@@ -20,6 +20,14 @@ from automated_stream_manager import AutomatedStreamManager, RegexChannelMatcher
 from api_utils import fetch_data_from_url, _get_base_url
 from stream_checker_service import get_stream_checker_service
 
+# Import croniter for cron expression validation
+try:
+    from croniter import croniter
+    CRONITER_AVAILABLE = True
+except ImportError:
+    CRONITER_AVAILABLE = False
+    logging.warning("croniter not installed - cron expression validation will be disabled")
+
 
 
 # Custom logging filter to exclude HTTP-related logs
@@ -929,6 +937,21 @@ def update_stream_checker_config():
         data = request.get_json()
         if not data:
             return jsonify({"error": "No configuration data provided"}), 400
+        
+        # Validate cron expression if provided
+        if 'global_check_schedule' in data and 'cron_expression' in data['global_check_schedule']:
+            cron_expr = data['global_check_schedule']['cron_expression']
+            if cron_expr:
+                if CRONITER_AVAILABLE:
+                    try:
+                        if not croniter.is_valid(cron_expr):
+                            return jsonify({"error": f"Invalid cron expression: {cron_expr}"}), 400
+                    except Exception as e:
+                        # Log the full error but only return a generic message to the user
+                        logging.error(f"Cron expression validation error: {e}")
+                        return jsonify({"error": "Invalid cron expression format"}), 400
+                else:
+                    logging.warning("croniter not available - cron expression validation skipped")
         
         service = get_stream_checker_service()
         service.update_config(data)

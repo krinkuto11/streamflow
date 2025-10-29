@@ -13,8 +13,7 @@ import {
   Grid,
   RadioGroup,
   Radio,
-  FormControl,
-  FormLabel
+  FormControl
 } from '@mui/material';
 import { automationAPI, streamCheckerAPI } from '../services/api';
 
@@ -401,59 +400,31 @@ function AutomationSettings() {
                   Configure when the scheduled Global Action runs. This performs a complete cycle: Updates all M3U playlists, matches all streams, and checks ALL channels (bypassing the 2-hour immunity).
                 </Typography>
                 
-                <FormControl component="fieldset" sx={{ mb: 2 }}>
-                  <FormLabel component="legend">Frequency</FormLabel>
-                  <RadioGroup
-                    row
-                    value={streamCheckerConfig.global_check_schedule?.frequency ?? 'daily'}
-                    onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.frequency', e.target.value)}
-                  >
-                    <FormControlLabel 
-                      value="daily" 
-                      control={<Radio />} 
-                      label="Daily" 
-                    />
-                    <FormControlLabel 
-                      value="monthly" 
-                      control={<Radio />} 
-                      label="Monthly" 
-                    />
-                  </RadioGroup>
-                </FormControl>
+                <TextField
+                  label="Cron Expression"
+                  value={streamCheckerConfig.global_check_schedule?.cron_expression ?? '0 3 * * *'}
+                  onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.cron_expression', e.target.value)}
+                  fullWidth
+                  margin="normal"
+                  helperText="Enter a cron expression (e.g., '0 3 * * *' for daily at 3:00 AM, '0 3 1 * *' for monthly on the 1st at 3:00 AM)"
+                  placeholder="0 3 * * *"
+                />
                 
-                {(streamCheckerConfig.global_check_schedule?.frequency ?? 'daily') === 'monthly' && (
-                  <TextField
-                    label="Day of Month"
-                    type="number"
-                    value={streamCheckerConfig.global_check_schedule?.day_of_month ?? 1}
-                    onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.day_of_month', parseInt(e.target.value))}
-                    inputProps={{ min: 1, max: 31 }}
-                    fullWidth
-                    margin="normal"
-                    helperText="Day of the month to run the check (1-31)"
-                  />
-                )}
-                
-                <Box sx={{ display: 'flex', gap: 2, mt: 2 }}>
-                  <TextField
-                    label="Hour (0-23)"
-                    type="number"
-                    value={streamCheckerConfig.global_check_schedule?.hour ?? 3}
-                    onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.hour', parseInt(e.target.value))}
-                    inputProps={{ min: 0, max: 23 }}
-                    sx={{ flex: 1 }}
-                    helperText="Hour (24-hour format)"
-                  />
-                  <TextField
-                    label="Minute (0-59)"
-                    type="number"
-                    value={streamCheckerConfig.global_check_schedule?.minute ?? 0}
-                    onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.minute', parseInt(e.target.value))}
-                    inputProps={{ min: 0, max: 59 }}
-                    sx={{ flex: 1 }}
-                    helperText="Minute"
-                  />
-                </Box>
+                <Alert severity="info" sx={{ mt: 2 }}>
+                  <Typography variant="body2" sx={{ fontWeight: 'bold', mb: 1 }}>
+                    Cron Expression Format: minute hour day month weekday
+                  </Typography>
+                  <Typography variant="body2" component="div">
+                    Common examples:
+                    <ul style={{ marginTop: '8px', marginBottom: '0' }}>
+                      <li><code>0 3 * * *</code> - Every day at 3:00 AM</li>
+                      <li><code>30 2 * * *</code> - Every day at 2:30 AM</li>
+                      <li><code>0 3 1 * *</code> - Monthly on the 1st at 3:00 AM</li>
+                      <li><code>0 0 * * 0</code> - Every Sunday at midnight</li>
+                      <li><code>0 */6 * * *</code> - Every 6 hours</li>
+                    </ul>
+                  </Typography>
+                </Alert>
               </CardContent>
             </Card>
           </Grid>

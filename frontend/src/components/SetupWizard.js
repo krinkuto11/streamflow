@@ -29,8 +29,7 @@ import {
   DialogActions,
   RadioGroup,
   Radio,
-  FormControl,
-  FormLabel
+  FormControl
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -82,6 +81,7 @@ function SetupWizard({ onComplete, setupStatus: initialSetupStatus }) {
     pipeline_mode: 'pipeline_1_5',
     global_check_schedule: {
       enabled: true,
+      cron_expression: '0 3 * * *',
       frequency: 'daily',
       hour: 3,
       minute: 0,
@@ -935,62 +935,32 @@ function SetupWizard({ onComplete, setupStatus: initialSetupStatus }) {
                             Configure when the global action runs (Update, Match, and Check all channels).
                           </Typography>
                           
-                          <FormControl component="fieldset" sx={{ mb: 2 }}>
-                            <FormLabel component="legend">Frequency</FormLabel>
-                            <RadioGroup
-                              row
-                              value={streamCheckerConfig.global_check_schedule.frequency || 'daily'}
-                              onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.frequency', e.target.value)}
-                            >
-                              <FormControlLabel 
-                                value="daily" 
-                                control={<Radio />} 
-                                label="Daily" 
-                                disabled={!streamCheckerConfig.global_check_schedule.enabled}
-                              />
-                              <FormControlLabel 
-                                value="monthly" 
-                                control={<Radio />} 
-                                label="Monthly" 
-                                disabled={!streamCheckerConfig.global_check_schedule.enabled}
-                              />
-                            </RadioGroup>
-                          </FormControl>
+                          <TextField
+                            label="Cron Expression"
+                            value={streamCheckerConfig.global_check_schedule.cron_expression || '0 3 * * *'}
+                            onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.cron_expression', e.target.value)}
+                            disabled={!streamCheckerConfig.global_check_schedule.enabled}
+                            fullWidth
+                            margin="normal"
+                            helperText="Enter a cron expression (e.g., '0 3 * * *' for daily at 3:00 AM)"
+                            placeholder="0 3 * * *"
+                          />
                           
-                          {streamCheckerConfig.global_check_schedule.frequency === 'monthly' && (
-                            <TextField
-                              label="Day of Month"
-                              type="number"
-                              value={streamCheckerConfig.global_check_schedule.day_of_month || 1}
-                              onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.day_of_month', parseInt(e.target.value))}
-                              inputProps={{ min: 1, max: 31 }}
-                              disabled={!streamCheckerConfig.global_check_schedule.enabled}
-                              fullWidth
-                              margin="normal"
-                              helperText="Day of the month to run the check (1-31)"
-                            />
-                          )}
-                          
-                          <Box sx={{ display: 'flex', gap: 2, mb: 2 }}>
-                            <TextField
-                              label="Hour (0-23)"
-                              type="number"
-                              value={streamCheckerConfig.global_check_schedule.hour}
-                              onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.hour', parseInt(e.target.value))}
-                              inputProps={{ min: 0, max: 23 }}
-                              disabled={!streamCheckerConfig.global_check_schedule.enabled}
-                              sx={{ flex: 1 }}
-                            />
-                            <TextField
-                              label="Minute (0-59)"
-                              type="number"
-                              value={streamCheckerConfig.global_check_schedule.minute}
-                              onChange={(e) => handleStreamCheckerConfigChange('global_check_schedule.minute', parseInt(e.target.value))}
-                              inputProps={{ min: 0, max: 59 }}
-                              disabled={!streamCheckerConfig.global_check_schedule.enabled}
-                              sx={{ flex: 1 }}
-                            />
-                          </Box>
+                          <Alert severity="info" sx={{ mt: 2 }}>
+                            <Typography variant="body2" sx={{ fontWeight: 'bold', mb: 1 }}>
+                              Cron Expression Format: minute hour day month weekday
+                            </Typography>
+                            <Typography variant="body2" component="div">
+                              Common examples:
+                              <ul style={{ marginTop: '8px', marginBottom: '0' }}>
+                                <li><code>0 3 * * *</code> - Every day at 3:00 AM</li>
+                                <li><code>30 2 * * *</code> - Every day at 2:30 AM</li>
+                                <li><code>0 3 1 * *</code> - Monthly on the 1st at 3:00 AM</li>
+                                <li><code>0 0 * * 0</code> - Every Sunday at midnight</li>
+                                <li><code>0 */6 * * *</code> - Every 6 hours</li>
+                              </ul>
+                            </Typography>
+                          </Alert>
                         </>
                       )}
                       
