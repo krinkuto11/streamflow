@@ -947,7 +947,9 @@ def update_stream_checker_config():
                         if not croniter.is_valid(cron_expr):
                             return jsonify({"error": f"Invalid cron expression: {cron_expr}"}), 400
                     except Exception as e:
-                        return jsonify({"error": f"Invalid cron expression: {str(e)}"}), 400
+                        # Log the full error but only return a generic message to the user
+                        logging.error(f"Cron expression validation error: {e}")
+                        return jsonify({"error": "Invalid cron expression format"}), 400
                 else:
                     logging.warning("croniter not available - cron expression validation skipped")
         
