@@ -1454,7 +1454,8 @@ class StreamCheckerService:
                 step_detail='Applying new stream order to channel'
             )
             reordered_ids = [s['stream_id'] for s in analyzed_streams]
-            update_channel_streams(channel_id, reordered_ids)
+            # Allow dead streams during force_check (global checks) to give them a second chance
+            update_channel_streams(channel_id, reordered_ids, allow_dead_streams=force_check)
             
             # Verify the update was applied correctly
             self.progress.update(
