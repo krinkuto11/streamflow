@@ -339,6 +339,9 @@ def update_channel_streams(
     """
     Update the streams for a given channel ID.
     
+    Filters out stream IDs that no longer exist in Dispatcharr to prevent
+    adding dead/removed streams back to channels.
+    
     Parameters:
         channel_id (int): The ID of the channel to update.
         stream_ids (List[int]): List of stream IDs to assign.
@@ -349,15 +352,26 @@ def update_channel_streams(
     Raises:
         Exception: If the API request fails.
     """
+    # Filter out stream IDs that no longer exist in Dispatcharr
+    valid_stream_ids = get_valid_stream_ids()
+    original_count = len(stream_ids)
+    filtered_stream_ids = [sid for sid in stream_ids if sid in valid_stream_ids]
+    
+    if len(filtered_stream_ids) < original_count:
+        removed_count = original_count - len(filtered_stream_ids)
+        logging.warning(
+            f"Filtered out {removed_count} non-existent stream(s) for channel {channel_id}"
+        )
+    
     url = f"{_get_base_url()}/api/channels/channels/{channel_id}/"
-    data = {"streams": stream_ids}
+    data = {"streams": filtered_stream_ids}
     
     try:
         response = patch_request(url, data)
         if response and response.status_code in [200, 204]:
             logging.info(
                 f"Successfully updated channel {channel_id} with "
-                f"{len(stream_ids)} streams"
+                f"{len(filtered_stream_ids)} streams"
             )
             return True
         else:
@@ -457,6 +471,27 @@ def get_streams(log_result: bool = True) -> List[Dict[str, Any]]:
         logging.info(f"Fetched {len(all_streams)} total streams")
     return all_streams
 
+
+def get_valid_stream_ids() -> set:
+    """
+    Get a set of all valid stream IDs that currently exist in Dispatcharr.
+    
+    This is used to filter out stream IDs that no longer exist (e.g., removed
+    from M3U playlists) before updating channels.
+    
+    Returns:
+        set: Set of valid stream IDs.
+    """
+    try:
+        all_streams = get_streams(log_result=False)
+        valid_ids = {stream['id'] for stream in all_streams if isinstance(stream, dict) and 'id' in stream}
+        return valid_ids
+    except Exception as e:
+        logging.error(f"Failed to fetch valid stream IDs: {e}")
+        # Return empty set on error - this will cause all stream IDs to be filtered out
+        # which is safer than allowing potentially invalid IDs
+        return set()
+
 def has_custom_streams() -> bool:
     """
     Efficiently check if any custom streams exist.
@@ -553,7 +588,8 @@ def add_streams_to_channel(
     Add new streams to an existing channel.
     
     Fetches the current streams for the channel, adds new streams
-    while avoiding duplicates, and updates the channel.
+    while avoiding duplicates, and updates the channel. Filters out
+    stream IDs that no longer exist in Dispatcharr.
     
     Parameters:
         channel_id (int): The ID of the channel to update.
@@ -575,19 +611,29 @@ def add_streams_to_channel(
     
     current_stream_ids = [s['id'] for s in current_streams]
     
-    # Add new streams (avoid duplicates)
-    new_stream_ids = [
+    # Filter out stream IDs that no longer exist in Dispatcharr
+    valid_stream_ids = get_valid_stream_ids()
+    valid_new_stream_ids = [
         sid for sid in stream_ids
-        if sid not in current_stream_ids
+        if sid in valid_stream_ids and sid not in current_stream_ids
     ]
-    if new_stream_ids:
-        updated_streams = current_stream_ids + new_stream_ids
+    
+    # Log if any stream IDs were filtered out
+    filtered_count = len([sid for sid in stream_ids if sid not in valid_stream_ids])
+    if filtered_count > 0:
+        logging.warning(
+            f"Filtered out {filtered_count} non-existent stream(s) "
+            f"before adding to channel {channel_id}"
+        )
+    
+    if valid_new_stream_ids:
+        updated_streams = current_stream_ids + valid_new_stream_ids
         update_channel_streams(channel_id, updated_streams)
         logging.info(
-            f"Added {len(new_stream_ids)} new streams to channel "
+            f"Added {len(valid_new_stream_ids)} new streams to channel "
             f"{channel_id}"
         )
-        return len(new_stream_ids)
+        return len(valid_new_stream_ids)
     else:
         logging.info(
             f"No new streams to add to channel {channel_id}"
