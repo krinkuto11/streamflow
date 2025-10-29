@@ -9,7 +9,7 @@ import os
 import json
 import logging
 import sys
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 import requests
 from pathlib import Path
 from dotenv import load_dotenv, set_key
@@ -373,21 +373,7 @@ def update_channel_streams(
     
     # Filter out dead streams unless allow_dead_streams is True (e.g., during global checks)
     if not allow_dead_streams:
-        # Get all streams to map IDs to URLs
-        all_streams = get_streams(log_result=False)
-        stream_id_to_url = {s['id']: s.get('url', '') for s in all_streams if isinstance(s, dict) and 'id' in s}
-        
-        # Get dead stream URLs
-        dead_urls = get_dead_stream_urls()
-        
-        # Filter out streams with dead URLs
-        before_dead_filter = len(filtered_stream_ids)
-        filtered_stream_ids = [
-            sid for sid in filtered_stream_ids
-            if stream_id_to_url.get(sid, '') not in dead_urls
-        ]
-        
-        dead_count = before_dead_filter - len(filtered_stream_ids)
+        filtered_stream_ids, dead_count = filter_dead_streams(filtered_stream_ids)
         if dead_count > 0:
             logging.warning(
                 f"Filtered out {dead_count} dead stream(s) for channel {channel_id}"
@@ -543,6 +529,39 @@ def get_dead_stream_urls() -> set:
         # Return empty set if tracker not available
         return set()
 
+
+def filter_dead_streams(stream_ids: List[int], stream_id_to_url: Optional[Dict[int, str]] = None) -> Tuple[List[int], int]:
+    """
+    Filter out dead streams from a list of stream IDs.
+    
+    Parameters:
+        stream_ids: List of stream IDs to filter
+        stream_id_to_url: Optional mapping of stream IDs to URLs. If None,
+            will fetch from API.
+    
+    Returns:
+        Tuple of (filtered_stream_ids, count_filtered)
+    """
+    if not stream_ids:
+        return stream_ids, 0
+    
+    # Get stream ID to URL mapping if not provided
+    if stream_id_to_url is None:
+        all_streams = get_streams(log_result=False)
+        stream_id_to_url = {s['id']: s.get('url', '') for s in all_streams if isinstance(s, dict) and 'id' in s}
+    
+    # Get dead stream URLs
+    dead_urls = get_dead_stream_urls()
+    
+    # Filter out streams with dead URLs
+    filtered_stream_ids = [
+        sid for sid in stream_ids
+        if stream_id_to_url.get(sid, '') not in dead_urls
+    ]
+    
+    count_filtered = len(stream_ids) - len(filtered_stream_ids)
+    return filtered_stream_ids, count_filtered
+
 def has_custom_streams() -> bool:
     """
     Efficiently check if any custom streams exist.
@@ -687,21 +706,7 @@ def add_streams_to_channel(
     
     # Filter out dead streams unless allow_dead_streams is True
     if not allow_dead_streams and valid_new_stream_ids:
-        # Get all streams to map IDs to URLs
-        all_streams = get_streams(log_result=False)
-        stream_id_to_url = {s['id']: s.get('url', '') for s in all_streams if isinstance(s, dict) and 'id' in s}
-        
-        # Get dead stream URLs
-        dead_urls = get_dead_stream_urls()
-        
-        # Filter out streams with dead URLs
-        before_dead_filter = len(valid_new_stream_ids)
-        valid_new_stream_ids = [
-            sid for sid in valid_new_stream_ids
-            if stream_id_to_url.get(sid, '') not in dead_urls
-        ]
-        
-        dead_count = before_dead_filter - len(valid_new_stream_ids)
+        valid_new_stream_ids, dead_count = filter_dead_streams(valid_new_stream_ids)
         if dead_count > 0:
             logging.warning(
                 f"Filtered out {dead_count} dead stream(s) "
