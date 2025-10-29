@@ -534,10 +534,22 @@ def filter_dead_streams(stream_ids: List[int], stream_id_to_url: Optional[Dict[i
     """
     Filter out dead streams from a list of stream IDs.
     
+    This function removes stream IDs whose URLs are marked as dead in the
+    DeadStreamsTracker. It's used to prevent dead streams from being added
+    back to channels during update operations.
+    
+    Performance Note: When processing multiple channels, pass stream_id_to_url
+    to avoid redundant API calls. Example:
+        all_streams = get_streams(log_result=False)
+        mapping = {s['id']: s.get('url') for s in all_streams if 'id' in s}
+        for channel_id in channels:
+            filtered, count = filter_dead_streams(stream_ids, mapping)
+    
     Parameters:
         stream_ids: List of stream IDs to filter
         stream_id_to_url: Optional mapping of stream IDs to URLs. If None,
-            will fetch from API.
+            will fetch from API. Pass this when filtering multiple batches
+            to optimize performance.
     
     Returns:
         Tuple of (filtered_stream_ids, count_filtered)
@@ -548,15 +560,19 @@ def filter_dead_streams(stream_ids: List[int], stream_id_to_url: Optional[Dict[i
     # Get stream ID to URL mapping if not provided
     if stream_id_to_url is None:
         all_streams = get_streams(log_result=False)
-        stream_id_to_url = {s['id']: s.get('url', '') for s in all_streams if isinstance(s, dict) and 'id' in s}
+        # Use None as default instead of empty string to distinguish missing streams
+        stream_id_to_url = {s['id']: s.get('url') for s in all_streams if isinstance(s, dict) and 'id' in s}
     
-    # Get dead stream URLs
+    # Get dead stream URLs (will not contain None or empty strings)
     dead_urls = get_dead_stream_urls()
     
     # Filter out streams with dead URLs
+    # Keep streams where:
+    # 1. URL is not in dead_urls (not dead)
+    # 2. URL is None (stream not found in mapping - keep for safety, will be filtered by existence check)
     filtered_stream_ids = [
         sid for sid in stream_ids
-        if stream_id_to_url.get(sid, '') not in dead_urls
+        if stream_id_to_url.get(sid) not in dead_urls or stream_id_to_url.get(sid) is None
     ]
     
     count_filtered = len(stream_ids) - len(filtered_stream_ids)
