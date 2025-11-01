@@ -148,19 +148,23 @@ function Dashboard() {
     if (schedule.cron_expression) {
       const cronExpr = schedule.cron_expression;
       // Common cron patterns
-      if (cronExpr === '0 3 * * *') return 'Daily at 3:00 AM';
       if (cronExpr === '0 * * * *') return 'Hourly';
       if (cronExpr.match(/^0 \d{1,2} \* \* \*$/)) {
         const hour = cronExpr.split(' ')[1];
-        return `Daily at ${hour}:00`;
+        const hourStr = String(hour).padStart(2, '0');
+        return `Daily at ${hourStr}:00`;
       }
       if (cronExpr.match(/^\d{1,2} \d{1,2} \* \* \*$/)) {
         const [minute, hour] = cronExpr.split(' ');
-        return `Daily at ${hour}:${minute.padStart(2, '0')}`;
+        const hourStr = String(hour).padStart(2, '0');
+        const minuteStr = String(minute).padStart(2, '0');
+        return `Daily at ${hourStr}:${minuteStr}`;
       }
       if (cronExpr.match(/^\d{1,2} \d{1,2} \d{1,2} \* \*$/)) {
         const [minute, hour, day] = cronExpr.split(' ');
-        return `Monthly on day ${day} at ${hour}:${minute.padStart(2, '0')}`;
+        const hourStr = String(hour).padStart(2, '0');
+        const minuteStr = String(minute).padStart(2, '0');
+        return `Monthly on day ${day} at ${hourStr}:${minuteStr}`;
       }
       // For other patterns, show the cron expression
       return `Cron: ${cronExpr}`;

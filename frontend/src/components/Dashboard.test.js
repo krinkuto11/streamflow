@@ -67,7 +67,7 @@ describe('Dashboard Component', () => {
     });
 
     expect(screen.getByText('Global Check Schedule')).toBeInTheDocument();
-    expect(screen.getByText('Daily at 3:00 AM')).toBeInTheDocument();
+    expect(screen.getByText('Daily at 03:00')).toBeInTheDocument();
   });
 
   test('displays correct cron schedule for custom daily time', async () => {
@@ -115,7 +115,7 @@ describe('Dashboard Component', () => {
       expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
     });
 
-    expect(screen.getByText('Monthly on day 15 at 2:00')).toBeInTheDocument();
+    expect(screen.getByText('Monthly on day 15 at 02:00')).toBeInTheDocument();
   });
 
   test('displays cron expression for complex patterns', async () => {
