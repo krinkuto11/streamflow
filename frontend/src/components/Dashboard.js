@@ -22,10 +22,11 @@ import {
   Schedule as ScheduleIcon,
   TrendingUp as TrendingIcon
 } from '@mui/icons-material';
-import { automationAPI, streamAPI, m3uAPI } from '../services/api';
+import { automationAPI, streamAPI, m3uAPI, streamCheckerAPI } from '../services/api';
 
 function Dashboard() {
   const [status, setStatus] = useState(null);
+  const [streamCheckerStatus, setStreamCheckerStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState('');
   const [error, setError] = useState('');
@@ -43,10 +44,14 @@ function Dashboard() {
 
   const loadStatus = async () => {
     try {
-      const response = await automationAPI.getStatus();
-      setStatus(response.data);
+      const [automationResponse, streamCheckerResponse] = await Promise.all([
+        automationAPI.getStatus(),
+        streamCheckerAPI.getStatus()
+      ]);
+      setStatus(automationResponse.data);
+      setStreamCheckerStatus(streamCheckerResponse.data);
       // Update selected accounts from config
-      const enabledAccounts = response.data?.config?.enabled_m3u_accounts || [];
+      const enabledAccounts = automationResponse.data?.config?.enabled_m3u_accounts || [];
       setSelectedAccounts(enabledAccounts);
     } catch (err) {
       console.error('Failed to load status:', err);
@@ -134,6 +139,49 @@ function Dashboard() {
   const formatDateTime = (dateString) => {
     if (!dateString) return 'Never';
     return new Date(dateString).toLocaleString();
+  };
+
+  const formatCronSchedule = (schedule) => {
+    if (!schedule) return 'Not configured';
+    
+    // If cron_expression is available, try to parse it for a human-readable format
+    if (schedule.cron_expression) {
+      const cronExpr = schedule.cron_expression;
+      // Common cron patterns
+      if (cronExpr === '0 * * * *') return 'Hourly';
+      if (cronExpr.match(/^0 \d{1,2} \* \* \*$/)) {
+        const hour = cronExpr.split(' ')[1];
+        const hourStr = String(hour).padStart(2, '0');
+        return `Daily at ${hourStr}:00`;
+      }
+      if (cronExpr.match(/^\d{1,2} \d{1,2} \* \* \*$/)) {
+        const [minute, hour] = cronExpr.split(' ');
+        const hourStr = String(hour).padStart(2, '0');
+        const minuteStr = String(minute).padStart(2, '0');
+        return `Daily at ${hourStr}:${minuteStr}`;
+      }
+      if (cronExpr.match(/^\d{1,2} \d{1,2} \d{1,2} \* \*$/)) {
+        const [minute, hour, day] = cronExpr.split(' ');
+        const hourStr = String(hour).padStart(2, '0');
+        const minuteStr = String(minute).padStart(2, '0');
+        return `Monthly on day ${day} at ${hourStr}:${minuteStr}`;
+      }
+      // For other patterns, show the cron expression
+      return `Cron: ${cronExpr}`;
+    }
+    
+    // Fallback to legacy format (frequency, hour, minute)
+    const freq = schedule.frequency || 'daily';
+    const hour = schedule.hour ?? 3;
+    const minute = schedule.minute ?? 0;
+    const hourStr = String(hour).padStart(2, '0');
+    const minuteStr = String(minute).padStart(2, '0');
+    
+    if (freq === 'monthly') {
+      const day = schedule.day_of_month || 1;
+      return `Monthly on day ${day} at ${hourStr}:${minuteStr}`;
+    }
+    return `Daily at ${hourStr}:${minuteStr}`;
   };
 
   const formatActivityDetails = (entry) => {
@@ -346,10 +394,10 @@ function Dashboard() {
                 </Grid>
                 <Grid item xs={12} sm={6} md={4}>
                   <Typography variant="body2" color="text.secondary">
-                    Global Check Interval
+                    Global Check Schedule
                   </Typography>
                   <Typography variant="body1">
-                    {status?.config?.global_check_interval_hours || 24} hours
+                    {formatCronSchedule(streamCheckerStatus?.config?.global_check_schedule)}
                   </Typography>
                 </Grid>
                 <Grid item xs={12} sm={6} md={4}>
