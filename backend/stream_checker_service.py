@@ -13,7 +13,6 @@ Features:
     - Progressive stream rating and automatic ordering
     - Real-time progress reporting via web API
     - Thread-safe operations with proper synchronization
-    - Caching layer integration to reduce API calls
 
 The service runs continuously in the background, monitoring for channel
 updates and maintaining a queue of channels that need checking. It
@@ -1192,10 +1191,7 @@ class StreamCheckerService:
             return False
     
     def _check_channel(self, channel_id: int):
-        """Check and reorder streams for a specific channel.
-        
-        Uses caching to reduce redundant API calls when checking streams.
-        """
+        """Check and reorder streams for a specific channel."""
         import time as time_module
         start_time = time_module.time()
         log_function_call(logger, "_check_channel", channel_id=channel_id)
@@ -1206,48 +1202,44 @@ class StreamCheckerService:
         logger.info(f"Checking channel {channel_id}")
         logger.info(f"=" * 80)
         
-        # Use cache for this channel check
-        cache = get_cache()
-        
-        with cache:
-            try:
-                # Get channel information
-                logger.debug(f"Updating progress for channel {channel_id} initialization")
-                self.progress.update(
-                    channel_id=channel_id,
-                    channel_name='Loading...',
-                    current=0,
-                    total=0,
-                    status='initializing',
-                    step='Fetching channel info',
-                    step_detail='Retrieving channel data from API'
-                )
-                
-                base_url = _get_base_url()
-                logger.debug(f"Fetching channel data from: {base_url}/api/channels/channels/{channel_id}/")
-                channel_data = fetch_data_from_url(f"{base_url}/api/channels/channels/{channel_id}/")
-                if not channel_data:
-                    logger.error(f"fetch_data_from_url returned None for channel {channel_id}")
-                    raise Exception(f"Could not fetch channel {channel_id}")
-                
-                channel_name = channel_data.get('name', f'Channel {channel_id}')
-                
-                # Get streams for this channel
-                self.progress.update(
-                    channel_id=channel_id,
-                    channel_name=channel_name,
-                    current=0,
-                    total=0,
-                    status='initializing',
-                    step='Fetching streams',
-                    step_detail=f'Loading streams for {channel_name}'
-                )
-                
-                streams = fetch_channel_streams(channel_id)
-                if not streams or len(streams) == 0:
-                    logger.info(f"No streams found for channel {channel_name}")
-                    self.check_queue.mark_completed(channel_id)
-                    self.update_tracker.mark_channel_checked(channel_id)
+        try:
+            # Get channel information
+            logger.debug(f"Updating progress for channel {channel_id} initialization")
+            self.progress.update(
+                channel_id=channel_id,
+                channel_name='Loading...',
+                current=0,
+                total=0,
+                status='initializing',
+                step='Fetching channel info',
+                step_detail='Retrieving channel data from API'
+            )
+            
+            base_url = _get_base_url()
+            logger.debug(f"Fetching channel data from: {base_url}/api/channels/channels/{channel_id}/")
+            channel_data = fetch_data_from_url(f"{base_url}/api/channels/channels/{channel_id}/")
+            if not channel_data:
+                logger.error(f"fetch_data_from_url returned None for channel {channel_id}")
+                raise Exception(f"Could not fetch channel {channel_id}")
+            
+            channel_name = channel_data.get('name', f'Channel {channel_id}')
+            
+            # Get streams for this channel
+            self.progress.update(
+                channel_id=channel_id,
+                channel_name=channel_name,
+                current=0,
+                total=0,
+                status='initializing',
+                step='Fetching streams',
+                step_detail=f'Loading streams for {channel_name}'
+            )
+            
+            streams = fetch_channel_streams(channel_id)
+            if not streams or len(streams) == 0:
+                logger.info(f"No streams found for channel {channel_name}")
+                self.check_queue.mark_completed(channel_id)
+                self.update_tracker.mark_channel_checked(channel_id)
                 return
             
             logger.info(f"Found {len(streams)} streams for channel {channel_name}")
@@ -1552,40 +1544,40 @@ class StreamCheckerService:
                 except Exception as e:
                     logger.warning(f"Failed to add changelog entry: {e}")
             
-                # Mark as completed with stream count and checked stream IDs
-                self.check_queue.mark_completed(channel_id)
-                self.update_tracker.mark_channel_checked(
-                    channel_id, 
-                    stream_count=len(streams),
-                    checked_stream_ids=current_stream_ids
-                )
-                
-            except Exception as e:
-                logger.error(f"Error checking channel {channel_id}: {e}", exc_info=True)
-                self.check_queue.mark_failed(channel_id, str(e))
-                
-                # Add changelog entry for failed check
-                if self.changelog:
-                    try:
-                        # Try to get channel name if available
-                        try:
-                            channel_name = channel_data.get('name', f'Channel {channel_id}')
-                        except:
-                            channel_name = f'Channel {channel_id}'
-                        
-                        changelog_details = {
-                            'channel_id': channel_id,
-                            'channel_name': channel_name,
-                            'success': False,
-                            'error': str(e)
-                        }
-                        self.changelog.add_entry('stream_check', changelog_details)
-                    except Exception as changelog_error:
-                        logger.warning(f"Failed to add changelog entry for failed check: {changelog_error}")
+            # Mark as completed with stream count and checked stream IDs
+            self.check_queue.mark_completed(channel_id)
+            self.update_tracker.mark_channel_checked(
+                channel_id, 
+                stream_count=len(streams),
+                checked_stream_ids=current_stream_ids
+            )
             
-            finally:
-                self.checking = False
-                self.progress.clear()
+        except Exception as e:
+            logger.error(f"Error checking channel {channel_id}: {e}", exc_info=True)
+            self.check_queue.mark_failed(channel_id, str(e))
+            
+            # Add changelog entry for failed check
+            if self.changelog:
+                try:
+                    # Try to get channel name if available
+                    try:
+                        channel_name = channel_data.get('name', f'Channel {channel_id}')
+                    except:
+                        channel_name = f'Channel {channel_id}'
+                    
+                    changelog_details = {
+                        'channel_id': channel_id,
+                        'channel_name': channel_name,
+                        'success': False,
+                        'error': str(e)
+                    }
+                    self.changelog.add_entry('stream_check', changelog_details)
+                except Exception as changelog_error:
+                    logger.warning(f"Failed to add changelog entry for failed check: {changelog_error}")
+        
+        finally:
+            self.checking = False
+            self.progress.clear()
     
     def _calculate_stream_score(self, stream_data: Dict) -> float:
         """Calculate a quality score for a stream based on analysis."""
