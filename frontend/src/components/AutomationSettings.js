@@ -133,6 +133,7 @@ function AutomationSettings() {
   // Determine which settings to show based on pipeline mode
   const showScheduleSettings = ['pipeline_1_5', 'pipeline_2_5', 'pipeline_3'].includes(pipelineMode);
   const showUpdateInterval = ['pipeline_1', 'pipeline_1_5', 'pipeline_2', 'pipeline_2_5'].includes(pipelineMode);
+  const showImmunityTime = ['pipeline_1', 'pipeline_1_5', 'pipeline_2_5', 'pipeline_3'].includes(pipelineMode);
 
   return (
     <Box>
@@ -198,14 +199,14 @@ function AutomationSettings() {
                         control={<Radio />} 
                         label={
                           <Box>
-                            <Typography variant="h6">Pipeline 1: Update → Match → Check (with 2hr immunity)</Typography>
+                            <Typography variant="h6">Pipeline 1: Update → Match → Check (with immunity)</Typography>
                             <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
                               Features:
                             </Typography>
                             <Box component="ul" sx={{ mt: 0.5, mb: 0, pl: 2 }}>
                               <li><Typography variant="body2" color="text.secondary">Automatic M3U updates</Typography></li>
                               <li><Typography variant="body2" color="text.secondary">Stream matching</Typography></li>
-                              <li><Typography variant="body2" color="text.secondary">Quality checking with 2-hour immunity</Typography></li>
+                              <li><Typography variant="body2" color="text.secondary">Quality checking with configurable stream immunity</Typography></li>
                             </Box>
                           </Box>
                         }
@@ -228,7 +229,7 @@ function AutomationSettings() {
                             <Box component="ul" sx={{ mt: 0.5, mb: 0, pl: 2 }}>
                               <li><Typography variant="body2" color="text.secondary">Automatic M3U updates</Typography></li>
                               <li><Typography variant="body2" color="text.secondary">Stream matching</Typography></li>
-                              <li><Typography variant="body2" color="text.secondary">Quality checking with 2-hour immunity</Typography></li>
+                              <li><Typography variant="body2" color="text.secondary">Quality checking with configurable stream immunity</Typography></li>
                               <li><Typography variant="body2" color="text.secondary">Scheduled Global Action (daily/monthly)</Typography></li>
                             </Box>
                           </Box>
@@ -397,7 +398,7 @@ function AutomationSettings() {
                 </Typography>
                 
                 <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                  Configure when the scheduled Global Action runs. This performs a complete cycle: Updates all M3U playlists, matches all streams, and checks ALL channels (bypassing the 2-hour immunity).
+                  Configure when the scheduled Global Action runs. This performs a complete cycle: Updates all M3U playlists, matches all streams, and checks ALL channels (bypassing stream immunity).
                 </Typography>
                 
                 <TextField
@@ -545,6 +546,26 @@ function AutomationSettings() {
               <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
                 Automatically queue channels for checking when they receive M3U playlist updates.
               </Typography>
+              
+              {showImmunityTime && (
+                <>
+                  <TextField
+                    label="Stream Immunity Time (hours)"
+                    type="number"
+                    value={streamCheckerConfig.queue?.immunity_time_hours ?? 2}
+                    onChange={(e) => handleStreamCheckerConfigChange('queue.immunity_time_hours', parseInt(e.target.value))}
+                    fullWidth
+                    margin="normal"
+                    helperText="Hours before rechecking already-checked streams. Prevents redundant analysis."
+                    inputProps={{ min: 1, max: 24 }}
+                    sx={{ mt: 2 }}
+                  />
+                  
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                    Streams remain "checked" for this duration. During this time, they use cached quality scores. Force check bypasses this immunity. Recommended: 2-4 hours for frequent updates, 6+ hours for limited connections.
+                  </Typography>
+                </>
+              )}
             </CardContent>
           </Card>
           </Grid>
