@@ -99,7 +99,8 @@ class StreamCheckConfig:
         'queue': {
             'max_size': 1000,
             'check_on_update': True,  # check channels when they receive M3U updates
-            'max_channels_per_run': 50  # limit channels per check cycle
+            'max_channels_per_run': 50,  # limit channels per check cycle
+            'immunity_time_hours': 2  # hours before rechecking already-checked streams
         }
     }
     
@@ -436,7 +437,7 @@ class ChannelUpdateTracker:
             return []
     
     def mark_channel_for_force_check(self, channel_id: int):
-        """Mark a channel for force checking (bypasses 2-hour immunity).
+        """Mark a channel for force checking (bypasses stream immunity).
         
         Args:
             channel_id: The channel ID to mark for force check
@@ -1055,7 +1056,7 @@ class StreamCheckerService:
         """Queue all channels for checking (global check).
         
         Args:
-            force_check: If True, marks channels for force checking which bypasses 2-hour immunity
+            force_check: If True, marks channels for force checking which bypasses stream immunity
         """
         try:
             base_url = _get_base_url()
@@ -1244,7 +1245,7 @@ class StreamCheckerService:
             
             logger.info(f"Found {len(streams)} streams for channel {channel_name}")
             
-            # Check if this is a force check (bypasses 2-hour immunity)
+            # Check if this is a force check (bypasses stream immunity)
             force_check = self.update_tracker.should_force_check(channel_id)
             
             # Get list of already checked streams to avoid re-analyzing
@@ -1256,7 +1257,7 @@ class StreamCheckerService:
             if force_check:
                 streams_to_check = streams
                 streams_already_checked = []
-                logger.info(f"Force check enabled: analyzing all {len(streams)} streams (bypassing 2-hour immunity)")
+                logger.info(f"Force check enabled: analyzing all {len(streams)} streams (bypassing immunity)")
                 # Clear the force check flag after acknowledging it
                 self.update_tracker.clear_force_check(channel_id)
             else:
@@ -1266,7 +1267,8 @@ class StreamCheckerService:
                 if streams_to_check:
                     logger.info(f"Found {len(streams_to_check)} new/unchecked streams (out of {len(streams)} total)")
                 else:
-                    logger.info(f"All {len(streams)} streams have been recently checked, using cached scores")
+                    immunity_hours = self.config.get('queue.immunity_time_hours', 2)
+                    logger.info(f"All {len(streams)} streams have been recently checked (within {immunity_hours}h immunity), using cached scores")
             
             # Import stream analysis functions from dispatcharr-stream-sorter
             # Note: The file has a dash in the name, so we need to import it specially

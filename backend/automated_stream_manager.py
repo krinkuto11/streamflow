@@ -474,7 +474,8 @@ class AutomatedStreamManager:
                         "Could not fetch M3U accounts, refreshing all as fallback")
                     refresh_m3u_playlists()
 
-                # Invalidate cache after refresh to get fresh data
+                # Invalidate cache after refresh to force fresh fetch of updated streams
+                # This ensures streams_after reflects the new state after M3U refresh
                 cache.invalidate()
                 logger.debug("Cache invalidated after M3U refresh")
 

@@ -247,13 +247,16 @@ The queue system prevents:
 - Checking channels that are already queued or in progress
 - Global actions from stacking up
 
-### 2-Hour Immunity System
+### Stream Immunity System
 
-Streams are tracked per channel:
+Streams are tracked per channel to avoid redundant checking:
 - Each stream's last check timestamp is stored
-- When checking a channel, only unchecked streams (or those not checked in 2 hours) are analyzed
-- Recently checked streams use cached quality scores
-- Force check bypasses this immunity
+- When checking a channel, only unchecked streams (or those outside immunity period) are analyzed
+- Recently checked streams use cached quality scores from their last analysis
+- Force check bypasses this immunity and rechecks all streams
+- **Configurable immunity period** via `queue.immunity_time_hours` (default: 2 hours)
+
+This system significantly reduces API calls and analysis time for large playlists, especially beneficial for users with connection limits.
 
 ---
 
@@ -265,7 +268,8 @@ Streams are tracked per channel:
   "pipeline_mode": "pipeline_1",
   "queue": {
     "check_on_update": true,
-    "max_channels_per_run": 50
+    "max_channels_per_run": 50,
+    "immunity_time_hours": 2
   }
 }
 ```
@@ -276,13 +280,37 @@ Streams are tracked per channel:
   "pipeline_mode": "pipeline_1_5",
   "queue": {
     "check_on_update": true,
-    "max_channels_per_run": 20
+    "max_channels_per_run": 20,
+    "immunity_time_hours": 4
   },
   "global_check_schedule": {
     "enabled": true,
     "frequency": "daily",
     "hour": 3,
     "minute": 0
+  }
+}
+```
+
+### For Users With Strict Limits
+```json
+{
+  "pipeline_mode": "pipeline_3",
+  "queue": {
+    "immunity_time_hours": 6
+  },
+  "global_check_schedule": {
+    "enabled": true,
+    "frequency": "daily",
+    "hour": 3,
+    "minute": 0
+  }
+}
+```
+
+---
+
+## Migration Guide
   }
 }
 ```
