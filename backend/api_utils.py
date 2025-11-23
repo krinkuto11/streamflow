@@ -3,6 +3,8 @@ API utilities for interacting with the Dispatcharr API.
 
 This module provides authentication, request handling, and helper functions
 for communicating with the Dispatcharr API endpoints.
+
+This module now integrates with the caching layer to reduce redundant API calls.
 """
 
 import os
@@ -18,6 +20,7 @@ from logging_config import (
     setup_logging, log_function_call, log_function_return,
     log_exception, log_api_request, log_api_response
 )
+from dispatcharr_cache import get_cache
 
 # Setup logging for this module
 logger = setup_logging(__name__)
@@ -378,17 +381,28 @@ def fetch_channel_streams(channel_id: int) -> Optional[List[Dict[str, Any]]]:
     """
     Fetch streams for a given channel ID.
     
+    If caching is enabled, returns cached data. Otherwise, fetches from API.
+    
     Parameters:
         channel_id (int): The ID of the channel.
         
     Returns:
         Optional[List[Dict[str, Any]]]: List of stream objects or None.
     """
-    url = (
-        f"{_get_base_url()}/api/channels/channels/{channel_id}/"
-        f"streams/"
-    )
-    return fetch_data_from_url(url)
+    cache = get_cache()
+    
+    def _fetch():
+        url = (
+            f"{_get_base_url()}/api/channels/channels/{channel_id}/"
+            f"streams/"
+        )
+        return fetch_data_from_url(url)
+    
+    # Use cache if enabled, otherwise fetch directly
+    if cache.is_enabled():
+        return cache.get_channel_streams(channel_id, _fetch)
+    else:
+        return _fetch()
 
 
 def update_channel_streams(
@@ -513,6 +527,8 @@ def get_streams(log_result: bool = True) -> List[Dict[str, Any]]:
     Fetches all streams from the Dispatcharr API, handling pagination
     automatically. Uses page_size=100 to minimize API calls.
     
+    If caching is enabled, returns cached data on subsequent calls.
+    
     Parameters:
         log_result (bool): Whether to log the number of fetched streams.
             Default is True. Set to False to avoid duplicate log entries.
@@ -520,30 +536,40 @@ def get_streams(log_result: bool = True) -> List[Dict[str, Any]]:
     Returns:
         List[Dict[str, Any]]: List of all stream objects.
     """
-    base_url = _get_base_url()
-    # Use page_size parameter to maximize streams per request
-    url = f"{base_url}/api/channels/streams/?page_size=100"
+    cache = get_cache()
     
-    all_streams: List[Dict[str, Any]] = []
-    
-    while url:
-        response = fetch_data_from_url(url)
-        if not response:
-            break
+    def _fetch():
+        """Internal function to fetch streams from API."""
+        base_url = _get_base_url()
+        # Use page_size parameter to maximize streams per request
+        url = f"{base_url}/api/channels/streams/?page_size=100"
         
-        # Handle paginated response
-        if isinstance(response, dict) and 'results' in response:
-            all_streams.extend(response.get('results', []))
-            url = response.get('next')  # Get next page URL
-        else:
-            # If response is list (non-paginated), use it directly
-            if isinstance(response, list):
-                all_streams.extend(response)
-            break
+        all_streams: List[Dict[str, Any]] = []
+        
+        while url:
+            response = fetch_data_from_url(url)
+            if not response:
+                break
+            
+            # Handle paginated response
+            if isinstance(response, dict) and 'results' in response:
+                all_streams.extend(response.get('results', []))
+                url = response.get('next')  # Get next page URL
+            else:
+                # If response is list (non-paginated), use it directly
+                if isinstance(response, list):
+                    all_streams.extend(response)
+                break
+        
+        if log_result:
+            logger.info(f"Fetched {len(all_streams)} total streams")
+        return all_streams
     
-    if log_result:
-        logger.info(f"Fetched {len(all_streams)} total streams")
-    return all_streams
+    # Use cache if enabled, otherwise fetch directly
+    if cache.is_enabled():
+        return cache.get_streams(_fetch)
+    else:
+        return _fetch()
 
 
 def get_valid_stream_ids() -> set:
@@ -553,13 +579,25 @@ def get_valid_stream_ids() -> set:
     This is used to filter out stream IDs that no longer exist (e.g., removed
     from M3U playlists) before updating channels.
     
+    If caching is enabled, uses cached stream data.
+    
     Returns:
         set: Set of valid stream IDs.
     """
+    cache = get_cache()
+    
+    def _fetch():
+        return get_streams(log_result=False)
+    
     try:
-        all_streams = get_streams(log_result=False)
-        valid_ids = {stream['id'] for stream in all_streams if isinstance(stream, dict) and 'id' in stream}
-        return valid_ids
+        if cache.is_enabled():
+            # Use cache to get valid IDs
+            return cache.get_valid_stream_ids(_fetch)
+        else:
+            # Original behavior - fetch directly
+            all_streams = get_streams(log_result=False)
+            valid_ids = {stream['id'] for stream in all_streams if isinstance(stream, dict) and 'id' in stream}
+            return valid_ids
     except Exception as e:
         logger.error(f"Failed to fetch valid stream IDs: {e}")
         # Return empty set on error - this will cause all stream IDs to be filtered out
@@ -603,11 +641,13 @@ def filter_dead_streams(stream_ids: List[int], stream_id_to_url: Optional[Dict[i
         for channel_id in channels:
             filtered, count = filter_dead_streams(stream_ids, mapping)
     
+    If caching is enabled, uses cached stream data automatically.
+    
     Parameters:
         stream_ids: List of stream IDs to filter
         stream_id_to_url: Optional mapping of stream IDs to URLs. If None,
-            will fetch from API. Pass this when filtering multiple batches
-            to optimize performance.
+            will fetch from API (or cache if enabled). Pass this when filtering
+            multiple batches to optimize performance.
     
     Returns:
         Tuple of (filtered_stream_ids, count_filtered)
@@ -615,11 +655,21 @@ def filter_dead_streams(stream_ids: List[int], stream_id_to_url: Optional[Dict[i
     if not stream_ids:
         return stream_ids, 0
     
+    cache = get_cache()
+    
     # Get stream ID to URL mapping if not provided
     if stream_id_to_url is None:
-        all_streams = get_streams(log_result=False)
-        # Use None as default instead of empty string to distinguish missing streams
-        stream_id_to_url = {s['id']: s.get('url') for s in all_streams if isinstance(s, dict) and 'id' in s}
+        def _fetch():
+            return get_streams(log_result=False)
+        
+        if cache.is_enabled():
+            # Use cache to get mapping
+            stream_id_to_url = cache.get_stream_id_to_url_mapping(_fetch)
+        else:
+            # Original behavior - fetch directly
+            all_streams = get_streams(log_result=False)
+            # Use None as default instead of empty string to distinguish missing streams
+            stream_id_to_url = {s['id']: s.get('url') for s in all_streams if isinstance(s, dict) and 'id' in s}
     
     # Get dead stream URLs (will not contain None or empty strings)
     dead_urls = get_dead_stream_urls()

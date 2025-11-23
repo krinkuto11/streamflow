@@ -6,6 +6,8 @@ This module handles the automated process of:
 1. Updating M3U playlists
 2. Discovering new streams and assigning them to channels via regex
 3. Maintaining changelog of updates
+
+This module integrates with the caching layer to reduce API calls.
 """
 
 import json
@@ -27,6 +29,7 @@ from api_utils import (
     add_streams_to_channel,
     _get_base_url
 )
+from dispatcharr_cache import get_cache
 
 # Setup centralized logging
 from logging_config import setup_logging, log_function_call, log_function_return, log_exception, log_state_change
@@ -360,154 +363,166 @@ class AutomatedStreamManager:
     def refresh_playlists(self, force: bool = False) -> bool:
         """Refresh M3U playlists and track changes.
         
+        Uses caching to reduce API calls during the refresh cycle.
+        
         Args:
             force: If True, bypass the auto_playlist_update feature flag check.
                    Used for manual/quick action triggers from the UI.
         """
-        try:
-            if not force and not self.config.get("enabled_features", {}).get("auto_playlist_update", True):
-                logger.info("Playlist update is disabled in configuration")
-                return False
-            
-            logger.info("Starting M3U playlist refresh...")
-            
-            # Get streams before refresh
-            from api_utils import get_streams
-            streams_before = get_streams(log_result=False) if self.config.get("enabled_features", {}).get("changelog_tracking", True) else []
-            before_stream_ids = {s.get('id'): s.get('name', '') for s in streams_before if isinstance(s, dict) and s.get('id')}
-            
-            # Get all M3U accounts and filter out "custom" and non-active accounts
-            all_accounts = get_m3u_accounts()
-            if all_accounts:
-                # Filter out "custom" account (it doesn't need refresh as it's for locally added streams)
-                # and non-active accounts (per Dispatcharr API spec)
-                # Only filter by name, not by null URLs, as legitimate accounts may have these
-                non_custom_accounts = [
-                    acc for acc in all_accounts
-                    if acc.get('name', '').lower() != 'custom' and acc.get('is_active', True)
-                ]
+        # Use cache for the entire refresh cycle
+        cache = get_cache()
+        
+        with cache:
+            try:
+                if not force and not self.config.get("enabled_features", {}).get("auto_playlist_update", True):
+                    logger.info("Playlist update is disabled in configuration")
+                    return False
                 
-                # Perform refresh - check if we need to filter by enabled accounts
-                enabled_accounts = self.config.get("enabled_m3u_accounts", [])
-                if enabled_accounts:
-                    # Refresh only enabled accounts (and exclude custom)
-                    non_custom_ids = [acc.get('id') for acc in non_custom_accounts if acc.get('id') is not None]
-                    accounts_to_refresh = [acc_id for acc_id in enabled_accounts if acc_id in non_custom_ids]
-                    for account_id in accounts_to_refresh:
-                        logger.info(f"Refreshing M3U account {account_id}")
-                        refresh_m3u_playlists(account_id=account_id)
-                    if len(enabled_accounts) != len(accounts_to_refresh):
-                        logger.info(f"Skipped {len(enabled_accounts) - len(accounts_to_refresh)} account(s) (custom or invalid)")
-                else:
-                    # Refresh all non-custom accounts
-                    for account in non_custom_accounts:
-                        account_id = account.get('id')
-                        if account_id is not None:
+                logger.info("Starting M3U playlist refresh (with caching enabled)...")
+                
+                # Get streams before refresh
+                from api_utils import get_streams
+                streams_before = get_streams(log_result=False) if self.config.get("enabled_features", {}).get("changelog_tracking", True) else []
+                before_stream_ids = {s.get('id'): s.get('name', '') for s in streams_before if isinstance(s, dict) and s.get('id')}
+                
+                # Get all M3U accounts and filter out "custom" and non-active accounts
+                all_accounts = get_m3u_accounts()
+                if all_accounts:
+                    # Filter out "custom" account (it doesn't need refresh as it's for locally added streams)
+                    # and non-active accounts (per Dispatcharr API spec)
+                    # Only filter by name, not by null URLs, as legitimate accounts may have these
+                    non_custom_accounts = [
+                        acc for acc in all_accounts
+                        if acc.get('name', '').lower() != 'custom' and acc.get('is_active', True)
+                    ]
+                    
+                    # Perform refresh - check if we need to filter by enabled accounts
+                    enabled_accounts = self.config.get("enabled_m3u_accounts", [])
+                    if enabled_accounts:
+                        # Refresh only enabled accounts (and exclude custom)
+                        non_custom_ids = [acc.get('id') for acc in non_custom_accounts if acc.get('id') is not None]
+                        accounts_to_refresh = [acc_id for acc_id in enabled_accounts if acc_id in non_custom_ids]
+                        for account_id in accounts_to_refresh:
                             logger.info(f"Refreshing M3U account {account_id}")
                             refresh_m3u_playlists(account_id=account_id)
-                    if len(all_accounts) != len(non_custom_accounts):
-                        logger.info(f"Skipped {len(all_accounts) - len(non_custom_accounts)} 'custom' account(s)")
-            else:
-                # Fallback: if we can't get accounts, refresh all (legacy behavior)
-                logger.warning("Could not fetch M3U accounts, refreshing all as fallback")
-                refresh_m3u_playlists()
-            
-            # Get streams after refresh - log this one since it shows the final result
-            streams_after = get_streams(log_result=True) if self.config.get("enabled_features", {}).get("changelog_tracking", True) else []
-            after_stream_ids = {s.get('id'): s.get('name', '') for s in streams_after if isinstance(s, dict) and s.get('id')}
-            
-            self.last_playlist_update = datetime.now()
-            
-            # Calculate differences
-            added_stream_ids = set(after_stream_ids.keys()) - set(before_stream_ids.keys())
-            removed_stream_ids = set(before_stream_ids.keys()) - set(after_stream_ids.keys())
-            
-            added_streams = [{"id": sid, "name": after_stream_ids[sid]} for sid in added_stream_ids]
-            removed_streams = [{"id": sid, "name": before_stream_ids[sid]} for sid in removed_stream_ids]
-            
-            
-            if self.config.get("enabled_features", {}).get("changelog_tracking", True):
-                self.changelog.add_entry("playlist_refresh", {
-                    "success": True,
-                    "timestamp": self.last_playlist_update.isoformat(),
-                    "total_streams": len(after_stream_ids),
-                    "added_streams": added_streams[:50],  # Limit to first 50 for changelog size
-                    "removed_streams": removed_streams[:50],  # Limit to first 50 for changelog size
-                    "added_count": len(added_streams),
-                    "removed_count": len(removed_streams)
-                })
-            
-            logger.info(f"M3U playlist refresh completed successfully. Added: {len(added_streams)}, Removed: {len(removed_streams)}")
-            
-            # Clean up dead streams that are no longer in the playlist
-            if self.dead_streams_tracker:
-                try:
-                    current_stream_urls = {s.get('url', '') for s in streams_after if isinstance(s, dict) and s.get('url')}
-                    # Remove empty URLs from the set
-                    current_stream_urls.discard('')
-                    cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls)
-                    if cleaned_count > 0:
-                        logger.info(f"Dead streams cleanup: removed {cleaned_count} stream(s) no longer in playlist")
-                except Exception as cleanup_error:
-                    logger.error(f"Error during dead streams cleanup: {cleanup_error}")
-            
-            # Mark channels for stream quality checking ONLY if streams were added or removed
-            # This prevents unnecessary marking of all channels on every refresh
-            if len(added_streams) > 0 or len(removed_streams) > 0:
-                try:
-                    # Get all channels that may have been affected
-                    from api_utils import fetch_data_from_url, _get_base_url
-                    base_url = _get_base_url()
-                    channels_data = fetch_data_from_url(f"{base_url}/api/channels/channels/")
-                    
-                    if channels_data:
-                        if isinstance(channels_data, dict) and 'results' in channels_data:
-                            channels = channels_data['results']
-                        else:
-                            channels = channels_data
+                        if len(enabled_accounts) != len(accounts_to_refresh):
+                            logger.info(f"Skipped {len(enabled_accounts) - len(accounts_to_refresh)} account(s) (custom or invalid)")
+                    else:
+                        # Refresh all non-custom accounts
+                        for account in non_custom_accounts:
+                            account_id = account.get('id')
+                            if account_id is not None:
+                                logger.info(f"Refreshing M3U account {account_id}")
+                                refresh_m3u_playlists(account_id=account_id)
+                        if len(all_accounts) != len(non_custom_accounts):
+                            logger.info(f"Skipped {len(all_accounts) - len(non_custom_accounts)} 'custom' account(s)")
+                else:
+                    # Fallback: if we can't get accounts, refresh all (legacy behavior)
+                    logger.warning("Could not fetch M3U accounts, refreshing all as fallback")
+                    refresh_m3u_playlists()
+                
+                # Invalidate cache after refresh to get fresh data
+                cache.invalidate()
+                logger.debug("Cache invalidated after M3U refresh")
+                
+                # Get streams after refresh - log this one since it shows the final result
+                streams_after = get_streams(log_result=True) if self.config.get("enabled_features", {}).get("changelog_tracking", True) else []
+                after_stream_ids = {s.get('id'): s.get('name', '') for s in streams_after if isinstance(s, dict) and s.get('id')}
+                
+                self.last_playlist_update = datetime.now()
+                
+                # Calculate differences
+                added_stream_ids = set(after_stream_ids.keys()) - set(before_stream_ids.keys())
+                removed_stream_ids = set(before_stream_ids.keys()) - set(after_stream_ids.keys())
+                
+                added_streams = [{"id": sid, "name": after_stream_ids[sid]} for sid in added_stream_ids]
+                removed_streams = [{"id": sid, "name": before_stream_ids[sid]} for sid in removed_stream_ids]
+                
+                
+                if self.config.get("enabled_features", {}).get("changelog_tracking", True):
+                    self.changelog.add_entry("playlist_refresh", {
+                        "success": True,
+                        "timestamp": self.last_playlist_update.isoformat(),
+                        "total_streams": len(after_stream_ids),
+                        "added_streams": added_streams[:50],  # Limit to first 50 for changelog size
+                        "removed_streams": removed_streams[:50],  # Limit to first 50 for changelog size
+                        "added_count": len(added_streams),
+                        "removed_count": len(removed_streams)
+                    })
+                
+                logger.info(f"M3U playlist refresh completed successfully. Added: {len(added_streams)}, Removed: {len(removed_streams)}")
+                
+                # Clean up dead streams that are no longer in the playlist
+                if self.dead_streams_tracker:
+                    try:
+                        current_stream_urls = {s.get('url', '') for s in streams_after if isinstance(s, dict) and s.get('url')}
+                        # Remove empty URLs from the set
+                        current_stream_urls.discard('')
+                        cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls)
+                        if cleaned_count > 0:
+                            logger.info(f"Dead streams cleanup: removed {cleaned_count} stream(s) no longer in playlist")
+                    except Exception as cleanup_error:
+                        logger.error(f"Error during dead streams cleanup: {cleanup_error}")
+                
+                # Mark channels for stream quality checking ONLY if streams were added or removed
+                # This prevents unnecessary marking of all channels on every refresh
+                if len(added_streams) > 0 or len(removed_streams) > 0:
+                    try:
+                        # Get all channels that may have been affected
+                        from api_utils import fetch_data_from_url, _get_base_url
+                        base_url = _get_base_url()
+                        channels_data = fetch_data_from_url(f"{base_url}/api/channels/channels/")
                         
-                        # Mark all channels for checking with stream counts for 2-hour immunity
-                        channel_ids = []
-                        stream_counts = {}
-                        for ch in channels:
-                            if isinstance(ch, dict) and 'id' in ch:
-                                ch_id = ch['id']
-                                channel_ids.append(ch_id)
-                                # Get stream count if available
-                                if 'streams' in ch and isinstance(ch['streams'], list):
-                                    stream_counts[ch_id] = len(ch['streams'])
-                        
-                        # Try to get stream checker service and mark channels
-                        try:
-                            from stream_checker_service import get_stream_checker_service
-                            stream_checker = get_stream_checker_service()
-                            stream_checker.update_tracker.mark_channels_updated(channel_ids, stream_counts=stream_counts)
-                            logger.info(f"Marked {len(channel_ids)} channels for stream quality checking")
-                            # Trigger immediate check instead of waiting for scheduled interval
-                            stream_checker.trigger_check_updated_channels()
-                        except Exception as sc_error:
-                            logger.debug(f"Stream checker not available or error marking channels: {sc_error}")
-                except Exception as ch_error:
-                    logger.debug(f"Could not mark channels for stream checking: {ch_error}")
-            else:
-                logger.info("No stream changes detected, skipping channel marking")
-            
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to refresh M3U playlists: {e}")
-            
-            
-            if self.config.get("enabled_features", {}).get("changelog_tracking", True):
-                self.changelog.add_entry("playlist_refresh", {
-                    "success": False,
-                    "error": str(e),
-                    "timestamp": datetime.now().isoformat()
-                })
-            return False
+                        if channels_data:
+                            if isinstance(channels_data, dict) and 'results' in channels_data:
+                                channels = channels_data['results']
+                            else:
+                                channels = channels_data
+                            
+                            # Mark all channels for checking with stream counts for 2-hour immunity
+                            channel_ids = []
+                            stream_counts = {}
+                            for ch in channels:
+                                if isinstance(ch, dict) and 'id' in ch:
+                                    ch_id = ch['id']
+                                    channel_ids.append(ch_id)
+                                    # Get stream count if available
+                                    if 'streams' in ch and isinstance(ch['streams'], list):
+                                        stream_counts[ch_id] = len(ch['streams'])
+                            
+                            # Try to get stream checker service and mark channels
+                            try:
+                                from stream_checker_service import get_stream_checker_service
+                                stream_checker = get_stream_checker_service()
+                                stream_checker.update_tracker.mark_channels_updated(channel_ids, stream_counts=stream_counts)
+                                logger.info(f"Marked {len(channel_ids)} channels for stream quality checking")
+                                # Trigger immediate check instead of waiting for scheduled interval
+                                stream_checker.trigger_check_updated_channels()
+                            except Exception as sc_error:
+                                logger.debug(f"Stream checker not available or error marking channels: {sc_error}")
+                    except Exception as ch_error:
+                        logger.debug(f"Could not mark channels for stream checking: {ch_error}")
+                else:
+                    logger.info("No stream changes detected, skipping channel marking")
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"Failed to refresh M3U playlists: {e}")
+                
+                
+                if self.config.get("enabled_features", {}).get("changelog_tracking", True):
+                    self.changelog.add_entry("playlist_refresh", {
+                        "success": False,
+                        "error": str(e),
+                        "timestamp": datetime.now().isoformat()
+                    })
+                return False
     
     def discover_and_assign_streams(self, force: bool = False) -> Dict[str, int]:
         """Discover new streams and assign them to channels based on regex patterns.
+        
+        Uses caching to reduce API calls during discovery and assignment.
         
         Args:
             force: If True, bypass the auto_stream_discovery feature flag check.
@@ -517,84 +532,88 @@ class AutomatedStreamManager:
             logger.info("Stream discovery is disabled in configuration")
             return {}
         
-        try:
-            # Reload patterns to ensure we have the latest changes
-            self.regex_matcher.reload_patterns()
-            
-            logger.info("Starting stream discovery and assignment...")
-            
-            # Get all available streams (don't log, we already logged during refresh)
-            all_streams = get_streams(log_result=False)
-            if not all_streams:
-                logger.warning("No streams found")
-                return {}
-            
-            # Validate that all_streams is a list
-            if not isinstance(all_streams, list):
-                logger.error(f"Invalid streams response format: expected list, got {type(all_streams).__name__}")
-                return {}
-            
-            # Filter streams by enabled M3U accounts
-            # Get all M3U accounts and filter by enabled and active status
-            all_accounts = get_m3u_accounts()
-            enabled_account_ids = set()
-            
-            if all_accounts:
-                # Filter out "custom" account and non-active accounts
-                non_custom_accounts = [
-                    acc for acc in all_accounts
-                    if acc.get('name', '').lower() != 'custom' and acc.get('is_active', True)
-                ]
+        # Use cache for the entire discovery cycle
+        cache = get_cache()
+        
+        with cache:
+            try:
+                # Reload patterns to ensure we have the latest changes
+                self.regex_matcher.reload_patterns()
                 
-                # Get enabled accounts from config
-                enabled_accounts_config = self.config.get("enabled_m3u_accounts", [])
+                logger.info("Starting stream discovery and assignment (with caching enabled)...")
                 
-                if enabled_accounts_config:
-                    # Only include accounts that are in the enabled list
-                    enabled_account_ids = set(
-                        acc.get('id') for acc in non_custom_accounts 
-                        if acc.get('id') in enabled_accounts_config and acc.get('id') is not None
-                    )
-                else:
-                    # If no specific accounts are enabled in config, use all non-custom active accounts
-                    enabled_account_ids = set(
-                        acc.get('id') for acc in non_custom_accounts 
-                        if acc.get('id') is not None
-                    )
-                
-                # Filter streams to only include those from enabled accounts
-                # Also include custom streams (is_custom=True) as they don't belong to an M3U account
-                filtered_streams = [
-                    stream for stream in all_streams
-                    if stream.get('is_custom', False) or stream.get('m3u_account') in enabled_account_ids
-                ]
-                
-                streams_filtered_count = len(all_streams) - len(filtered_streams)
-                if streams_filtered_count > 0:
-                    logger.info(f"Filtered out {streams_filtered_count} streams from disabled/inactive M3U accounts")
-                
-                all_streams = filtered_streams
-                
+                # Get all available streams (don't log, we already logged during refresh)
+                all_streams = get_streams(log_result=False)
                 if not all_streams:
-                    logger.info("No streams found after filtering by enabled M3U accounts")
+                    logger.warning("No streams found")
                     return {}
-            else:
-                logger.warning("Could not fetch M3U accounts, using all streams")
-            
-            # Get all channels
-            base_url = _get_base_url()
-            all_channels = fetch_data_from_url(f"{base_url}/api/channels/channels/")
-            if not all_channels:
-                logger.warning("No channels found")
-                return {}
-            
-            # Validate that all_channels is a list
-            if not isinstance(all_channels, list):
-                logger.error(f"Invalid channels response format: expected list, got {type(all_channels).__name__}")
-                return {}
-            
-            # Create a map of existing channel streams
-            channel_streams = {}
+                
+                # Validate that all_streams is a list
+                if not isinstance(all_streams, list):
+                    logger.error(f"Invalid streams response format: expected list, got {type(all_streams).__name__}")
+                    return {}
+                
+                # Filter streams by enabled M3U accounts
+                # Get all M3U accounts and filter by enabled and active status
+                all_accounts = get_m3u_accounts()
+                enabled_account_ids = set()
+                
+                if all_accounts:
+                    # Filter out "custom" account and non-active accounts
+                    non_custom_accounts = [
+                        acc for acc in all_accounts
+                        if acc.get('name', '').lower() != 'custom' and acc.get('is_active', True)
+                    ]
+                    
+                    # Get enabled accounts from config
+                    enabled_accounts_config = self.config.get("enabled_m3u_accounts", [])
+                    
+                    if enabled_accounts_config:
+                        # Only include accounts that are in the enabled list
+                        enabled_account_ids = set(
+                            acc.get('id') for acc in non_custom_accounts 
+                            if acc.get('id') in enabled_accounts_config and acc.get('id') is not None
+                        )
+                    else:
+                        # If no specific accounts are enabled in config, use all non-custom active accounts
+                        enabled_account_ids = set(
+                            acc.get('id') for acc in non_custom_accounts 
+                            if acc.get('id') is not None
+                        )
+                    
+                    # Filter streams to only include those from enabled accounts
+                    # Also include custom streams (is_custom=True) as they don't belong to an M3U account
+                    filtered_streams = [
+                        stream for stream in all_streams
+                        if stream.get('is_custom', False) or stream.get('m3u_account') in enabled_account_ids
+                    ]
+                    
+                    streams_filtered_count = len(all_streams) - len(filtered_streams)
+                    if streams_filtered_count > 0:
+                        logger.info(f"Filtered out {streams_filtered_count} streams from disabled/inactive M3U accounts")
+                    
+                    all_streams = filtered_streams
+                    
+                    if not all_streams:
+                        logger.info("No streams found after filtering by enabled M3U accounts")
+                        return {}
+                else:
+                    logger.warning("Could not fetch M3U accounts, using all streams")
+                
+                # Get all channels
+                base_url = _get_base_url()
+                all_channels = fetch_data_from_url(f"{base_url}/api/channels/channels/")
+                if not all_channels:
+                    logger.warning("No channels found")
+                    return {}
+                
+                # Validate that all_channels is a list
+                if not isinstance(all_channels, list):
+                    logger.error(f"Invalid channels response format: expected list, got {type(all_channels).__name__}")
+                    return {}
+                
+                # Create a map of existing channel streams
+                channel_streams = {}
             channel_names = {}  # Store channel names for changelog
             for channel in all_channels:
                 # Validate that channel is a dictionary
@@ -738,29 +757,29 @@ class AutomatedStreamManager:
                                 pass  # If we can't get count, marking will still work
                     
                     # Try to get stream checker service and mark channels
-                    if channel_ids_to_mark:
-                        try:
-                            from stream_checker_service import get_stream_checker_service
-                            stream_checker = get_stream_checker_service()
-                            stream_checker.update_tracker.mark_channels_updated(channel_ids_to_mark, stream_counts=stream_counts)
-                            logger.info(f"Marked {len(channel_ids_to_mark)} channels with new streams for stream quality checking")
-                            # Trigger immediate check instead of waiting for scheduled interval
-                            stream_checker.trigger_check_updated_channels()
-                        except Exception as sc_error:
-                            logger.debug(f"Stream checker not available or error marking channels: {sc_error}")
-                except Exception as mark_error:
-                    logger.debug(f"Could not mark channels for stream checking after discovery: {mark_error}")
-            
-            return assignment_count
-            
-        except Exception as e:
-            logger.error(f"Stream discovery failed: {e}")
-            if self.config.get("enabled_features", {}).get("changelog_tracking", True):
-                self.changelog.add_entry("stream_discovery", {
-                    "success": False,
-                    "error": str(e)
-                })
-            return {}
+                        if channel_ids_to_mark:
+                            try:
+                                from stream_checker_service import get_stream_checker_service
+                                stream_checker = get_stream_checker_service()
+                                stream_checker.update_tracker.mark_channels_updated(channel_ids_to_mark, stream_counts=stream_counts)
+                                logger.info(f"Marked {len(channel_ids_to_mark)} channels with new streams for stream quality checking")
+                                # Trigger immediate check instead of waiting for scheduled interval
+                                stream_checker.trigger_check_updated_channels()
+                            except Exception as sc_error:
+                                logger.debug(f"Stream checker not available or error marking channels: {sc_error}")
+                    except Exception as mark_error:
+                        logger.debug(f"Could not mark channels for stream checking after discovery: {mark_error}")
+                
+                return assignment_count
+                
+            except Exception as e:
+                logger.error(f"Stream discovery failed: {e}")
+                if self.config.get("enabled_features", {}).get("changelog_tracking", True):
+                    self.changelog.add_entry("stream_discovery", {
+                        "success": False,
+                        "error": str(e)
+                    })
+                return {}
     
     def should_run_playlist_update(self) -> bool:
         """Check if it's time to run playlist update."""
