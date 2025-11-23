@@ -66,8 +66,7 @@ class ChangelogManager:
                     return json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
                 logger.warning(
-                    f"Could not load {
-                        self.changelog_file}, creating new changelog")
+                    f"Could not load {self.changelog_file}, creating new changelog")
         return []
 
     def add_entry(self, action: str, details: Dict,
@@ -154,8 +153,7 @@ class RegexChannelMatcher:
                     return json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
                 logger.warning(
-                    f"Could not load {
-                        self.config_file}, creating default config")
+                    f"Could not load {self.config_file}, creating default config")
 
         # Create default configuration
         default_config = {
@@ -316,8 +314,7 @@ class AutomatedStreamManager:
                     return json.load(f)
             except (json.JSONDecodeError, FileNotFoundError):
                 logger.warning(
-                    f"Could not load {
-                        self.config_file}, creating default config")
+                    f"Could not load {self.config_file}, creating default config")
 
         # Default configuration
         default_config = {
@@ -371,8 +368,7 @@ class AutomatedStreamManager:
                     config_changes.append("M3U accounts: all enabled")
                 else:
                     config_changes.append(
-                        f"M3U accounts: {
-                            len(new_accounts)} selected")
+                        f"M3U accounts: {len(new_accounts)} selected")
 
         # Apply the configuration update
         self.config.update(updates)
@@ -381,8 +377,7 @@ class AutomatedStreamManager:
         # Log the changes
         if config_changes:
             logger.info(
-                f"Automation configuration updated: {
-                    '; '.join(config_changes)}")
+                f"Automation configuration updated: {'; '.join(config_changes)}")
             logger.info("Changes will take effect on next scheduled operation")
         else:
             logger.info("Automation configuration updated")
@@ -451,9 +446,7 @@ class AutomatedStreamManager:
                             refresh_m3u_playlists(account_id=account_id)
                         if len(enabled_accounts) != len(accounts_to_refresh):
                             logger.info(
-                                f"Skipped {
-                                    len(enabled_accounts) -
-                                    len(accounts_to_refresh)} account(s) (custom or invalid)")
+                                f"Skipped {len(enabled_accounts) - len(accounts_to_refresh)} account(s) (custom or invalid)")
                     else:
                         # Refresh all non-custom accounts
                         for account in non_custom_accounts:
@@ -464,9 +457,7 @@ class AutomatedStreamManager:
                                 refresh_m3u_playlists(account_id=account_id)
                         if len(all_accounts) != len(non_custom_accounts):
                             logger.info(
-                                f"Skipped {
-                                    len(all_accounts) -
-                                    len(non_custom_accounts)} 'custom' account(s)")
+                                f"Skipped {len(all_accounts) - len(non_custom_accounts)} 'custom' account(s)")
                 else:
                     # Fallback: if we can't get accounts, refresh all (legacy
                     # behavior)
@@ -521,9 +512,7 @@ class AutomatedStreamManager:
                     })
 
                 logger.info(
-                    f"M3U playlist refresh completed successfully. Added: {
-                        len(added_streams)}, Removed: {
-                        len(removed_streams)}")
+                    f"M3U playlist refresh completed successfully. Added: {len(added_streams)}, Removed: {len(removed_streams)}")
 
                 # Clean up dead streams that are no longer in the playlist
                 if self.dead_streams_tracker:
@@ -586,8 +575,7 @@ class AutomatedStreamManager:
                                 stream_checker.update_tracker.mark_channels_updated(
                                     channel_ids, stream_counts=stream_counts)
                                 logger.info(
-                                    f"Marked {
-                                        len(channel_ids)} channels for stream quality checking")
+                                    f"Marked {len(channel_ids)} channels for stream quality checking")
                                 # Trigger immediate check instead of waiting
                                 # for scheduled interval
                                 stream_checker.trigger_check_updated_channels()
@@ -653,8 +641,7 @@ class AutomatedStreamManager:
                 # Validate that all_streams is a list
                 if not isinstance(all_streams, list):
                     logger.error(
-                        f"Invalid streams response format: expected list, got {
-                            type(all_streams).__name__}")
+                        f"Invalid streams response format: expected list, got {type(all_streams).__name__}")
                     return {}
 
                 # Filter streams by enabled M3U accounts
@@ -720,8 +707,7 @@ class AutomatedStreamManager:
                 # Validate that all_channels is a list
                 if not isinstance(all_channels, list):
                     logger.error(
-                        f"Invalid channels response format: expected list, got {
-                            type(all_channels).__name__}")
+                        f"Invalid channels response format: expected list, got {type(all_channels).__name__}")
                     return {}
 
                 # Create a map of existing channel streams
@@ -731,8 +717,7 @@ class AutomatedStreamManager:
                     # Validate that channel is a dictionary
                     if not isinstance(channel, dict) or 'id' not in channel:
                         logger.warning(
-                            f"Invalid channel format encountered: {
-                                type(channel).__name__} - {channel}")
+                            f"Invalid channel format encountered: {type(channel).__name__} - {channel}")
                         continue
 
                     channel_id = str(channel['id'])
@@ -749,13 +734,11 @@ class AutomatedStreamManager:
                                 valid_stream_ids.add(s['id'])
                             else:
                                 logger.warning(
-                                    f"Invalid stream format in channel {channel_id}: {
-                                        type(s).__name__} - {s}")
+                                    f"Invalid stream format in channel {channel_id}: {type(s).__name__} - {s}")
                         channel_streams[channel_id] = valid_stream_ids
                     else:
                         logger.warning(
-                            f"Invalid streams format for channel {channel_id}: expected list, got {
-                                type(streams).__name__}")
+                            f"Invalid streams format for channel {channel_id}: expected list, got {type(streams).__name__}")
                         channel_streams[channel_id] = set()
                 else:
                     channel_streams[channel_id] = set()
@@ -771,8 +754,7 @@ class AutomatedStreamManager:
                     # attributes
                     if not isinstance(stream, dict):
                         logger.warning(
-                            f"Invalid stream format encountered: {
-                                type(stream).__name__} - {stream}")
+                            f"Invalid stream format encountered: {type(stream).__name__} - {stream}")
                         continue
 
                     stream_name = stream.get('name', '')
@@ -836,13 +818,10 @@ class AutomatedStreamManager:
                                         if len(
                                                 added_stream_ids) == added_count:
                                             logger.info(
-                                                f"✓ Verified: {added_count} streams successfully added to channel {channel_id} ({
-                                                    channel_names.get(
-                                                        channel_id, f'Channel {channel_id}')})")
+                                                f"✓ Verified: {added_count} streams successfully added to channel {channel_id} ({channel_names.get(channel_id, f'Channel {channel_id}')})")
                                         else:
                                             logger.warning(
-                                                f"⚠ Verification mismatch for channel {channel_id}: expected {added_count} streams, found {
-                                                    len(added_stream_ids)} in channel")
+                                                f"⚠ Verification mismatch for channel {channel_id}: expected {added_count} streams, found {len(added_stream_ids)} in channel")
                                     else:
                                         logger.warning(
                                             f"⚠ Could not verify stream addition for channel {channel_id}: invalid response")
@@ -887,8 +866,7 @@ class AutomatedStreamManager:
                     })
 
                 logger.info(
-                    f"Stream discovery completed. Assigned {total_assigned} new streams across {
-                        len(assignment_count)} channels")
+                    f"Stream discovery completed. Assigned {total_assigned} new streams across {len(assignment_count)} channels")
 
                 # Mark channels that received new streams for stream quality
                 # checking
@@ -921,8 +899,7 @@ class AutomatedStreamManager:
                                 stream_checker.update_tracker.mark_channels_updated(
                                     channel_ids_to_mark, stream_counts=stream_counts)
                                 logger.info(
-                                    f"Marked {
-                                        len(channel_ids_to_mark)} channels with new streams for stream quality checking")
+                                    f"Marked {len(channel_ids_to_mark)} channels with new streams for stream quality checking")
                                 # Trigger immediate check instead of waiting
                                 # for scheduled interval
                                 stream_checker.trigger_check_updated_channels()
@@ -1020,8 +997,7 @@ class AutomatedStreamManager:
             target=automation_loop, daemon=True)
         self.automation_thread.start()
         logger.debug(
-            f"Automation thread started (id: {
-                self.automation_thread.ident})")
+            f"Automation thread started (id: {self.automation_thread.ident})")
         log_state_change(logger, "automation_manager", "starting", "running")
         log_function_return(logger, "start_automation")
 
