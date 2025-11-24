@@ -36,7 +36,9 @@ from api_utils import (
     fetch_data_from_url,
     update_channel_streams,
     _get_base_url,
-    patch_request
+    patch_request,
+    get_streams,
+    get_valid_stream_ids
 )
 from dispatcharr_cache import get_cache
 
@@ -1245,6 +1247,14 @@ class StreamCheckerService:
             
             logger.info(f"Found {len(streams)} streams for channel {channel_name}")
             
+            # Pre-fetch valid stream IDs and stream-to-URL mapping ONCE to avoid
+            # redundant API calls during update_channel_streams()
+            # This significantly reduces API load when checking multiple channels
+            logger.debug("Pre-fetching valid stream IDs and URL mapping for efficient filtering")
+            all_streams_data = get_streams(log_result=False)
+            valid_stream_ids = {s['id'] for s in all_streams_data if isinstance(s, dict) and 'id' in s}
+            stream_id_to_url = {s['id']: s.get('url') for s in all_streams_data if isinstance(s, dict) and 'id' in s}
+            
             # Check if this is a force check (bypasses stream immunity)
             force_check = self.update_tracker.should_force_check(channel_id)
             
@@ -1482,7 +1492,14 @@ class StreamCheckerService:
             )
             reordered_ids = [s['stream_id'] for s in analyzed_streams]
             # Allow dead streams during force_check (global checks) to give them a second chance
-            update_channel_streams(channel_id, reordered_ids, allow_dead_streams=force_check)
+            # Pass pre-computed valid_stream_ids and stream_id_to_url to avoid redundant API calls
+            update_channel_streams(
+                channel_id, 
+                reordered_ids, 
+                valid_stream_ids=valid_stream_ids,
+                allow_dead_streams=force_check,
+                stream_id_to_url=stream_id_to_url
+            )
             
             # Verify the update was applied correctly
             self.progress.update(

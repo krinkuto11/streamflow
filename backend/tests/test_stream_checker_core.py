@@ -152,10 +152,11 @@ class TestProgressTracking(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
     
+    @patch('stream_checker_service.get_streams')
     @patch('stream_checker_service.fetch_channel_streams')
     @patch('stream_checker_service.fetch_data_from_url')
     @patch('stream_checker_service._get_base_url')
-    def test_total_streams_defined_before_use(self, mock_base_url, mock_fetch_data, mock_fetch_streams):
+    def test_total_streams_defined_before_use(self, mock_base_url, mock_fetch_data, mock_fetch_streams, mock_get_streams):
         """Test that total_streams is defined before being used in progress updates."""
         # Setup mocks
         mock_base_url.return_value = "http://test:8000"
@@ -167,11 +168,14 @@ class TestProgressTracking(unittest.TestCase):
         }
         
         # Mock streams - 3 streams to check
-        mock_fetch_streams.return_value = [
+        mock_streams = [
             {'id': 1, 'name': 'Stream 1', 'url': 'http://test1'},
             {'id': 2, 'name': 'Stream 2', 'url': 'http://test2'},
             {'id': 3, 'name': 'Stream 3', 'url': 'http://test3'},
         ]
+        mock_fetch_streams.return_value = mock_streams
+        # Mock get_streams for pre-fetching valid stream IDs
+        mock_get_streams.return_value = mock_streams
         
         # Create service instance with temporary config directory
         with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):

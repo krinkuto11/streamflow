@@ -407,7 +407,8 @@ def fetch_channel_streams(channel_id: int) -> Optional[List[Dict[str, Any]]]:
 
 def update_channel_streams(
     channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
-    allow_dead_streams: bool = False
+    allow_dead_streams: bool = False,
+    stream_id_to_url: Optional[Dict[int, str]] = None
 ) -> bool:
     """
     Update the streams for a given channel ID.
@@ -423,6 +424,9 @@ def update_channel_streams(
             updating multiple channels.
         allow_dead_streams (bool): If True, allows dead streams (used during
             global checks to give dead streams a second chance). Default False.
+        stream_id_to_url (Optional[Dict[int, str]]): Mapping of stream IDs to URLs.
+            If None, will fetch from API. Pass this to avoid redundant API calls
+            when updating multiple channels.
         
     Returns:
         bool: True if update successful, False otherwise.
@@ -445,7 +449,7 @@ def update_channel_streams(
     
     # Filter out dead streams unless allow_dead_streams is True (e.g., during global checks)
     if not allow_dead_streams:
-        filtered_stream_ids, dead_count = filter_dead_streams(filtered_stream_ids)
+        filtered_stream_ids, dead_count = filter_dead_streams(filtered_stream_ids, stream_id_to_url)
         if dead_count > 0:
             logger.warning(
                 f"Filtered out {dead_count} dead stream(s) for channel {channel_id}"
@@ -777,7 +781,8 @@ def create_channel_from_stream(
 
 def add_streams_to_channel(
     channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
-    allow_dead_streams: bool = False
+    allow_dead_streams: bool = False,
+    stream_id_to_url: Optional[Dict[int, str]] = None
 ) -> int:
     """
     Add new streams to an existing channel.
@@ -794,6 +799,9 @@ def add_streams_to_channel(
             updating multiple channels.
         allow_dead_streams (bool): If True, allows dead streams (used during
             global checks to give dead streams a second chance). Default False.
+        stream_id_to_url (Optional[Dict[int, str]]): Mapping of stream IDs to URLs.
+            If None, will fetch from API. Pass this to avoid redundant API calls
+            when updating multiple channels.
         
     Returns:
         int: Number of new streams actually added.
@@ -830,7 +838,7 @@ def add_streams_to_channel(
     
     # Filter out dead streams unless allow_dead_streams is True
     if not allow_dead_streams and valid_new_stream_ids:
-        valid_new_stream_ids, dead_count = filter_dead_streams(valid_new_stream_ids)
+        valid_new_stream_ids, dead_count = filter_dead_streams(valid_new_stream_ids, stream_id_to_url)
         if dead_count > 0:
             logger.warning(
                 f"Filtered out {dead_count} dead stream(s) "
@@ -839,7 +847,7 @@ def add_streams_to_channel(
     
     if valid_new_stream_ids:
         updated_streams = current_stream_ids + valid_new_stream_ids
-        update_channel_streams(channel_id, updated_streams, valid_stream_ids, allow_dead_streams)
+        update_channel_streams(channel_id, updated_streams, valid_stream_ids, allow_dead_streams, stream_id_to_url)
         logger.info(
             f"Added {len(valid_new_stream_ids)} new streams to channel "
             f"{channel_id}"
