@@ -15,10 +15,9 @@ import tempfile
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock, call
 import sys
-import os
 
-# Add backend to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add backend to path using Path for cleaner path manipulation
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 class TestChannelListCaching(unittest.TestCase):

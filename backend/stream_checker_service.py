@@ -1252,8 +1252,10 @@ class StreamCheckerService:
             # This significantly reduces API load when checking multiple channels
             logger.debug("Pre-fetching valid stream IDs and URL mapping for efficient filtering")
             all_streams_data = get_streams(log_result=False)
-            valid_stream_ids = {s['id'] for s in all_streams_data if isinstance(s, dict) and 'id' in s}
-            stream_id_to_url = {s['id']: s.get('url') for s in all_streams_data if isinstance(s, dict) and 'id' in s}
+            # Filter to valid stream dictionaries once to avoid duplicate condition
+            valid_streams = [s for s in all_streams_data if isinstance(s, dict) and 'id' in s]
+            valid_stream_ids = {s['id'] for s in valid_streams}
+            stream_id_to_url = {s['id']: s.get('url') for s in valid_streams}
             
             # Check if this is a force check (bypasses stream immunity)
             force_check = self.update_tracker.should_force_check(channel_id)
