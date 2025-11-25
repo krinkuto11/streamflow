@@ -1,0 +1,178 @@
+streamflow  | 2025-11-25T10:54:00.128702311Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/channels/)
+streamflow  | 2025-11-25T10:54:00.128737868Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ 
+streamflow  | 2025-11-25T10:54:00.128743513Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:00.128747891Z 2025-11-25 11:54:00 - INFO - [api_utils:_get_auth_headers:185] - DISPATCHARR_TOKEN not found. Attempting to log in...
+streamflow  | 2025-11-25T10:54:00.128751895Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_function_call:92] - → login()
+streamflow  | 2025-11-25T10:54:00.128755972Z 2025-11-25 11:54:00 - INFO - [api_utils:login:107] - Attempting to log in to http://dispatcharr:9191...
+streamflow  | 2025-11-25T10:54:00.128759831Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_api_request:165] - → API POST http://dispatcharr:9191/api/accounts/token/ json=
+streamflow  | 2025-11-25T10:54:00.128764254Z 2025-11-25 11:54:00 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:00.726077083Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_api_response:183] - ← API POST http://dispatcharr:9191/api/accounts/token/ → 200 (0.605s)
+streamflow  | 2025-11-25T10:54:00.726103828Z 2025-11-25 11:54:00 - DEBUG - [api_utils:login:125] - Received token (length: 231)
+streamflow  | 2025-11-25T10:54:00.726108939Z 2025-11-25 11:54:00 - INFO - [api_utils:login:133] - Login successful. Token stored in memory.
+streamflow  | 2025-11-25T10:54:00.726112950Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_function_return:115] - ← login → True (0.605s)
+streamflow  | 2025-11-25T10:54:00.726116978Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_function_return:115] - ← _get_auth_headers → 
+streamflow  | 2025-11-25T10:54:00.726773212Z 2025-11-25 11:54:00 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:00.820394898Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.700s)
+streamflow  | 2025-11-25T10:54:00.820592535Z 2025-11-25 11:54:00 - DEBUG - [api_utils:fetch_data_from_url:262] - Response contains list with 29 items
+streamflow  | 2025-11-25T10:54:00.820603080Z 2025-11-25 11:54:00 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.700s)
+streamflow  | 2025-11-25T10:54:06.005535484Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/m3u/accounts/)
+streamflow  | 2025-11-25T10:54:06.005559767Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/m3u/accounts/ 
+streamflow  | 2025-11-25T10:54:06.005565179Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:06.005569532Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:06.005574089Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:06.006195077Z 2025-11-25 11:54:06 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:06.055903742Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.049s)
+streamflow  | 2025-11-25T10:54:06.055922017Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.049s)
+streamflow  | 2025-11-25T10:54:06.055927028Z 2025-11-25 11:54:06 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:06.055931212Z 2025-11-25 11:54:06 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:06.079758578Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/m3u/accounts/ → 200 (0.074s)
+streamflow  | 2025-11-25T10:54:06.079829719Z 2025-11-25 11:54:06 - DEBUG - [api_utils:fetch_data_from_url:262] - Response contains list with 4 items
+streamflow  | 2025-11-25T10:54:06.079907997Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.074s)
+streamflow  | 2025-11-25T10:54:06.080027366Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/streams/?is_custom=true&page_size=1)
+streamflow  | 2025-11-25T10:54:06.080035186Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/streams/?is_custom=true&page_size=1 
+streamflow  | 2025-11-25T10:54:06.080162421Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:06.080173522Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:06.080178460Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:06.080858323Z 2025-11-25 11:54:06 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:06.129641628Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.049s)
+streamflow  | 2025-11-25T10:54:06.129679518Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.049s)
+streamflow  | 2025-11-25T10:54:06.130743859Z 2025-11-25 11:54:06 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:06.130754739Z 2025-11-25 11:54:06 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:06.139935709Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/streams/?is_custom=true&page_size=1 → 200 (0.060s)
+streamflow  | 2025-11-25T10:54:06.139953934Z 2025-11-25 11:54:06 - DEBUG - [api_utils:fetch_data_from_url:260] - Response contains dict with 4 keys
+streamflow  | 2025-11-25T10:54:06.140762981Z 2025-11-25 11:54:06 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.060s)
+streamflow  | 2025-11-25T10:54:09.529682311Z 2025-11-25 11:54:09 - DEBUG - [dispatcharr_cache:__enter__:81] - Dispatcharr cache enabled
+streamflow  | 2025-11-25T10:54:09.529769303Z 2025-11-25 11:54:09 - INFO - [automated_stream_manager:refresh_playlists:405] - Starting M3U playlist refresh (with caching enabled)...
+streamflow  | 2025-11-25T10:54:09.529814944Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/streams/?page_size=100)
+streamflow  | 2025-11-25T10:54:09.529871835Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/streams/?page_size=100 
+streamflow  | 2025-11-25T10:54:09.529932401Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:09.529940891Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:09.530107579Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:09.530657748Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.583690327Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.052s)
+streamflow  | 2025-11-25T10:54:09.583714383Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.052s)
+streamflow  | 2025-11-25T10:54:09.583720423Z 2025-11-25 11:54:09 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:09.583724639Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.610786037Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/streams/?page_size=100 → 200 (0.079s)
+streamflow  | 2025-11-25T10:54:09.610814740Z 2025-11-25 11:54:09 - DEBUG - [api_utils:fetch_data_from_url:260] - Response contains dict with 4 keys
+streamflow  | 2025-11-25T10:54:09.610820122Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.079s)
+streamflow  | 2025-11-25T10:54:09.610824626Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/streams/?page=2&page_size=100)
+streamflow  | 2025-11-25T10:54:09.610828898Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/streams/?page=2&page_size=100 
+streamflow  | 2025-11-25T10:54:09.610833032Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:09.610836860Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:09.610841038Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:09.610845160Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.714790053Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.105s)
+streamflow  | 2025-11-25T10:54:09.714810779Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.105s)
+streamflow  | 2025-11-25T10:54:09.714868097Z 2025-11-25 11:54:09 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:09.715445225Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.734280383Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/streams/?page=2&page_size=100 → 200 (0.125s)
+streamflow  | 2025-11-25T10:54:09.734888496Z 2025-11-25 11:54:09 - DEBUG - [api_utils:fetch_data_from_url:260] - Response contains dict with 4 keys
+streamflow  | 2025-11-25T10:54:09.734901432Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.125s)
+streamflow  | 2025-11-25T10:54:09.734971320Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/streams/?page=3&page_size=100)
+streamflow  | 2025-11-25T10:54:09.734982758Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/streams/?page=3&page_size=100 
+streamflow  | 2025-11-25T10:54:09.735132230Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:09.735142848Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:09.735156590Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:09.735758782Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.777796535Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.042s)
+streamflow  | 2025-11-25T10:54:09.777815084Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.042s)
+streamflow  | 2025-11-25T10:54:09.777861164Z 2025-11-25 11:54:09 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:09.778445069Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.795393481Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/streams/?page=3&page_size=100 → 200 (0.060s)
+streamflow  | 2025-11-25T10:54:09.795800947Z 2025-11-25 11:54:09 - DEBUG - [api_utils:fetch_data_from_url:260] - Response contains dict with 4 keys
+streamflow  | 2025-11-25T10:54:09.795812445Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.060s)
+streamflow  | 2025-11-25T10:54:09.795932778Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/streams/?page=4&page_size=100)
+streamflow  | 2025-11-25T10:54:09.795992856Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/streams/?page=4&page_size=100 
+streamflow  | 2025-11-25T10:54:09.796003923Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:09.796029932Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:09.796164863Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:09.796690277Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.846205763Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.050s)
+streamflow  | 2025-11-25T10:54:09.846223926Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.050s)
+streamflow  | 2025-11-25T10:54:09.846255112Z 2025-11-25 11:54:09 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:09.846838884Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.855525072Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/streams/?page=4&page_size=100 → 200 (0.059s)
+streamflow  | 2025-11-25T10:54:09.855542848Z 2025-11-25 11:54:09 - DEBUG - [api_utils:fetch_data_from_url:260] - Response contains dict with 4 keys
+streamflow  | 2025-11-25T10:54:09.855547870Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.059s)
+streamflow  | 2025-11-25T10:54:09.855886156Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/m3u/accounts/)
+streamflow  | 2025-11-25T10:54:09.855907075Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/m3u/accounts/ 
+streamflow  | 2025-11-25T10:54:09.855938471Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:09.855949977Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:09.855968873Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:09.856508156Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.901898321Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.046s)
+streamflow  | 2025-11-25T10:54:09.901916438Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.046s)
+streamflow  | 2025-11-25T10:54:09.902004945Z 2025-11-25 11:54:09 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:09.902885672Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.921594770Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/m3u/accounts/ → 200 (0.064s)
+streamflow  | 2025-11-25T10:54:09.921611708Z 2025-11-25 11:54:09 - DEBUG - [api_utils:fetch_data_from_url:262] - Response contains list with 4 items
+streamflow  | 2025-11-25T10:54:09.921616519Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.064s)
+streamflow  | 2025-11-25T10:54:09.921620850Z 2025-11-25 11:54:09 - INFO - [automated_stream_manager:refresh_playlists:445] - Refreshing M3U account 6
+streamflow  | 2025-11-25T10:54:09.921624645Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:09.921628676Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:09.921632780Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:09.921636668Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.968591686Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.048s)
+streamflow  | 2025-11-25T10:54:09.968610530Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.048s)
+streamflow  | 2025-11-25T10:54:09.968624787Z 2025-11-25 11:54:09 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:09.969276076Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:09.974316554Z 2025-11-25 11:54:09 - INFO - [api_utils:refresh_m3u_playlists:509] - M3U refresh initiated successfully
+streamflow  | 2025-11-25T10:54:09.974592425Z 2025-11-25 11:54:09 - DEBUG - [automated_stream_manager:refresh_playlists:471] - Cache invalidated after M3U refresh
+streamflow  | 2025-11-25T10:54:09.974605004Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/streams/?page_size=100)
+streamflow  | 2025-11-25T10:54:09.974610458Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/streams/?page_size=100 
+streamflow  | 2025-11-25T10:54:09.974614907Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:09.974618948Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:09.974623254Z 2025-11-25 11:54:09 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:09.975251481Z 2025-11-25 11:54:09 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:10.030008519Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.054s)
+streamflow  | 2025-11-25T10:54:10.030030446Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.054s)
+streamflow  | 2025-11-25T10:54:10.030035524Z 2025-11-25 11:54:10 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:10.030039461Z 2025-11-25 11:54:10 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:10.048859351Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/streams/?page_size=100 → 200 (0.074s)
+streamflow  | 2025-11-25T10:54:10.049416173Z 2025-11-25 11:54:10 - DEBUG - [api_utils:fetch_data_from_url:260] - Response contains dict with 4 keys
+streamflow  | 2025-11-25T10:54:10.049428484Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.074s)
+streamflow  | 2025-11-25T10:54:10.049602753Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/streams/?page=2&page_size=100)
+streamflow  | 2025-11-25T10:54:10.049611443Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/streams/?page=2&page_size=100 
+streamflow  | 2025-11-25T10:54:10.049686071Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:10.049693080Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:10.049765258Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:10.050390170Z 2025-11-25 11:54:10 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:10.101694000Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.052s)
+streamflow  | 2025-11-25T10:54:10.101725845Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.052s)
+streamflow  | 2025-11-25T10:54:10.101741335Z 2025-11-25 11:54:10 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:10.102316716Z 2025-11-25 11:54:10 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:10.130801874Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/streams/?page=2&page_size=100 → 200 (0.080s)
+streamflow  | 2025-11-25T10:54:10.130820506Z 2025-11-25 11:54:10 - DEBUG - [api_utils:fetch_data_from_url:260] - Response contains dict with 4 keys
+streamflow  | 2025-11-25T10:54:10.130825487Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.080s)
+streamflow  | 2025-11-25T10:54:10.131959294Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/streams/?page=3&page_size=100)
+streamflow  | 2025-11-25T10:54:10.131973838Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/streams/?page=3&page_size=100 
+streamflow  | 2025-11-25T10:54:10.131979144Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:10.131983375Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:10.131987410Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:10.131991612Z 2025-11-25 11:54:10 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:10.176819187Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.046s)
+streamflow  | 2025-11-25T10:54:10.176837986Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.046s)
+streamflow  | 2025-11-25T10:54:10.176930786Z 2025-11-25 11:54:10 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:10.177688212Z 2025-11-25 11:54:10 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:10.195083025Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/streams/?page=3&page_size=100 → 200 (0.064s)
+streamflow  | 2025-11-25T10:54:10.195554438Z 2025-11-25 11:54:10 - DEBUG - [api_utils:fetch_data_from_url:260] - Response contains dict with 4 keys
+streamflow  | 2025-11-25T10:54:10.195566443Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.064s)
+streamflow  | 2025-11-25T10:54:10.196560197Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_call:92] - → fetch_data_from_url(url=http://dispatcharr:9191/api/channels/streams/?page=4&page_size=100)
+streamflow  | 2025-11-25T10:54:10.196580398Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/streams/?page=4&page_size=100 
+streamflow  | 2025-11-25T10:54:10.196586159Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_call:92] - → _get_auth_headers()
+streamflow  | 2025-11-25T10:54:10.196590319Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_call:92] - → _validate_token(token=)
+streamflow  | 2025-11-25T10:54:10.196594494Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_request:165] - → API GET http://dispatcharr:9191/api/channels/channels/ params={'page_size': 1}
+streamflow  | 2025-11-25T10:54:10.196598449Z 2025-11-25 11:54:10 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:10.242200726Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/channels/ → 200 (0.045s)
+streamflow  | 2025-11-25T10:54:10.242216669Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_return:115] - ← _validate_token → True (0.045s)
+streamflow  | 2025-11-25T10:54:10.242221602Z 2025-11-25 11:54:10 - DEBUG - [api_utils:_get_auth_headers:174] - Using existing valid token
+streamflow  | 2025-11-25T10:54:10.242225732Z 2025-11-25 11:54:10 - DEBUG - [urllib3.connectionpool:_new_conn:241] - Starting new HTTP connection (1): dispatcharr:9191
+streamflow  | 2025-11-25T10:54:10.252176629Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_api_response:183] - ← API GET http://dispatcharr:9191/api/channels/streams/?page=4&page_size=100 → 200 (0.056s)
+streamflow  | 2025-11-25T10:54:10.252194646Z 2025-11-25 11:54:10 - DEBUG - [api_utils:fetch_data_from_url:260] - Response contains dict with 4 keys
+streamflow  | 2025-11-25T10:54:10.252199535Z 2025-11-25 11:54:10 - DEBUG - [api_utils:log_function_return:115] - ← fetch_data_from_url →  (0.056s)
+streamflow  | 2025-11-25T10:54:10.252203879Z 2025-11-25 11:54:10 - INFO - [api_utils:_fetch:569] - Fetched 307 total streams
+streamflow  | 2025-11-25T10:54:10.299270043Z 2025-11-25 11:54:10 - INFO - [automated_stream_manager:add_entry:86] - Changelog entry added: playlist_refresh
+streamflow  | 2025-11-25T10:54:10.299287910Z 2025-11-25 11:54:10 - INFO - [automated_stream_manager:refresh_playlists:514] - M3U playlist refresh completed successfully. Added: 0, Removed: 0
+streamflow  | 2025-11-25T10:54:10.299381904Z 2025-11-25 11:54:10 - INFO - [automated_stream_manager:refresh_playlists:589] - No stream changes detected, skipping channel marking
+streamflow  | 2025-11-25T10:54:10.299454034Z 2025-11-25 11:54:10 - DEBUG - [dispatcharr_cache:__exit__:92] - Dispatcharr cache disabled
