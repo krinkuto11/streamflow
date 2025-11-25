@@ -1121,6 +1121,153 @@ def trigger_global_action():
         logger.error(f"Error triggering global action: {e}")
         return jsonify({"error": str(e)}), 500
 
+# ===== Unified Data Index Endpoints =====
+
+@app.route('/api/index/status', methods=['GET'])
+def get_index_status():
+    """Get Unified Data Index status and statistics."""
+    try:
+        from unified_data_index import get_unified_data_index
+        
+        udi = get_unified_data_index()
+        stats = udi.get_stats()
+        
+        return jsonify({
+            "available": True,
+            "stats": stats
+        })
+    except ImportError:
+        return jsonify({
+            "available": False,
+            "error": "Unified Data Index module not available"
+        })
+    except Exception as e:
+        logger.error(f"Error getting index status: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/index/rebuild', methods=['POST'])
+def rebuild_index():
+    """Manually trigger a rebuild of the Unified Data Index from Dispatcharr."""
+    try:
+        from dispatcharr_sync_service import get_dispatcharr_sync_service
+        
+        sync_service = get_dispatcharr_sync_service()
+        counts = sync_service.rebuild_index()
+        
+        return jsonify({
+            "message": "Index rebuilt successfully",
+            "counts": counts
+        })
+    except Exception as e:
+        logger.error(f"Error rebuilding index: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/index/changelog', methods=['GET'])
+def get_index_changelog():
+    """Get changelog entries from the Unified Data Index."""
+    try:
+        from unified_data_index import get_unified_data_index
+        
+        days = request.args.get('days', 7, type=int)
+        limit = request.args.get('limit', 100, type=int)
+        
+        udi = get_unified_data_index()
+        changelog = udi.get_changelog(days=days, limit=limit)
+        
+        return jsonify(changelog)
+    except Exception as e:
+        logger.error(f"Error getting index changelog: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/index/pending-changes', methods=['GET'])
+def get_pending_changes():
+    """Get pending changes that need to be synced to Dispatcharr."""
+    try:
+        from unified_data_index import get_unified_data_index
+        
+        limit = request.args.get('limit', 100, type=int)
+        
+        udi = get_unified_data_index()
+        changes = udi.get_pending_changes(limit=limit)
+        
+        return jsonify({
+            "count": len(changes),
+            "changes": changes
+        })
+    except Exception as e:
+        logger.error(f"Error getting pending changes: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/sync/status', methods=['GET'])
+def get_sync_status():
+    """Get Dispatcharr Sync Service status."""
+    try:
+        from dispatcharr_sync_service import get_dispatcharr_sync_service
+        
+        sync_service = get_dispatcharr_sync_service()
+        status = sync_service.get_status()
+        
+        return jsonify(status)
+    except ImportError:
+        return jsonify({
+            "available": False,
+            "error": "Dispatcharr Sync Service module not available"
+        })
+    except Exception as e:
+        logger.error(f"Error getting sync status: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/sync/start', methods=['POST'])
+def start_sync_service():
+    """Start the Dispatcharr Sync Service."""
+    try:
+        from dispatcharr_sync_service import get_dispatcharr_sync_service
+        
+        sync_service = get_dispatcharr_sync_service()
+        sync_service.start()
+        
+        return jsonify({
+            "message": "Sync service started successfully",
+            "status": "running"
+        })
+    except Exception as e:
+        logger.error(f"Error starting sync service: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/sync/stop', methods=['POST'])
+def stop_sync_service():
+    """Stop the Dispatcharr Sync Service."""
+    try:
+        from dispatcharr_sync_service import get_dispatcharr_sync_service
+        
+        sync_service = get_dispatcharr_sync_service()
+        sync_service.stop()
+        
+        return jsonify({
+            "message": "Sync service stopped successfully",
+            "status": "stopped"
+        })
+    except Exception as e:
+        logger.error(f"Error stopping sync service: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/sync/trigger', methods=['POST'])
+def trigger_sync():
+    """Manually trigger sync of pending changes to Dispatcharr."""
+    try:
+        from dispatcharr_sync_service import get_dispatcharr_sync_service
+        
+        sync_service = get_dispatcharr_sync_service()
+        stats = sync_service.sync_pending_changes()
+        
+        return jsonify({
+            "message": "Sync completed",
+            "stats": stats
+        })
+    except Exception as e:
+        logger.error(f"Error triggering sync: {e}")
+        return jsonify({"error": str(e)}), 500
+
 # Serve React app for all frontend routes (catch-all - must be last!)
 @app.route('/<path:path>')
 def serve_frontend(path):

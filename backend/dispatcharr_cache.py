@@ -5,11 +5,20 @@ Dispatcharr API Cache Module
 This module provides a centralized caching layer for Dispatcharr API responses
 to significantly reduce redundant API calls during playlist refresh cycles.
 
+ARCHITECTURE CHANGE (v2.0):
+This module now acts as a facade over the Unified Data Index (UDI).
+Instead of caching in memory, it delegates to the SQLite-based UDI which
+provides persistent caching and is rebuilt on every M3U refresh.
+
+The old in-memory cache behavior is preserved for backward compatibility,
+but the primary data source is now the UDI when available.
+
 The cache is designed to be:
 - Thread-safe for concurrent access
 - Scoped to individual refresh cycles
 - Automatically invalidated when needed
 - Transparent to calling code (via context manager)
+- Backed by the Unified Data Index for persistent storage
 
 Usage:
     with DispatcharrCache() as cache:
@@ -26,6 +35,14 @@ from datetime import datetime, timedelta
 from logging_config import setup_logging
 
 logger = setup_logging(__name__)
+
+# Try to import UDI - if not available, fall back to old behavior
+try:
+    from unified_data_index import get_unified_data_index
+    UDI_AVAILABLE = True
+except ImportError:
+    UDI_AVAILABLE = False
+    logger.debug("Unified Data Index not available, using legacy cache only")
 
 
 class DispatcharrCache:
@@ -162,6 +179,9 @@ class DispatcharrCache:
         """
         Get all streams from cache or fetch if not cached.
         
+        In v2.0, this method first tries to get data from the Unified Data Index.
+        If UDI is not available or empty, falls back to the legacy cache behavior.
+        
         Args:
             fetch_func: Function to call to fetch streams if not cached
                        Should return List[Dict[str, Any]]
@@ -169,6 +189,20 @@ class DispatcharrCache:
         Returns:
             List of stream dictionaries
         """
+        # Try Unified Data Index first
+        if UDI_AVAILABLE:
+            try:
+                udi = get_unified_data_index()
+                udi_stats = udi.get_stats()
+                if udi_stats.get('streams', 0) > 0:
+                    streams = udi.get_all_streams()
+                    if streams:
+                        logger.debug(f"Retrieved {len(streams)} streams from Unified Data Index")
+                        return streams
+            except Exception as e:
+                logger.debug(f"UDI read failed, falling back to legacy cache: {e}")
+        
+        # Legacy cache behavior
         key = "all_streams"
         cached = self._get_from_cache(key)
         
@@ -188,6 +222,8 @@ class DispatcharrCache:
         """
         Get streams for a specific channel from cache or fetch if not cached.
         
+        In v2.0, this method first tries to get data from the Unified Data Index.
+        
         Args:
             channel_id: Channel ID
             fetch_func: Function to call to fetch channel streams if not cached
@@ -196,6 +232,20 @@ class DispatcharrCache:
         Returns:
             List of stream dictionaries or None if fetch fails
         """
+        # Try Unified Data Index first
+        if UDI_AVAILABLE:
+            try:
+                udi = get_unified_data_index()
+                udi_stats = udi.get_stats()
+                if udi_stats.get('channel_streams', 0) > 0:
+                    streams = udi.get_channel_streams(channel_id)
+                    if streams is not None:
+                        logger.debug(f"Retrieved {len(streams)} streams for channel {channel_id} from UDI")
+                        return streams
+            except Exception as e:
+                logger.debug(f"UDI read failed for channel {channel_id}, falling back: {e}")
+        
+        # Legacy cache behavior
         key = f"channel_{channel_id}_streams"
         cached = self._get_from_cache(key)
         
@@ -215,6 +265,8 @@ class DispatcharrCache:
         """
         Get set of valid stream IDs from cache or compute if not cached.
         
+        In v2.0, this method first tries to get data from the Unified Data Index.
+        
         Args:
             fetch_func: Function to call to get all streams if not cached
                        Should return List[Dict[str, Any]]
@@ -222,6 +274,20 @@ class DispatcharrCache:
         Returns:
             Set of valid stream IDs
         """
+        # Try Unified Data Index first
+        if UDI_AVAILABLE:
+            try:
+                udi = get_unified_data_index()
+                udi_stats = udi.get_stats()
+                if udi_stats.get('streams', 0) > 0:
+                    valid_ids = udi.get_valid_stream_ids()
+                    if valid_ids:
+                        logger.debug(f"Retrieved {len(valid_ids)} valid stream IDs from UDI")
+                        return valid_ids
+            except Exception as e:
+                logger.debug(f"UDI read failed for valid stream IDs, falling back: {e}")
+        
+        # Legacy cache behavior
         key = "valid_stream_ids"
         cached = self._get_from_cache(key)
         
@@ -240,6 +306,8 @@ class DispatcharrCache:
         """
         Get mapping of stream IDs to URLs from cache or compute if not cached.
         
+        In v2.0, this method first tries to get data from the Unified Data Index.
+        
         Args:
             fetch_func: Function to call to get all streams if not cached
                        Should return List[Dict[str, Any]]
@@ -247,6 +315,20 @@ class DispatcharrCache:
         Returns:
             Dictionary mapping stream IDs to URLs
         """
+        # Try Unified Data Index first
+        if UDI_AVAILABLE:
+            try:
+                udi = get_unified_data_index()
+                udi_stats = udi.get_stats()
+                if udi_stats.get('streams', 0) > 0:
+                    mapping = udi.get_stream_url_mapping()
+                    if mapping:
+                        logger.debug(f"Retrieved stream URL mapping ({len(mapping)} entries) from UDI")
+                        return mapping
+            except Exception as e:
+                logger.debug(f"UDI read failed for stream URL mapping, falling back: {e}")
+        
+        # Legacy cache behavior
         key = "stream_id_to_url"
         cached = self._get_from_cache(key)
         
@@ -265,17 +347,58 @@ class DispatcharrCache:
         """
         Get cache statistics.
         
+        In v2.0, includes statistics from both the legacy cache and UDI.
+        
         Returns:
             Dictionary with cache statistics
         """
         with self._lock:
-            return {
+            stats = {
                 "enabled": self._enabled,
                 "entries": len(self._cache_data),
                 "keys": list(self._cache_data.keys()),
                 "max_age": self.max_age,
-                "context_depth": self._context_depth
+                "context_depth": self._context_depth,
+                "udi_available": UDI_AVAILABLE
             }
+            
+            # Add UDI stats if available
+            if UDI_AVAILABLE:
+                try:
+                    udi = get_unified_data_index()
+                    stats["udi_stats"] = udi.get_stats()
+                except Exception as e:
+                    stats["udi_error"] = str(e)
+            
+            return stats
+    
+    def rebuild_index(self) -> Optional[Dict[str, int]]:
+        """
+        Rebuild the Unified Data Index from Dispatcharr.
+        
+        This should be called after M3U refresh to ensure the index
+        is synchronized with Dispatcharr.
+        
+        Returns:
+            Dict with counts of synced entities, or None if UDI not available
+        """
+        if not UDI_AVAILABLE:
+            logger.warning("Cannot rebuild index: Unified Data Index not available")
+            return None
+        
+        try:
+            from dispatcharr_sync_service import get_dispatcharr_sync_service
+            sync_service = get_dispatcharr_sync_service()
+            counts = sync_service.rebuild_index()
+            
+            # Invalidate legacy cache after rebuild
+            self.invalidate()
+            
+            logger.info(f"Index rebuilt: {counts}")
+            return counts
+        except Exception as e:
+            logger.error(f"Failed to rebuild index: {e}")
+            return None
 
 
 # Global cache instance for convenience

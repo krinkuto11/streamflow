@@ -469,6 +469,15 @@ class AutomatedStreamManager:
                 # This ensures streams_after reflects the new state after M3U refresh
                 cache.invalidate()
                 logger.debug("Cache invalidated after M3U refresh")
+                
+                # Rebuild Unified Data Index after M3U refresh
+                # This syncs all data from Dispatcharr to the local SQLite index
+                try:
+                    index_counts = cache.rebuild_index()
+                    if index_counts:
+                        logger.info(f"Unified Data Index rebuilt: {index_counts}")
+                except Exception as idx_error:
+                    logger.warning(f"Could not rebuild index (non-critical): {idx_error}")
 
                 # Get streams after refresh - log this one since it shows the
                 # final result

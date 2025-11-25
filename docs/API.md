@@ -305,3 +305,157 @@ Returns service health status.
   }
 }
 ```
+
+## Unified Data Index Endpoints
+
+The Unified Data Index (UDI) is a SQLite-based local database that caches all Dispatcharr data.
+It is rebuilt on every M3U refresh and serves as the single source of truth for all stream operations.
+
+### Get Index Status
+```
+GET /api/index/status
+```
+Returns UDI status and statistics.
+
+**Response:**
+```json
+{
+  "available": true,
+  "stats": {
+    "accounts": 5,
+    "groups": 10,
+    "channels": 150,
+    "streams": 5000,
+    "channel_streams": 8000,
+    "pending_changes": 0,
+    "last_sync": "2024-01-15T10:30:00"
+  }
+}
+```
+
+### Rebuild Index
+```
+POST /api/index/rebuild
+```
+Manually trigger a rebuild of the UDI from Dispatcharr.
+
+**Response:**
+```json
+{
+  "message": "Index rebuilt successfully",
+  "counts": {
+    "accounts": 5,
+    "groups": 10,
+    "channels": 150,
+    "streams": 5000,
+    "channel_streams": 8000
+  }
+}
+```
+
+### Get Index Changelog
+```
+GET /api/index/changelog
+```
+Returns changelog entries from the UDI.
+
+**Query Parameters:**
+- `days` - Number of days to include (default: 7)
+- `limit` - Maximum entries to return (default: 100)
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "timestamp": "2024-01-15T10:30:00",
+    "action": "streams_reordered",
+    "entity_type": "channel",
+    "entity_id": 123,
+    "entity_name": "ESPN HD",
+    "details": "{\"old_count\": 5, \"new_count\": 6}",
+    "source": "stream_checker"
+  }
+]
+```
+
+### Get Pending Changes
+```
+GET /api/index/pending-changes
+```
+Returns changes pending sync to Dispatcharr.
+
+**Query Parameters:**
+- `limit` - Maximum changes to return (default: 100)
+
+**Response:**
+```json
+{
+  "count": 5,
+  "changes": [
+    {
+      "id": 1,
+      "entity_type": "channel",
+      "entity_id": 123,
+      "operation": "update_streams",
+      "created_at": "2024-01-15T10:30:00",
+      "sync_status": "pending"
+    }
+  ]
+}
+```
+
+## Dispatcharr Sync Service Endpoints
+
+The Sync Service is responsible for all communication with Dispatcharr.
+It reads pending changes from the UDI and batches API calls.
+
+### Get Sync Status
+```
+GET /api/sync/status
+```
+Returns sync service status.
+
+**Response:**
+```json
+{
+  "running": true,
+  "has_token": true,
+  "base_url": "http://dispatcharr:8000",
+  "index_stats": {
+    "streams": 5000,
+    "pending_changes": 3
+  },
+  "sync_interval": 5
+}
+```
+
+### Start Sync Service
+```
+POST /api/sync/start
+```
+Starts the background sync service.
+
+### Stop Sync Service
+```
+POST /api/sync/stop
+```
+Stops the background sync service.
+
+### Trigger Sync
+```
+POST /api/sync/trigger
+```
+Manually trigger sync of pending changes.
+
+**Response:**
+```json
+{
+  "message": "Sync completed",
+  "stats": {
+    "total": 5,
+    "synced": 5,
+    "failed": 0
+  }
+}
+```
