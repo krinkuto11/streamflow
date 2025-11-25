@@ -25,6 +25,10 @@ from dispatcharr_cache import get_cache
 # Setup logging for this module
 logger = setup_logging(__name__)
 
+# Standard timeout for Dispatcharr API requests
+# Tuple of (connect_timeout, read_timeout) to prevent hanging on connection issues
+API_TIMEOUT = (10, 30)
+
 env_path = Path('.') / '.env'
 
 # Load environment variables from .env file if it exists
@@ -112,7 +116,8 @@ def login() -> bool:
         resp = requests.post(
             login_url,
             headers={"Content-Type": "application/json"},
-            json={"username": username, "password": password}
+            json={"username": username, "password": password},
+            timeout=API_TIMEOUT
         )
         elapsed = time.time() - start_time
         log_api_response(logger, "POST", login_url, resp.status_code, elapsed)
@@ -141,6 +146,15 @@ def login() -> bool:
             )
             logger.debug(f"Response data: {data}")
             return False
+    except requests.exceptions.ConnectTimeout:
+        logger.error("Connection timeout during login - Dispatcharr may be unreachable")
+        return False
+    except requests.exceptions.ReadTimeout:
+        logger.error("Read timeout during login - Dispatcharr may be slow to respond")
+        return False
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error during login: {e}")
+        return False
     except requests.exceptions.RequestException as e:
         log_exception(logger, e, "login")
         if hasattr(e, 'response') and e.response is not None:
@@ -248,7 +262,7 @@ def fetch_data_from_url(url: str) -> Optional[Any]:
     
     try:
         log_api_request(logger, "GET", url)
-        resp = requests.get(url, headers=_get_auth_headers())
+        resp = requests.get(url, headers=_get_auth_headers(), timeout=API_TIMEOUT)
         elapsed = time.time() - start_time
         log_api_response(logger, "GET", url, resp.status_code, elapsed)
         
@@ -270,7 +284,7 @@ def fetch_data_from_url(url: str) -> Optional[Any]:
                 logger.info("Retrying request with new token...")
                 retry_start = time.time()
                 log_api_request(logger, "GET", url)
-                resp = requests.get(url, headers=_get_auth_headers())
+                resp = requests.get(url, headers=_get_auth_headers(), timeout=API_TIMEOUT)
                 retry_elapsed = time.time() - retry_start
                 log_api_response(logger, "GET", url, resp.status_code, retry_elapsed)
                 
@@ -285,6 +299,15 @@ def fetch_data_from_url(url: str) -> Optional[Any]:
         else:
             log_exception(logger, e, f"fetch_data_from_url ({url})")
             return None
+    except requests.exceptions.ConnectTimeout:
+        logger.error(f"Connection timeout fetching {url} - Dispatcharr may be unreachable")
+        return None
+    except requests.exceptions.ReadTimeout:
+        logger.error(f"Read timeout fetching {url} - response took too long")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error fetching {url}: {e}")
+        return None
     except requests.exceptions.RequestException as e:
         log_exception(logger, e, f"fetch_data_from_url ({url})")
         return None
@@ -309,7 +332,7 @@ def patch_request(url: str, payload: Dict[str, Any]) -> requests.Response:
     """
     try:
         resp = requests.patch(
-            url, json=payload, headers=_get_auth_headers()
+            url, json=payload, headers=_get_auth_headers(), timeout=API_TIMEOUT
         )
         resp.raise_for_status()
         return resp
@@ -318,7 +341,7 @@ def patch_request(url: str, payload: Dict[str, Any]) -> requests.Response:
             if _refresh_token():
                 logger.info("Retrying PATCH request with new token...")
                 resp = requests.patch(
-                    url, json=payload, headers=_get_auth_headers()
+                    url, json=payload, headers=_get_auth_headers(), timeout=API_TIMEOUT
                 )
                 resp.raise_for_status()
                 return resp
@@ -329,6 +352,15 @@ def patch_request(url: str, payload: Dict[str, Any]) -> requests.Response:
                 f"Error patching data to {url}: {e.response.text}"
             )
             raise
+    except requests.exceptions.ConnectTimeout:
+        logger.error(f"Connection timeout patching {url} - Dispatcharr may be unreachable")
+        raise
+    except requests.exceptions.ReadTimeout:
+        logger.error(f"Read timeout patching {url} - response took too long")
+        raise
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error patching {url}: {e}")
+        raise
     except requests.exceptions.RequestException as e:
         logger.error(f"Error patching data to {url}: {e}")
         raise
@@ -353,7 +385,7 @@ def post_request(url: str, payload: Dict[str, Any]) -> requests.Response:
     """
     try:
         resp = requests.post(
-            url, json=payload, headers=_get_auth_headers()
+            url, json=payload, headers=_get_auth_headers(), timeout=API_TIMEOUT
         )
         resp.raise_for_status()
         return resp
@@ -362,7 +394,7 @@ def post_request(url: str, payload: Dict[str, Any]) -> requests.Response:
             if _refresh_token():
                 logger.info("Retrying POST request with new token...")
                 resp = requests.post(
-                    url, json=payload, headers=_get_auth_headers()
+                    url, json=payload, headers=_get_auth_headers(), timeout=API_TIMEOUT
                 )
                 resp.raise_for_status()
                 return resp
@@ -373,6 +405,15 @@ def post_request(url: str, payload: Dict[str, Any]) -> requests.Response:
                 f"Error posting data to {url}: {e.response.text}"
             )
             raise
+    except requests.exceptions.ConnectTimeout:
+        logger.error(f"Connection timeout posting to {url} - Dispatcharr may be unreachable")
+        raise
+    except requests.exceptions.ReadTimeout:
+        logger.error(f"Read timeout posting to {url} - response took too long")
+        raise
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error posting to {url}: {e}")
+        raise
     except requests.exceptions.RequestException as e:
         logger.error(f"Error posting data to {url}: {e}")
         raise

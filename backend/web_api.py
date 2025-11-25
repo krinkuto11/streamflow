@@ -775,7 +775,7 @@ def test_dispatcharr_connection():
                 login_url,
                 headers={"Content-Type": "application/json"},
                 json={"username": test_username, "password": test_password},
-                timeout=10
+                timeout=(10, 30)  # (connect_timeout, read_timeout)
             )
             resp.raise_for_status()
             data = resp.json()
@@ -791,7 +791,7 @@ def test_dispatcharr_connection():
                         "Accept": "application/json"
                     },
                     params={'page_size': 1},
-                    timeout=10
+                    timeout=(10, 30)  # (connect_timeout, read_timeout)
                 )
                 
                 if channels_resp.status_code == 200:

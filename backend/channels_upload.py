@@ -23,6 +23,10 @@ logger = setup_logging(__name__)
 env_path = Path('.') / '.env'
 load_dotenv(dotenv_path=env_path)
 
+# Standard timeout for Dispatcharr API requests
+# Tuple of (connect_timeout, read_timeout) to prevent hanging on connection issues
+API_TIMEOUT = (10, 30)
+
 
 # --- API Utilities ---
 def _get_base_url() -> str:
@@ -102,7 +106,8 @@ def login() -> bool:
         resp = requests.post(
             login_url,
             headers={"Content-Type": "application/json"},
-            json={"username": username, "password": password}
+            json={"username": username, "password": password},
+            timeout=API_TIMEOUT
         )
         resp.raise_for_status()
         data = resp.json()
@@ -117,6 +122,15 @@ def login() -> bool:
                 "Login failed: No access token in response."
             )
             return False
+    except requests.exceptions.ConnectTimeout:
+        logger.error("Connection timeout during login - Dispatcharr may be unreachable")
+        return False
+    except requests.exceptions.ReadTimeout:
+        logger.error("Read timeout during login - Dispatcharr may be slow to respond")
+        return False
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error during login: {e}")
+        return False
     except requests.exceptions.RequestException as e:
         logger.error(f"Login failed: {e}")
         if hasattr(e, 'response') and e.response is not None:
@@ -157,6 +171,10 @@ def _make_request(
     Raises:
         requests.exceptions.RequestException: If request fails.
     """
+    # Ensure timeout is set
+    if 'timeout' not in kwargs:
+        kwargs['timeout'] = API_TIMEOUT
+    
     try:
         resp = requests.request(
             method, url, headers=_get_auth_headers(), **kwargs
@@ -183,6 +201,15 @@ def _make_request(
             )
             logger.error(f"Response: {e.response.text}")
             raise
+    except requests.exceptions.ConnectTimeout:
+        logger.error(f"Connection timeout for {method} {url} - Dispatcharr may be unreachable")
+        raise
+    except requests.exceptions.ReadTimeout:
+        logger.error(f"Read timeout for {method} {url} - response took too long")
+        raise
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Connection error for {method} {url}: {e}")
+        raise
     except requests.exceptions.RequestException as e:
         logger.error(f"Request failed: {e}")
         raise

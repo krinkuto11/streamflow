@@ -56,7 +56,10 @@ class DispatcharrAPIFetcher:
         """
         self.base_url = base_url.rstrip('/')
         self.auth_headers = auth_headers
-        self.timeout = 30
+        # Use tuple (connect_timeout, read_timeout) to prevent hanging on connection issues
+        # Connect timeout: 10 seconds to establish TCP connection
+        # Read timeout: 30 seconds to receive response data
+        self.timeout = (10, 30)
     
     def _fetch_paginated(self, url: str) -> List[Dict]:
         """Fetch all pages of a paginated endpoint."""
@@ -77,6 +80,15 @@ class DispatcharrAPIFetcher:
                 else:
                     break
                     
+            except requests.exceptions.ConnectTimeout:
+                logger.error(f"Connection timeout fetching {url} - Dispatcharr may be unreachable")
+                break
+            except requests.exceptions.ReadTimeout:
+                logger.error(f"Read timeout fetching {url} - response took too long")
+                break
+            except requests.exceptions.ConnectionError as e:
+                logger.error(f"Connection error fetching {url}: {e} - check network connectivity")
+                break
             except Exception as e:
                 logger.error(f"Error fetching from {url}: {e}")
                 break
@@ -110,6 +122,15 @@ class DispatcharrAPIFetcher:
             response = requests.get(url, headers=self.auth_headers, timeout=self.timeout)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.ConnectTimeout:
+            logger.error(f"Connection timeout fetching channel {channel_id} streams - Dispatcharr may be unreachable")
+            return []
+        except requests.exceptions.ReadTimeout:
+            logger.error(f"Read timeout fetching channel {channel_id} streams - response took too long")
+            return []
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error fetching channel {channel_id} streams: {e}")
+            return []
         except Exception as e:
             logger.error(f"Error fetching channel {channel_id} streams: {e}")
             return []
@@ -177,7 +198,7 @@ class DispatcharrSyncService:
                 login_url,
                 headers={"Content-Type": "application/json"},
                 json={"username": username, "password": password},
-                timeout=30
+                timeout=(10, 30)  # (connect_timeout, read_timeout)
             )
             response.raise_for_status()
             data = response.json()
@@ -191,7 +212,16 @@ class DispatcharrSyncService:
             else:
                 logger.error("No token in login response")
                 return False
-                
+        
+        except requests.exceptions.ConnectTimeout:
+            logger.error("Connection timeout during Dispatcharr login - service may be unreachable")
+            return False
+        except requests.exceptions.ReadTimeout:
+            logger.error("Read timeout during Dispatcharr login - service may be slow")
+            return False
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error during Dispatcharr login: {e}")
+            return False
         except Exception as e:
             logger.error(f"Dispatcharr login failed: {e}")
             return False
@@ -223,19 +253,22 @@ class DispatcharrSyncService:
         Returns:
             Tuple of (success, response_data, error_message)
         """
+        # Use tuple (connect_timeout, read_timeout) to prevent hanging
+        timeout = (10, 30)
+        
         try:
             headers = self._get_auth_headers()
             
             if method.upper() == 'GET':
-                response = requests.get(url, headers=headers, timeout=30)
+                response = requests.get(url, headers=headers, timeout=timeout)
             elif method.upper() == 'POST':
-                response = requests.post(url, json=data, headers=headers, timeout=30)
+                response = requests.post(url, json=data, headers=headers, timeout=timeout)
             elif method.upper() == 'PATCH':
-                response = requests.patch(url, json=data, headers=headers, timeout=30)
+                response = requests.patch(url, json=data, headers=headers, timeout=timeout)
             elif method.upper() == 'PUT':
-                response = requests.put(url, json=data, headers=headers, timeout=30)
+                response = requests.put(url, json=data, headers=headers, timeout=timeout)
             elif method.upper() == 'DELETE':
-                response = requests.delete(url, headers=headers, timeout=30)
+                response = requests.delete(url, headers=headers, timeout=timeout)
             else:
                 return False, None, f"Unsupported method: {method}"
             
@@ -253,7 +286,16 @@ class DispatcharrSyncService:
                 return True, response.json(), None
             except json.JSONDecodeError:
                 return True, None, None
-                
+        
+        except requests.exceptions.ConnectTimeout:
+            logger.error(f"Connection timeout for {method} {url} - Dispatcharr may be unreachable")
+            return False, None, "Connection timeout - Dispatcharr may be unreachable"
+        except requests.exceptions.ReadTimeout:
+            logger.error(f"Read timeout for {method} {url} - response took too long")
+            return False, None, "Read timeout - response took too long"
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"Connection error for {method} {url}: {e}")
+            return False, None, f"Connection error: {e}"
         except requests.exceptions.HTTPError as e:
             error_msg = str(e)
             if hasattr(e, 'response') and e.response is not None:
