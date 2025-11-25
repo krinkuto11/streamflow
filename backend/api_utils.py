@@ -73,7 +73,8 @@ def _validate_token(token: str) -> bool:
             "Content-Type": "application/json"
         }
         log_api_request(logger, "GET", test_url, params={'page_size': 1})
-        resp = requests.get(test_url, headers=headers, timeout=5, params={'page_size': 1})
+        # Use shorter timeout for validation (5s connect, 10s read)
+        resp = requests.get(test_url, headers=headers, timeout=(5, 10), params={'page_size': 1})
         elapsed = time.time() - start_time
         log_api_response(logger, "GET", test_url, resp.status_code, elapsed)
         
