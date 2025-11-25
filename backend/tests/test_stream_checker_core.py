@@ -167,11 +167,12 @@ class TestProgressTracking(unittest.TestCase):
         }
         
         # Mock streams - 3 streams to check
-        mock_fetch_streams.return_value = [
+        mock_streams = [
             {'id': 1, 'name': 'Stream 1', 'url': 'http://test1'},
             {'id': 2, 'name': 'Stream 2', 'url': 'http://test2'},
             {'id': 3, 'name': 'Stream 3', 'url': 'http://test3'},
         ]
+        mock_fetch_streams.return_value = mock_streams
         
         # Create service instance with temporary config directory
         with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
