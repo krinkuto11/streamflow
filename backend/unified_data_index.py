@@ -264,12 +264,16 @@ class UnifiedDataIndex:
             cursor.close()
             logger.debug("Database schema initialized")
     
-    def rebuild_from_dispatcharr(self, api_fetcher) -> Dict[str, int]:
+    def rebuild_from_dispatcharr(self, api_fetcher, progress_callback=None) -> Dict[str, int]:
         """
         Rebuild the entire index from Dispatcharr API.
         
         This should be called after every M3U refresh to ensure the index
         is in sync with Dispatcharr.
+        
+        Progress is printed differently based on DEBUG_MODE:
+        - DEBUG_MODE=true: Detailed logging of each step with timing
+        - DEBUG_MODE=false: Simple progress bar with percentage
         
         Args:
             api_fetcher: Object with methods to fetch data from Dispatcharr:
@@ -278,11 +282,20 @@ class UnifiedDataIndex:
                 - fetch_channels() -> List[Dict]
                 - fetch_streams() -> List[Dict]
                 - fetch_channel_streams(channel_id) -> List[Dict]
+            progress_callback: Optional callback(step, current, total, message)
+                for external progress tracking
         
         Returns:
             Dict with counts of synced entities
         """
-        logger.info("Rebuilding Unified Data Index from Dispatcharr...")
+        import os
+        import sys
+        
+        debug_mode = os.getenv('DEBUG_MODE', 'false').lower() in ('true', '1', 'yes', 'on')
+        
+        logger.info("=" * 60)
+        logger.info("REBUILDING UNIFIED DATA INDEX FROM DISPATCHARR")
+        logger.info("=" * 60)
         start_time = datetime.now()
         
         counts = {
@@ -293,12 +306,44 @@ class UnifiedDataIndex:
             'channel_streams': 0
         }
         
+        # Progress tracking steps
+        steps = ['accounts', 'groups', 'streams', 'channels', 'channel_streams', 'finalize']
+        current_step = 0
+        total_steps = len(steps)
+        
+        def _report_progress(step_name: str, current: int, total: int, message: str = ""):
+            """Report progress based on debug mode."""
+            nonlocal current_step
+            current_step = steps.index(step_name) + 1 if step_name in steps else current_step
+            
+            if progress_callback:
+                progress_callback(step_name, current, total, message)
+            
+            if debug_mode:
+                # Advanced debug output with detailed info
+                elapsed = (datetime.now() - start_time).total_seconds()
+                if total > 0:
+                    logger.debug(f"  [{step_name}] {current}/{total} ({100*current/total:.1f}%) - {message} [{elapsed:.1f}s elapsed]")
+                else:
+                    logger.debug(f"  [{step_name}] {message} [{elapsed:.1f}s elapsed]")
+            else:
+                # Simple progress bar for non-debug mode
+                overall_pct = (current_step / total_steps) * 100
+                bar_width = 30
+                filled = int(bar_width * current_step / total_steps)
+                bar = '█' * filled + '░' * (bar_width - filled)
+                progress_msg = f"\r  Reindexing: [{bar}] {overall_pct:.0f}% - {step_name}"
+                # Print to stdout with carriage return for in-place update
+                sys.stdout.write(progress_msg)
+                sys.stdout.flush()
+        
         with self._write_lock:
             conn = self._get_connection()
             cursor = conn.cursor()
             
             try:
                 # Clear existing data (but preserve pending changes and changelog)
+                _report_progress('accounts', 0, 0, "Clearing old data...")
                 cursor.execute('DELETE FROM channel_streams')
                 cursor.execute('DELETE FROM streams')
                 cursor.execute('DELETE FROM channels')
@@ -306,30 +351,65 @@ class UnifiedDataIndex:
                 cursor.execute('DELETE FROM m3u_accounts')
                 
                 # Sync M3U accounts
+                step_start = datetime.now()
+                _report_progress('accounts', 0, 0, "Fetching M3U accounts...")
                 accounts = api_fetcher.fetch_m3u_accounts()
                 if accounts:
-                    for account in accounts:
+                    total_accounts = len(accounts)
+                    logger.info(f"Indexing {total_accounts} M3U accounts...")
+                    for idx, account in enumerate(accounts, 1):
                         self._insert_account(cursor, account)
                         counts['accounts'] += 1
+                        if debug_mode and idx % 10 == 0:
+                            _report_progress('accounts', idx, total_accounts, f"Account: {account.get('name', 'Unknown')}")
+                    step_elapsed = (datetime.now() - step_start).total_seconds()
+                    logger.info(f"  ✓ Indexed {counts['accounts']} accounts in {step_elapsed:.2f}s")
+                else:
+                    logger.info("  ⚠ No M3U accounts found")
                 
                 # Sync channel groups
+                step_start = datetime.now()
+                _report_progress('groups', 0, 0, "Fetching channel groups...")
                 groups = api_fetcher.fetch_channel_groups()
                 if groups:
-                    for group in groups:
+                    total_groups = len(groups)
+                    logger.info(f"Indexing {total_groups} channel groups...")
+                    for idx, group in enumerate(groups, 1):
                         self._insert_group(cursor, group)
                         counts['groups'] += 1
+                        if debug_mode and idx % 10 == 0:
+                            _report_progress('groups', idx, total_groups, f"Group: {group.get('name', 'Unknown')}")
+                    step_elapsed = (datetime.now() - step_start).total_seconds()
+                    logger.info(f"  ✓ Indexed {counts['groups']} groups in {step_elapsed:.2f}s")
+                else:
+                    logger.info("  ⚠ No channel groups found")
                 
                 # Sync streams
+                step_start = datetime.now()
+                _report_progress('streams', 0, 0, "Fetching streams...")
                 streams = api_fetcher.fetch_streams()
                 if streams:
-                    for stream in streams:
+                    total_streams = len(streams)
+                    logger.info(f"Indexing {total_streams} streams...")
+                    for idx, stream in enumerate(streams, 1):
                         self._insert_stream(cursor, stream)
                         counts['streams'] += 1
+                        # Report progress more frequently for streams (every 100 or 5%)
+                        if idx % max(100, total_streams // 20) == 0:
+                            _report_progress('streams', idx, total_streams, f"Stream {idx}/{total_streams}")
+                    step_elapsed = (datetime.now() - step_start).total_seconds()
+                    logger.info(f"  ✓ Indexed {counts['streams']} streams in {step_elapsed:.2f}s")
+                else:
+                    logger.warning("  ⚠ No streams found - this may indicate a problem with the Dispatcharr connection")
                 
                 # Sync channels
+                step_start = datetime.now()
+                _report_progress('channels', 0, 0, "Fetching channels...")
                 channels = api_fetcher.fetch_channels()
                 if channels:
-                    for channel in channels:
+                    total_channels = len(channels)
+                    logger.info(f"Indexing {total_channels} channels and their stream assignments...")
+                    for idx, channel in enumerate(channels, 1):
                         self._insert_channel(cursor, channel)
                         counts['channels'] += 1
                         
@@ -344,6 +424,18 @@ class UnifiedDataIndex:
                                     VALUES (?, ?, ?, ?)
                                 ''', (channel_id, stream_id, position, datetime.now().isoformat()))
                                 counts['channel_streams'] += 1
+                        
+                        # Report progress for channels (every 10 or 5%)
+                        if idx % max(10, total_channels // 20) == 0:
+                            _report_progress('channels', idx, total_channels, f"Channel {idx}/{total_channels}: {channel.get('name', 'Unknown')}")
+                    
+                    step_elapsed = (datetime.now() - step_start).total_seconds()
+                    logger.info(f"  ✓ Indexed {counts['channels']} channels with {counts['channel_streams']} stream assignments in {step_elapsed:.2f}s")
+                else:
+                    logger.warning("  ⚠ No channels found")
+                
+                # Finalize
+                _report_progress('finalize', 0, 0, "Finalizing index...")
                 
                 # Update metadata
                 cursor.execute('''
@@ -352,24 +444,40 @@ class UnifiedDataIndex:
                 ''', (datetime.now().isoformat(), datetime.now().isoformat()))
                 
                 # Add changelog entry using internal method (already holding lock)
+                elapsed = (datetime.now() - start_time).total_seconds()
                 self._add_changelog_entry_internal(
                     cursor,
                     action='index_rebuild',
                     entity_type='index',
                     details=json.dumps({
                         'counts': counts,
-                        'elapsed_seconds': (datetime.now() - start_time).total_seconds()
+                        'elapsed_seconds': elapsed
                     }),
                     source='m3u_refresh'
                 )
                 
                 conn.commit()
                 
-                elapsed = (datetime.now() - start_time).total_seconds()
-                logger.info(f"Index rebuilt in {elapsed:.2f}s: {counts}")
+                # Clear progress line in non-debug mode
+                if not debug_mode:
+                    sys.stdout.write('\r' + ' ' * 70 + '\r')  # Clear the line
+                    sys.stdout.flush()
+                
+                logger.info("=" * 60)
+                logger.info(f"INDEX REBUILD COMPLETE in {elapsed:.2f}s")
+                logger.info(f"  Accounts: {counts['accounts']}")
+                logger.info(f"  Groups: {counts['groups']}")
+                logger.info(f"  Streams: {counts['streams']}")
+                logger.info(f"  Channels: {counts['channels']}")
+                logger.info(f"  Channel-Stream assignments: {counts['channel_streams']}")
+                logger.info("=" * 60)
                 
             except Exception as e:
                 conn.rollback()
+                # Clear progress line on error
+                if not debug_mode:
+                    sys.stdout.write('\r' + ' ' * 70 + '\r')
+                    sys.stdout.flush()
                 logger.error(f"Failed to rebuild index: {e}")
                 raise
             finally:
