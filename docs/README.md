@@ -7,6 +7,7 @@ This directory contains detailed documentation for StreamFlow for Dispatcharr.
 - **[DEPLOYMENT.md](DEPLOYMENT.md)** - Installation and deployment instructions
 - **[FEATURES.md](FEATURES.md)** - Detailed feature descriptions and usage
 - **[API.md](API.md)** - REST API endpoints and usage examples
+- **[CACHING_ARCHITECTURE.md](CACHING_ARCHITECTURE.md)** - Centralized caching system architecture
 
 ## Quick Links
 
