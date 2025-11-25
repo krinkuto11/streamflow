@@ -37,6 +37,13 @@ logger = setup_logging(__name__)
 # Configuration directory - persisted via Docker volume
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
 
+# Progress reporting constants
+STREAMS_PROGRESS_INTERVAL = 100  # Report progress every N streams
+STREAMS_PROGRESS_FRACTION = 20   # Or every 5% (1/20) of total
+CHANNELS_PROGRESS_INTERVAL = 10  # Report progress every N channels
+CHANNELS_PROGRESS_FRACTION = 20  # Or every 5% (1/20) of total
+PROGRESS_LINE_WIDTH = 70         # Width of progress bar line for clearing
+
 
 class UnifiedDataIndex:
     """
@@ -394,8 +401,8 @@ class UnifiedDataIndex:
                     for idx, stream in enumerate(streams, 1):
                         self._insert_stream(cursor, stream)
                         counts['streams'] += 1
-                        # Report progress more frequently for streams (every 100 or 5%)
-                        if idx % max(100, total_streams // 20) == 0:
+                        # Report progress more frequently for streams
+                        if idx % max(STREAMS_PROGRESS_INTERVAL, total_streams // STREAMS_PROGRESS_FRACTION) == 0:
                             _report_progress('streams', idx, total_streams, f"Stream {idx}/{total_streams}")
                     step_elapsed = (datetime.now() - step_start).total_seconds()
                     logger.info(f"  ✓ Indexed {counts['streams']} streams in {step_elapsed:.2f}s")
@@ -425,8 +432,8 @@ class UnifiedDataIndex:
                                 ''', (channel_id, stream_id, position, datetime.now().isoformat()))
                                 counts['channel_streams'] += 1
                         
-                        # Report progress for channels (every 10 or 5%)
-                        if idx % max(10, total_channels // 20) == 0:
+                        # Report progress for channels
+                        if idx % max(CHANNELS_PROGRESS_INTERVAL, total_channels // CHANNELS_PROGRESS_FRACTION) == 0:
                             _report_progress('channels', idx, total_channels, f"Channel {idx}/{total_channels}: {channel.get('name', 'Unknown')}")
                     
                     step_elapsed = (datetime.now() - step_start).total_seconds()
@@ -460,7 +467,7 @@ class UnifiedDataIndex:
                 
                 # Clear progress line in non-debug mode
                 if not debug_mode:
-                    sys.stdout.write('\r' + ' ' * 70 + '\r')  # Clear the line
+                    sys.stdout.write('\r' + ' ' * PROGRESS_LINE_WIDTH + '\r')  # Clear the line
                     sys.stdout.flush()
                 
                 logger.info("=" * 60)
@@ -476,7 +483,7 @@ class UnifiedDataIndex:
                 conn.rollback()
                 # Clear progress line on error
                 if not debug_mode:
-                    sys.stdout.write('\r' + ' ' * 70 + '\r')
+                    sys.stdout.write('\r' + ' ' * PROGRESS_LINE_WIDTH + '\r')
                     sys.stdout.flush()
                 logger.error(f"Failed to rebuild index: {e}")
                 raise
