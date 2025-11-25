@@ -36,9 +36,7 @@ from api_utils import (
     fetch_data_from_url,
     update_channel_streams,
     _get_base_url,
-    patch_request,
-    get_streams,
-    get_valid_stream_ids
+    patch_request
 )
 from dispatcharr_cache import get_cache
 
@@ -801,22 +799,42 @@ class StreamCheckerService:
         log_function_call(logger, "_worker_loop")
         logger.info("Stream checker worker started")
         
+        # Get the cache instance for enabling during batch channel processing
+        cache = get_cache()
+        cache_context_active = False
+        
         while self.running:
             try:
                 logger.debug("Worker waiting for next channel from queue...")
                 channel_id = self.check_queue.get_next_channel(timeout=1.0)
+                
                 if channel_id is None:
                     logger.debug("No channel in queue (timeout)")
+                    # If cache was active and queue is now empty, exit cache context
+                    if cache_context_active:
+                        cache.__exit__(None, None, None)
+                        cache_context_active = False
+                        logger.debug("Cache context disabled after processing all queued channels")
                     continue
                 
+                # If we have a channel to process and cache is not active, enable it
+                # This ensures a single API call round before processing all channels
+                if not cache_context_active:
+                    cache.__enter__()
+                    cache_context_active = True
+                    logger.info("Cache context enabled for batch channel processing")
+                
                 logger.debug(f"Worker processing channel {channel_id}")
-                # Check this channel
                 self._check_channel(channel_id)
                 logger.debug(f"Worker completed channel {channel_id}")
                 
             except Exception as e:
                 log_exception(logger, e, "worker loop")
                 logger.error(f"Error in worker loop: {e}", exc_info=True)
+        
+        # Clean up cache context if still active when stopping
+        if cache_context_active:
+            cache.__exit__(None, None, None)
         
         logger.info("Stream checker worker stopped")
         log_function_return(logger, "_worker_loop")
@@ -1247,16 +1265,6 @@ class StreamCheckerService:
             
             logger.info(f"Found {len(streams)} streams for channel {channel_name}")
             
-            # Pre-fetch valid stream IDs and stream-to-URL mapping ONCE to avoid
-            # redundant API calls during update_channel_streams()
-            # This significantly reduces API load when checking multiple channels
-            logger.debug("Pre-fetching valid stream IDs and URL mapping for efficient filtering")
-            all_streams_data = get_streams(log_result=False)
-            # Filter to valid stream dictionaries once to avoid duplicate condition
-            valid_streams = [s for s in all_streams_data if isinstance(s, dict) and 'id' in s]
-            valid_stream_ids = {s['id'] for s in valid_streams}
-            stream_id_to_url = {s['id']: s.get('url') for s in valid_streams}
-            
             # Check if this is a force check (bypasses stream immunity)
             force_check = self.update_tracker.should_force_check(channel_id)
             
@@ -1494,13 +1502,11 @@ class StreamCheckerService:
             )
             reordered_ids = [s['stream_id'] for s in analyzed_streams]
             # Allow dead streams during force_check (global checks) to give them a second chance
-            # Pass pre-computed valid_stream_ids and stream_id_to_url to avoid redundant API calls
+            # The cache is enabled in _worker_loop, so API calls here will use cached data
             update_channel_streams(
                 channel_id, 
                 reordered_ids, 
-                valid_stream_ids=valid_stream_ids,
-                allow_dead_streams=force_check,
-                stream_id_to_url=stream_id_to_url
+                allow_dead_streams=force_check
             )
             
             # Verify the update was applied correctly
