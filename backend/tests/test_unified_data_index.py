@@ -294,6 +294,72 @@ class TestUnifiedDataIndexRebuild(unittest.TestCase):
         # Verify channel-stream relationship
         channel_streams = udi.get_channel_stream_ids(1)
         self.assertEqual(channel_streams, [1, 2])
+    
+    def test_rebuild_with_progress_callback(self):
+        """Test that progress callback is called during index rebuild."""
+        from unified_data_index import UnifiedDataIndex
+        
+        udi = UnifiedDataIndex(db_path=self.db_path)
+        
+        # Create mock fetcher
+        mock_fetcher = Mock()
+        mock_fetcher.fetch_m3u_accounts.return_value = [
+            {'id': 1, 'name': 'Test Account', 'is_active': True}
+        ]
+        mock_fetcher.fetch_channel_groups.return_value = [
+            {'id': 1, 'name': 'Test Group'}
+        ]
+        mock_fetcher.fetch_streams.return_value = [
+            {'id': 1, 'name': 'Test Stream', 'url': 'http://test.com/stream1'},
+        ]
+        mock_fetcher.fetch_channels.return_value = [
+            {'id': 1, 'name': 'Test Channel', 'streams': [1]}
+        ]
+        
+        # Track progress callbacks
+        progress_calls = []
+        def progress_callback(step, current, total, message):
+            progress_calls.append({
+                'step': step,
+                'current': current,
+                'total': total,
+                'message': message
+            })
+        
+        # Rebuild index with progress callback
+        counts = udi.rebuild_from_dispatcharr(mock_fetcher, progress_callback=progress_callback)
+        
+        # Verify progress callbacks were called
+        self.assertGreater(len(progress_calls), 0, "Progress callback should have been called")
+        
+        # Verify we got progress for expected steps
+        steps_seen = set(call['step'] for call in progress_calls)
+        expected_steps = {'accounts', 'groups', 'streams', 'channels', 'finalize'}
+        self.assertTrue(expected_steps.issubset(steps_seen), 
+            f"Expected steps {expected_steps} but got {steps_seen}")
+    
+    def test_rebuild_handles_empty_data(self):
+        """Test that rebuild handles empty data from API gracefully."""
+        from unified_data_index import UnifiedDataIndex
+        
+        udi = UnifiedDataIndex(db_path=self.db_path)
+        
+        # Create mock fetcher returning empty data
+        mock_fetcher = Mock()
+        mock_fetcher.fetch_m3u_accounts.return_value = []
+        mock_fetcher.fetch_channel_groups.return_value = []
+        mock_fetcher.fetch_streams.return_value = []
+        mock_fetcher.fetch_channels.return_value = []
+        
+        # Rebuild index - should complete without error
+        counts = udi.rebuild_from_dispatcharr(mock_fetcher)
+        
+        # Verify counts are zero
+        self.assertEqual(counts['accounts'], 0)
+        self.assertEqual(counts['groups'], 0)
+        self.assertEqual(counts['streams'], 0)
+        self.assertEqual(counts['channels'], 0)
+        self.assertEqual(counts['channel_streams'], 0)
 
 
 class TestUnifiedDataIndexStats(unittest.TestCase):

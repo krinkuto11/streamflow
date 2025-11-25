@@ -143,73 +143,122 @@ class TestFilterDeadStreamsPassThrough(unittest.TestCase):
 
 
 class TestCacheIntegration(unittest.TestCase):
-    """Test that the cache works correctly for API data."""
+    """Test that the cache works correctly for API data via UDI."""
     
     def setUp(self):
-        """Clear cache before each test to avoid test interference."""
-        from dispatcharr_cache import get_cache
-        cache = get_cache()
-        # Ensure cache is disabled and cleared before each test
-        cache.invalidate()
+        """Set up test fixtures with a temporary UDI database."""
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / 'test_cache.db'
+        
+        # Reset the UDI singleton and create a test instance
+        import unified_data_index
+        unified_data_index._udi_instance = None
+        unified_data_index.UnifiedDataIndex._instance = None
+        
+        # Create UDI with test path
+        self.udi = unified_data_index.UnifiedDataIndex(db_path=self.db_path)
+        unified_data_index._udi_instance = self.udi
+        
+        from dispatcharr_cache import get_cache, DispatcharrCache
+        # Reset cache singleton
+        DispatcharrCache._instance = None
+        self.cache = get_cache()
     
-    def test_cache_stores_and_retrieves_streams(self):
-        """Test that the cache correctly stores and retrieves stream data."""
-        from dispatcharr_cache import get_cache
+    def tearDown(self):
+        """Clean up test fixtures."""
+        import shutil
+        import unified_data_index
         
-        # Use the global cache instance (singleton pattern)
-        cache = get_cache()
+        # Close connections and reset singletons
+        if hasattr(self, 'udi'):
+            self.udi.close()
         
-        # Mock fetch function
-        mock_streams = [
+        unified_data_index._udi_instance = None
+        unified_data_index.UnifiedDataIndex._instance = None
+        
+        from dispatcharr_cache import DispatcharrCache
+        DispatcharrCache._instance = None
+        
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+    
+    def test_cache_with_populated_udi_returns_streams(self):
+        """Test that the cache returns data from UDI when populated."""
+        # Populate UDI with mock data
+        mock_fetcher = Mock()
+        mock_fetcher.fetch_m3u_accounts.return_value = []
+        mock_fetcher.fetch_channel_groups.return_value = []
+        mock_fetcher.fetch_streams.return_value = [
             {'id': 1, 'name': 'Stream 1', 'url': 'http://test1'},
             {'id': 2, 'name': 'Stream 2', 'url': 'http://test2'},
+        ]
+        mock_fetcher.fetch_channels.return_value = []
+        
+        # Rebuild UDI
+        self.udi.rebuild_from_dispatcharr(mock_fetcher)
+        
+        # Fetch function that should NOT be called since UDI is populated
+        fetch_called = [0]
+        def mock_fetch():
+            fetch_called[0] += 1
+            return []
+        
+        # Use cache context
+        with self.cache:
+            result = self.cache.get_streams(mock_fetch)
+            self.assertEqual(len(result), 2)
+            self.assertEqual(fetch_called[0], 0, "Fetch should not be called when UDI is populated")
+    
+    def test_cache_fallback_when_udi_empty(self):
+        """Test that the cache falls back to fetch function when UDI is empty."""
+        mock_streams = [
+            {'id': 1, 'name': 'Stream 1', 'url': 'http://test1'},
         ]
         fetch_called = [0]
         def mock_fetch():
             fetch_called[0] += 1
             return mock_streams
         
-        # Use cache context
-        with cache:
-            # First call should fetch
-            result1 = cache.get_streams(mock_fetch)
-            self.assertEqual(result1, mock_streams)
-            self.assertEqual(fetch_called[0], 1, "Fetch should be called once")
-            
-            # Second call should use cache
-            result2 = cache.get_streams(mock_fetch)
-            self.assertEqual(result2, mock_streams)
-            self.assertEqual(fetch_called[0], 1, "Fetch should still be called only once (cached)")
+        # UDI is empty, so fetch should be called
+        with self.cache:
+            result = self.cache.get_streams(mock_fetch)
+            self.assertEqual(result, mock_streams)
+            self.assertEqual(fetch_called[0], 1, "Fetch should be called when UDI is empty")
     
-    def test_cache_computes_valid_stream_ids(self):
-        """Test that the cache correctly computes valid stream IDs."""
-        from dispatcharr_cache import get_cache
-        
-        cache = get_cache()
-        
-        mock_streams = [
+    def test_cache_computes_valid_stream_ids_from_udi(self):
+        """Test that the cache correctly gets valid stream IDs from UDI."""
+        # Populate UDI
+        mock_fetcher = Mock()
+        mock_fetcher.fetch_m3u_accounts.return_value = []
+        mock_fetcher.fetch_channel_groups.return_value = []
+        mock_fetcher.fetch_streams.return_value = [
             {'id': 1, 'name': 'Stream 1'},
             {'id': 2, 'name': 'Stream 2'},
             {'id': 3, 'name': 'Stream 3'},
         ]
+        mock_fetcher.fetch_channels.return_value = []
         
-        with cache:
-            valid_ids = cache.get_valid_stream_ids(lambda: mock_streams)
+        self.udi.rebuild_from_dispatcharr(mock_fetcher)
+        
+        with self.cache:
+            valid_ids = self.cache.get_valid_stream_ids(lambda: [])
             self.assertEqual(valid_ids, {1, 2, 3})
     
-    def test_cache_computes_stream_id_to_url_mapping(self):
-        """Test that the cache correctly computes stream ID to URL mapping."""
-        from dispatcharr_cache import get_cache
-        
-        cache = get_cache()
-        
-        mock_streams = [
-            {'id': 1, 'url': 'http://test1'},
-            {'id': 2, 'url': 'http://test2'},
+    def test_cache_computes_stream_id_to_url_mapping_from_udi(self):
+        """Test that the cache correctly gets stream URL mapping from UDI."""
+        # Populate UDI
+        mock_fetcher = Mock()
+        mock_fetcher.fetch_m3u_accounts.return_value = []
+        mock_fetcher.fetch_channel_groups.return_value = []
+        mock_fetcher.fetch_streams.return_value = [
+            {'id': 1, 'name': 'Stream 1', 'url': 'http://test1'},
+            {'id': 2, 'name': 'Stream 2', 'url': 'http://test2'},
         ]
+        mock_fetcher.fetch_channels.return_value = []
         
-        with cache:
-            mapping = cache.get_stream_id_to_url_mapping(lambda: mock_streams)
+        self.udi.rebuild_from_dispatcharr(mock_fetcher)
+        
+        with self.cache:
+            mapping = self.cache.get_stream_id_to_url_mapping(lambda: [])
             self.assertEqual(mapping, {1: 'http://test1', 2: 'http://test2'})
 
 
