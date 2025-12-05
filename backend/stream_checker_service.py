@@ -16,8 +16,7 @@ Features:
 
 The service runs continuously in the background, monitoring for channel
 updates and maintaining a queue of channels that need checking. It
-integrates with the dispatcharr-stream-sorter.py module for actual
-stream analysis.
+integrates with the stream_analyzer module for stream analysis.
 """
 
 import json
@@ -44,6 +43,9 @@ from udi import get_udi_manager
 # Import dead streams tracker
 from dead_streams_tracker import DeadStreamsTracker
 
+# Import stream analyzer
+from stream_analyzer import analyze_stream
+
 # Import changelog manager
 try:
     from automated_stream_manager import ChangelogManager
@@ -65,19 +67,12 @@ class StreamCheckConfig:
     
     DEFAULT_CONFIG = {
         'enabled': True,
-        'check_interval': 300,  # DEPRECATED - checks now only triggered by M3U refresh
         'pipeline_mode': 'pipeline_1_5',  # Pipeline mode: 'disabled', 'pipeline_1', 'pipeline_1_5', 'pipeline_2', 'pipeline_2_5', 'pipeline_3'
         'global_check_schedule': {
             'enabled': True,
             'cron_expression': '0 3 * * *',  # Cron expression: default is daily at 3:00 AM
-            'frequency': 'daily',  # DEPRECATED: kept for backward compatibility - 'daily' or 'monthly'
-            'hour': 3,  # DEPRECATED: kept for backward compatibility - 3 AM for off-peak checking
-            'minute': 0,  # DEPRECATED: kept for backward compatibility
-            'day_of_month': 1  # DEPRECATED: kept for backward compatibility - Day of month for monthly checks (1-31)
         },
         'stream_analysis': {
-            'ffmpeg_duration': 30,  # DEPRECATED - No longer used by ffprobe (kept for backward compatibility)
-            'idet_frames': 500,  # DEPRECATED - No longer used by ffprobe (kept for backward compatibility)
             'timeout': 30,  # timeout for operations
             'retries': 1,  # retry attempts
             'retry_delay': 10,  # seconds between retries
@@ -1277,21 +1272,6 @@ class StreamCheckerService:
                 else:
                     logger.info(f"All {len(streams)} streams have been recently checked, using cached scores")
             
-            # Import stream analysis functions from dispatcharr-stream-sorter
-            # Note: The file has a dash in the name, so we need to import it specially
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "stream_sorter", 
-                Path(__file__).parent / "dispatcharr-stream-sorter.py"
-            )
-            stream_sorter = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(stream_sorter)
-            
-            load_sorter_config = stream_sorter.load_config
-            _analyze_stream_task = stream_sorter._analyze_stream_task
-            
-            # Load sorter configuration
-            sorter_config = load_sorter_config()
             
             # Analyze new/unchecked streams
             analyzed_streams = []
@@ -1311,8 +1291,8 @@ class StreamCheckerService:
                     step_detail=f'Checking bitrate, resolution, codec ({idx}/{total_streams})'
                 )
                 
-                # Prepare stream row for analysis
-                stream_row = {
+                # Prepare stream data for analysis
+                stream_data = {
                     'channel_id': channel_id,
                     'channel_name': channel_name,
                     'stream_id': stream['id'],
@@ -1322,14 +1302,11 @@ class StreamCheckerService:
                 
                 # Analyze stream
                 analysis_params = self.config.get('stream_analysis', {})
-                analyzed = _analyze_stream_task(
-                    stream_row,
-                    ffmpeg_duration=analysis_params.get('ffmpeg_duration', 20),
-                    idet_frames=analysis_params.get('idet_frames', 500),
+                analyzed = analyze_stream(
+                    stream_data,
                     timeout=analysis_params.get('timeout', 30),
                     retries=analysis_params.get('retries', 1),
                     retry_delay=analysis_params.get('retry_delay', 10),
-                    config=sorter_config,
                     user_agent=analysis_params.get('user_agent', 'VLC/3.0.14')
                 )
                 
@@ -1426,7 +1403,7 @@ class StreamCheckerService:
                 else:
                     # If we can't fetch cached data, analyze this stream
                     logger.warning(f"Could not fetch cached data for stream {stream['id']}, will analyze")
-                    stream_row = {
+                    stream_data = {
                         'channel_id': channel_id,
                         'channel_name': channel_name,
                         'stream_id': stream['id'],
@@ -1434,14 +1411,11 @@ class StreamCheckerService:
                         'stream_url': stream.get('url', '')
                     }
                     analysis_params = self.config.get('stream_analysis', {})
-                    analyzed = _analyze_stream_task(
-                        stream_row,
-                        ffmpeg_duration=analysis_params.get('ffmpeg_duration', 20),
-                        idet_frames=analysis_params.get('idet_frames', 500),
+                    analyzed = analyze_stream(
+                        stream_data,
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),
                         retry_delay=analysis_params.get('retry_delay', 10),
-                        config=sorter_config,
                         user_agent=analysis_params.get('user_agent', 'VLC/3.0.14')
                     )
                     self._update_stream_stats(analyzed)
