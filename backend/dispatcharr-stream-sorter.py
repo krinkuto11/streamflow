@@ -83,10 +83,11 @@ class StreamCheckProgress:
 
 # --- Configuration ---
 def load_config():
-    """Returns default configuration settings.
+    """Returns default configuration settings for stream analysis.
     
-    All configuration is now managed through environment variables and JSON files.
-    This function provides default values for stream analysis settings.
+    These default values are used for filtering and scoring streams when using
+    the command-line interface directly. The automated system uses configuration
+    from JSON files instead.
     """
     config = configparser.ConfigParser()
     config['script_settings'] = {
