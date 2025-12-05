@@ -346,10 +346,10 @@ def _get_stream_info(url, timeout, user_agent='VLC/3.0.14'):
                 result_dict['audio_sample_rate'] = audio_stream.get('sample_rate', 'N/A')
                 result_dict['audio_channels'] = audio_stream.get('channels', 'N/A')
             
-            # Determine status
+            # Determine status based on extracted data
             if result_dict['resolution'] == '0x0' or result_dict['video_codec'] == 'N/A':
                 result_dict['status'] = 'No Video'
-            elif result_dict['bitrate_kbps'] == 0:
+            elif not result_dict['bitrate_kbps'] or result_dict['bitrate_kbps'] == 0:
                 result_dict['status'] = 'No Bitrate'
             
             return result_dict
