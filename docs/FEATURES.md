@@ -20,14 +20,17 @@ See [PIPELINE_SYSTEM.md](PIPELINE_SYSTEM.md) for detailed pipeline documentation
 
 ### Intelligent Stream Quality Checking
 Multi-factor analysis of stream quality:
-- **Bitrate**: Average kbps measurement
+- **Bitrate**: Average kbps measurement (optimized for MPEG-TS streams)
 - **Resolution**: Width × height detection
 - **Frame Rate**: FPS analysis
 - **Video Codec**: H.265/H.264 identification
 - **Audio Codec**: Detection and validation
 - **Error Detection**: Decode errors, discontinuities, timeouts
-- **Interlacing**: Detection and penalty
-- **Dropped Frames**: Tracking and penalty
+
+**Technical Implementation:**
+- Uses ffprobe with optimized parameters for fast and accurate analysis
+- `-analyzeduration 5M` and `-probesize 10M` ensure proper bitrate detection for MPEG-TS streams
+- Analysis completes in ~5 seconds per stream (speed prioritized over maximum accuracy)
 
 ### Automatic Stream Reordering
 - Best quality streams automatically moved to top
@@ -107,7 +110,7 @@ Automatically identifies and manages non-functional streams:
   - Day of month for monthly schedules
 - **Context-Aware Settings**: Only relevant options shown based on selected pipeline
 - **Update Intervals**: Configure M3U refresh frequency (for applicable pipelines)
-- **Stream Analysis Parameters**: FFmpeg duration, timeouts, retries
+- **Stream Analysis Parameters**: User agent, timeouts, retries
 - **Queue Settings**: Maximum queue size, channels per run
 
 ### Changelog

@@ -147,18 +147,19 @@ POST   /api/stream-checker/mark-updated    # Mark updated
 ```json
 {
   "enabled": true,
-  "check_interval": 300,
+  "check_interval": 300,  // DEPRECATED - checks now triggered by M3U refresh
   "global_check_schedule": {
     "enabled": true,
     "hour": 3,
     "minute": 0
   },
   "stream_analysis": {
-    "ffmpeg_duration": 20,
-    "idet_frames": 500,
     "timeout": 30,
     "retries": 1,
-    "retry_delay": 10
+    "retry_delay": 10,
+    "user_agent": "VLC/3.0.14"
+    // Note: ffmpeg_duration and idet_frames are deprecated as of this version
+    // ffprobe now uses -analyzeduration and -probesize for optimal MPEG-TS bitrate detection
   },
   "scoring": {
     "weights": {
