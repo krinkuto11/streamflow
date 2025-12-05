@@ -43,6 +43,9 @@ from udi import get_udi_manager
 # Import dead streams tracker
 from dead_streams_tracker import DeadStreamsTracker
 
+# Import stream analyzer
+from stream_analyzer import analyze_stream
+
 # Import changelog manager
 try:
     from automated_stream_manager import ChangelogManager
@@ -1269,8 +1272,6 @@ class StreamCheckerService:
                 else:
                     logger.info(f"All {len(streams)} streams have been recently checked, using cached scores")
             
-            # Import stream analysis function
-            from stream_analyzer import analyze_stream
             
             # Analyze new/unchecked streams
             analyzed_streams = []
