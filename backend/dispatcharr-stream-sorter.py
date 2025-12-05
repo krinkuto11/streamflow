@@ -265,12 +265,18 @@ def _get_stream_info(url, timeout, user_agent='VLC/3.0.14'):
     - Video: codec, resolution, framerate, bitrate
     - Audio: codec, sample_rate, channels, bitrate
     
+    For MPEG-TS streams, bitrate might not be in headers, so we use
+    -analyzeduration and -probesize to give ffprobe time to calculate it.
+    These values are optimized for speed while ensuring accuracy.
+    
     Returns a dict with parsed information or None on failure.
     """
     logger.debug(f"Running ffprobe for URL: {url[:50]}...")
     command = [
         'ffprobe',
         '-user_agent', user_agent,
+        '-analyzeduration', '5M',  # Analyze up to 5 seconds of stream data
+        '-probesize', '10M',  # Read up to 10MB of data for probing
         '-v', 'error',
         '-show_entries', 'stream=codec_name,codec_type,width,height,avg_frame_rate,bit_rate,sample_rate,channels:format=bit_rate,duration',
         '-of', 'json',
@@ -376,8 +382,22 @@ def _get_provider_from_url(url):
 def _analyze_stream_task(row, ffmpeg_duration, idet_frames, timeout, retries, retry_delay, config, user_agent='VLC/3.0.14'):
     """Analyzes a stream using a single ffprobe command.
     
-    Parameters ffmpeg_duration and idet_frames are kept for backward compatibility but are no longer used.
-    The analysis is now simplified to use only ffprobe.
+    Args:
+        row: Stream data dictionary
+        ffmpeg_duration: DEPRECATED - No longer used (kept for backward compatibility)
+        idet_frames: DEPRECATED - No longer used (kept for backward compatibility)
+        timeout: Timeout in seconds for ffprobe operation
+        retries: Number of retry attempts on failure
+        retry_delay: Delay in seconds between retries
+        config: Configuration object
+        user_agent: User agent string for HTTP requests
+    
+    Returns:
+        dict: Analyzed stream data with codec, resolution, fps, bitrate, etc.
+    
+    Note:
+        ffprobe now uses -analyzeduration and -probesize parameters to properly
+        detect bitrate in MPEG-TS streams where bitrate may not be in headers.
     """
     url = row.get('stream_url')
     stream_name = row.get('stream_name', 'Unknown')
@@ -445,7 +465,26 @@ def _analyze_stream_task(row, ffmpeg_duration, idet_frames, timeout, retries, re
     return row
 
 def analyze_streams(config, input_csv, output_csv, fails_csv, ffmpeg_duration, idet_frames, timeout, max_workers, retries, retry_delay, user_agent='VLC/3.0.14'):
-    """Analyzes streams from a CSV file for various metrics and saves results incrementally."""
+    """Analyzes streams from a CSV file for various metrics and saves results incrementally.
+    
+    Args:
+        config: Configuration object
+        input_csv: Path to input CSV file with stream data
+        output_csv: Path to output CSV file for results
+        fails_csv: Path to CSV file for failed streams
+        ffmpeg_duration: DEPRECATED - No longer used (kept for backward compatibility)
+        idet_frames: DEPRECATED - No longer used (kept for backward compatibility)
+        timeout: Timeout in seconds for ffprobe operation
+        max_workers: DEPRECATED - Processing is now synchronous (kept for backward compatibility)
+        retries: Number of retry attempts on failure
+        retry_delay: Delay in seconds between retries
+        user_agent: User agent string for HTTP requests
+    
+    Note:
+        This function now uses synchronous processing (one stream at a time) with
+        ffprobe for stream analysis. The ffprobe command includes -analyzeduration
+        and -probesize parameters to properly detect bitrate in MPEG-TS streams.
+    """
     logger.info("="*80)
     logger.info("STARTING STREAM ANALYSIS OPERATION")
     logger.info("="*80)
@@ -1024,7 +1063,18 @@ def reorder_streams(config, input_csv):
     logger.info("="*80)
 
 def retry_failed_streams(config, input_csv, fails_csv, ffmpeg_duration, idet_frames, timeout, max_workers, user_agent='VLC/3.0.14'):
-    """Retries analysis for streams that previously failed."""
+    """Retries analysis for streams that previously failed.
+    
+    Args:
+        config: Configuration object
+        input_csv: Path to input CSV file with stream data
+        fails_csv: Path to CSV file for failed streams output
+        ffmpeg_duration: DEPRECATED - No longer used (kept for backward compatibility)
+        idet_frames: DEPRECATED - No longer used (kept for backward compatibility)
+        timeout: Timeout in seconds for ffprobe operation
+        max_workers: DEPRECATED - Processing is now synchronous (kept for backward compatibility)
+        user_agent: User agent string for HTTP requests
+    """
     if not os.path.exists(input_csv):
         logger.error(f"Input file not found: {input_csv}. Cannot retry failed streams.")
         return
@@ -1124,10 +1174,10 @@ def main():
     analyze_parser.add_argument('--input', type=str, default='csv/02_grouped_channel_streams.csv')
     analyze_parser.add_argument('--output', type=str, default='csv/03_iptv_stream_measurements.csv')
     analyze_parser.add_argument('--fails_output', type=str, default='csv/04_fails.csv')
-    analyze_parser.add_argument('--duration', type=int, default=10, help='Duration in seconds for ffmpeg to analyze stream.')
-    analyze_parser.add_argument('--idet-frames', type=int, default=500)
-    analyze_parser.add_argument('--timeout', type=int, default=30)
-    analyze_parser.add_argument('--workers', type=int, default=8)
+    analyze_parser.add_argument('--duration', type=int, default=10, help='DEPRECATED - No longer used by ffprobe (kept for backward compatibility)')
+    analyze_parser.add_argument('--idet-frames', type=int, default=500, help='DEPRECATED - No longer used by ffprobe (kept for backward compatibility)')
+    analyze_parser.add_argument('--timeout', type=int, default=30, help='Timeout in seconds for ffprobe operations')
+    analyze_parser.add_argument('--workers', type=int, default=8, help='DEPRECATED - Processing is now synchronous (kept for backward compatibility)')
     analyze_parser.add_argument('--retries', type=int, default=1)
     analyze_parser.add_argument('--retry-delay', type=int, default=10)
 
@@ -1142,10 +1192,10 @@ def main():
     retry_parser = subparsers.add_parser('retry', help='Retry analysis for failed streams.')
     retry_parser.add_argument('--input', type=str, default='csv/03_iptv_stream_measurements.csv')
     retry_parser.add_argument('--fails-output', type=str, default='csv/04_fails.csv')
-    retry_parser.add_argument('--duration', type=int, default=20)
-    retry_parser.add_argument('--idet-frames', type=int, default=500)
-    retry_parser.add_argument('--timeout', type=int, default=30)
-    retry_parser.add_argument('--workers', type=int, default=8)
+    retry_parser.add_argument('--duration', type=int, default=20, help='DEPRECATED - No longer used by ffprobe (kept for backward compatibility)')
+    retry_parser.add_argument('--idet-frames', type=int, default=500, help='DEPRECATED - No longer used by ffprobe (kept for backward compatibility)')
+    retry_parser.add_argument('--timeout', type=int, default=30, help='Timeout in seconds for ffprobe operations')
+    retry_parser.add_argument('--workers', type=int, default=8, help='DEPRECATED - Processing is now synchronous (kept for backward compatibility)')
 
     # Automation commands
     automation_parser = subparsers.add_parser('automation', help='Automated stream management commands.')

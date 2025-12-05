@@ -76,8 +76,8 @@ class StreamCheckConfig:
             'day_of_month': 1  # DEPRECATED: kept for backward compatibility - Day of month for monthly checks (1-31)
         },
         'stream_analysis': {
-            'ffmpeg_duration': 30,  # seconds to analyze each stream
-            'idet_frames': 500,  # frames to check for interlacing
+            'ffmpeg_duration': 30,  # DEPRECATED - No longer used by ffprobe (kept for backward compatibility)
+            'idet_frames': 500,  # DEPRECATED - No longer used by ffprobe (kept for backward compatibility)
             'timeout': 30,  # timeout for operations
             'retries': 1,  # retry attempts
             'retry_delay': 10,  # seconds between retries
