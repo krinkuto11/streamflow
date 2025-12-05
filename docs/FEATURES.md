@@ -61,8 +61,6 @@ Multi-factor analysis of stream quality:
 
 ### Codec Preferences
 - H.265/HEVC preference: Higher score for modern codecs
-- Interlaced penalty: Lower score for interlaced content
-- Dropped frames penalty: Lower score for streams with frame drops
 
 ### Sequential Checking
 - One channel at a time to avoid overload
