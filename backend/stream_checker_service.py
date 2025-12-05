@@ -1280,11 +1280,7 @@ class StreamCheckerService:
             stream_sorter = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(stream_sorter)
             
-            load_sorter_config = stream_sorter.load_config
             _analyze_stream_task = stream_sorter._analyze_stream_task
-            
-            # Load sorter configuration
-            sorter_config = load_sorter_config()
             
             # Analyze new/unchecked streams
             analyzed_streams = []
@@ -1320,7 +1316,6 @@ class StreamCheckerService:
                     timeout=analysis_params.get('timeout', 30),
                     retries=analysis_params.get('retries', 1),
                     retry_delay=analysis_params.get('retry_delay', 10),
-                    config=sorter_config,
                     user_agent=analysis_params.get('user_agent', 'VLC/3.0.14')
                 )
                 
@@ -1430,7 +1425,6 @@ class StreamCheckerService:
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),
                         retry_delay=analysis_params.get('retry_delay', 10),
-                        config=sorter_config,
                         user_agent=analysis_params.get('user_agent', 'VLC/3.0.14')
                     )
                     self._update_stream_stats(analyzed)

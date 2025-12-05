@@ -386,7 +386,7 @@ def _get_provider_from_url(url):
     except Exception:
         return "unknown_provider"
 
-def _analyze_stream_task(row, timeout, retries, retry_delay, config, user_agent='VLC/3.0.14'):
+def _analyze_stream_task(row, timeout, retries, retry_delay, user_agent='VLC/3.0.14'):
     """Analyzes a stream using a single ffprobe command.
     
     Args:
@@ -394,7 +394,6 @@ def _analyze_stream_task(row, timeout, retries, retry_delay, config, user_agent=
         timeout: Timeout in seconds for ffprobe operation
         retries: Number of retry attempts on failure
         retry_delay: Delay in seconds between retries
-        config: Configuration object
         user_agent: User agent string for HTTP requests
     
     Returns:
@@ -651,7 +650,7 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, timeout, retries, 
                     stream_name = row.get('stream_name', 'Unknown')
                     logger.info(f"\n[{idx}/{total_streams}] ═══ Starting analysis of: {stream_name} ═══")
                     
-                    result_row = _analyze_stream_task(row, timeout, retries, retry_delay, config, user_agent)
+                    result_row = _analyze_stream_task(row, timeout, retries, retry_delay, user_agent)
                     completed_streams += 1
                     
                     stream_elapsed = (datetime.now() - stream_start_time).total_seconds()
@@ -1110,7 +1109,7 @@ def retry_failed_streams(config, input_csv, fails_csv, timeout, user_agent='VLC/
     # Process streams synchronously (one at a time)
     for row in failed_streams:
         try:
-            result_row = _analyze_stream_task(row, timeout, 0, 0, config, user_agent)
+            result_row = _analyze_stream_task(row, timeout, 0, 0, user_agent)
             completed_streams += 1
             stream_id = result_row.get('stream_id')
             stream_name = result_row.get('stream_name', 'Unknown')
