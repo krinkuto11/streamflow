@@ -62,7 +62,8 @@ def get_provider_from_url(url: str) -> str:
         return "unknown_provider"
 
 
-def get_stream_info(url: str, timeout: int, user_agent: str = 'VLC/3.0.14') -> Optional[Dict[str, Any]]:
+def get_stream_info(url: str, timeout: int, user_agent: str = 'VLC/3.0.14', 
+                    check_mode: str = 'full', probe_duration: int = 5) -> Optional[Dict[str, Any]]:
     """Gets stream information using a single ffprobe command.
     
     Retrieves all necessary stream information in one call:
@@ -77,6 +78,8 @@ def get_stream_info(url: str, timeout: int, user_agent: str = 'VLC/3.0.14') -> O
         url: Stream URL to analyze
         timeout: Timeout in seconds for ffprobe operation
         user_agent: User agent string for HTTP requests
+        check_mode: 'full' (analyze bitrate) or 'quick' (skip bitrate analysis)
+        probe_duration: Seconds to analyze stream (only used in 'full' mode)
     
     Returns:
         Dict with parsed stream information or None on failure
@@ -93,17 +96,34 @@ def get_stream_info(url: str, timeout: int, user_agent: str = 'VLC/3.0.14') -> O
             'status': 'OK'
         }
     """
-    logger.debug(f"Running ffprobe for URL: {url[:50]}...")
-    command = [
-        'ffprobe',
-        '-user_agent', user_agent,
-        '-analyzeduration', '5M',  # Analyze up to 5 seconds of stream data
-        '-probesize', '10M',  # Read up to 10MB of data for probing
+    logger.debug(f"Running ffprobe for URL: {url[:50]}... (mode: {check_mode})")
+    
+    # Build command based on check mode
+    command = ['ffprobe', '-user_agent', user_agent]
+    
+    if check_mode == 'full':
+        # Full mode: analyze bitrate (takes longer)
+        # Convert probe_duration to microseconds for -analyzeduration
+        analyze_duration_us = probe_duration * 1000000
+        # Set probesize to 2MB per second of probe duration
+        probe_size_mb = probe_duration * 2000000
+        command.extend([
+            '-analyzeduration', str(analyze_duration_us),
+            '-probesize', str(probe_size_mb)
+        ])
+    else:
+        # Quick mode: minimal analysis (faster, no bitrate)
+        command.extend([
+            '-analyzeduration', '100000',  # 0.1 seconds
+            '-probesize', '500000'  # 500KB
+        ])
+    
+    command.extend([
         '-v', 'error',
         '-show_entries', 'stream=codec_name,codec_type,width,height,avg_frame_rate,bit_rate,sample_rate,channels:format=bit_rate,duration',
         '-of', 'json',
         url
-    ]
+    ])
     try:
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, text=True)
         if result.stdout:
@@ -177,8 +197,10 @@ def get_stream_info(url: str, timeout: int, user_agent: str = 'VLC/3.0.14') -> O
             # Determine status based on extracted data
             if result_dict['resolution'] == '0x0' or result_dict['video_codec'] == 'N/A':
                 result_dict['status'] = 'No Video'
-            elif not result_dict['bitrate_kbps'] or result_dict['bitrate_kbps'] == 0:
+            elif check_mode == 'full' and (not result_dict['bitrate_kbps'] or result_dict['bitrate_kbps'] == 0):
+                # In full mode, missing bitrate is an issue
                 result_dict['status'] = 'No Bitrate'
+            # In quick mode, missing bitrate is expected and OK
             
             return result_dict
             
@@ -196,7 +218,8 @@ def get_stream_info(url: str, timeout: int, user_agent: str = 'VLC/3.0.14') -> O
 
 
 def analyze_stream(stream_data: Dict[str, Any], timeout: int = 30, retries: int = 1, 
-                   retry_delay: int = 10, user_agent: str = 'VLC/3.0.14') -> Dict[str, Any]:
+                   retry_delay: int = 10, user_agent: str = 'VLC/3.0.14',
+                   check_mode: str = 'full', probe_duration: int = 5) -> Dict[str, Any]:
     """Analyzes a stream using ffprobe with provider-based rate limiting.
     
     This function:
@@ -216,6 +239,8 @@ def analyze_stream(stream_data: Dict[str, Any], timeout: int = 30, retries: int 
         retries: Number of retry attempts on failure (default: 1)
         retry_delay: Delay in seconds between retries (default: 10)
         user_agent: User agent string for HTTP requests (default: 'VLC/3.0.14')
+        check_mode: 'full' (analyze bitrate) or 'quick' (skip bitrate, faster)
+        probe_duration: Seconds to analyze stream (only used in 'full' mode, default: 5)
     
     Returns:
         Dict with analysis results including all input fields plus:
@@ -237,7 +262,7 @@ def analyze_stream(stream_data: Dict[str, Any], timeout: int = 30, retries: int 
             'channel_id': 1,
             'channel_name': 'Channel 1'
         }
-        result = analyze_stream(stream, timeout=30, retries=2)
+        result = analyze_stream(stream, timeout=30, retries=2, check_mode='quick')
     """
     url = stream_data.get('stream_url')
     stream_name = stream_data.get('stream_name', 'Unknown')
@@ -275,7 +300,7 @@ def analyze_stream(stream_data: Dict[str, Any], timeout: int = 30, retries: int 
 
             # Get all stream info with single ffprobe command
             logger.info(f"  Analyzing stream with ffprobe...")
-            stream_info = get_stream_info(url, timeout, user_agent)
+            stream_info = get_stream_info(url, timeout, user_agent, check_mode, probe_duration)
             
             if stream_info:
                 # Update stream_data with all extracted information
