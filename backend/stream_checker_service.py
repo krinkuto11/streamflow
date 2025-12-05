@@ -16,8 +16,7 @@ Features:
 
 The service runs continuously in the background, monitoring for channel
 updates and maintaining a queue of channels that need checking. It
-integrates with the dispatcharr-stream-sorter.py module for actual
-stream analysis.
+integrates with the stream_analyzer module for stream analysis.
 """
 
 import json
@@ -1270,17 +1269,8 @@ class StreamCheckerService:
                 else:
                     logger.info(f"All {len(streams)} streams have been recently checked, using cached scores")
             
-            # Import stream analysis functions from dispatcharr-stream-sorter
-            # Note: The file has a dash in the name, so we need to import it specially
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(
-                "stream_sorter", 
-                Path(__file__).parent / "dispatcharr-stream-sorter.py"
-            )
-            stream_sorter = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(stream_sorter)
-            
-            _analyze_stream_task = stream_sorter._analyze_stream_task
+            # Import stream analysis function
+            from stream_analyzer import analyze_stream
             
             # Analyze new/unchecked streams
             analyzed_streams = []
@@ -1300,8 +1290,8 @@ class StreamCheckerService:
                     step_detail=f'Checking bitrate, resolution, codec ({idx}/{total_streams})'
                 )
                 
-                # Prepare stream row for analysis
-                stream_row = {
+                # Prepare stream data for analysis
+                stream_data = {
                     'channel_id': channel_id,
                     'channel_name': channel_name,
                     'stream_id': stream['id'],
@@ -1311,8 +1301,8 @@ class StreamCheckerService:
                 
                 # Analyze stream
                 analysis_params = self.config.get('stream_analysis', {})
-                analyzed = _analyze_stream_task(
-                    stream_row,
+                analyzed = analyze_stream(
+                    stream_data,
                     timeout=analysis_params.get('timeout', 30),
                     retries=analysis_params.get('retries', 1),
                     retry_delay=analysis_params.get('retry_delay', 10),
@@ -1412,7 +1402,7 @@ class StreamCheckerService:
                 else:
                     # If we can't fetch cached data, analyze this stream
                     logger.warning(f"Could not fetch cached data for stream {stream['id']}, will analyze")
-                    stream_row = {
+                    stream_data = {
                         'channel_id': channel_id,
                         'channel_name': channel_name,
                         'stream_id': stream['id'],
@@ -1420,8 +1410,8 @@ class StreamCheckerService:
                         'stream_url': stream.get('url', '')
                     }
                     analysis_params = self.config.get('stream_analysis', {})
-                    analyzed = _analyze_stream_task(
-                        stream_row,
+                    analyzed = analyze_stream(
+                        stream_data,
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),
                         retry_delay=analysis_params.get('retry_delay', 10),
