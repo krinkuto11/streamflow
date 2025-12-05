@@ -588,8 +588,8 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, timeout, retries, 
     streams_to_analyze = df.to_dict('records')
     logger.info(f"FINAL: {len(streams_to_analyze)} streams to analyze")
 
-    # Calculate estimated time
-    estimated_time_per_stream = ffmpeg_duration + 30  # ffmpeg duration + overhead
+    # Calculate estimated time (timeout + overhead)
+    estimated_time_per_stream = timeout + 30  # timeout + overhead
     estimated_total_seconds = estimated_time_per_stream * len(streams_to_analyze)
     estimated_hours = estimated_total_seconds / 3600
     logger.info(f"ESTIMATED TIME: ~{estimated_hours:.1f} hours ({estimated_time_per_stream}s per stream)")
@@ -616,9 +616,7 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, timeout, retries, 
 
     logger.info("="*80)
     logger.info(f"ANALYSIS PARAMETERS:")
-    logger.info(f"  - Duration: {ffmpeg_duration}s per stream")
     logger.info(f"  - Timeout: {timeout}s per operation")
-    logger.info(f"  - idet frames: {idet_frames}")
     logger.info(f"  - Retries: {retries}")
     logger.info(f"  - Retry delay: {retry_delay}s")
     logger.info(f"  - Output: {output_csv}")

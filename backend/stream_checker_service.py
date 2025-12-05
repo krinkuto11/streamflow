@@ -1317,8 +1317,6 @@ class StreamCheckerService:
                 analysis_params = self.config.get('stream_analysis', {})
                 analyzed = _analyze_stream_task(
                     stream_row,
-                    ffmpeg_duration=analysis_params.get('ffmpeg_duration', 20),
-                    idet_frames=analysis_params.get('idet_frames', 500),
                     timeout=analysis_params.get('timeout', 30),
                     retries=analysis_params.get('retries', 1),
                     retry_delay=analysis_params.get('retry_delay', 10),
@@ -1429,8 +1427,6 @@ class StreamCheckerService:
                     analysis_params = self.config.get('stream_analysis', {})
                     analyzed = _analyze_stream_task(
                         stream_row,
-                        ffmpeg_duration=analysis_params.get('ffmpeg_duration', 20),
-                        idet_frames=analysis_params.get('idet_frames', 500),
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),
                         retry_delay=analysis_params.get('retry_delay', 10),
