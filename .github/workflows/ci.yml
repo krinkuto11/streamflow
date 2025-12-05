@@ -7,14 +7,14 @@ on:
   pull_request:
     branches:
       - dev
-    types: [closed] # Expanded trigger types for universal-data-index branch
+    types: [opened, synchronize, reopened, closed] # Build on PR open/update for testing, and on merge for release
 
 jobs:
   build:
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'release' ||
-      (github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.merged == true)
+      github.event_name == 'pull_request'
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -57,7 +57,6 @@ jobs:
           ${{ runner.os }}-${{ runner.arch }}-buildx-
 
     - name: Log in to GitHub Container Registry
-      if: github.event_name == 'workflow_dispatch' || github.event_name == 'release' || (github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.merged == true)
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
@@ -65,7 +64,6 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Extract metadata
-      if: github.event_name == 'workflow_dispatch' || github.event_name == 'release' || (github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.merged == true)
       id: meta
       uses: docker/metadata-action@v5
       with:
@@ -75,6 +73,7 @@ jobs:
           type=semver,pattern={{major}}.{{minor}}
           type=semver,pattern={{major}}
           type=raw,value=latest
+          type=ref,event=pr,prefix=pr-
 
     - name: Build and push Docker image by digest
       id: build
@@ -112,7 +111,7 @@ jobs:
     if: |
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'release' ||
-      (github.event_name == 'pull_request' && github.base_ref == 'dev' && github.event.pull_request.merged == true)
+      github.event_name == 'pull_request'
     needs:
       - build
     steps:
@@ -136,6 +135,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=latest
+            type=ref,event=pr,prefix=pr-
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -150,8 +150,15 @@ jobs:
           tags=""
           if [ "${{ github.event_name }}" = "release" ]; then
             tags=$(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON")
-          else
+          elif [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.pull_request.merged }}" = "true" ]; then
+            # Merged PR - tag as pr-test for testing before release
             tags="-t ghcr.io/${{ github.repository_owner }}/streamflow:pr-test"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Open PR - tag with PR number for testing
+            tags="-t ghcr.io/${{ github.repository_owner }}/streamflow:pr-${{ github.event.pull_request.number }}"
+          else
+            # Workflow dispatch - tag as latest
+            tags="-t ghcr.io/${{ github.repository_owner }}/streamflow:latest"
           fi
           docker buildx imagetools create $tags \
             $(printf 'ghcr.io/${{ github.repository_owner }}/streamflow@sha256:%s ' *)
@@ -160,6 +167,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
             docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/streamflow:${{ steps.meta.outputs.version }}
-          else
+          elif [ "${{ github.event_name }}" = "pull_request" ] && [ "${{ github.event.pull_request.merged }}" = "true" ]; then
             docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/streamflow:pr-test
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/streamflow:pr-${{ github.event.pull_request.number }}
+          else
+            docker buildx imagetools inspect ghcr.io/${{ github.repository_owner }}/streamflow:latest
           fi

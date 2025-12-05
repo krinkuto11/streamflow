@@ -442,17 +442,6 @@ function AutomationSettings() {
                 </Typography>
               
               <TextField
-                label="FFmpeg Duration (seconds)"
-                type="number"
-                value={streamCheckerConfig.stream_analysis?.ffmpeg_duration ?? 30}
-                onChange={(e) => handleStreamCheckerConfigChange('stream_analysis.ffmpeg_duration', parseInt(e.target.value))}
-                fullWidth
-                margin="normal"
-                helperText="Duration to analyze each stream"
-                inputProps={{ min: 5, max: 120 }}
-              />
-              
-              <TextField
                 label="FFmpeg/FFprobe User Agent"
                 type="text"
                 value={streamCheckerConfig.stream_analysis?.user_agent ?? 'VLC/3.0.14'}
