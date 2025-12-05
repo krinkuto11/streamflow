@@ -19,7 +19,9 @@ See [PIPELINE_SYSTEM.md](PIPELINE_SYSTEM.md) for detailed pipeline documentation
 - Tracks update history in changelog
 
 ### Intelligent Stream Quality Checking
-Multi-factor analysis of stream quality:
+Multi-factor analysis of stream quality with two configurable modes:
+
+#### Full Mode (Default)
 - **Bitrate**: Average kbps measurement (optimized for MPEG-TS streams)
 - **Resolution**: Width × height detection
 - **Frame Rate**: FPS analysis
@@ -28,9 +30,28 @@ Multi-factor analysis of stream quality:
 - **Error Detection**: Decode errors, discontinuities, timeouts
 
 **Technical Implementation:**
-- Uses ffprobe with optimized parameters for fast and accurate analysis
-- `-analyzeduration 5M` and `-probesize 10M` ensure proper bitrate detection for MPEG-TS streams
-- Analysis completes in ~5 seconds per stream (speed prioritized over maximum accuracy)
+- Uses ffprobe with configurable probe duration (default: 5 seconds)
+- `-analyzeduration` and `-probesize` set based on probe duration to ensure proper bitrate detection
+- Best for accurate stream ranking but takes longer per stream
+- Streams without bitrate are marked as dead
+
+#### Quick Mode
+- **Resolution**: Width × height detection
+- **Frame Rate**: FPS analysis
+- **Video Codec**: H.265/H.264 identification
+- **Audio Codec**: Detection and validation
+- **Error Detection**: Decode errors, discontinuities, timeouts
+
+**Technical Implementation:**
+- Uses ffprobe with minimal probe duration (0.1 seconds)
+- Skips bitrate analysis for faster checking
+- Best for large playlists or when speed is priority
+- Scoring relies on resolution, FPS, and codec only
+- Streams without bitrate are NOT marked as dead
+
+**Mode Selection:** Configure in the Stream Analysis Settings under Configuration page. Choose based on your needs:
+- Use **Full Mode** for accurate bitrate-based stream ranking
+- Use **Quick Mode** for faster checks when bitrate is not critical
 
 ### Automatic Stream Reordering
 - Best quality streams automatically moved to top

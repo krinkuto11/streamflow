@@ -76,7 +76,9 @@ class StreamCheckConfig:
             'timeout': 30,  # timeout for operations
             'retries': 1,  # retry attempts
             'retry_delay': 10,  # seconds between retries
-            'user_agent': 'VLC/3.0.14'  # user agent for ffmpeg/ffprobe
+            'user_agent': 'VLC/3.0.14',  # user agent for ffmpeg/ffprobe
+            'check_mode': 'full',  # 'full' or 'quick' mode
+            'probe_duration': 5  # seconds to analyze stream (only for full mode)
         },
         'scoring': {
             'weights': {
@@ -1099,7 +1101,7 @@ class StreamCheckerService:
         
         A stream is dead if:
         - Resolution is '0x0' or contains 0 in width or height
-        - Bitrate is 0 or None
+        - Bitrate is 0 or None (only in full mode; in quick mode bitrate is not checked)
         
         Args:
             stream_data: Analyzed stream data dictionary
@@ -1125,10 +1127,12 @@ class StreamCheckerService:
                 except (ValueError, IndexError):
                     pass
         
-        # Check bitrate
-        bitrate = stream_data.get('bitrate_kbps', 0)
-        if bitrate in [0, None, 'N/A'] or (isinstance(bitrate, (int, float)) and bitrate == 0):
-            return True
+        # Check bitrate (only in full mode)
+        check_mode = self.config.get('stream_analysis.check_mode', 'full')
+        if check_mode == 'full':
+            bitrate = stream_data.get('bitrate_kbps', 0)
+            if bitrate in [0, None, 'N/A'] or (isinstance(bitrate, (int, float)) and bitrate == 0):
+                return True
         
         return False
     
@@ -1307,7 +1311,9 @@ class StreamCheckerService:
                     timeout=analysis_params.get('timeout', 30),
                     retries=analysis_params.get('retries', 1),
                     retry_delay=analysis_params.get('retry_delay', 10),
-                    user_agent=analysis_params.get('user_agent', 'VLC/3.0.14')
+                    user_agent=analysis_params.get('user_agent', 'VLC/3.0.14'),
+                    check_mode=analysis_params.get('check_mode', 'full'),
+                    probe_duration=analysis_params.get('probe_duration', 5)
                 )
                 
                 # Update stream stats on dispatcharr with ffmpeg-extracted data
@@ -1416,7 +1422,9 @@ class StreamCheckerService:
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),
                         retry_delay=analysis_params.get('retry_delay', 10),
-                        user_agent=analysis_params.get('user_agent', 'VLC/3.0.14')
+                        user_agent=analysis_params.get('user_agent', 'VLC/3.0.14'),
+                        check_mode=analysis_params.get('check_mode', 'full'),
+                        probe_duration=analysis_params.get('probe_duration', 5)
                     )
                     self._update_stream_stats(analyzed)
                     score = self._calculate_stream_score(analyzed)
@@ -1571,6 +1579,7 @@ class StreamCheckerService:
             return 0.0
         
         weights = self.config.get('scoring.weights', {})
+        check_mode = self.config.get('stream_analysis.check_mode', 'full')
         score = 0.0
         
         # Bitrate score (0-1, normalized to typical range 1000-8000 kbps)
@@ -1578,6 +1587,10 @@ class StreamCheckerService:
         if isinstance(bitrate, (int, float)) and bitrate > 0:
             bitrate_score = min(bitrate / 8000, 1.0)
             score += bitrate_score * weights.get('bitrate', 0.30)
+        elif check_mode == 'quick':
+            # In quick mode, if bitrate is missing, don't penalize - redistribute weight to other factors
+            # We'll normalize the score at the end to compensate for missing bitrate weight
+            pass
         
         # Resolution score (0-1)
         resolution = stream_data.get('resolution', 'N/A')
@@ -1624,6 +1637,15 @@ class StreamCheckerService:
         
         error_score = max(error_score, 0.0)
         score += error_score * weights.get('errors', 0.20)
+        
+        # In quick mode, normalize score if bitrate is missing
+        # This redistributes the bitrate weight proportionally to other factors
+        if check_mode == 'quick' and (not bitrate or bitrate == 0):
+            bitrate_weight = weights.get('bitrate', 0.30)
+            total_other_weights = 1.0 - bitrate_weight
+            if total_other_weights > 0:
+                # Normalize score: scale up by total weight / (1 - bitrate_weight)
+                score = score / total_other_weights
         
         return round(score, 2)
     

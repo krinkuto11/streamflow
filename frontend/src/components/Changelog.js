@@ -657,12 +657,12 @@ function Changelog() {
         <Card sx={{ mb: 3, bgcolor: 'error.dark', borderLeft: '4px solid', borderColor: 'error.main' }}>
           <CardContent>
             <Box display="flex" alignItems="center" gap={2}>
-              <ErrorIcon sx={{ fontSize: 40, color: 'error.light' }} />
+              <ErrorIcon sx={{ fontSize: 40, color: 'white' }} />
               <Box flex={1}>
-                <Typography variant="h6" color="error.light" fontWeight="bold">
+                <Typography variant="h6" color="white" fontWeight="bold">
                   Dead Streams Alert
                 </Typography>
-                <Typography variant="body2" color="error.light">
+                <Typography variant="body2" color="white">
                   {deadStreamsStats.total_dead_streams} stream{deadStreamsStats.total_dead_streams !== 1 ? 's are' : ' is'} currently marked as dead
                 </Typography>
               </Box>
@@ -670,7 +670,7 @@ function Changelog() {
                 label={`${deadStreamsStats.total_dead_streams} Dead`}
                 color="error"
                 size="large"
-                sx={{ fontWeight: 'bold', fontSize: '1rem', px: 2 }}
+                sx={{ fontWeight: 'bold', fontSize: '1rem', px: 2, color: 'white', bgcolor: 'error.main' }}
               />
             </Box>
           </CardContent>

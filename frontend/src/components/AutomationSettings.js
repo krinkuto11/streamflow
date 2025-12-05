@@ -441,6 +441,60 @@ function AutomationSettings() {
                   Stream Analysis Settings
                 </Typography>
               
+              <FormControl component="fieldset" fullWidth margin="normal">
+                <Typography variant="body2" color="text.secondary" gutterBottom>
+                  Stream Check Mode
+                </Typography>
+                <RadioGroup
+                  value={streamCheckerConfig.stream_analysis?.check_mode ?? 'full'}
+                  onChange={(e) => handleStreamCheckerConfigChange('stream_analysis.check_mode', e.target.value)}
+                >
+                  <Card variant="outlined" sx={{ mb: 1, p: 1, border: (streamCheckerConfig.stream_analysis?.check_mode ?? 'full') === 'full' ? 2 : 1, borderColor: (streamCheckerConfig.stream_analysis?.check_mode ?? 'full') === 'full' ? 'primary.main' : 'divider' }}>
+                    <FormControlLabel 
+                      value="full" 
+                      control={<Radio />} 
+                      label={
+                        <Box>
+                          <Typography variant="body1" fontWeight="bold">Full Mode</Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Analyzes bitrate, resolution, FPS, and codec. Takes longer but provides complete quality metrics. Best for accurate stream ranking.
+                          </Typography>
+                        </Box>
+                      }
+                      sx={{ alignItems: 'flex-start', m: 0 }}
+                    />
+                  </Card>
+                  <Card variant="outlined" sx={{ mb: 1, p: 1, border: (streamCheckerConfig.stream_analysis?.check_mode ?? 'full') === 'quick' ? 2 : 1, borderColor: (streamCheckerConfig.stream_analysis?.check_mode ?? 'full') === 'quick' ? 'primary.main' : 'divider' }}>
+                    <FormControlLabel 
+                      value="quick" 
+                      control={<Radio />} 
+                      label={
+                        <Box>
+                          <Typography variant="body1" fontWeight="bold">Quick Mode</Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Skips bitrate analysis for faster checking. Scores based on resolution, FPS, and codec only. Missing bitrate won't mark streams as dead or give them zero score.
+                          </Typography>
+                        </Box>
+                      }
+                      sx={{ alignItems: 'flex-start', m: 0 }}
+                    />
+                  </Card>
+                </RadioGroup>
+              </FormControl>
+              
+              {(streamCheckerConfig.stream_analysis?.check_mode ?? 'full') === 'full' && (
+                <TextField
+                  label="Probe Duration (seconds)"
+                  type="number"
+                  value={streamCheckerConfig.stream_analysis?.probe_duration ?? 5}
+                  onChange={(e) => handleStreamCheckerConfigChange('stream_analysis.probe_duration', parseInt(e.target.value))}
+                  fullWidth
+                  margin="normal"
+                  helperText="How long to analyze the stream for bitrate calculation. Longer = more accurate but slower. MPEG-TS streams need more time."
+                  inputProps={{ min: 1, max: 30 }}
+                />
+              )}
+              
               <TextField
                 label="FFmpeg/FFprobe User Agent"
                 type="text"
