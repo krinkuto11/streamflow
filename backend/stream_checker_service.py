@@ -65,19 +65,12 @@ class StreamCheckConfig:
     
     DEFAULT_CONFIG = {
         'enabled': True,
-        'check_interval': 300,  # DEPRECATED - checks now only triggered by M3U refresh
         'pipeline_mode': 'pipeline_1_5',  # Pipeline mode: 'disabled', 'pipeline_1', 'pipeline_1_5', 'pipeline_2', 'pipeline_2_5', 'pipeline_3'
         'global_check_schedule': {
             'enabled': True,
             'cron_expression': '0 3 * * *',  # Cron expression: default is daily at 3:00 AM
-            'frequency': 'daily',  # DEPRECATED: kept for backward compatibility - 'daily' or 'monthly'
-            'hour': 3,  # DEPRECATED: kept for backward compatibility - 3 AM for off-peak checking
-            'minute': 0,  # DEPRECATED: kept for backward compatibility
-            'day_of_month': 1  # DEPRECATED: kept for backward compatibility - Day of month for monthly checks (1-31)
         },
         'stream_analysis': {
-            'ffmpeg_duration': 30,  # DEPRECATED - No longer used by ffprobe (kept for backward compatibility)
-            'idet_frames': 500,  # DEPRECATED - No longer used by ffprobe (kept for backward compatibility)
             'timeout': 30,  # timeout for operations
             'retries': 1,  # retry attempts
             'retry_delay': 10,  # seconds between retries

@@ -83,30 +83,19 @@ class StreamCheckProgress:
 
 # --- Configuration ---
 def load_config():
-    """Loads the configuration from the config.ini file or returns defaults.
+    """Returns default configuration settings.
     
-    Note: config.ini is deprecated. This function now returns a default
-    configuration to maintain backward compatibility with existing code.
-    All settings use their default values.
+    All configuration is now managed through environment variables and JSON files.
+    This function provides default values for stream analysis settings.
     """
     config = configparser.ConfigParser()
-    config_path = Path(__file__).parent / 'config.ini'
-    
-    # If config.ini exists, load it for backward compatibility
-    if config_path.exists():
-        logger.info(f"Loading configuration from {config_path} (deprecated)")
-        config.read(config_path)
-    else:
-        # config.ini is deprecated - return default configuration
-        logger.debug("config.ini not found - using default configuration")
-        config['script_settings'] = {
-            'channel_group_ids': 'ALL',
-            'start_channel': '1',
-            'end_channel': '999',
-            'stream_last_measured_days': '7',
-            'fps_bonus_points': '55'
-        }
-    
+    config['script_settings'] = {
+        'channel_group_ids': 'ALL',
+        'start_channel': '1',
+        'end_channel': '999',
+        'stream_last_measured_days': '7',
+        'fps_bonus_points': '55'
+    }
     return config
 
 # --- Main Functionality ---
@@ -396,13 +385,11 @@ def _get_provider_from_url(url):
     except Exception:
         return "unknown_provider"
 
-def _analyze_stream_task(row, ffmpeg_duration, idet_frames, timeout, retries, retry_delay, config, user_agent='VLC/3.0.14'):
+def _analyze_stream_task(row, timeout, retries, retry_delay, config, user_agent='VLC/3.0.14'):
     """Analyzes a stream using a single ffprobe command.
     
     Args:
         row: Stream data dictionary
-        ffmpeg_duration: DEPRECATED - No longer used (kept for backward compatibility)
-        idet_frames: DEPRECATED - No longer used (kept for backward compatibility)
         timeout: Timeout in seconds for ffprobe operation
         retries: Number of retry attempts on failure
         retry_delay: Delay in seconds between retries
@@ -481,7 +468,7 @@ def _analyze_stream_task(row, ffmpeg_duration, idet_frames, timeout, retries, re
 
     return row
 
-def analyze_streams(config, input_csv, output_csv, fails_csv, ffmpeg_duration, idet_frames, timeout, max_workers, retries, retry_delay, user_agent='VLC/3.0.14'):
+def analyze_streams(config, input_csv, output_csv, fails_csv, timeout, retries, retry_delay, user_agent='VLC/3.0.14'):
     """Analyzes streams from a CSV file for various metrics and saves results incrementally.
     
     Args:
@@ -489,16 +476,13 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, ffmpeg_duration, i
         input_csv: Path to input CSV file with stream data
         output_csv: Path to output CSV file for results
         fails_csv: Path to CSV file for failed streams
-        ffmpeg_duration: DEPRECATED - No longer used (kept for backward compatibility)
-        idet_frames: DEPRECATED - No longer used (kept for backward compatibility)
         timeout: Timeout in seconds for ffprobe operation
-        max_workers: DEPRECATED - Processing is now synchronous (kept for backward compatibility)
         retries: Number of retry attempts on failure
         retry_delay: Delay in seconds between retries
         user_agent: User agent string for HTTP requests
     
     Note:
-        This function now uses synchronous processing (one stream at a time) with
+        This function uses synchronous processing (one stream at a time) with
         ffprobe for stream analysis. The ffprobe command includes -analyzeduration
         and -probesize parameters to properly detect bitrate in MPEG-TS streams.
     """
@@ -668,7 +652,7 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, ffmpeg_duration, i
                     stream_name = row.get('stream_name', 'Unknown')
                     logger.info(f"\n[{idx}/{total_streams}] ═══ Starting analysis of: {stream_name} ═══")
                     
-                    result_row = _analyze_stream_task(row, ffmpeg_duration, idet_frames, timeout, retries, retry_delay, config, user_agent)
+                    result_row = _analyze_stream_task(row, timeout, retries, retry_delay, config, user_agent)
                     completed_streams += 1
                     
                     stream_elapsed = (datetime.now() - stream_start_time).total_seconds()
@@ -1079,17 +1063,14 @@ def reorder_streams(config, input_csv):
     logger.info(f"  Errors: {error_count} channels")
     logger.info("="*80)
 
-def retry_failed_streams(config, input_csv, fails_csv, ffmpeg_duration, idet_frames, timeout, max_workers, user_agent='VLC/3.0.14'):
+def retry_failed_streams(config, input_csv, fails_csv, timeout, user_agent='VLC/3.0.14'):
     """Retries analysis for streams that previously failed.
     
     Args:
         config: Configuration object
         input_csv: Path to input CSV file with stream data
         fails_csv: Path to CSV file for failed streams output
-        ffmpeg_duration: DEPRECATED - No longer used (kept for backward compatibility)
-        idet_frames: DEPRECATED - No longer used (kept for backward compatibility)
         timeout: Timeout in seconds for ffprobe operation
-        max_workers: DEPRECATED - Processing is now synchronous (kept for backward compatibility)
         user_agent: User agent string for HTTP requests
     """
     if not os.path.exists(input_csv):
@@ -1130,7 +1111,7 @@ def retry_failed_streams(config, input_csv, fails_csv, ffmpeg_duration, idet_fra
     # Process streams synchronously (one at a time)
     for row in failed_streams:
         try:
-            result_row = _analyze_stream_task(row, ffmpeg_duration, idet_frames, timeout, 0, 0, config, user_agent)
+            result_row = _analyze_stream_task(row, timeout, 0, 0, config, user_agent)
             completed_streams += 1
             stream_id = result_row.get('stream_id')
             stream_name = result_row.get('stream_name', 'Unknown')
@@ -1191,10 +1172,7 @@ def main():
     analyze_parser.add_argument('--input', type=str, default='csv/02_grouped_channel_streams.csv')
     analyze_parser.add_argument('--output', type=str, default='csv/03_iptv_stream_measurements.csv')
     analyze_parser.add_argument('--fails_output', type=str, default='csv/04_fails.csv')
-    analyze_parser.add_argument('--duration', type=int, default=10, help='DEPRECATED - No longer used by ffprobe (kept for backward compatibility)')
-    analyze_parser.add_argument('--idet-frames', type=int, default=500, help='DEPRECATED - No longer used by ffprobe (kept for backward compatibility)')
     analyze_parser.add_argument('--timeout', type=int, default=30, help='Timeout in seconds for ffprobe operations')
-    analyze_parser.add_argument('--workers', type=int, default=8, help='DEPRECATED - Processing is now synchronous (kept for backward compatibility)')
     analyze_parser.add_argument('--retries', type=int, default=1)
     analyze_parser.add_argument('--retry-delay', type=int, default=10)
 
@@ -1209,10 +1187,7 @@ def main():
     retry_parser = subparsers.add_parser('retry', help='Retry analysis for failed streams.')
     retry_parser.add_argument('--input', type=str, default='csv/03_iptv_stream_measurements.csv')
     retry_parser.add_argument('--fails-output', type=str, default='csv/04_fails.csv')
-    retry_parser.add_argument('--duration', type=int, default=20, help='DEPRECATED - No longer used by ffprobe (kept for backward compatibility)')
-    retry_parser.add_argument('--idet-frames', type=int, default=500, help='DEPRECATED - No longer used by ffprobe (kept for backward compatibility)')
     retry_parser.add_argument('--timeout', type=int, default=30, help='Timeout in seconds for ffprobe operations')
-    retry_parser.add_argument('--workers', type=int, default=8, help='DEPRECATED - Processing is now synchronous (kept for backward compatibility)')
 
     # Automation commands
     automation_parser = subparsers.add_parser('automation', help='Automated stream management commands.')
@@ -1238,13 +1213,13 @@ def main():
             channel_ids = [int(cid.strip()) for cid in args.channel_ids.split(',')]
         fetch_streams(config, args.output, channel_ids)
     elif args.command == 'analyze':
-        analyze_streams(config, args.input, args.output, args.fails_output, args.duration, args.idet_frames, args.timeout, args.workers, args.retries, args.retry_delay)
+        analyze_streams(config, args.input, args.output, args.fails_output, args.timeout, args.retries, args.retry_delay)
     elif args.command == 'score':
         score_streams(config, args.input, args.output, args.update_stats)
     elif args.command == 'reorder':
         reorder_streams(config, args.input)
     elif args.command == 'retry':
-        retry_failed_streams(config, args.input, args.fails_output, args.duration, args.idet_frames, args.timeout, args.workers)
+        retry_failed_streams(config, args.input, args.fails_output, args.timeout)
     elif args.command == 'refresh-playlist':
         try:
             refresh_m3u_playlists(args.account_id)
@@ -1304,7 +1279,7 @@ def main():
         logger.info("Pipeline: fetch -> analyze -> score -> reorder")
         
         fetch_streams(config, 'csv/02_grouped_channel_streams.csv')
-        analyze_streams(config, 'csv/02_grouped_channel_streams.csv', 'csv/03_iptv_stream_measurements.csv', 'csv/04_fails.csv', 20, 500, 30, 8, 1, 10)
+        analyze_streams(config, 'csv/02_grouped_channel_streams.csv', 'csv/03_iptv_stream_measurements.csv', 'csv/04_fails.csv', 30, 1, 10)
         score_streams(config, 'csv/03_iptv_stream_measurements.csv', 'csv/05_iptv_streams_scored_sorted.csv', update_stats=True)
         reorder_streams(config, 'csv/05_iptv_streams_scored_sorted.csv')
         

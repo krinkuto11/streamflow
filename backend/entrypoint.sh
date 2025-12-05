@@ -13,14 +13,6 @@ API_PORT="${API_PORT:-5000}"
 DEBUG_MODE="${DEBUG_MODE:-false}"
 CONFIG_DIR="${CONFIG_DIR:-/app/data}"
 
-# Deprecated: Old manual interval approach (kept for backward compatibility warnings)
-if [ -n "$INTERVAL_SECONDS" ]; then
-    echo "[WARNING] INTERVAL_SECONDS environment variable is deprecated."
-    echo "[WARNING] The system now uses automated scheduling via the web API."
-    echo "[WARNING] Please configure automation via the web interface or API endpoints."
-    echo "[WARNING] The old manual triggering pattern is no longer recommended."
-fi
-
 # Check if configuration files exist, create defaults if needed
 echo "[INFO] Checking configuration files..."
 
