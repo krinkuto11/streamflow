@@ -272,8 +272,7 @@ def _get_stream_info(url, timeout, user_agent='VLC/3.0.14'):
         'ffprobe',
         '-user_agent', user_agent,
         '-v', 'error',
-        '-show_entries', 'stream=codec_name,codec_type,width,height,avg_frame_rate,bit_rate,sample_rate,channels',
-        '-show_entries', 'format=bit_rate,duration',
+        '-show_entries', 'stream=codec_name,codec_type,width,height,avg_frame_rate,bit_rate,sample_rate,channels:format=bit_rate,duration',
         '-of', 'json',
         url
     ]
@@ -326,7 +325,7 @@ def _get_stream_info(url, timeout, user_agent='VLC/3.0.14'):
                 
                 # Get video bitrate (prefer stream bitrate, fallback to format bitrate)
                 video_bitrate = video_stream.get('bit_rate')
-                if video_bitrate and video_bitrate != 'N/A':
+                if video_bitrate is not None:
                     try:
                         result_dict['bitrate_kbps'] = round(int(video_bitrate) / 1000, 2)
                     except (ValueError, TypeError):
@@ -335,7 +334,7 @@ def _get_stream_info(url, timeout, user_agent='VLC/3.0.14'):
             # If video bitrate not available from stream, try format bitrate
             if result_dict['bitrate_kbps'] == 0:
                 format_bitrate = format_info.get('bit_rate')
-                if format_bitrate and format_bitrate != 'N/A':
+                if format_bitrate is not None:
                     try:
                         result_dict['bitrate_kbps'] = round(int(format_bitrate) / 1000, 2)
                     except (ValueError, TypeError):
