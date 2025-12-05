@@ -147,7 +147,7 @@ POST   /api/stream-checker/mark-updated    # Mark updated
 ```json
 {
   "enabled": true,
-  "check_interval": 300,  // DEPRECATED - checks now triggered by M3U refresh
+  "check_interval": 300,
   "global_check_schedule": {
     "enabled": true,
     "hour": 3,
@@ -158,8 +158,6 @@ POST   /api/stream-checker/mark-updated    # Mark updated
     "retries": 1,
     "retry_delay": 10,
     "user_agent": "VLC/3.0.14"
-    // Note: ffmpeg_duration and idet_frames are deprecated as of this version
-    // ffprobe now uses -analyzeduration and -probesize for optimal MPEG-TS bitrate detection
   },
   "scoring": {
     "weights": {
@@ -180,6 +178,9 @@ POST   /api/stream-checker/mark-updated    # Mark updated
     "max_channels_per_run": 50
   }
 }
+```
+
+**Note:** As of the latest version, `ffmpeg_duration` and `idet_frames` parameters have been deprecated. Stream analysis now uses ffprobe with optimized `-analyzeduration` and `-probesize` parameters for accurate MPEG-TS bitrate detection. The `check_interval` parameter is also deprecated as checks are now triggered by M3U refresh events.
 ```
 
 ### Scoring Algorithm
