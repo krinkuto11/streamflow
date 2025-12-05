@@ -92,9 +92,7 @@ class StreamCheckConfig:
                 'errors': 0.20
             },
             'min_score': 0.0,  # minimum score to keep stream
-            'prefer_h265': True,  # prefer h265 over h264
-            'penalize_interlaced': True,
-            'penalize_dropped_frames': True
+            'prefer_h265': True  # prefer h265 over h264
         },
         'queue': {
             'max_size': 1000,
@@ -1645,30 +1643,10 @@ class StreamCheckerService:
         score += codec_score * weights.get('codec', 0.10)
         
         # Error penalty (0-1, inverted - fewer errors = higher score)
+        # Simplified: only check status
         error_score = 1.0
         if stream_data.get('status') != 'OK':
             error_score -= 0.5
-        if stream_data.get('err_decode', False):
-            error_score -= 0.2
-        if stream_data.get('err_discontinuity', False):
-            error_score -= 0.2
-        if stream_data.get('err_timeout', False):
-            error_score -= 0.3
-        
-        # Interlaced penalty
-        if self.config.get('scoring.penalize_interlaced', True):
-            interlaced = stream_data.get('interlaced_status', 'N/A')
-            if 'interlaced' in str(interlaced).lower():
-                error_score -= 0.1
-        
-        # Dropped frames penalty
-        if self.config.get('scoring.penalize_dropped_frames', True):
-            dropped = stream_data.get('frames_dropped', 0)
-            decoded = stream_data.get('frames_decoded', 0)
-            if isinstance(dropped, (int, float)) and isinstance(decoded, (int, float)) and decoded > 0:
-                drop_rate = dropped / decoded
-                if drop_rate > 0.01:  # More than 1% dropped
-                    error_score -= min(drop_rate * 5, 0.3)  # Up to 0.3 penalty
         
         error_score = max(error_score, 0.0)
         score += error_score * weights.get('errors', 0.20)

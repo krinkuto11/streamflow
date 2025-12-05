@@ -259,13 +259,21 @@ def _check_ffmpeg_installed():
         return False
 
 def _get_stream_info(url, timeout, user_agent='VLC/3.0.14'):
-    """Gets stream information using ffprobe."""
+    """Gets stream information using a single ffprobe command.
+    
+    Retrieves all necessary stream information in one call:
+    - Video: codec, resolution, framerate, bitrate
+    - Audio: codec, sample_rate, channels, bitrate
+    
+    Returns a dict with parsed information or None on failure.
+    """
     logger.debug(f"Running ffprobe for URL: {url[:50]}...")
     command = [
         'ffprobe',
         '-user_agent', user_agent,
         '-v', 'error',
-        '-show_entries', 'stream=codec_name,width,height,avg_frame_rate',
+        '-show_entries', 'stream=codec_name,codec_type,width,height,avg_frame_rate,bit_rate,sample_rate,channels',
+        '-show_entries', 'format=bit_rate,duration',
         '-of', 'json',
         url
     ]
@@ -274,170 +282,90 @@ def _get_stream_info(url, timeout, user_agent='VLC/3.0.14'):
         if result.stdout:
             data = json.loads(result.stdout)
             streams = data.get('streams', [])
+            format_info = data.get('format', {})
+            
             logger.debug(f"ffprobe returned {len(streams)} streams")
-            return streams
+            
+            # Parse video and audio streams
+            video_stream = None
+            audio_stream = None
+            
+            for stream in streams:
+                codec_type = stream.get('codec_type', '')
+                if codec_type == 'video' and not video_stream:
+                    video_stream = stream
+                elif codec_type == 'audio' and not audio_stream:
+                    audio_stream = stream
+            
+            # Build result dict
+            result_dict = {
+                'video_codec': 'N/A',
+                'audio_codec': 'N/A',
+                'resolution': '0x0',
+                'fps': 0,
+                'bitrate_kbps': 0,
+                'audio_sample_rate': 'N/A',
+                'audio_channels': 'N/A',
+                'status': 'OK'
+            }
+            
+            # Extract video info
+            if video_stream:
+                result_dict['video_codec'] = video_stream.get('codec_name', 'N/A')
+                width = video_stream.get('width', 0)
+                height = video_stream.get('height', 0)
+                result_dict['resolution'] = f"{width}x{height}"
+                
+                # Parse FPS
+                fps_str = video_stream.get('avg_frame_rate', '0/1')
+                try:
+                    num, den = map(int, fps_str.split('/'))
+                    result_dict['fps'] = round(num / den, 2) if den != 0 else 0
+                except (ValueError, ZeroDivisionError, AttributeError):
+                    result_dict['fps'] = 0
+                
+                # Get video bitrate (prefer stream bitrate, fallback to format bitrate)
+                video_bitrate = video_stream.get('bit_rate')
+                if video_bitrate and video_bitrate != 'N/A':
+                    try:
+                        result_dict['bitrate_kbps'] = round(int(video_bitrate) / 1000, 2)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # If video bitrate not available from stream, try format bitrate
+            if result_dict['bitrate_kbps'] == 0:
+                format_bitrate = format_info.get('bit_rate')
+                if format_bitrate and format_bitrate != 'N/A':
+                    try:
+                        result_dict['bitrate_kbps'] = round(int(format_bitrate) / 1000, 2)
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Extract audio info
+            if audio_stream:
+                result_dict['audio_codec'] = audio_stream.get('codec_name', 'N/A')
+                result_dict['audio_sample_rate'] = audio_stream.get('sample_rate', 'N/A')
+                result_dict['audio_channels'] = audio_stream.get('channels', 'N/A')
+            
+            # Determine status
+            if result_dict['resolution'] == '0x0' or result_dict['video_codec'] == 'N/A':
+                result_dict['status'] = 'No Video'
+            elif result_dict['bitrate_kbps'] == 0:
+                result_dict['status'] = 'No Bitrate'
+            
+            return result_dict
+            
         logger.debug("ffprobe returned empty output")
-        return []
+        return None
     except subprocess.TimeoutExpired:
         logger.warning(f"Timeout ({timeout}s) while fetching stream info for: {url[:50]}...")
-        return []
+        return None
     except json.JSONDecodeError as e:
         logger.warning(f"Failed to decode JSON from ffprobe for {url[:50]}...: {e}")
-        return []
+        return None
     except Exception as e:
         logger.error(f"Stream info check failed for {url[:50]}...: {e}")
-        return []
-
-def _check_interlaced_status(url, stream_name, idet_frames, timeout, user_agent='VLC/3.0.14'):
-    """
-    Checks if a video stream is interlaced using ffmpeg's idet filter.
-    Returns 'INTERLACED', 'PROGRESSIVE', or 'UNKNOWN' if detection fails.
-    """
-    logger.debug(f"Checking interlacing for '{stream_name}' using {idet_frames} frames...")
-    idet_command = [
-        'ffmpeg', '-user_agent', user_agent,
-        '-analyzeduration', '5000000', '-probesize', '5000000',
-        '-i', url, '-vf', 'idet', '-frames:v', str(idet_frames), '-an', '-f', 'null', 'NUL' if os.name == 'nt' else '/dev/null'
-    ]
-
-    try:
-        idet_result = subprocess.run(idet_command, capture_output=True, text=True, timeout=timeout)
-        idet_output = idet_result.stderr
-
-        interlaced_frames = 0
-        progressive_frames = 0
-
-        for line in idet_output.splitlines():
-            if "Single frame detection:" in line or "Multi frame detection:" in line:
-                tff_match = re.search(r'TFF:\s*(\d+)', line)
-                bff_match = re.search(r'BFF:\s*(\d+)', line)
-                progressive_match = re.search(r'Progressive:\s*(\d+)', line)
-
-                if tff_match: interlaced_frames += int(tff_match.group(1))
-                if bff_match: interlaced_frames += int(bff_match.group(1))
-                if progressive_match: progressive_frames += int(progressive_match.group(1))
-        
-        if interlaced_frames > progressive_frames:
-            status = "INTERLACED"
-            logger.debug(f"  → Interlaced detected: {interlaced_frames} interlaced vs {progressive_frames} progressive")
-        elif progressive_frames > interlaced_frames:
-            status = "PROGRESSIVE"
-            logger.debug(f"  → Progressive detected: {progressive_frames} progressive vs {interlaced_frames} interlaced")
-        else:
-            status = "UNKNOWN"
-            logger.debug(f"  → Unknown: {interlaced_frames} interlaced vs {progressive_frames} progressive")
-            
-        return status
-
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Timeout ({timeout}s) checking interlacing for {stream_name}")
-        return "UNKNOWN (Timeout)"
-    except Exception as e:
-        logger.error(f"Error checking interlacing for {stream_name}: {e}")
-        return "UNKNOWN (Error)"
-
-def _get_bitrate_and_frame_stats(url, ffmpeg_duration, timeout, user_agent='VLC/3.0.14'):
-    """Gets bitrate and frame statistics using ffmpeg.
-    
-    Uses multiple methods to detect bitrate:
-    1. Primary: Parse "Statistics:" line with "bytes read" (legacy method)
-    2. Fallback 1: Parse progress output lines (e.g., "size=12345kB time=00:00:30.00 bitrate=3333.3kbits/s")
-    3. Fallback 2: Calculate from total bytes transferred (any "bytes read" line)
-    4. Fallback 3: Extract from any line containing "bitrate=" pattern
-    """
-    logger.debug(f"Analyzing bitrate and frame stats for {ffmpeg_duration}s...")
-    command = [
-        'ffmpeg', '-re', '-v', 'debug', '-user_agent', user_agent,
-        '-i', url, '-t', str(ffmpeg_duration), '-f', 'null', '-'
-    ]
-    bitrate = "N/A"
-    frames_decoded = "N/A"
-    frames_dropped = "N/A"
-    elapsed = 0
-    status = "OK"
-
-    # Add buffer to timeout to account for ffmpeg startup, network latency, and shutdown overhead
-    # Since -re flag reads at real-time, ffmpeg takes at least ffmpeg_duration seconds
-    actual_timeout = timeout + ffmpeg_duration + 10
-
-    try:
-        start = time.time()
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=actual_timeout, text=True)
-        elapsed = time.time() - start
-        output = result.stderr
-        total_bytes = 0
-        progress_bitrate = None  # Track last progress bitrate separately
-        
-        for line in output.splitlines():
-            # Method 1: Primary method - Statistics line with bytes read
-            if "Statistics:" in line and "bytes read" in line:
-                try:
-                    parts = line.split("bytes read")
-                    size_str = parts[0].strip().split()[-1]
-                    total_bytes = int(size_str)
-                    if total_bytes > 0 and ffmpeg_duration > 0:
-                        bitrate = (total_bytes * 8) / 1000 / ffmpeg_duration
-                        logger.debug(f"  → Calculated bitrate (method 1): {bitrate:.2f} kbps from {total_bytes} bytes")
-                except ValueError:
-                    pass
-            
-            # Method 2: Parse progress output (e.g., "size=12345kB time=00:00:30.00 bitrate=3333.3kbits/s")
-            # Track latest progress bitrate as fallback, will use last one found
-            if "bitrate=" in line and "kbits/s" in line:
-                try:
-                    bitrate_match = re.search(r'bitrate=\s*(\d+\.?\d*)\s*kbits/s', line)
-                    if bitrate_match:
-                        # Store progress bitrate, will keep updating with later values
-                        progress_bitrate = float(bitrate_match.group(1))
-                        logger.debug(f"  → Found progress bitrate (method 2): {progress_bitrate:.2f} kbps")
-                except (ValueError, AttributeError):
-                    pass
-            
-            # Method 3: Alternative bytes read pattern (not requiring Statistics:)
-            if bitrate == "N/A" and "bytes read" in line and not "Statistics:" in line:
-                try:
-                    # Look for pattern like "12345 bytes read"
-                    bytes_match = re.search(r'(\d+)\s+bytes read', line)
-                    if bytes_match:
-                        total_bytes = int(bytes_match.group(1))
-                        if total_bytes > 0 and ffmpeg_duration > 0:
-                            calculated_bitrate = (total_bytes * 8) / 1000 / ffmpeg_duration
-                            logger.debug(f"  → Calculated bitrate (method 3): {calculated_bitrate:.2f} kbps from {total_bytes} bytes")
-                            bitrate = calculated_bitrate
-                except (ValueError, AttributeError):
-                    pass
-            
-            # Parse frame statistics
-            if "Input stream #" in line and "frames decoded;" in line:
-                decoded_match = re.search(r'(\d+)\s*frames decoded', line)
-                errors_match = re.search(r'(\d+)\s*decode errors', line)
-                if decoded_match: 
-                    frames_decoded = int(decoded_match.group(1))
-                    logger.debug(f"  → Frames decoded: {frames_decoded}")
-                if errors_match: 
-                    frames_dropped = int(errors_match.group(1))
-                    logger.debug(f"  → Decode errors: {frames_dropped}")
-        
-        # Use progress bitrate as final fallback if primary methods didn't find anything
-        if bitrate == "N/A" and progress_bitrate is not None:
-            bitrate = progress_bitrate
-            logger.debug(f"  → Using last progress bitrate as fallback: {bitrate:.2f} kbps")
-        
-        # Log if bitrate detection failed
-        if bitrate == "N/A":
-            logger.warning(f"  ⚠ Failed to detect bitrate from ffmpeg output (analyzed for {ffmpeg_duration}s)")
-            logger.debug(f"  → Searched {len(output.splitlines())} lines of output")
-        
-        logger.debug(f"  → Analysis completed in {elapsed:.2f}s")
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Timeout ({actual_timeout}s) while fetching bitrate/frames")
-        status = "Timeout"
-        elapsed = actual_timeout
-    except Exception as e:
-        logger.error(f"Bitrate/frames check failed: {e}")
-        status = "Error"
-
-    return bitrate, frames_decoded, frames_dropped, status, elapsed
+        return None
 
 def _get_provider_from_url(url):
     """Extracts the hostname and port as a provider identifier."""
@@ -446,98 +374,12 @@ def _get_provider_from_url(url):
     except Exception:
         return "unknown_provider"
 
-def _check_stream_for_critical_errors(url, stream_name, timeout, config):
-    """
-    Runs a specific ffmpeg command to check for critical, provider-side errors.
-    Returns a dictionary of identified critical errors.
-    """
-    logger.debug(f"Checking for critical errors in stream (timeout: {timeout}s)...")
-    settings = config['script_settings']
-    hwaccel_mode = settings.get('ffmpeg_hwaccel_mode', 'none').lower()
-
-    # Base command arguments
-    ffmpeg_command = [
-        'ffmpeg',
-        '-probesize', '500000', '-analyzeduration', '1000000',
-        '-fflags', '+genpts+discardcorrupt', '-flags', 'low_delay',
-        '-flush_packets', '1', '-avoid_negative_ts', 'make_zero',
-        '-timeout', '5000000', '-rw_timeout', '5000000',
-    ]
-
-    # Hardware acceleration specific arguments
-    if hwaccel_mode == 'qsv':
-        ffmpeg_command.extend([
-            '-hwaccel', 'qsv', '-hwaccel_output_format', 'qsv',
-        ])
-        logger.debug(f"  Using QSV hardware acceleration")
-
-    # Input and common arguments
-    ffmpeg_command.extend([
-        '-i', url,
-        '-t', '20', # 20 second duration for the check
-        '-map', '0:v:0', '-map', '0:a:0?', '-map', '0:s?',
-    ])
-
-    # Codec and output arguments
-    if hwaccel_mode == 'qsv':
-        ffmpeg_command.extend([
-            '-c:v', 'hevc_qsv',
-        ])
-    else: # Default to software encoding
-        ffmpeg_command.extend([
-            '-c:v', 'libx265',
-        ])
-
-    ffmpeg_command.extend([
-        '-preset', 'veryfast', '-profile:v', 'main', '-g', '50', '-bf', '1',
-        '-b:v', '12000k', '-maxrate', '15000k', '-bufsize', '25000k',
-        '-c:a', 'libfdk_aac', '-vbr', '4', '-b:a', '128k', '-ac', '2',
-        '-af', 'aresample=async=0', '-fps_mode', 'passthrough',
-        '-f', 'null', '-'
-    ])
-
-    errors = {
-        'err_decode': False,
-        'err_discontinuity': False,
-        'err_timeout': False,
-    }
-
-    try:
-        start_time = time.time()
-        result = subprocess.run(
-            ffmpeg_command,
-            capture_output=True, # Captures both stdout and stderr
-            text=True,
-            timeout=timeout
-        )
-        elapsed = time.time() - start_time
-        stderr_output = result.stderr
-
-        if "decode_slice_header error" in stderr_output:
-            errors['err_decode'] = True
-            logger.debug(f"  ✗ Decode error detected")
-        if "timestamp discontinuity" in stderr_output:
-            errors['err_discontinuity'] = True
-            logger.debug(f"  ✗ Timestamp discontinuity detected")
-        if "Connection timed out" in stderr_output:
-            errors['err_timeout'] = True
-            logger.debug(f"  ✗ Connection timeout detected")
-        
-        if not any(errors.values()):
-            logger.debug(f"  ✓ No critical errors detected (elapsed: {elapsed:.2f}s)")
-        else:
-            logger.debug(f"  Critical errors found (elapsed: {elapsed:.2f}s): {errors}")
-
-    except subprocess.TimeoutExpired:
-        logger.warning(f"  ✗ Timeout ({timeout}s) during critical error check for {stream_name}")
-        errors['err_timeout'] = True
-    except Exception as e:
-        logger.error(f"  ✗ Exception during critical error check for {stream_name}: {e}")
-        errors['err_timeout'] = True
-
-    return errors
-
 def _analyze_stream_task(row, ffmpeg_duration, idet_frames, timeout, retries, retry_delay, config, user_agent='VLC/3.0.14'):
+    """Analyzes a stream using a single ffprobe command.
+    
+    Parameters ffmpeg_duration and idet_frames are kept for backward compatibility but are no longer used.
+    The analysis is now simplified to use only ffprobe.
+    """
     url = row.get('stream_url')
     stream_name = row.get('stream_name', 'Unknown')
     stream_id = row.get('stream_id', 'Unknown')
@@ -564,84 +406,42 @@ def _analyze_stream_task(row, ffmpeg_duration, idet_frames, timeout, retries, re
             row['audio_codec'] = 'N/A'
             row['resolution'] = '0x0'
             row['fps'] = 0
-            row['interlaced_status'] = 'N/A'
             row['bitrate_kbps'] = 0
-            row['frames_decoded'] = 'N/A'
-            row['frames_dropped'] = 'N/A'
             row['status'] = 'N/A'
+            row['audio_sample_rate'] = 'N/A'
+            row['audio_channels'] = 'N/A'
 
-            # 1. Get Codec, Resolution, FPS from ffprobe
-            logger.info(f"  [1/4] Fetching codec/resolution/FPS info...")
-            streams_info = _get_stream_info(url, timeout, user_agent)
-            video_info = next((s for s in streams_info if 'width' in s), None)
-            audio_info = next((s for s in streams_info if 'codec_name' in s and 'width' not in s), None)
-
-            if video_info:
-                row['video_codec'] = video_info.get('codec_name')
-                row['resolution'] = f"{video_info.get('width')}x{video_info.get('height')}"
-                fps_str = video_info.get('avg_frame_rate', '0/1')
-                try:
-                    num, den = map(int, fps_str.split('/'))
-                    row['fps'] = round(num / den, 2) if den != 0 else 0
-                except (ValueError, ZeroDivisionError):
-                    row['fps'] = 0
-                logger.info(f"    ✓ Video: {row['video_codec']}, {row['resolution']}, {row['fps']} FPS")
-            else:
-                logger.warning(f"    ✗ No video info found")
+            # Get all stream info with single ffprobe command
+            logger.info(f"  Analyzing stream with ffprobe...")
+            stream_info = _get_stream_info(url, timeout, user_agent)
             
-            if audio_info:
-                row['audio_codec'] = audio_info.get('codec_name')
-                logger.info(f"    ✓ Audio: {row['audio_codec']}")
+            if stream_info:
+                # Update row with all extracted information
+                row['video_codec'] = stream_info.get('video_codec', 'N/A')
+                row['audio_codec'] = stream_info.get('audio_codec', 'N/A')
+                row['resolution'] = stream_info.get('resolution', '0x0')
+                row['fps'] = stream_info.get('fps', 0)
+                row['bitrate_kbps'] = stream_info.get('bitrate_kbps', 0)
+                row['audio_sample_rate'] = stream_info.get('audio_sample_rate', 'N/A')
+                row['audio_channels'] = stream_info.get('audio_channels', 'N/A')
+                row['status'] = stream_info.get('status', 'OK')
+                
+                logger.info(f"    ✓ Video: {row['video_codec']}, {row['resolution']}, {row['fps']} FPS, {row['bitrate_kbps']} kbps")
+                logger.info(f"    ✓ Audio: {row['audio_codec']}, {row['audio_sample_rate']} Hz, {row['audio_channels']} channels")
+                logger.info(f"    ✓ Status: {row['status']}")
             else:
-                logger.warning(f"    ✗ No audio info found")
+                row['status'] = 'Error'
+                logger.warning(f"    ✗ Failed to analyze stream")
 
-            # 2. Get Bitrate and Frame Drop stats from ffmpeg
-            logger.info(f"  [2/4] Analyzing bitrate and frame stats...")
-            bitrate, frames_decoded, frames_dropped, status, elapsed = _get_bitrate_and_frame_stats(url, ffmpeg_duration, timeout, user_agent)
-            row['bitrate_kbps'] = bitrate
-            row['frames_decoded'] = frames_decoded
-            row['frames_dropped'] = frames_dropped
-            row['status'] = status
-            
-            if status == "OK":
-                logger.info(f"    ✓ Bitrate: {bitrate} kbps, Frames: {frames_decoded} decoded, {frames_dropped} dropped (elapsed: {elapsed:.2f}s)")
-            else:
-                logger.warning(f"    ✗ Status: {status} (elapsed: {elapsed:.2f}s)")
-
-            # 3. Check for interlacing if stream is OK so far
-            if status == "OK":
-                logger.info(f"  [3/4] Checking interlaced status...")
-                row['interlaced_status'] = _check_interlaced_status(url, stream_name, idet_frames, timeout, user_agent)
-                logger.info(f"    ✓ Interlaced status: {row['interlaced_status']}")
-            else:
-                logger.info(f"  [3/4] Skipping interlace check due to previous errors")
-                row['interlaced_status'] = "N/A"
-
-            # 4. Perform critical error check
-            logger.info(f"  [4/4] Checking for critical errors...")
-            critical_errors = _check_stream_for_critical_errors(url, stream_name, timeout, config)
-            row.update(critical_errors)
-            error_count = sum(critical_errors.values())
-            if error_count > 0:
-                logger.warning(f"    ✗ Found {error_count} critical error(s): {critical_errors}")
-            else:
-                logger.info(f"    ✓ No critical errors detected")
-
-            # If the main status is OK, break the retry loop
-            if status == "OK":
+            # If the status is OK, break the retry loop
+            if row['status'] == 'OK':
                 logger.info(f"  ✓ Stream analysis complete for {stream_name}")
                 break
 
             # If not the last attempt, wait before retrying
             if attempt < retries:
-                logger.warning(f"  Stream '{stream_name}' failed with status '{status}'. Retrying in {retry_delay} seconds... ({attempt + 1}/{retries})")
+                logger.warning(f"  Stream '{stream_name}' failed with status '{row['status']}'. Retrying in {retry_delay} seconds... ({attempt + 1}/{retries})")
                 time.sleep(retry_delay)
-
-        # Respect ffmpeg duration to avoid hammering provider
-        if isinstance(elapsed, (int, float)) and elapsed < ffmpeg_duration:
-            wait_time = ffmpeg_duration - elapsed
-            logger.debug(f"  Waiting additional {wait_time:.2f} seconds before next stream from {provider}")
-            time.sleep(wait_time)
 
     return row
 
@@ -758,9 +558,8 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, ffmpeg_duration, i
     # --- Execute Analysis and Write Incrementally ---
     final_columns = [
         'channel_number', 'channel_id', 'stream_id', 'stream_name', 'stream_url',
-        'channel_group_id', 'timestamp', 'video_codec', 'audio_codec', 'interlaced_status',
-        'status', 'bitrate_kbps', 'fps', 'resolution', 'frames_decoded', 'frames_dropped',
-        'err_decode', 'err_discontinuity', 'err_timeout'
+        'channel_group_id', 'timestamp', 'video_codec', 'audio_codec',
+        'status', 'bitrate_kbps', 'fps', 'resolution', 'audio_sample_rate', 'audio_channels'
     ]
     
     # Ensure the output directory exists
@@ -871,8 +670,6 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, ffmpeg_duration, i
                     
                     # Update row with error info and write to both files
                     row.update({'timestamp': datetime.now().isoformat(), 'status': "Exception"})
-                    default_errors = {'err_decode': False, 'err_discontinuity': False, 'err_timeout': True}
-                    row.update(default_errors)
                     
                     writer_out.writerow(row)
                     writer_fails.writerow(row)
@@ -986,29 +783,21 @@ def score_streams(config, input_csv, output_csv, update_stats=False):
     # Convert types, handling potential errors
     logger.info("Converting data types for scoring...")
     df['bitrate_kbps'] = pd.to_numeric(df['bitrate_kbps'], errors='coerce')
-    df['frames_decoded'] = pd.to_numeric(df['frames_decoded'], errors='coerce')
-    df['frames_dropped'] = pd.to_numeric(df['frames_dropped'], errors='coerce')
 
     # Group by stream_id and calculate averages
     logger.info("Calculating averages per stream...")
     summary = df.groupby('stream_id').agg(
-        avg_bitrate_kbps=('bitrate_kbps', 'mean'),
-        avg_frames_decoded=('frames_decoded', 'mean'),
-        avg_frames_dropped=('frames_dropped', 'mean')
+        avg_bitrate_kbps=('bitrate_kbps', 'mean')
     ).reset_index()
     logger.info(f"✓ Calculated averages for {len(summary)} unique streams")
 
     # Merge with the latest metadata for each stream
     logger.info("Merging with latest metadata...")
     latest_meta = df.drop_duplicates(subset='stream_id', keep='last')
-    summary = pd.merge(summary, latest_meta.drop(columns=['bitrate_kbps', 'frames_decoded', 'frames_dropped']), on='stream_id')
-
-    # Calculate dropped frame percentage
-    logger.info("Calculating dropped frame percentages...")
-    summary['dropped_frame_percentage'] = (summary['avg_frames_dropped'] / summary['avg_frames_decoded'] * 100).fillna(0)
+    summary = pd.merge(summary, latest_meta.drop(columns=['bitrate_kbps']), on='stream_id')
 
     # Score and Sort
-    logger.info("Calculating scores based on resolution, FPS, bitrate, and errors...")
+    logger.info("Calculating scores based on resolution, FPS, and bitrate...")
     RESOLUTION_SCORES = {
         '3840x2160': 100, '1920x1080': 80, '1280x720': 50,
         '960x540': 20, 'Unknown': 0, '': 0
@@ -1025,24 +814,11 @@ def score_streams(config, input_csv, output_csv, update_stats=False):
     summary['max_bitrate_for_channel'] = summary.groupby('channel_id')['avg_bitrate_kbps'].transform('max')
     summary['bitrate_score'] = (summary['avg_bitrate_kbps'] / (summary['max_bitrate_for_channel'] * 0.01)).fillna(0)
     logger.info(f"  Bitrate scoring applied (relative to channel max)")
-    
-    summary['dropped_frames_penalty'] = summary['dropped_frame_percentage'] * 1
-    logger.info(f"  Dropped frames penalty calculated")
-
-    # Calculate penalty for critical errors
-    error_columns = ['err_decode', 'err_discontinuity', 'err_timeout']
-    for col in error_columns:
-        summary[col] = pd.to_numeric(summary[col], errors='coerce').fillna(0)
-    summary['error_penalty'] = summary[error_columns].sum(axis=1) * 25
-    streams_with_errors = (summary['error_penalty'] > 0).sum()
-    logger.info(f"  Error penalties applied (25 pts each, {streams_with_errors} streams affected)")
 
     summary['score'] = (
         summary['bitrate_score'] +
         summary['resolution_score'] +
-        summary['fps_bonus'] -
-        summary['dropped_frames_penalty'] -
-        summary['error_penalty']
+        summary['fps_bonus']
     )
     summary.loc[summary['avg_bitrate_kbps'].isna(), 'score'] = -1
     
@@ -1052,8 +828,8 @@ def score_streams(config, input_csv, output_csv, update_stats=False):
     # Ensure all columns are present for the final CSV
     final_columns = [
         'stream_id', 'channel_number', 'channel_id', 'channel_group_id', 'stream_name', 'stream_url',
-        'avg_bitrate_kbps', 'avg_frames_decoded', 'avg_frames_dropped', 'dropped_frame_percentage',
-        'fps', 'resolution', 'video_codec', 'audio_codec', 'interlaced_status', 'status', 'score', 'error_penalty'
+        'avg_bitrate_kbps', 'fps', 'resolution', 'video_codec', 'audio_codec', 'audio_sample_rate', 
+        'audio_channels', 'status', 'score'
     ]
     for col in final_columns:
         if col not in df_sorted.columns:
@@ -1264,7 +1040,7 @@ def retry_failed_streams(config, input_csv, fails_csv, ffmpeg_duration, idet_fra
         fieldnames = reader.fieldnames or []
         all_rows = list(reader)
 
-    required_cols = ['video_codec', 'audio_codec', 'interlaced_status', 'status']
+    required_cols = ['video_codec', 'audio_codec', 'audio_sample_rate', 'audio_channels', 'status']
     for col in required_cols:
         if col not in fieldnames:
             fieldnames.append(col)
