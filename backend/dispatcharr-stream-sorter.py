@@ -83,13 +83,30 @@ class StreamCheckProgress:
 
 # --- Configuration ---
 def load_config():
-    """Loads the configuration from the config.ini file."""
+    """Loads the configuration from the config.ini file or returns defaults.
+    
+    Note: config.ini is deprecated. This function now returns a default
+    configuration to maintain backward compatibility with existing code.
+    All settings use their default values.
+    """
     config = configparser.ConfigParser()
     config_path = Path(__file__).parent / 'config.ini'
-    if not config_path.exists():
-        logger.error(f"Configuration file not found at: {config_path}")
-        sys.exit(1)
-    config.read(config_path)
+    
+    # If config.ini exists, load it for backward compatibility
+    if config_path.exists():
+        logger.info(f"Loading configuration from {config_path} (deprecated)")
+        config.read(config_path)
+    else:
+        # config.ini is deprecated - return default configuration
+        logger.debug("config.ini not found - using default configuration")
+        config['script_settings'] = {
+            'channel_group_ids': 'ALL',
+            'start_channel': '1',
+            'end_channel': '999',
+            'stream_last_measured_days': '7',
+            'fps_bonus_points': '55'
+        }
+    
     return config
 
 # --- Main Functionality ---
@@ -113,7 +130,7 @@ def fetch_streams(config, output_file, channel_ids=None):
         end_range = settings.getint('end_channel', 999)
         logger.info(f"Configuration loaded - Groups: {group_ids_str}, Channel range: {start_range}-{end_range}")
     except ValueError:
-        logger.error("Invalid number format in config.ini for start/end channel. Please provide valid integers.")
+        logger.error("Invalid number format for start/end channel configuration. Please provide valid integers.")
         return
 
     # --- Fetch initial data ---
@@ -166,7 +183,7 @@ def fetch_streams(config, output_file, channel_ids=None):
                 target_channels = [ch for ch in all_channels if ch.get('channel_group_id') in target_group_ids]
                 logger.info(f"After group filter: {len(target_channels)} channels remain")
             except ValueError:
-                logger.error(f"Invalid channel_group_ids in config.ini: '{group_ids_str}'. Please use a comma-separated list of numbers.")
+                logger.error(f"Invalid channel_group_ids configuration: '{group_ids_str}'. Please use a comma-separated list of numbers.")
                 return
         else:
             logger.info("No specific groups selected (ALL). Using channel number range as primary filter.")
@@ -186,7 +203,7 @@ def fetch_streams(config, output_file, channel_ids=None):
         if channel_ids:
             logger.warning(f"No channels found matching the provided channel IDs: {channel_ids}")
         else:
-            logger.error("Conflict in filters: No channels were found that match BOTH the selected group(s) and the channel number range. Please check your config.ini. Aborting.")
+            logger.error("Conflict in filters: No channels were found that match BOTH the selected group(s) and the channel number range. Please check your configuration. Aborting.")
         return
 
     logger.info(f"FINAL: {len(final_filtered_channels)} channels to process after applying all filters.")
@@ -513,7 +530,7 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, ffmpeg_duration, i
         group_ids_str = settings.get('channel_group_ids', 'ALL').strip()
         logger.info(f"Filter settings - Groups: {group_ids_str}, Channel range: {start_range}-{end_range}")
     except ValueError:
-        logger.error("Invalid start_channel or end_channel in config.ini. Aborting analyze.")
+        logger.error("Invalid start_channel or end_channel configuration. Aborting analyze.")
         return
 
     if group_ids_str.upper() != 'ALL':
@@ -524,7 +541,7 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, ffmpeg_duration, i
             df = df[df['channel_group_id'].isin(target_group_ids)]
             logger.info(f"Group filter applied: {before_count} → {len(df)} streams")
         except ValueError:
-            logger.error(f"Invalid channel_group_ids in config.ini: '{group_ids_str}'. Aborting analyze.")
+            logger.error(f"Invalid channel_group_ids configuration: '{group_ids_str}'. Aborting analyze.")
             return
 
     df['channel_number'] = pd.to_numeric(df['channel_number'], errors='coerce')
@@ -543,7 +560,7 @@ def analyze_streams(config, input_csv, output_csv, fails_csv, ffmpeg_duration, i
         logger.info(f"Pruning streams analyzed within last {days_to_keep} days...")
     except (ValueError, TypeError):
         days_to_keep = 7
-        logger.warning("Invalid or missing stream_last_measured_days in config.ini, defaulting to 7 days.")
+        logger.warning("Invalid or missing stream_last_measured_days configuration, defaulting to 7 days.")
 
     if days_to_keep > 0 and os.path.exists(output_csv):
         try:
@@ -784,14 +801,14 @@ def score_streams(config, input_csv, output_csv, update_stats=False):
         logger.error(f"Error reading CSV: {e}")
         return
 
-    # --- Filtering based on config.ini ---
+    # --- Filtering based on configuration ---
     try:
         start_range = settings.getint('start_channel', 1)
         end_range = settings.getint('end_channel', 999)
         group_ids_str = settings.get('channel_group_ids', 'ALL').strip()
         logger.info(f"Filter settings - Groups: {group_ids_str}, Channel range: {start_range}-{end_range}")
     except ValueError:
-        logger.error("Invalid start_channel or end_channel in config.ini. Aborting score.")
+        logger.error("Invalid start_channel or end_channel configuration. Aborting score.")
         return
 
     # Filter by group first if specified
@@ -803,7 +820,7 @@ def score_streams(config, input_csv, output_csv, update_stats=False):
             df = df[df['channel_group_id'].isin(target_group_ids)]
             logger.info(f"Group filter applied: {before_count} → {len(df)} streams")
         except ValueError:
-            logger.error(f"Invalid channel_group_ids in config.ini: '{group_ids_str}'. Aborting score.")
+            logger.error(f"Invalid channel_group_ids configuration: '{group_ids_str}'. Aborting score.")
             return
 
     # Then filter by channel number range
@@ -971,7 +988,7 @@ def reorder_streams(config, input_csv):
         group_ids_str = settings.get('channel_group_ids', 'ALL').strip()
         logger.info(f"Filter settings - Groups: {group_ids_str}, Channel range: {start_range}-{end_range}")
     except ValueError:
-        logger.error("Invalid start_channel or end_channel in config.ini. Aborting reorder.")
+        logger.error("Invalid start_channel or end_channel configuration. Aborting reorder.")
         return
 
     logger.info(f"Loading scored CSV: {input_csv}")
@@ -991,7 +1008,7 @@ def reorder_streams(config, input_csv):
             df = df[df['channel_group_id'].isin(target_group_ids)]
             logger.info(f"Group filter applied: {before_count} → {len(df)} streams")
         except ValueError:
-            logger.error(f"Invalid channel_group_ids in config.ini: '{group_ids_str}'. Aborting reorder.")
+            logger.error(f"Invalid channel_group_ids configuration: '{group_ids_str}'. Aborting reorder.")
             return
 
     # Then filter by channel number range
