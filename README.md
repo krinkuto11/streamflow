@@ -24,7 +24,7 @@ See [Deployment Guide](docs/DEPLOYMENT.md) for detailed instructions.
 
 - **5 Pipeline Modes**: Choose the automation level that fits your needs (from continuous checking to scheduled-only)
 - **Automated M3U Playlist Management**: Refresh playlists every 5 minutes (configurable)
-- **Stream Quality Checking**: Analyze streams for bitrate, resolution, FPS, codec quality, and errors
+- **Stream Quality Checking**: Two modes - Full Mode (with bitrate) or Quick Mode (faster, no bitrate). Analyze streams for bitrate, resolution, FPS, codec quality, and errors
 - **Automatic Stream Reordering**: Best quality streams moved to the top
 - **Stream Discovery**: Regex patterns for automatic stream-to-channel assignment
 - **Global Action**: Manual or scheduled complete update cycles (Update → Match → Check all channels)
