@@ -20,7 +20,7 @@ from unittest.mock import Mock, patch, MagicMock
 # Add backend to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from udi_analyzer import (
+from backend.tests.udi_analyzer import (
     APIEndpoint,
     DataEntity,
     UDIAnalysisReport,
