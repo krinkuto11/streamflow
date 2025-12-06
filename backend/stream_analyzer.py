@@ -24,6 +24,10 @@ from logging_config import setup_logging
 
 logger = setup_logging(__name__)
 
+# Network timeout ratio - used to calculate rw_timeout from subprocess timeout
+# Set to 80% to allow time for cleanup and graceful timeout handling
+NETWORK_TIMEOUT_RATIO = 0.8
+
 # Provider-based semaphores to prevent overwhelming a single provider
 provider_semaphores: Dict[str, threading.Semaphore] = {}
 semaphore_lock = threading.Lock()
@@ -99,8 +103,8 @@ def get_stream_info(url: str, timeout: int, user_agent: str = 'VLC/3.0.14',
     logger.debug(f"Running ffprobe for URL: {url[:50]}... (mode: {check_mode})")
     
     # Calculate network timeout in microseconds (should be less than subprocess timeout)
-    # Use 80% of the timeout to leave time for cleanup
-    network_timeout_us = int(timeout * 0.8 * 1000000)
+    # Use NETWORK_TIMEOUT_RATIO of the timeout to leave time for cleanup
+    network_timeout_us = int(timeout * NETWORK_TIMEOUT_RATIO * 1000000)
     
     # Build command based on check mode
     command = ['ffprobe', '-user_agent', user_agent]

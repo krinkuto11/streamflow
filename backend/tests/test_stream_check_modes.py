@@ -251,7 +251,7 @@ class TestStreamAnalyzerModes(unittest.TestCase):
     
     def test_get_stream_info_includes_network_timeout(self):
         """Test that ffprobe includes -rw_timeout parameter for network streams."""
-        from stream_analyzer import get_stream_info
+        from stream_analyzer import get_stream_info, NETWORK_TIMEOUT_RATIO
         
         with patch('stream_analyzer.subprocess.run') as mock_run:
             mock_run.return_value = Mock(stdout='{"streams":[],"format":{}}', stderr='')
@@ -263,11 +263,11 @@ class TestStreamAnalyzerModes(unittest.TestCase):
             call_args = mock_run.call_args[0][0]
             self.assertIn('-rw_timeout', call_args)
             
-            # The network timeout should be 80% of the timeout (24 seconds = 24000000 microseconds)
+            # The network timeout should be NETWORK_TIMEOUT_RATIO of the timeout (24 seconds = 24000000 microseconds)
             rw_timeout_idx = call_args.index('-rw_timeout')
             rw_timeout_value = int(call_args[rw_timeout_idx + 1])
-            expected_timeout_us = int(30 * 0.8 * 1000000)
-            self.assertEqual(rw_timeout_value, expected_timeout_us, "Network timeout should be 80% of subprocess timeout")
+            expected_timeout_us = int(30 * NETWORK_TIMEOUT_RATIO * 1000000)
+            self.assertEqual(rw_timeout_value, expected_timeout_us, f"Network timeout should be {NETWORK_TIMEOUT_RATIO*100}% of subprocess timeout")
 
 
 if __name__ == '__main__':

@@ -491,7 +491,7 @@ function AutomationSettings() {
                   fullWidth
                   margin="normal"
                   helperText="How long to analyze the stream for bitrate calculation. Longer = more accurate but slower. MPEG-TS and buffering streams need more time (recommended: 10-15s)."
-                  inputProps={{ min: 5, max: 30 }}
+                  inputProps={{ min: 3, max: 30 }}
                 />
               )}
               
