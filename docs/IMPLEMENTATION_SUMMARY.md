@@ -154,10 +154,12 @@ POST   /api/stream-checker/mark-updated    # Mark updated
     "minute": 0
   },
   "stream_analysis": {
-    "timeout": 30,
-    "retries": 1,
+    "timeout": 45,
+    "retries": 2,
     "retry_delay": 10,
-    "user_agent": "VLC/3.0.14"
+    "user_agent": "VLC/3.0.14",
+    "check_mode": "full",
+    "probe_duration": 10
   },
   "scoring": {
     "weights": {
@@ -181,7 +183,8 @@ POST   /api/stream-checker/mark-updated    # Mark updated
 ```
 
 **Note:** As of the latest version, `ffmpeg_duration` and `idet_frames` parameters have been deprecated. Stream analysis now uses ffprobe with optimized `-analyzeduration` and `-probesize` parameters for accurate MPEG-TS bitrate detection. The `check_interval` parameter is also deprecated as checks are now triggered by M3U refresh events.
-```
+
+**Timeout Improvements:** Network timeout protection has been added via `-rw_timeout` parameter to prevent ffprobe from hanging on slow or buffering streams. Default timeout increased to 45 seconds and probe_duration increased to 10 seconds for better handling of MPEG-TS streams with buffering.
 
 ### Scoring Algorithm
 

@@ -30,10 +30,12 @@ Multi-factor analysis of stream quality with two configurable modes:
 - **Error Detection**: Decode errors, discontinuities, timeouts
 
 **Technical Implementation:**
-- Uses ffprobe with configurable probe duration (default: 5 seconds)
+- Uses ffprobe with configurable probe duration (default: 10 seconds)
+- Network timeout protection via `-rw_timeout` to prevent hanging on buffering streams
 - `-analyzeduration` and `-probesize` set based on probe duration to ensure proper bitrate detection
 - Best for accurate stream ranking but takes longer per stream
 - Streams without bitrate are marked as dead
+- Default timeout: 45 seconds (allows adequate time for buffering)
 
 #### Quick Mode
 - **Resolution**: Width × height detection
@@ -43,11 +45,13 @@ Multi-factor analysis of stream quality with two configurable modes:
 - **Error Detection**: Decode errors, discontinuities, timeouts
 
 **Technical Implementation:**
-- Uses ffprobe with minimal probe duration (0.1 seconds)
+- Uses ffprobe with minimal probe duration (1 second, increased for buffering)
+- Network timeout protection via `-rw_timeout` to prevent hanging
 - Skips bitrate analysis for faster checking
 - Best for large playlists or when speed is priority
 - Scoring relies on resolution, FPS, and codec only
 - Streams without bitrate are NOT marked as dead
+- Faster but still allows for basic stream buffering
 
 **Mode Selection:** Configure in the Stream Analysis Settings under Configuration page. Choose based on your needs:
 - Use **Full Mode** for accurate bitrate-based stream ranking
