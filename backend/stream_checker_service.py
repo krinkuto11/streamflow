@@ -73,12 +73,12 @@ class StreamCheckConfig:
             'cron_expression': '0 3 * * *',  # Cron expression: default is daily at 3:00 AM
         },
         'stream_analysis': {
-            'timeout': 30,  # timeout for operations
-            'retries': 1,  # retry attempts
+            'timeout': 45,  # timeout for ffprobe operations (increased to handle buffering)
+            'retries': 2,  # retry attempts (increased for better reliability)
             'retry_delay': 10,  # seconds between retries
             'user_agent': 'VLC/3.0.14',  # user agent for ffmpeg/ffprobe
             'check_mode': 'full',  # 'full' or 'quick' mode
-            'probe_duration': 5  # seconds to analyze stream (only for full mode)
+            'probe_duration': 10  # seconds to analyze stream (increased for better bitrate detection)
         },
         'scoring': {
             'weights': {

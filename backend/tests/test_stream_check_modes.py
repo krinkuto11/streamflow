@@ -37,7 +37,7 @@ class TestStreamCheckModes(unittest.TestCase):
                                     'enabled': True,
                                     'pipeline_mode': 'pipeline_1_5',
                                     'global_check_schedule': {'enabled': True, 'cron_expression': '0 3 * * *'},
-                                    'stream_analysis': {'timeout': 30, 'retries': 1, 'retry_delay': 10, 'user_agent': 'VLC/3.0.14', 'check_mode': 'full', 'probe_duration': 5},
+                                    'stream_analysis': {'timeout': 45, 'retries': 2, 'retry_delay': 10, 'user_agent': 'VLC/3.0.14', 'check_mode': 'full', 'probe_duration': 10},
                                     'scoring': {'weights': {'bitrate': 0.30, 'resolution': 0.25, 'fps': 0.15, 'codec': 0.10, 'errors': 0.20}, 'min_score': 0.0, 'prefer_h265': True},
                                     'queue': {'max_size': 1000, 'check_on_update': True, 'max_channels_per_run': 50}
                                 }):
@@ -199,9 +199,11 @@ class TestStreamCheckModes(unittest.TestCase):
         self.assertIn('check_mode', default_config['stream_analysis'])
         self.assertIn('probe_duration', default_config['stream_analysis'])
         
-        # Check default values
+        # Check default values (updated for better buffering support)
         self.assertEqual(default_config['stream_analysis']['check_mode'], 'full')
-        self.assertEqual(default_config['stream_analysis']['probe_duration'], 5)
+        self.assertEqual(default_config['stream_analysis']['probe_duration'], 10)
+        self.assertEqual(default_config['stream_analysis']['timeout'], 45)
+        self.assertEqual(default_config['stream_analysis']['retries'], 2)
 
 
 class TestStreamAnalyzerModes(unittest.TestCase):
@@ -240,11 +242,32 @@ class TestStreamAnalyzerModes(unittest.TestCase):
             # Check that the command includes minimal analyzeduration
             call_args = mock_run.call_args[0][0]
             self.assertIn('-analyzeduration', call_args)
+            self.assertIn('-rw_timeout', call_args)
             
-            # Find the analyzeduration value (should be 100000 microseconds = 0.1 seconds)
+            # Find the analyzeduration value (should be 1000000 microseconds = 1 second)
             analyze_idx = call_args.index('-analyzeduration')
             analyze_value = int(call_args[analyze_idx + 1])
-            self.assertEqual(analyze_value, 100000, "Quick mode should use minimal analyzeduration")
+            self.assertEqual(analyze_value, 1000000, "Quick mode should use 1 second analyzeduration")
+    
+    def test_get_stream_info_includes_network_timeout(self):
+        """Test that ffprobe includes -rw_timeout parameter for network streams."""
+        from stream_analyzer import get_stream_info
+        
+        with patch('stream_analyzer.subprocess.run') as mock_run:
+            mock_run.return_value = Mock(stdout='{"streams":[],"format":{}}', stderr='')
+            
+            # Call with full mode
+            get_stream_info('http://test.url', timeout=30, check_mode='full', probe_duration=10)
+            
+            # Check that the command includes -rw_timeout
+            call_args = mock_run.call_args[0][0]
+            self.assertIn('-rw_timeout', call_args)
+            
+            # The network timeout should be 80% of the timeout (24 seconds = 24000000 microseconds)
+            rw_timeout_idx = call_args.index('-rw_timeout')
+            rw_timeout_value = int(call_args[rw_timeout_idx + 1])
+            expected_timeout_us = int(30 * 0.8 * 1000000)
+            self.assertEqual(rw_timeout_value, expected_timeout_us, "Network timeout should be 80% of subprocess timeout")
 
 
 if __name__ == '__main__':

@@ -457,7 +457,7 @@ function AutomationSettings() {
                         <Box>
                           <Typography variant="body1" fontWeight="bold">Full Mode</Typography>
                           <Typography variant="body2" color="text.secondary">
-                            Analyzes bitrate, resolution, FPS, and codec. Takes longer but provides complete quality metrics. Best for accurate stream ranking.
+                            Analyzes bitrate, resolution, FPS, and codec. Takes longer but provides complete quality metrics. Best for accurate stream ranking. Includes network buffering support.
                           </Typography>
                         </Box>
                       }
@@ -472,7 +472,7 @@ function AutomationSettings() {
                         <Box>
                           <Typography variant="body1" fontWeight="bold">Quick Mode</Typography>
                           <Typography variant="body2" color="text.secondary">
-                            Skips bitrate analysis for faster checking. Scores based on resolution, FPS, and codec only. Missing bitrate won't mark streams as dead or give them zero score.
+                            Faster checking with minimal buffering wait time. Skips bitrate analysis. Scores based on resolution, FPS, and codec only. Better for slow networks but less accurate ranking.
                           </Typography>
                         </Box>
                       }
@@ -486,12 +486,12 @@ function AutomationSettings() {
                 <TextField
                   label="Probe Duration (seconds)"
                   type="number"
-                  value={streamCheckerConfig.stream_analysis?.probe_duration ?? 5}
+                  value={streamCheckerConfig.stream_analysis?.probe_duration ?? 10}
                   onChange={(e) => handleStreamCheckerConfigChange('stream_analysis.probe_duration', parseInt(e.target.value))}
                   fullWidth
                   margin="normal"
-                  helperText="How long to analyze the stream for bitrate calculation. Longer = more accurate but slower. MPEG-TS streams need more time."
-                  inputProps={{ min: 1, max: 30 }}
+                  helperText="How long to analyze the stream for bitrate calculation. Longer = more accurate but slower. MPEG-TS and buffering streams need more time (recommended: 10-15s)."
+                  inputProps={{ min: 5, max: 30 }}
                 />
               )}
               
@@ -509,22 +509,22 @@ function AutomationSettings() {
               <TextField
                 label="Timeout (seconds)"
                 type="number"
-                value={streamCheckerConfig.stream_analysis?.timeout ?? 30}
+                value={streamCheckerConfig.stream_analysis?.timeout ?? 45}
                 onChange={(e) => handleStreamCheckerConfigChange('stream_analysis.timeout', parseInt(e.target.value))}
                 fullWidth
                 margin="normal"
-                helperText="Timeout for stream analysis operations"
-                inputProps={{ min: 10, max: 300 }}
+                helperText="Maximum time to wait for ffprobe to complete. Increase if streams have buffering or slow network (recommended: 45-60s)."
+                inputProps={{ min: 20, max: 300 }}
               />
               
               <TextField
                 label="Retry Attempts"
                 type="number"
-                value={streamCheckerConfig.stream_analysis?.retries ?? 1}
+                value={streamCheckerConfig.stream_analysis?.retries ?? 2}
                 onChange={(e) => handleStreamCheckerConfigChange('stream_analysis.retries', parseInt(e.target.value))}
                 fullWidth
                 margin="normal"
-                helperText="Number of retry attempts for failed checks"
+                helperText="Number of retry attempts for failed checks. Increase for unreliable streams (recommended: 2-3)."
                 inputProps={{ min: 0, max: 5 }}
               />
               

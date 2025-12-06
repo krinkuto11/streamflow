@@ -98,24 +98,35 @@ def get_stream_info(url: str, timeout: int, user_agent: str = 'VLC/3.0.14',
     """
     logger.debug(f"Running ffprobe for URL: {url[:50]}... (mode: {check_mode})")
     
+    # Calculate network timeout in microseconds (should be less than subprocess timeout)
+    # Use 80% of the timeout to leave time for cleanup
+    network_timeout_us = int(timeout * 0.8 * 1000000)
+    
     # Build command based on check mode
     command = ['ffprobe', '-user_agent', user_agent]
+    
+    # Add network timeout to prevent hanging on slow/buffering streams
+    # This applies to all network protocols (http, https, hls, etc.)
+    command.extend([
+        '-rw_timeout', str(network_timeout_us)
+    ])
     
     if check_mode == 'full':
         # Full mode: analyze bitrate (takes longer)
         # Convert probe_duration to microseconds for -analyzeduration
         analyze_duration_us = probe_duration * 1000000
-        # Set probesize to 2MB per second of probe duration
-        probe_size_mb = probe_duration * 2000000
+        # Set probesize to 2MB per second of probe duration (minimum 1MB)
+        probe_size_bytes = max(probe_duration * 2000000, 1000000)
         command.extend([
             '-analyzeduration', str(analyze_duration_us),
-            '-probesize', str(probe_size_mb)
+            '-probesize', str(probe_size_bytes)
         ])
     else:
         # Quick mode: minimal analysis (faster, no bitrate)
+        # Increased from 0.1s to 1s and 500KB to 1MB to handle buffering better
         command.extend([
-            '-analyzeduration', '100000',  # 0.1 seconds
-            '-probesize', '500000'  # 500KB
+            '-analyzeduration', '1000000',  # 1 second (increased from 0.1s)
+            '-probesize', '1000000'  # 1MB (increased from 500KB)
         ])
     
     command.extend([
@@ -125,7 +136,13 @@ def get_stream_info(url: str, timeout: int, user_agent: str = 'VLC/3.0.14',
         url
     ])
     try:
+        logger.debug(f"Executing ffprobe command with timeout={timeout}s, check_mode={check_mode}")
         result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, text=True)
+        
+        # Log any errors from ffprobe stderr (even if successful)
+        if result.stderr:
+            logger.debug(f"ffprobe stderr: {result.stderr[:200]}")
+        
         if result.stdout:
             data = json.loads(result.stdout)
             streams = data.get('streams', [])
