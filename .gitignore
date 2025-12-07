@@ -223,3 +223,4 @@ __marimo__/
 
 # UDI data files (runtime data)
 backend/data/udi/
+*.backup
