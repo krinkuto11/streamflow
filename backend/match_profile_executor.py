@@ -16,6 +16,21 @@ from match_profile_manager import MatchProfile, get_match_profile_manager
 logger = setup_logging(__name__)
 
 
+def normalize_pattern_spaces(pattern: str) -> str:
+    """Convert literal spaces in pattern to flexible whitespace regex.
+    
+    This allows matching streams with different whitespace characters
+    (non-breaking spaces, tabs, double spaces, etc.).
+    
+    Args:
+        pattern: Regex pattern string
+        
+    Returns:
+        Pattern with spaces converted to \\s+
+    """
+    return re.sub(r' +', r'\\s+', pattern)
+
+
 class PipelineNode:
     """Base class for pipeline nodes."""
     
@@ -116,7 +131,7 @@ class FilterNode(PipelineNode):
                 for pattern in patterns:
                     search_pattern = pattern if case_sensitive else pattern.lower()
                     # Convert literal spaces to flexible whitespace
-                    search_pattern = re.sub(r' +', r'\\s+', search_pattern)
+                    search_pattern = normalize_pattern_spaces(search_pattern)
                     
                     try:
                         if re.search(search_pattern, search_name):
@@ -230,7 +245,7 @@ class MatchNode(PipelineNode):
                     
                     if match_mode == 'regex':
                         # Convert literal spaces to flexible whitespace
-                        search_pattern = re.sub(r' +', r'\\s+', search_pattern)
+                        search_pattern = normalize_pattern_spaces(search_pattern)
                         
                         try:
                             if re.search(search_pattern, search_name):

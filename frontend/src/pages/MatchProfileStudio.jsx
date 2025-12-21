@@ -110,6 +110,9 @@ const MatchProfileStudio = () => {
   const [selectedProfile, setSelectedProfile] = useState(null);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [profileToDelete, setProfileToDelete] = useState(null);
+  const [executeConfirmOpen, setExecuteConfirmOpen] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
   const [newProfileDescription, setNewProfileDescription] = useState('');
   const { toast } = useToast();
@@ -183,12 +186,17 @@ const MatchProfileStudio = () => {
   };
 
   const handleDeleteProfile = async (profileId) => {
-    if (!confirm('Are you sure you want to delete this profile?')) return;
+    setProfileToDelete(profileId);
+    setDeleteConfirmOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    if (!profileToDelete) return;
 
     try {
-      await matchProfileService.deleteProfile(profileId);
-      setProfiles(profiles.filter(p => p.id !== profileId));
-      if (selectedProfile?.id === profileId) {
+      await matchProfileService.deleteProfile(profileToDelete);
+      setProfiles(profiles.filter(p => p.id !== profileToDelete));
+      if (selectedProfile?.id === profileToDelete) {
         setSelectedProfile(null);
       }
       
@@ -203,6 +211,9 @@ const MatchProfileStudio = () => {
         description: 'Failed to delete match profile',
         variant: 'destructive',
       });
+    } finally {
+      setDeleteConfirmOpen(false);
+      setProfileToDelete(null);
     }
   };
 
@@ -266,8 +277,10 @@ const MatchProfileStudio = () => {
   const handleExecuteProfile = async () => {
     if (!selectedProfile) return;
     
-    if (!confirm('This will apply the match profile. Continue?')) return;
+    setExecuteConfirmOpen(true);
+  };
 
+  const confirmExecute = async () => {
     try {
       const result = await matchProfileService.executeProfile(selectedProfile.id);
       
@@ -282,6 +295,8 @@ const MatchProfileStudio = () => {
         description: 'Failed to execute match profile',
         variant: 'destructive',
       });
+    } finally {
+      setExecuteConfirmOpen(false);
     }
   };
 
@@ -573,6 +588,46 @@ const MatchProfileStudio = () => {
           )}
         </Card>
       </div>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Match Profile</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete this profile? This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setDeleteConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={confirmDelete}>
+              Delete
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Execute Confirmation Dialog */}
+      <Dialog open={executeConfirmOpen} onOpenChange={setExecuteConfirmOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Execute Match Profile</DialogTitle>
+            <DialogDescription>
+              This will apply the match profile and assign streams to channels. Continue?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setExecuteConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={confirmExecute}>
+              Execute
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
