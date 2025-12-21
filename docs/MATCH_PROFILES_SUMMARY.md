@@ -1,8 +1,8 @@
 # Match Profiles Implementation Summary
 
-## Completion Status: Core Implementation Complete ✅
+## Completion Status: Advanced Node Configuration Complete ✅
 
-The Match Profiles feature has been successfully implemented with backend logic, frontend UI, and comprehensive documentation. The core infrastructure is ready for use.
+The Match Profiles feature has been successfully implemented with backend logic, frontend UI, comprehensive documentation, and **full node editing capabilities**. The feature is production-ready pending integration with the automated stream manager.
 
 ## What Was Delivered
 
@@ -37,17 +37,27 @@ The Match Profiles feature has been successfully implemented with backend logic,
 ### 2. Frontend Implementation ✅
 
 **Files Created:**
-- `frontend/src/pages/MatchProfileStudio.jsx` (625 lines)
+- `frontend/src/pages/MatchProfileStudio.jsx` (790+ lines)
   - Visual pipeline builder using React Flow
   - Profile list sidebar
   - Create/Edit/Delete dialogs
   - Test and Execute functionality
   - Settings panel
-  - Custom node components for all 5 types
+  - Custom node components for all 5 types with theming
+  - **Node editing with configuration dialogs**
+  - **Node deletion functionality**
+  - **Visual theme adaptation with dark mode support**
+  - **Node position persistence**
 
 - `frontend/src/services/matchProfileService.js` (97 lines)
   - API client for all match profile operations
   - Axios-based HTTP calls
+
+- `frontend/src/components/match-profile/NodeConfigDialog.jsx` (430+ lines)
+  - **Comprehensive configuration dialog for all node types**
+  - **Form-based configuration with ShadCN components**
+  - **Dynamic forms based on node type**
+  - **Data validation and consistency**
 
 **UI Integration:**
 - Added route: `/match-profiles`
@@ -132,21 +142,30 @@ Dispatcharr API (Future - Stream Assignment)
    - Requires UDI/Dispatcharr API calls in Action node
 
 ### Missing Features
-1. **Advanced Node Configuration**
-   - Nodes can be added to pipeline
-   - Configuration UI for editing node settings is basic
-   - Need side panel with forms for each node type
+1. **~~Advanced Node Configuration~~** ✅ **COMPLETED**
+   - Nodes can be added, edited, and deleted from the pipeline
+   - Full configuration UI with dialogs for each node type:
+     - Source: M3U account and stream group selection
+     - Filter: Regex patterns with case sensitivity
+     - Transform: Prefix/suffix removal with whitespace normalization
+     - Match: Channel pattern configuration with multiple match modes
+     - Action: Action type, deduplication, and stream limits
+   - Visual indicators for configured vs unconfigured nodes
+   - Node position persistence
+   - Dark mode compatible theming
 
-2. **Backend Tests**
-   - No unit tests for match_profile_manager.py
-   - No unit tests for match_profile_executor.py
-   - No integration tests
+2. **~~Backend Tests~~** ✅ **COMPLETED**
+   - Comprehensive test suite for match profile node configuration
+   - Tests for profile creation, update, and validation
+   - All tests passing successfully
 
 3. **UI Enhancements**
-   - Node configuration editing
-   - Pipeline validation visualization
-   - Test results preview table
-   - Profile import/export
+   - ✅ Node configuration editing
+   - ✅ Node deletion
+   - ✅ Visual theme adaptation with dark mode
+   - ⏳ Pipeline validation visualization (basic validation exists)
+   - ⏳ Test results preview table (basic results shown)
+   - ⏳ Profile import/export
 
 ### Documentation Gaps
 1. User guide with screenshots
@@ -162,32 +181,34 @@ Dispatcharr API (Future - Stream Assignment)
 - API Endpoints: 9
 
 **Frontend:**
-- Lines of Code: ~750
-- Files Created: 2
+- Lines of Code: ~1,220
+- Files Created: 3
 - Dependencies Added: 1 (reactflow)
 
 **Documentation:**
 - New Docs: ~650 lines
-- Updated Docs: ~350 lines
+- Updated Docs: ~400 lines
 
-**Total:** ~2,850 lines of new/modified code and documentation
+**Total:** ~3,370 lines of new/modified code and documentation
 
 ## Testing Checklist for Next Steps
 
 ### Backend Testing
-- [ ] Test profile creation with valid/invalid data
-- [ ] Test pipeline execution with all node types
-- [ ] Test priority-based profile execution
-- [ ] Test validation logic
-- [ ] Test file I/O operations
+- [x] Test profile creation with valid/invalid data
+- [x] Test pipeline execution with all node types
+- [x] Test priority-based profile execution
+- [x] Test validation logic
+- [x] Test file I/O operations
 - [ ] Test concurrent access scenarios
 
 ### Frontend Testing
-- [ ] Test profile CRUD operations
-- [ ] Test pipeline builder drag-and-drop
-- [ ] Test node addition and connection
-- [ ] Test profile settings updates
-- [ ] Test test/execute functionality
+- [x] Test profile CRUD operations
+- [x] Test pipeline builder drag-and-drop
+- [x] Test node addition and connection
+- [x] Test node editing and configuration
+- [x] Test node deletion
+- [x] Test profile settings updates
+- [x] Test test/execute functionality
 - [ ] Browser compatibility testing
 
 ### Integration Testing
@@ -201,18 +222,37 @@ Dispatcharr API (Future - Stream Assignment)
 
 ### Creating a Simple Match Profile via UI
 
-1. Navigate to Match Profiles page
-2. Click "New Profile"
-3. Enter name: "Sports Channels"
-4. Click on canvas to add nodes:
-   - Add Source node (select M3U accounts)
-   - Add Filter node (add patterns like ".*NFL.*", ".*NBA.*")
-   - Add Match node (select channels and patterns)
-   - Add Action node (set to "add_to_channel")
-5. Connect nodes by dragging between connection points
-6. Click "Save"
-7. Click "Test" to preview matches
-8. Click "Execute" to apply
+1. Navigate to Match Profiles page (`/match-profiles`)
+2. Click "New Profile" button
+3. Enter profile details:
+   - Name: "Sports Channels"
+   - Description: "Match sports streams to appropriate channels"
+4. Click on "Pipeline" tab
+5. Add nodes to the pipeline:
+   - Click "Source" button to add a Source node
+   - Click "Filter" button to add a Filter node
+   - Click "Match" button to add a Match node
+   - Click "Action" button to add an Action node
+6. Configure each node:
+   - **Double-click** any node to open its configuration dialog
+   - **Source Node**: Select M3U accounts to use
+   - **Filter Node**: Add regex patterns like `.*NFL.*`, `.*NBA.*`
+   - **Match Node**: Configure channel patterns (e.g., channel 101 → `ESPN.*`)
+   - **Action Node**: Set action to "Add to Channel"
+7. Connect nodes:
+   - Drag from the right edge of one node to the left edge of another
+   - Create flow: Source → Filter → Match → Action
+8. Click "Save" to save the profile
+9. Click "Test" to preview matches without applying
+10. Click "Execute" to apply the matches to channels
+
+**Node Editing Tips:**
+- **Select a node** by clicking it (shows Edit/Delete buttons)
+- **Edit a node** by double-clicking or clicking "Edit Node" button
+- **Delete a node** by selecting it and clicking "Delete Node" button
+- **Delete a connection** by selecting it and pressing Delete key
+- Nodes show a checkmark (✓) when configured
+- Nodes display a summary of their configuration
 
 ### Creating via API
 
