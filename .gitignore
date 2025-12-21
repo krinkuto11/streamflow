@@ -234,6 +234,3 @@ __marimo__/
 backend/data/udi/
 
 .vscode
-node_modules
-package-lock.json
-package.json
