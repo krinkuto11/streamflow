@@ -29,6 +29,7 @@ See [Deployment Guide](docs/DEPLOYMENT.md) for detailed instructions.
 - **Parallel Stream Checking**: Thread-based parallel stream analysis with configurable worker pool
 - **Per-Account Stream Limits**: Intelligent concurrent stream limiting respects M3U provider limits while maximizing parallelism
 - **Channel Profile Management**: Select specific Dispatcharr profiles, manage dead streams, and use snapshots for automatic re-enabling
+- **Match Profiles**: Visual pipeline builder for advanced stream-to-channel matching with granular control
 - **Automated M3U Playlist Management**: Refresh playlists every 5 minutes (configurable)
 - **Stream Quality Checking**: Analyze streams for bitrate, resolution, FPS, codec quality, and errors
 - **Automatic Stream Reordering**: Best quality streams moved to the top

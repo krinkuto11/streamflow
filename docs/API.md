@@ -974,3 +974,326 @@ Disable channels with no working streams in a specific profile.
 
 See [CHANNEL_PROFILES_FEATURE.md](CHANNEL_PROFILES_FEATURE.md) for complete documentation and troubleshooting guide.
 
+
+## Match Profiles API
+
+Match Profiles provide a visual, pipeline-based approach to stream-to-channel matching. These endpoints allow you to create, manage, and execute match profiles.
+
+### List All Match Profiles
+```
+GET /api/match-profiles
+```
+Get all match profiles.
+
+**Response:**
+```json
+[
+  {
+    "id": 1,
+    "name": "US Sports Channels",
+    "description": "Match US sports streams to appropriate channels",
+    "enabled": true,
+    "priority": 100,
+    "pipeline": {
+      "nodes": [...],
+      "edges": [...]
+    },
+    "stats": {
+      "last_run": "2025-12-21T20:00:00Z",
+      "streams_matched": 45,
+      "channels_updated": 3
+    },
+    "created_at": "2025-12-01T10:00:00Z",
+    "updated_at": "2025-12-21T20:00:00Z"
+  }
+]
+```
+
+### Get Match Profile
+```
+GET /api/match-profiles/{id}
+```
+Get a specific match profile by ID.
+
+**Response:**
+```json
+{
+  "id": 1,
+  "name": "US Sports Channels",
+  "description": "Match US sports streams to appropriate channels",
+  "enabled": true,
+  "priority": 100,
+  "pipeline": {
+    "nodes": [
+      {
+        "id": "source-1",
+        "type": "source",
+        "config": {
+          "m3u_accounts": [1, 2],
+          "stream_groups": ["Sports", "US Channels"]
+        }
+      },
+      {
+        "id": "match-1",
+        "type": "match",
+        "config": {
+          "channels": [101, 102],
+          "match_mode": "regex",
+          "patterns": {
+            "101": ["NFL.*"],
+            "102": ["NBA.*"]
+          }
+        }
+      }
+    ],
+    "edges": [
+      {"from": "source-1", "to": "match-1"}
+    ]
+  },
+  "stats": {
+    "last_run": "2025-12-21T20:00:00Z",
+    "streams_matched": 45,
+    "channels_updated": 3
+  },
+  "created_at": "2025-12-01T10:00:00Z",
+  "updated_at": "2025-12-21T20:00:00Z"
+}
+```
+
+### Create Match Profile
+```
+POST /api/match-profiles
+```
+Create a new match profile.
+
+**Request Body:**
+```json
+{
+  "name": "US Sports Channels",
+  "description": "Match US sports streams to appropriate channels",
+  "enabled": true,
+  "priority": 100,
+  "pipeline": {
+    "nodes": [
+      {
+        "id": "source-1",
+        "type": "source",
+        "config": {
+          "m3u_accounts": [1, 2],
+          "stream_groups": ["Sports"]
+        }
+      }
+    ],
+    "edges": []
+  }
+}
+```
+
+**Response:** `201 Created` with created profile
+
+### Update Match Profile
+```
+PUT /api/match-profiles/{id}
+```
+Update an existing match profile.
+
+**Request Body:** Same structure as create
+
+**Response:** Updated profile
+
+### Delete Match Profile
+```
+DELETE /api/match-profiles/{id}
+```
+Delete a match profile.
+
+**Response:** `204 No Content`
+
+### Test Match Profile
+```
+POST /api/match-profiles/{id}/test
+```
+Test a match profile without applying changes. Useful for previewing which streams would be matched.
+
+**Response:**
+```json
+{
+  "profile_id": 1,
+  "profile_name": "US Sports Channels",
+  "matches": {
+    "123": [101],
+    "124": [102]
+  },
+  "streams_matched": 2,
+  "channels_affected": 2,
+  "success": true,
+  "preview_matches": [
+    {
+      "stream_id": 123,
+      "stream_name": "NFL Network HD",
+      "channel_ids": [101]
+    },
+    {
+      "stream_id": 124,
+      "stream_name": "NBA TV HD",
+      "channel_ids": [102]
+    }
+  ]
+}
+```
+
+### Execute Match Profile
+```
+POST /api/match-profiles/{id}/execute
+```
+Execute a match profile manually. This will apply the matches to channels.
+
+**Response:**
+```json
+{
+  "profile_id": 1,
+  "profile_name": "US Sports Channels",
+  "matches": {
+    "123": [101],
+    "124": [102]
+  },
+  "streams_matched": 2,
+  "channels_affected": 2,
+  "success": true
+}
+```
+
+### Get Node Types
+```
+GET /api/match-profiles/node-types
+```
+Get available node types and their configuration schemas.
+
+**Response:**
+```json
+{
+  "source": {
+    "name": "Source",
+    "description": "Filter streams by M3U accounts and groups",
+    "config_schema": {
+      "m3u_accounts": {
+        "type": "array",
+        "description": "List of M3U account IDs"
+      },
+      "stream_groups": {
+        "type": "array",
+        "description": "List of stream group names"
+      }
+    }
+  },
+  "filter": {
+    "name": "Filter",
+    "description": "Filter streams by patterns and attributes",
+    "config_schema": {
+      "patterns": {
+        "type": "array",
+        "description": "List of regex patterns"
+      },
+      "exclude_dead": {
+        "type": "boolean",
+        "description": "Exclude dead streams"
+      }
+    }
+  }
+  // ... other node types
+}
+```
+
+### Validate Match Profile
+```
+POST /api/match-profiles/validate
+```
+Validate a match profile configuration without saving.
+
+**Request Body:** Profile configuration to validate
+
+**Response:**
+```json
+{
+  "valid": true,
+  "errors": []
+}
+```
+
+Or if invalid:
+```json
+{
+  "valid": false,
+  "errors": [
+    "Profile name is required",
+    "Node source-1 missing required field: type"
+  ]
+}
+```
+
+## Pipeline Node Types
+
+### Source Node
+Filters streams by M3U accounts and groups.
+
+**Configuration:**
+```json
+{
+  "m3u_accounts": [1, 2],  // List of M3U account IDs
+  "stream_groups": ["Sports", "Movies"]  // List of group names
+}
+```
+
+### Filter Node
+Filters streams by patterns and attributes.
+
+**Configuration:**
+```json
+{
+  "patterns": [".*NFL.*", ".*NBA.*"],  // Regex patterns
+  "exclude_dead": true,  // Exclude [DEAD] streams
+  "case_sensitive": false  // Case-sensitive matching
+}
+```
+
+### Transform Node
+Transforms stream names before matching.
+
+**Configuration:**
+```json
+{
+  "remove_prefixes": ["US: ", "UK: "],  // Prefixes to remove
+  "remove_suffixes": [" HD", " FHD"],  // Suffixes to remove
+  "normalize_whitespace": true  // Normalize whitespace
+}
+```
+
+### Match Node
+Matches streams to channels.
+
+**Configuration:**
+```json
+{
+  "channels": [101, 102, 103],  // Channel IDs to match
+  "match_mode": "regex",  // "regex", "exact", or "contains"
+  "patterns": {
+    "101": ["NFL.*Network"],
+    "102": ["NBA.*TV"]
+  },
+  "case_sensitive": false
+}
+```
+
+### Action Node
+Performs actions on matched streams.
+
+**Configuration:**
+```json
+{
+  "action": "add_to_channel",  // "add_to_channel", "tag", or "skip"
+  "deduplicate": true,  // Remove duplicate streams
+  "max_streams_per_channel": 10  // Max streams per channel (0 = unlimited)
+}
+```
+
+See [MATCH_PROFILES_IMPLEMENTATION.md](MATCH_PROFILES_IMPLEMENTATION.md) for complete documentation.
