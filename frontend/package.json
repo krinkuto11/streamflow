@@ -38,6 +38,7 @@
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.68.0",
     "react-router-dom": "^6.8.0",
+    "reactflow": "^11.11.0",
     "recharts": "^2.8.0",
     "tailwind-merge": "^2.6.0",
     "tailwindcss-animate": "^1.0.7",
