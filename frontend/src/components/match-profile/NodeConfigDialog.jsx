@@ -47,11 +47,20 @@ const NodeConfigDialog = ({ open, onOpenChange, node, onSave, m3uAccounts = [], 
   const Icon = NodeIcons[node.type] || Database;
 
   const handleSave = () => {
+    // For match nodes, ensure channels array is synced with patterns
+    let finalConfig = { ...config };
+    if (node.type === 'match' && config.patterns) {
+      // Extract channel IDs that have patterns configured
+      finalConfig.channels = Object.keys(config.patterns)
+        .filter(channelId => config.patterns[channelId] && config.patterns[channelId].length > 0)
+        .map(id => parseInt(id));
+    }
+    
     onSave({
       ...node,
       data: {
         ...node.data,
-        config,
+        config: finalConfig,
       },
     });
     onOpenChange(false);

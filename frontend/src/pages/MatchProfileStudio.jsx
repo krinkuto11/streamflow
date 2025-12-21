@@ -131,7 +131,11 @@ const getNodeSummary = (type, config) => {
       return total > 0 ? `${total} rule${total !== 1 ? 's' : ''}` : 'No transforms';
       
     case 'match':
-      const channelCount = config.channels?.length || 0;
+      // Count channels that have patterns configured
+      const patternsObj = config.patterns || {};
+      const channelCount = Object.keys(patternsObj).filter(
+        channelId => patternsObj[channelId] && patternsObj[channelId].length > 0
+      ).length;
       return channelCount > 0 ? `${channelCount} channel${channelCount !== 1 ? 's' : ''}` : 'No channels';
       
     case 'action':
