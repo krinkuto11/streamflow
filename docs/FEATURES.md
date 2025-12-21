@@ -91,6 +91,23 @@ Multi-factor analysis of stream quality using a single optimized ffmpeg call:
 - Automatic channel assignment based on patterns
 - Pattern testing interface
 
+### Match Profiles (Advanced Stream Matching)
+- **Visual Pipeline Builder**: Drag-and-drop interface for creating matching workflows
+- **Granular Control**: Fine-tune stream-to-channel matching with multiple stages
+- **Reusable Profiles**: Save and manage multiple match configurations
+- **Pipeline Nodes**:
+  - **Source**: Filter streams by M3U accounts and groups
+  - **Filter**: Apply regex patterns and quality filters
+  - **Transform**: Transform stream names (remove prefixes, normalize whitespace)
+  - **Match**: Match streams to channels with configurable patterns
+  - **Action**: Define actions (add to channel, tag, skip)
+- **Priority System**: Control execution order with profile priorities
+- **Testing Mode**: Preview matches before applying
+- **Backward Compatible**: Works alongside legacy regex patterns
+- **Mass Assignment**: Efficiently assign matching rules to multiple channels
+
+See [MATCH_PROFILES_IMPLEMENTATION.md](MATCH_PROFILES_IMPLEMENTATION.md) for detailed match profiles documentation.
+
 ## Quality Analysis
 
 ### Scoring Formula
