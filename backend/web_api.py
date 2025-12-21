@@ -3354,6 +3354,232 @@ def trigger_epg_refresh():
         return jsonify({"error": str(e)}), 500
 
 
+# ==================== Match Profile API Endpoints ====================
+
+@app.route('/api/match-profiles', methods=['GET'])
+def get_match_profiles():
+    """Get all match profiles."""
+    try:
+        from match_profile_manager import get_match_profile_manager
+        
+        manager = get_match_profile_manager()
+        profiles = manager.get_all_profiles()
+        
+        return jsonify(profiles)
+    except Exception as e:
+        logger.error(f"Error getting match profiles: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/match-profiles', methods=['POST'])
+def create_match_profile():
+    """Create a new match profile."""
+    try:
+        from match_profile_manager import get_match_profile_manager
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No profile data provided"}), 400
+        
+        manager = get_match_profile_manager()
+        profile = manager.create_profile(data)
+        
+        logger.info(f"Created match profile: {profile.get('name')} (ID: {profile.get('id')})")
+        return jsonify(profile), 201
+        
+    except ValueError as e:
+        logger.warning(f"Validation error creating match profile: {e}")
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error creating match profile: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/match-profiles/<int:profile_id>', methods=['GET'])
+def get_match_profile(profile_id):
+    """Get a specific match profile."""
+    try:
+        from match_profile_manager import get_match_profile_manager
+        
+        manager = get_match_profile_manager()
+        profile = manager.get_profile(profile_id)
+        
+        if profile is None:
+            return jsonify({"error": f"Profile {profile_id} not found"}), 404
+        
+        return jsonify(profile)
+    except Exception as e:
+        logger.error(f"Error getting match profile {profile_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/match-profiles/<int:profile_id>', methods=['PUT'])
+def update_match_profile(profile_id):
+    """Update a match profile."""
+    try:
+        from match_profile_manager import get_match_profile_manager
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No profile data provided"}), 400
+        
+        manager = get_match_profile_manager()
+        profile = manager.update_profile(profile_id, data)
+        
+        logger.info(f"Updated match profile: {profile.get('name')} (ID: {profile_id})")
+        return jsonify(profile)
+        
+    except ValueError as e:
+        logger.warning(f"Validation error updating match profile {profile_id}: {e}")
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error updating match profile {profile_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/match-profiles/<int:profile_id>', methods=['DELETE'])
+def delete_match_profile(profile_id):
+    """Delete a match profile."""
+    try:
+        from match_profile_manager import get_match_profile_manager
+        
+        manager = get_match_profile_manager()
+        success = manager.delete_profile(profile_id)
+        
+        if not success:
+            return jsonify({"error": f"Profile {profile_id} not found"}), 404
+        
+        logger.info(f"Deleted match profile ID: {profile_id}")
+        return '', 204
+        
+    except Exception as e:
+        logger.error(f"Error deleting match profile {profile_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/match-profiles/<int:profile_id>/test', methods=['POST'])
+def test_match_profile(profile_id):
+    """Test a match profile without applying changes."""
+    try:
+        from match_profile_manager import get_match_profile_manager, MatchProfile
+        from match_profile_executor import get_match_profile_executor
+        from api_utils import get_streams
+        
+        manager = get_match_profile_manager()
+        profile_data = manager.get_profile(profile_id)
+        
+        if profile_data is None:
+            return jsonify({"error": f"Profile {profile_id} not found"}), 404
+        
+        # Get streams
+        udi = get_udi_manager()
+        streams = udi.get_streams()
+        
+        # Convert to list format expected by executor
+        streams_list = [
+            {
+                'id': s['id'],
+                'name': s['name'],
+                'm3u_account': s.get('m3u_account'),
+                'channel_group_name': s.get('channel_group_name', '')
+            }
+            for s in streams
+        ]
+        
+        # Execute test
+        profile = MatchProfile(profile_data)
+        executor = get_match_profile_executor()
+        result = executor.test_profile(profile, streams_list)
+        
+        logger.info(f"Tested match profile {profile_id}: {result.get('streams_matched', 0)} streams matched")
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Error testing match profile {profile_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/match-profiles/<int:profile_id>/execute', methods=['POST'])
+def execute_match_profile(profile_id):
+    """Execute a match profile manually."""
+    try:
+        from match_profile_manager import get_match_profile_manager, MatchProfile
+        from match_profile_executor import get_match_profile_executor
+        
+        manager = get_match_profile_manager()
+        profile_data = manager.get_profile(profile_id)
+        
+        if profile_data is None:
+            return jsonify({"error": f"Profile {profile_id} not found"}), 404
+        
+        # Get streams
+        udi = get_udi_manager()
+        streams = udi.get_streams()
+        
+        # Convert to list format expected by executor
+        streams_list = [
+            {
+                'id': s['id'],
+                'name': s['name'],
+                'm3u_account': s.get('m3u_account'),
+                'channel_group_name': s.get('channel_group_name', '')
+            }
+            for s in streams
+        ]
+        
+        # Execute profile
+        profile = MatchProfile(profile_data)
+        executor = get_match_profile_executor()
+        result = executor.execute_profile(profile, streams_list)
+        
+        # TODO: Apply matches to channels via UDI/Dispatcharr API
+        # For now, just return the result
+        
+        logger.info(f"Executed match profile {profile_id}: {result.get('streams_matched', 0)} streams matched")
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Error executing match profile {profile_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/match-profiles/node-types', methods=['GET'])
+def get_node_types():
+    """Get available node types and their configuration schemas."""
+    try:
+        from match_profile_executor import MatchProfileExecutor
+        
+        node_types = MatchProfileExecutor.get_node_types()
+        return jsonify(node_types)
+        
+    except Exception as e:
+        logger.error(f"Error getting node types: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/match-profiles/validate', methods=['POST'])
+def validate_match_profile():
+    """Validate a match profile configuration."""
+    try:
+        from match_profile_manager import get_match_profile_manager
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No profile data provided"}), 400
+        
+        manager = get_match_profile_manager()
+        is_valid, errors = manager.validate_profile(data)
+        
+        return jsonify({
+            "valid": is_valid,
+            "errors": errors
+        })
+        
+    except Exception as e:
+        logger.error(f"Error validating match profile: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # Serve React app for all frontend routes (catch-all - must be last!)
 @app.route('/<path:path>')
 def serve_frontend(path):
