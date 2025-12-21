@@ -31,71 +31,72 @@ import {
   Filter,
   Wand2,
   Link2,
-  Target
+  Target,
+  Edit,
+  Trash
 } from 'lucide-react';
 
 import matchProfileService from '@/services/matchProfileService';
+import NodeConfigDialog from '@/components/match-profile/NodeConfigDialog';
+import axios from 'axios';
 
-// Custom node components
-const SourceNodeComponent = ({ data }) => (
-  <div className="px-4 py-2 shadow-md rounded-md bg-blue-50 border-2 border-blue-500 dark:bg-blue-900/30">
-    <div className="flex items-center gap-2">
-      <Database className="h-4 w-4" />
-      <div className="font-bold text-sm">Source</div>
+// Custom node components with consistent theming
+const createNodeComponent = (type, Icon, colorClasses) => {
+  return ({ data, selected }) => (
+    <div
+      className={`px-4 py-3 shadow-lg rounded-lg border-2 transition-all ${
+        selected
+          ? 'ring-2 ring-primary ring-offset-2'
+          : ''
+      } ${colorClasses.bg} ${colorClasses.border} ${colorClasses.text}`}
+    >
+      <div className="flex items-center justify-between gap-2 mb-1">
+        <div className="flex items-center gap-2">
+          <Icon className="h-4 w-4" />
+          <div className="font-bold text-sm">{type.charAt(0).toUpperCase() + type.slice(1)}</div>
+        </div>
+        {data.configured && (
+          <Badge variant="outline" className="text-xs">
+            ✓
+          </Badge>
+        )}
+      </div>
+      <div className="text-xs text-muted-foreground">
+        {data.summary || 'Not configured'}
+      </div>
     </div>
-    <div className="text-xs text-muted-foreground mt-1">
-      {data.config?.m3u_accounts?.length || 0} accounts
-    </div>
-  </div>
-);
+  );
+};
 
-const FilterNodeComponent = ({ data }) => (
-  <div className="px-4 py-2 shadow-md rounded-md bg-yellow-50 border-2 border-yellow-500 dark:bg-yellow-900/30">
-    <div className="flex items-center gap-2">
-      <Filter className="h-4 w-4" />
-      <div className="font-bold text-sm">Filter</div>
-    </div>
-    <div className="text-xs text-muted-foreground mt-1">
-      {data.config?.patterns?.length || 0} patterns
-    </div>
-  </div>
-);
+const SourceNodeComponent = createNodeComponent('source', Database, {
+  bg: 'bg-blue-50 dark:bg-blue-950/50',
+  border: 'border-blue-500 dark:border-blue-600',
+  text: 'text-blue-900 dark:text-blue-100',
+});
 
-const TransformNodeComponent = ({ data }) => (
-  <div className="px-4 py-2 shadow-md rounded-md bg-purple-50 border-2 border-purple-500 dark:bg-purple-900/30">
-    <div className="flex items-center gap-2">
-      <Wand2 className="h-4 w-4" />
-      <div className="font-bold text-sm">Transform</div>
-    </div>
-    <div className="text-xs text-muted-foreground mt-1">
-      {(data.config?.remove_prefixes?.length || 0) + (data.config?.remove_suffixes?.length || 0)} rules
-    </div>
-  </div>
-);
+const FilterNodeComponent = createNodeComponent('filter', Filter, {
+  bg: 'bg-yellow-50 dark:bg-yellow-950/50',
+  border: 'border-yellow-500 dark:border-yellow-600',
+  text: 'text-yellow-900 dark:text-yellow-100',
+});
 
-const MatchNodeComponent = ({ data }) => (
-  <div className="px-4 py-2 shadow-md rounded-md bg-green-50 border-2 border-green-500 dark:bg-green-900/30">
-    <div className="flex items-center gap-2">
-      <Link2 className="h-4 w-4" />
-      <div className="font-bold text-sm">Match</div>
-    </div>
-    <div className="text-xs text-muted-foreground mt-1">
-      {data.config?.channels?.length || 0} channels
-    </div>
-  </div>
-);
+const TransformNodeComponent = createNodeComponent('transform', Wand2, {
+  bg: 'bg-purple-50 dark:bg-purple-950/50',
+  border: 'border-purple-500 dark:border-purple-600',
+  text: 'text-purple-900 dark:text-purple-100',
+});
 
-const ActionNodeComponent = ({ data }) => (
-  <div className="px-4 py-2 shadow-md rounded-md bg-red-50 border-2 border-red-500 dark:bg-red-900/30">
-    <div className="flex items-center gap-2">
-      <Target className="h-4 w-4" />
-      <div className="font-bold text-sm">Action</div>
-    </div>
-    <div className="text-xs text-muted-foreground mt-1">
-      {data.config?.action || 'add_to_channel'}
-    </div>
-  </div>
-);
+const MatchNodeComponent = createNodeComponent('match', Link2, {
+  bg: 'bg-green-50 dark:bg-green-950/50',
+  border: 'border-green-500 dark:border-green-600',
+  text: 'text-green-900 dark:text-green-100',
+});
+
+const ActionNodeComponent = createNodeComponent('action', Target, {
+  bg: 'bg-red-50 dark:bg-red-950/50',
+  border: 'border-red-500 dark:border-red-600',
+  text: 'text-red-900 dark:text-red-100',
+});
 
 const nodeTypes = {
   source: SourceNodeComponent,
@@ -103,6 +104,42 @@ const nodeTypes = {
   transform: TransformNodeComponent,
   match: MatchNodeComponent,
   action: ActionNodeComponent,
+};
+
+// Helper to generate node summary text
+const getNodeSummary = (type, config) => {
+  if (!config) return 'Not configured';
+  
+  switch (type) {
+    case 'source':
+      const accountCount = config.m3u_accounts?.length || 0;
+      const groupCount = config.stream_groups?.length || 0;
+      if (accountCount === 0 && groupCount === 0) return 'All sources';
+      const parts = [];
+      if (accountCount > 0) parts.push(`${accountCount} account${accountCount !== 1 ? 's' : ''}`);
+      if (groupCount > 0) parts.push(`${groupCount} group${groupCount !== 1 ? 's' : ''}`);
+      return parts.join(', ');
+      
+    case 'filter':
+      const patternCount = config.patterns?.length || 0;
+      return patternCount > 0 ? `${patternCount} pattern${patternCount !== 1 ? 's' : ''}` : 'No filters';
+      
+    case 'transform':
+      const prefixCount = config.remove_prefixes?.length || 0;
+      const suffixCount = config.remove_suffixes?.length || 0;
+      const total = prefixCount + suffixCount;
+      return total > 0 ? `${total} rule${total !== 1 ? 's' : ''}` : 'No transforms';
+      
+    case 'match':
+      const channelCount = config.channels?.length || 0;
+      return channelCount > 0 ? `${channelCount} channel${channelCount !== 1 ? 's' : ''}` : 'No channels';
+      
+    case 'action':
+      return config.action || 'add_to_channel';
+      
+    default:
+      return 'Not configured';
+  }
 };
 
 const MatchProfileStudio = () => {
@@ -115,6 +152,10 @@ const MatchProfileStudio = () => {
   const [executeConfirmOpen, setExecuteConfirmOpen] = useState(false);
   const [newProfileName, setNewProfileName] = useState('');
   const [newProfileDescription, setNewProfileDescription] = useState('');
+  const [selectedNode, setSelectedNode] = useState(null);
+  const [configDialogOpen, setConfigDialogOpen] = useState(false);
+  const [m3uAccounts, setM3uAccounts] = useState([]);
+  const [channels, setChannels] = useState([]);
   const { toast } = useToast();
 
   // React Flow state
@@ -123,6 +164,8 @@ const MatchProfileStudio = () => {
 
   useEffect(() => {
     loadProfiles();
+    loadM3UAccounts();
+    loadChannels();
   }, []);
 
   const loadProfiles = async () => {
@@ -139,6 +182,26 @@ const MatchProfileStudio = () => {
       });
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadM3UAccounts = async () => {
+    try {
+      const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+      const response = await axios.get(`${API_BASE_URL}/api/m3u/accounts`);
+      setM3uAccounts(response.data);
+    } catch (error) {
+      console.error('Error loading M3U accounts:', error);
+    }
+  };
+
+  const loadChannels = async () => {
+    try {
+      const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+      const response = await axios.get(`${API_BASE_URL}/api/channels/channels?page_size=1000`);
+      setChannels(response.data.results || []);
+    } catch (error) {
+      console.error('Error loading channels:', error);
     }
   };
 
@@ -227,6 +290,7 @@ const MatchProfileStudio = () => {
           nodes: nodes.map(n => ({
             id: n.id,
             type: n.type,
+            position: n.position,
             config: n.data.config || {},
           })),
           edges: edges.map(e => ({
@@ -309,9 +373,11 @@ const MatchProfileStudio = () => {
     const flowNodes = pipeline.nodes.map((node, index) => ({
       id: node.id,
       type: node.type,
-      position: { x: 100 + index * 200, y: 100 },
+      position: node.position || { x: 100 + index * 200, y: 100 },
       data: {
         config: node.config || {},
+        configured: Object.keys(node.config || {}).length > 0,
+        summary: getNodeSummary(node.type, node.config),
       },
     }));
     
@@ -320,6 +386,8 @@ const MatchProfileStudio = () => {
       source: edge.from,
       target: edge.to,
       markerEnd: { type: MarkerType.ArrowClosed },
+      animated: true,
+      style: { stroke: 'hsl(var(--primary))', strokeWidth: 2 },
     }));
     
     setNodes(flowNodes);
@@ -327,7 +395,12 @@ const MatchProfileStudio = () => {
   };
 
   const onConnect = useCallback(
-    (params) => setEdges((eds) => addEdge({ ...params, markerEnd: { type: MarkerType.ArrowClosed } }, eds)),
+    (params) => setEdges((eds) => addEdge({ 
+      ...params, 
+      markerEnd: { type: MarkerType.ArrowClosed },
+      animated: true,
+      style: { stroke: 'hsl(var(--primary))', strokeWidth: 2 },
+    }, eds)),
     [setEdges],
   );
 
@@ -338,10 +411,52 @@ const MatchProfileStudio = () => {
       position: { x: Math.random() * 400, y: Math.random() * 400 },
       data: {
         config: {},
+        configured: false,
+        summary: 'Not configured',
       },
     };
     
     setNodes((nds) => [...nds, newNode]);
+  };
+
+  const handleNodeClick = useCallback((event, node) => {
+    setSelectedNode(node);
+  }, []);
+
+  const handleNodeDoubleClick = useCallback((event, node) => {
+    setSelectedNode(node);
+    setConfigDialogOpen(true);
+  }, []);
+
+  const handleNodeConfigSave = (updatedNode) => {
+    setNodes((nds) =>
+      nds.map((n) => {
+        if (n.id === updatedNode.id) {
+          return {
+            ...n,
+            data: {
+              ...updatedNode.data,
+              configured: Object.keys(updatedNode.data.config || {}).length > 0,
+              summary: getNodeSummary(n.type, updatedNode.data.config),
+            },
+          };
+        }
+        return n;
+      })
+    );
+    setSelectedNode(null);
+  };
+
+  const handleDeleteNode = () => {
+    if (!selectedNode) return;
+    
+    setNodes((nds) => nds.filter((n) => n.id !== selectedNode.id));
+    setEdges((eds) => eds.filter((e) => e.source !== selectedNode.id && e.target !== selectedNode.id));
+    setSelectedNode(null);
+  };
+
+  const handleDeleteEdge = (edgeId) => {
+    setEdges((eds) => eds.filter((e) => e.id !== edgeId));
   };
 
   if (loading) {
@@ -500,38 +615,65 @@ const MatchProfileStudio = () => {
                   </TabsList>
                   
                   <TabsContent value="pipeline" className="space-y-4">
-                    <div className="flex gap-2 flex-wrap">
-                      <Button size="sm" variant="outline" onClick={() => addNode('source')}>
-                        <Database className="h-4 w-4 mr-2" />
-                        Source
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => addNode('filter')}>
-                        <Filter className="h-4 w-4 mr-2" />
-                        Filter
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => addNode('transform')}>
-                        <Wand2 className="h-4 w-4 mr-2" />
-                        Transform
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => addNode('match')}>
-                        <Link2 className="h-4 w-4 mr-2" />
-                        Match
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => addNode('action')}>
-                        <Target className="h-4 w-4 mr-2" />
-                        Action
-                      </Button>
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex gap-2 flex-wrap">
+                        <Button size="sm" variant="outline" onClick={() => addNode('source')}>
+                          <Database className="h-4 w-4 mr-2" />
+                          Source
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => addNode('filter')}>
+                          <Filter className="h-4 w-4 mr-2" />
+                          Filter
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => addNode('transform')}>
+                          <Wand2 className="h-4 w-4 mr-2" />
+                          Transform
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => addNode('match')}>
+                          <Link2 className="h-4 w-4 mr-2" />
+                          Match
+                        </Button>
+                        <Button size="sm" variant="outline" onClick={() => addNode('action')}>
+                          <Target className="h-4 w-4 mr-2" />
+                          Action
+                        </Button>
+                      </div>
+                      
+                      {selectedNode && (
+                        <div className="flex gap-2">
+                          <Button 
+                            size="sm" 
+                            variant="outline" 
+                            onClick={() => {
+                              setConfigDialogOpen(true);
+                            }}
+                          >
+                            <Edit className="h-4 w-4 mr-2" />
+                            Edit Node
+                          </Button>
+                          <Button 
+                            size="sm" 
+                            variant="destructive" 
+                            onClick={handleDeleteNode}
+                          >
+                            <Trash className="h-4 w-4 mr-2" />
+                            Delete Node
+                          </Button>
+                        </div>
+                      )}
                     </div>
                     
                     <Separator />
                     
-                    <div style={{ height: '500px' }} className="border rounded-lg">
+                    <div style={{ height: '500px' }} className="border rounded-lg bg-background">
                       <ReactFlow
                         nodes={nodes}
                         edges={edges}
                         onNodesChange={onNodesChange}
                         onEdgesChange={onEdgesChange}
                         onConnect={onConnect}
+                        onNodeClick={handleNodeClick}
+                        onNodeDoubleClick={handleNodeDoubleClick}
                         nodeTypes={nodeTypes}
                         fitView
                       >
@@ -628,6 +770,16 @@ const MatchProfileStudio = () => {
           </div>
         </DialogContent>
       </Dialog>
+
+      {/* Node Configuration Dialog */}
+      <NodeConfigDialog
+        open={configDialogOpen}
+        onOpenChange={setConfigDialogOpen}
+        node={selectedNode}
+        onSave={handleNodeConfigSave}
+        m3uAccounts={m3uAccounts}
+        channels={channels}
+      />
     </div>
   );
 };
