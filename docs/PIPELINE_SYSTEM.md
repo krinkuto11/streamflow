@@ -50,11 +50,48 @@ The StreamFlow application now supports 5 different pipeline modes, each with di
 
 **Behavior:**
 - All features of Pipeline 1
+- **Stream Quality Checking:** Channels that receive new streams are automatically queued for quality checking (respects 2-hour immunity for recently checked streams)
 - **PLUS:** Scheduled Global Action (daily or monthly)
   - Updates all M3U playlists
   - Matches all streams
   - Checks ALL channels, bypassing 2-hour immunity
   - Typically scheduled during off-peak hours (e.g., 3 AM)
+
+**⚠️ IMPORTANT: Pipeline 1.5 DOES Check Stream Quality With Every Playlist Update**
+
+Pipeline 1.5 performs a complete Update → Match → Check cycle with every playlist refresh. Here's exactly what happens:
+
+**Every 5 minutes (or per your cron schedule):**
+```
+1. Update M3U Playlists
+   └─→ Refresh all enabled M3U playlists from providers
+
+2. Match Streams to Channels
+   └─→ Apply regex patterns to assign new streams to channels
+       └─→ Channels that receive new streams are marked as "updated"
+           └─→ Trigger immediate stream quality check
+
+3. Check Stream Quality
+   └─→ Channels with new streams are queued for quality analysis
+       └─→ Only NEW or UNCHECKED streams are analyzed (2-hour immunity)
+       └─→ Streams are scored, rated, and reordered by quality
+```
+
+**The 2-Hour Immunity System:**
+- Prevents re-analyzing streams that were recently checked
+- Only applies to streams already analyzed in the last 2 hours
+- NEW streams are ALWAYS checked immediately
+- Immunity is BYPASSED during scheduled global actions
+
+**During Scheduled Global Action (e.g., 3 AM daily):**
+```
+1. Update ALL M3U Playlists
+2. Match ALL Streams to Channels
+3. Check ALL Channels (bypasses immunity)
+   └─→ EVERY stream is re-analyzed, regardless of when last checked
+   └─→ All quality scores are refreshed
+   └─→ All channels are re-ranked
+```
 
 **Use Case:** Users who want automatic updates with immunity during the day, but want a complete check of all channels during off-peak hours.
 
@@ -469,6 +506,69 @@ You can monitor dead streams via:
 - Changelog page in web UI
 - Dispatcharr stream list (search for `[DEAD]`)
 - Stream checker logs
+
+---
+
+## Verifying Pipeline 1.5 Is Working
+
+If you're using Pipeline 1.5 and want to verify it's checking stream quality with every playlist update:
+
+### 1. Check the Changelog
+
+Navigate to the **Changelog** page in the web UI:
+- Look for `playlist_update_match` entries (these occur every 5 minutes or per your cron schedule)
+- Each entry should show:
+  - **Update** subgroup: M3U playlist refresh statistics
+  - **Match** subgroup: Streams assigned to channels
+  - **Check** subgroup: ✅ Channels that were checked for quality
+
+If you see the **Check** subgroup with channel entries, Pipeline 1.5 is working correctly!
+
+### 2. Check Stream Checker Status
+
+Navigate to the **Stream Checker** page:
+- Look at "Channels Checked" counter - this should increment after each playlist update
+- Check "Queue Status" - you should see channels being queued and processed
+- View "Last Check Time" for individual channels
+
+### 3. Check Logs
+
+If running in Docker, check the backend logs:
+```bash
+docker logs <container-name> | grep -i "marked.*channels.*for stream quality checking"
+```
+
+You should see entries like:
+```
+Marked 5 channels with new streams for stream quality checking
+Queued 5/5 updated channels for checking (mode: pipeline_1_5)
+```
+
+### 4. Watch for Stream Reordering
+
+After streams are checked:
+- Navigate to a channel in Dispatcharr
+- Check if streams are ordered by quality (best streams at the top)
+- Look for stream quality indicators (resolution, bitrate, FPS)
+
+### What If It's Not Working?
+
+**Common Issues:**
+
+1. **No new streams being assigned:**
+   - Check your regex patterns in **Configuration → Channel Patterns**
+   - Verify M3U accounts are enabled
+   - Ensure channels have matching enabled (not excluded)
+
+2. **Streams assigned but not checked:**
+   - Verify pipeline mode is set to `pipeline_1_5` (not `pipeline_2` or `pipeline_2_5`)
+   - Check if Stream Checker service is running on the **Stream Checker** page
+   - Look for errors in Docker logs
+
+3. **2-hour immunity preventing checks:**
+   - This is normal! New streams are always checked, but recently checked streams are skipped
+   - Wait for the scheduled global action (e.g., 3 AM) to force-check all streams
+   - Or manually trigger a Global Action from the **Stream Checker** page
 
 ---
 

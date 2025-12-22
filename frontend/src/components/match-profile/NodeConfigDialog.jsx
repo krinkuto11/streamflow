@@ -100,7 +100,7 @@ const NodeConfigDialog = ({ open, onOpenChange, node, onSave, m3uAccounts = [], 
               <SelectValue placeholder="Select M3U accounts..." />
             </SelectTrigger>
             <SelectContent>
-              {m3uAccounts.map((account) => (
+              {(Array.isArray(m3uAccounts) ? m3uAccounts : []).map((account) => (
                 <SelectItem key={account.id} value={account.id.toString()}>
                   {account.name}
                 </SelectItem>
@@ -109,7 +109,7 @@ const NodeConfigDialog = ({ open, onOpenChange, node, onSave, m3uAccounts = [], 
           </Select>
           <div className="flex flex-wrap gap-2">
             {(config.m3u_accounts || []).map((accountId, index) => {
-              const account = m3uAccounts.find((a) => a.id === accountId);
+              const account = (Array.isArray(m3uAccounts) ? m3uAccounts : []).find((a) => a.id === accountId);
               return (
                 <Badge key={index} variant="secondary" className="flex items-center gap-1">
                   {account?.name || `Account ${accountId}`}
@@ -278,7 +278,7 @@ const NodeConfigDialog = ({ open, onOpenChange, node, onSave, m3uAccounts = [], 
           Configure patterns for each channel
         </p>
         <ScrollArea className="h-[200px] border rounded-md p-3">
-          {channels.length === 0 ? (
+          {!Array.isArray(channels) || channels.length === 0 ? (
             <p className="text-sm text-muted-foreground">No channels available</p>
           ) : (
             channels.map((channel) => (
