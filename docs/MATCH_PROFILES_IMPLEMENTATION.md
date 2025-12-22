@@ -15,12 +15,20 @@ A Match Profile is a reusable configuration that defines:
 4. **Transformations**: Optional name transformations before matching
 5. **Actions**: What to do when a match is found (add to channel, tag, etc.)
 
-### Pipeline-Based Matching
+### Vertical Pipeline-Based Matching
 
-Each Match Profile consists of a visual pipeline with nodes:
+Each Match Profile consists of a **vertical visual pipeline** with nodes stacked from top to bottom:
 
 ```
-[Source] → [Filter] → [Transform] → [Match] → [Action]
+    [Source]
+       ↓
+    [Filter]
+       ↓
+  [Transform]
+       ↓
+    [Match]
+       ↓
+    [Action]
 ```
 
 **Node Types:**
@@ -29,6 +37,14 @@ Each Match Profile consists of a visual pipeline with nodes:
 - **Transform**: Transform stream names (remove prefixes, normalize whitespace, etc.)
 - **Match**: Match against channel patterns (regex, exact, fuzzy)
 - **Action**: Add to channel, skip, tag, or custom action
+
+### UI Features
+
+- **Vertical Layout**: Nodes flow from top to bottom for intuitive understanding
+- **Hover-to-Add**: Hover over any node to reveal "+" buttons for adding nodes above or below
+- **Floating Menu**: Click "+" to open a dropdown menu for selecting node type
+- **Color-Coded Nodes**: Each node type has a distinct color (Source=Blue, Filter=Yellow, etc.)
+- **Auto-Initialization**: New profiles automatically start with a Source node
 
 ## Data Model
 
