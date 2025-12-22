@@ -17,7 +17,6 @@ import {
   Plus, 
   Settings as SettingsIcon,
   TestTube,
-  Edit,
   Trash
 } from 'lucide-react';
 
@@ -111,7 +110,7 @@ const MatchProfileStudio = () => {
   const loadM3UAccounts = async () => {
     try {
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
-      const response = await axios.get(`${API_BASE_URL}/api/m3u/accounts`);
+      const response = await axios.get(`${API_BASE_URL}/api/m3u-accounts`);
       setM3uAccounts(response.data || []);
     } catch (error) {
       console.error('Error loading M3U accounts:', error);
@@ -554,16 +553,6 @@ const MatchProfileStudio = () => {
                       <div className="flex gap-2 justify-end">
                         <Button 
                           size="sm" 
-                          variant="outline" 
-                          onClick={() => {
-                            setConfigDialogOpen(true);
-                          }}
-                        >
-                          <Edit className="h-4 w-4 mr-2" />
-                          Edit Node
-                        </Button>
-                        <Button 
-                          size="sm" 
                           variant="destructive" 
                           onClick={handleDeleteNode}
                         >
@@ -580,6 +569,7 @@ const MatchProfileStudio = () => {
                         nodes={pipelineNodes}
                         selectedNode={selectedNode}
                         onNodeSelect={handleNodeClick}
+                        onNodeDoubleClick={handleNodeDoubleClick}
                         onAddNode={handleAddNode}
                         pipelineId={selectedProfile?.id}
                       />
