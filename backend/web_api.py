@@ -461,6 +461,35 @@ def get_channels():
         logger.error(f"Error fetching channels: {e}")
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/api/stream-groups', methods=['GET'])
+def get_stream_groups():
+    """Get all unique stream groups (channel groups) from UDI.
+    
+    Returns a list of unique stream group names that can be used for filtering
+    in match profiles.
+    """
+    try:
+        udi = get_udi_manager()
+        channel_groups = udi.get_channel_groups()
+        
+        if channel_groups is None:
+            return jsonify({"error": "Failed to fetch stream groups"}), 500
+        
+        # Return list of channel groups with id and name
+        # Filter out groups without names
+        groups = [
+            {"id": group.get("id"), "name": group.get("name")}
+            for group in channel_groups
+            if group.get("name")
+        ]
+        
+        return jsonify(groups)
+    except Exception as e:
+        logger.error(f"Error fetching stream groups: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/channels/<channel_id>/stats', methods=['GET'])
 def get_channel_stats(channel_id):
     """Get channel statistics including stream count, dead streams, resolution, and bitrate."""

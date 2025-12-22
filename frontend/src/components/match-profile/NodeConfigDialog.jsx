@@ -32,7 +32,7 @@ const NodeIcons = {
   action: Target,
 };
 
-const NodeConfigDialog = ({ open, onOpenChange, node, onSave, m3uAccounts = [], channels = [] }) => {
+const NodeConfigDialog = ({ open, onOpenChange, node, onSave, m3uAccounts = [], channels = [], streamGroups = [] }) => {
   const [config, setConfig] = useState({});
   const [tempInput, setTempInput] = useState('');
 
@@ -129,25 +129,25 @@ const NodeConfigDialog = ({ open, onOpenChange, node, onSave, m3uAccounts = [], 
       <div className="space-y-2">
         <Label>Stream Groups</Label>
         <div className="space-y-2">
-          <div className="flex gap-2">
-            <Input
-              placeholder="Enter group name..."
-              value={tempInput}
-              onChange={(e) => setTempInput(e.target.value)}
-              onKeyPress={(e) => {
-                if (e.key === 'Enter') {
-                  addToArray('stream_groups', tempInput);
-                }
-              }}
-            />
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => addToArray('stream_groups', tempInput)}
-            >
-              <Plus className="h-4 w-4" />
-            </Button>
-          </div>
+          <Select
+            onValueChange={(value) => {
+              const current = config.stream_groups || [];
+              if (!current.includes(value)) {
+                updateConfig('stream_groups', [...current, value]);
+              }
+            }}
+          >
+            <SelectTrigger>
+              <SelectValue placeholder="Select stream groups..." />
+            </SelectTrigger>
+            <SelectContent>
+              {(Array.isArray(streamGroups) ? streamGroups : []).map((group) => (
+                <SelectItem key={group.name} value={group.name}>
+                  {group.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <div className="flex flex-wrap gap-2">
             {(config.stream_groups || []).map((group, index) => (
               <Badge key={index} variant="secondary" className="flex items-center gap-1">

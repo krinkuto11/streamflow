@@ -79,6 +79,7 @@ const MatchProfileStudio = () => {
   const [configDialogOpen, setConfigDialogOpen] = useState(false);
   const [m3uAccounts, setM3uAccounts] = useState([]);
   const [channels, setChannels] = useState([]);
+  const [streamGroups, setStreamGroups] = useState([]);
   const { toast } = useToast();
 
   // Pipeline state - array of nodes in vertical order
@@ -88,6 +89,7 @@ const MatchProfileStudio = () => {
     loadProfiles();
     loadM3UAccounts();
     loadChannels();
+    loadStreamGroups();
   }, []);
 
   const loadProfiles = async () => {
@@ -111,7 +113,9 @@ const MatchProfileStudio = () => {
     try {
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
       const response = await axios.get(`${API_BASE_URL}/api/m3u-accounts`);
-      setM3uAccounts(response.data || []);
+      // Backend returns {accounts: [...], global_priority_mode: ...}
+      const accounts = response.data?.accounts || response.data || [];
+      setM3uAccounts(accounts);
     } catch (error) {
       console.error('Error loading M3U accounts:', error);
       toast({
@@ -132,6 +136,21 @@ const MatchProfileStudio = () => {
       toast({
         title: 'Error',
         description: 'Failed to load channels',
+        variant: 'destructive',
+      });
+    }
+  };
+
+  const loadStreamGroups = async () => {
+    try {
+      const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+      const response = await axios.get(`${API_BASE_URL}/api/stream-groups`);
+      setStreamGroups(response.data || []);
+    } catch (error) {
+      console.error('Error loading stream groups:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load stream groups',
         variant: 'destructive',
       });
     }
@@ -671,6 +690,7 @@ const MatchProfileStudio = () => {
         onSave={handleNodeConfigSave}
         m3uAccounts={m3uAccounts}
         channels={channels}
+        streamGroups={streamGroups}
       />
     </div>
   );
