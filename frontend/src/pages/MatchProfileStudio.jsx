@@ -112,7 +112,6 @@ const MatchProfileStudio = () => {
     try {
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
       const response = await axios.get(`${API_BASE_URL}/api/m3u/accounts`);
-      console.log('M3U Accounts loaded:', response.data);
       setM3uAccounts(response.data || []);
     } catch (error) {
       console.error('Error loading M3U accounts:', error);
@@ -128,7 +127,6 @@ const MatchProfileStudio = () => {
     try {
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
       const response = await axios.get(`${API_BASE_URL}/api/channels/channels?page_size=1000`);
-      console.log('Channels loaded:', response.data.results?.length || 0);
       setChannels(response.data.results || []);
     } catch (error) {
       console.error('Error loading channels:', error);

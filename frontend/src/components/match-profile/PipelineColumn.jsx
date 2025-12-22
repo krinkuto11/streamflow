@@ -66,7 +66,7 @@ const PipelineNode = ({ node, isSelected, onSelect, onAddNode, isFirst, isLast }
     <div className="relative">
       {/* Top Add Button */}
       {!isFirst && (
-        <div className="flex justify-center mb-2 opacity-0 hover:opacity-100 transition-opacity group-hover:opacity-100">
+        <div className="flex justify-center mb-2 opacity-0 group-hover:opacity-100 transition-opacity">
           <DropdownMenu open={showAddMenu.top} onOpenChange={(open) => setShowAddMenu({ ...showAddMenu, top: open })}>
             <DropdownMenuTrigger asChild>
               <Button
@@ -133,7 +133,7 @@ const PipelineNode = ({ node, isSelected, onSelect, onAddNode, isFirst, isLast }
       </Card>
 
       {/* Bottom Add Button */}
-      <div className="flex justify-center mt-2 opacity-0 hover:opacity-100 transition-opacity group-hover:opacity-100">
+      <div className="flex justify-center mt-2 opacity-0 group-hover:opacity-100 transition-opacity">
         <DropdownMenu open={showAddMenu.bottom} onOpenChange={(open) => setShowAddMenu({ ...showAddMenu, bottom: open })}>
           <DropdownMenuTrigger asChild>
             <Button
