@@ -50,11 +50,14 @@ The StreamFlow application now supports 5 different pipeline modes, each with di
 
 **Behavior:**
 - All features of Pipeline 1
+- **Stream Quality Checking:** Channels that receive new streams are automatically queued for quality checking (respects 2-hour immunity for recently checked streams)
 - **PLUS:** Scheduled Global Action (daily or monthly)
   - Updates all M3U playlists
   - Matches all streams
   - Checks ALL channels, bypassing 2-hour immunity
   - Typically scheduled during off-peak hours (e.g., 3 AM)
+
+**Important:** Pipeline 1.5 DOES check stream quality with every playlist update. When M3U playlists are refreshed and new streams are matched to channels, those channels are queued for quality analysis. The 2-hour immunity only prevents re-checking streams that were recently analyzed. During scheduled global actions, ALL streams are checked regardless of immunity.
 
 **Use Case:** Users who want automatic updates with immunity during the day, but want a complete check of all channels during off-peak hours.
 

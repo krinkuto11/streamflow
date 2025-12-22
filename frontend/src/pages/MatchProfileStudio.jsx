@@ -43,7 +43,7 @@ import axios from 'axios';
 const createNodeComponent = (type, Icon, colorClasses) => {
   return ({ data, selected }) => (
     <div
-      className={`px-4 py-3 shadow-lg rounded-lg border-2 transition-all ${
+      className={`px-3 py-2 shadow-lg rounded-lg border-2 transition-all min-w-[140px] max-w-[180px] ${
         selected
           ? 'ring-2 ring-primary ring-offset-2'
           : ''
@@ -51,16 +51,16 @@ const createNodeComponent = (type, Icon, colorClasses) => {
     >
       <div className="flex items-center justify-between gap-2 mb-1">
         <div className="flex items-center gap-2">
-          <Icon className="h-4 w-4" />
-          <div className="font-bold text-sm">{type.charAt(0).toUpperCase() + type.slice(1)}</div>
+          <Icon className="h-3 w-3" />
+          <div className="font-bold text-xs">{type.charAt(0).toUpperCase() + type.slice(1)}</div>
         </div>
         {data.configured && (
-          <Badge variant="outline" className="text-xs">
+          <Badge variant="outline" className="text-xs px-1 py-0">
             ✓
           </Badge>
         )}
       </div>
-      <div className="text-xs text-muted-foreground">
+      <div className="text-xs text-muted-foreground truncate">
         {data.summary || 'Not configured'}
       </div>
     </div>
@@ -422,8 +422,8 @@ const MatchProfileStudio = () => {
         node.position.x > max.position.x ? node : max
       , nodes[0]);
       
-      // Position new node 250px to the right of the rightmost node
-      xPosition = rightmostNode.position.x + 250;
+      // Position new node 200px to the right of the rightmost node
+      xPosition = rightmostNode.position.x + 200;
       yPosition = rightmostNode.position.y;
     }
     
@@ -699,9 +699,14 @@ const MatchProfileStudio = () => {
                         nodeTypes={nodeTypes}
                         fitView
                         fitViewOptions={{
-                          padding: 0.2,
-                          minZoom: 0.5,
-                          maxZoom: 1.5,
+                          padding: 0.3,
+                          minZoom: 0.3,
+                          maxZoom: 1,
+                        }}
+                        defaultEdgeOptions={{
+                          markerEnd: { type: MarkerType.ArrowClosed },
+                          animated: true,
+                          style: { stroke: 'hsl(var(--primary))', strokeWidth: 2 },
                         }}
                       >
                         <Controls />
