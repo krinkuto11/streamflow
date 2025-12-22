@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
 import ReactFlow, {
-  MiniMap,
   Controls,
   Background,
   useNodesState,
@@ -374,7 +373,11 @@ const MatchProfileStudio = () => {
     // Load pipeline into React Flow
     const pipeline = profile.pipeline || { nodes: [], edges: [] };
     
-    const flowNodes = pipeline.nodes.map((node, index) => ({
+    // Ensure nodes and edges are arrays to prevent .map errors
+    const pipelineNodes = Array.isArray(pipeline.nodes) ? pipeline.nodes : [];
+    const pipelineEdges = Array.isArray(pipeline.edges) ? pipeline.edges : [];
+    
+    const flowNodes = pipelineNodes.map((node, index) => ({
       id: node.id,
       type: node.type,
       position: node.position || { x: 100 + index * 200, y: 100 },
@@ -385,7 +388,7 @@ const MatchProfileStudio = () => {
       },
     }));
     
-    const flowEdges = pipeline.edges.map((edge, index) => ({
+    const flowEdges = pipelineEdges.map((edge, index) => ({
       id: `edge-${index}`,
       source: edge.from,
       target: edge.to,
@@ -409,10 +412,25 @@ const MatchProfileStudio = () => {
   );
 
   const addNode = (type) => {
+    // Calculate position to the right of the last added node
+    let xPosition = 100;
+    let yPosition = 100;
+    
+    if (nodes.length > 0) {
+      // Find the rightmost node
+      const rightmostNode = nodes.reduce((max, node) => 
+        node.position.x > max.position.x ? node : max
+      , nodes[0]);
+      
+      // Position new node 250px to the right of the rightmost node
+      xPosition = rightmostNode.position.x + 250;
+      yPosition = rightmostNode.position.y;
+    }
+    
     const newNode = {
       id: `${type}-${Date.now()}`,
       type,
-      position: { x: Math.random() * 400, y: Math.random() * 400 },
+      position: { x: xPosition, y: yPosition },
       data: {
         config: {},
         configured: false,
@@ -680,9 +698,13 @@ const MatchProfileStudio = () => {
                         onNodeDoubleClick={handleNodeDoubleClick}
                         nodeTypes={nodeTypes}
                         fitView
+                        fitViewOptions={{
+                          padding: 0.2,
+                          minZoom: 0.5,
+                          maxZoom: 1.5,
+                        }}
                       >
                         <Controls />
-                        <MiniMap />
                         <Background variant="dots" gap={12} size={1} />
                       </ReactFlow>
                     </div>
