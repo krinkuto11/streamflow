@@ -52,7 +52,7 @@ const NodeColors = {
   },
 };
 
-const PipelineNode = ({ node, isSelected, onSelect, onAddNode, isFirst, isLast }) => {
+const PipelineNode = ({ node, isSelected, onSelect, onDoubleClick, onAddNode, isFirst, isLast }) => {
   const [showAddMenu, setShowAddMenu] = useState({ top: false, bottom: false });
   const Icon = NodeIcons[node.type] || Database;
   const colors = NodeColors[node.type] || NodeColors.source;
@@ -113,6 +113,7 @@ const PipelineNode = ({ node, isSelected, onSelect, onAddNode, isFirst, isLast }
           isSelected && 'ring-2 ring-primary ring-offset-2'
         )}
         onClick={() => onSelect(node)}
+        onDoubleClick={() => onDoubleClick(node)}
       >
         <div className="flex items-center justify-between gap-2 mb-1">
           <div className="flex items-center gap-2">
@@ -172,14 +173,14 @@ const PipelineNode = ({ node, isSelected, onSelect, onAddNode, isFirst, isLast }
       {/* Connector Line */}
       {!isLast && (
         <div className="flex justify-center my-2">
-          <div className="w-0.5 h-4 bg-border" />
+          <div className="w-0.5 h-4 bg-blue-500 dark:bg-green-500" />
         </div>
       )}
     </div>
   );
 };
 
-const PipelineColumn = ({ nodes, selectedNode, onNodeSelect, onAddNode, pipelineId }) => {
+const PipelineColumn = ({ nodes, selectedNode, onNodeSelect, onNodeDoubleClick, onAddNode, pipelineId }) => {
   return (
     <div className="flex flex-col items-center w-full max-w-md mx-auto p-4">
       <div className="w-full space-y-0 group">
@@ -189,6 +190,7 @@ const PipelineColumn = ({ nodes, selectedNode, onNodeSelect, onAddNode, pipeline
             node={node}
             isSelected={selectedNode?.id === node.id}
             onSelect={onNodeSelect}
+            onDoubleClick={onNodeDoubleClick}
             onAddNode={onAddNode}
             isFirst={index === 0}
             isLast={index === nodes.length - 1}
