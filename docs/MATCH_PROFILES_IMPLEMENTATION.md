@@ -45,6 +45,9 @@ Each Match Profile consists of a **vertical visual pipeline** with nodes stacked
 - **Floating Menu**: Click "+" to open a dropdown menu for selecting node type
 - **Color-Coded Nodes**: Each node type has a distinct color (Source=Blue, Filter=Yellow, etc.)
 - **Auto-Initialization**: New profiles automatically start with a Source node
+- **Double-Click Editing**: Double-click any node to open its configuration dialog
+- **Theme-Aware Connectors**: Connector lines are blue in light mode and green in dark mode
+- **UDI Data Integration**: Nodes fetch M3U accounts and channels directly from the UDI for proper data synchronization
 
 ## Data Model
 

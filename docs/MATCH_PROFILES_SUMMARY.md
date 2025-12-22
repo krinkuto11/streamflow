@@ -229,30 +229,26 @@ Dispatcharr API (Future - Stream Assignment)
    - Description: "Match sports streams to appropriate channels"
 4. Click on "Pipeline" tab
 5. Add nodes to the pipeline:
-   - Click "Source" button to add a Source node
-   - Click "Filter" button to add a Filter node
-   - Click "Match" button to add a Match node
-   - Click "Action" button to add an Action node
+   - Hover over any node and click "+" button to add nodes above or below
+   - Select node type from the dropdown menu
 6. Configure each node:
    - **Double-click** any node to open its configuration dialog
    - **Source Node**: Select M3U accounts to use
    - **Filter Node**: Add regex patterns like `.*NFL.*`, `.*NBA.*`
    - **Match Node**: Configure channel patterns (e.g., channel 101 → `ESPN.*`)
    - **Action Node**: Set action to "Add to Channel"
-7. Connect nodes:
-   - Drag from the right edge of one node to the left edge of another
-   - Create flow: Source → Filter → Match → Action
+7. Nodes are connected automatically in the vertical pipeline
 8. Click "Save" to save the profile
 9. Click "Test" to preview matches without applying
 10. Click "Execute" to apply the matches to channels
 
 **Node Editing Tips:**
-- **Select a node** by clicking it (shows Edit/Delete buttons)
-- **Edit a node** by double-clicking or clicking "Edit Node" button
+- **Select a node** by clicking it (shows Delete button)
+- **Edit a node** by double-clicking it
 - **Delete a node** by selecting it and clicking "Delete Node" button
-- **Delete a connection** by selecting it and pressing Delete key
 - Nodes show a checkmark (✓) when configured
 - Nodes display a summary of their configuration
+- Connector lines are blue in light mode and green in dark mode for better theme matching
 
 ### Creating via API
 

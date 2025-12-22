@@ -125,8 +125,8 @@ const MatchProfileStudio = () => {
   const loadChannels = async () => {
     try {
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
-      const response = await axios.get(`${API_BASE_URL}/api/channels/channels?page_size=1000`);
-      setChannels(response.data.results || []);
+      const response = await axios.get(`${API_BASE_URL}/api/channels`);
+      setChannels(response.data || []);
     } catch (error) {
       console.error('Error loading channels:', error);
       toast({
