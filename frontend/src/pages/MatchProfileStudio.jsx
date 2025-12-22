@@ -1,13 +1,4 @@
 import { useState, useEffect, useCallback } from 'react';
-import ReactFlow, {
-  Controls,
-  Background,
-  useNodesState,
-  useEdgesState,
-  addEdge,
-  MarkerType,
-} from 'reactflow';
-import 'reactflow/dist/style.css';
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -26,84 +17,14 @@ import {
   Plus, 
   Settings as SettingsIcon,
   TestTube,
-  Database,
-  Filter,
-  Wand2,
-  Link2,
-  Target,
   Edit,
   Trash
 } from 'lucide-react';
 
 import matchProfileService from '@/services/matchProfileService';
 import NodeConfigDialog from '@/components/match-profile/NodeConfigDialog';
+import PipelineColumn from '@/components/match-profile/PipelineColumn';
 import axios from 'axios';
-
-// Custom node components with consistent theming
-const createNodeComponent = (type, Icon, colorClasses) => {
-  return ({ data, selected }) => (
-    <div
-      className={`px-3 py-2 shadow-lg rounded-lg border-2 transition-all min-w-[140px] max-w-[180px] ${
-        selected
-          ? 'ring-2 ring-primary ring-offset-2'
-          : ''
-      } ${colorClasses.bg} ${colorClasses.border} ${colorClasses.text}`}
-    >
-      <div className="flex items-center justify-between gap-2 mb-1">
-        <div className="flex items-center gap-2">
-          <Icon className="h-3 w-3" />
-          <div className="font-bold text-xs">{type.charAt(0).toUpperCase() + type.slice(1)}</div>
-        </div>
-        {data.configured && (
-          <Badge variant="outline" className="text-xs px-1 py-0">
-            ✓
-          </Badge>
-        )}
-      </div>
-      <div className="text-xs text-muted-foreground truncate">
-        {data.summary || 'Not configured'}
-      </div>
-    </div>
-  );
-};
-
-const SourceNodeComponent = createNodeComponent('source', Database, {
-  bg: 'bg-blue-50 dark:bg-blue-950/50',
-  border: 'border-blue-500 dark:border-blue-600',
-  text: 'text-blue-900 dark:text-blue-100',
-});
-
-const FilterNodeComponent = createNodeComponent('filter', Filter, {
-  bg: 'bg-yellow-50 dark:bg-yellow-950/50',
-  border: 'border-yellow-500 dark:border-yellow-600',
-  text: 'text-yellow-900 dark:text-yellow-100',
-});
-
-const TransformNodeComponent = createNodeComponent('transform', Wand2, {
-  bg: 'bg-purple-50 dark:bg-purple-950/50',
-  border: 'border-purple-500 dark:border-purple-600',
-  text: 'text-purple-900 dark:text-purple-100',
-});
-
-const MatchNodeComponent = createNodeComponent('match', Link2, {
-  bg: 'bg-green-50 dark:bg-green-950/50',
-  border: 'border-green-500 dark:border-green-600',
-  text: 'text-green-900 dark:text-green-100',
-});
-
-const ActionNodeComponent = createNodeComponent('action', Target, {
-  bg: 'bg-red-50 dark:bg-red-950/50',
-  border: 'border-red-500 dark:border-red-600',
-  text: 'text-red-900 dark:text-red-100',
-});
-
-const nodeTypes = {
-  source: SourceNodeComponent,
-  filter: FilterNodeComponent,
-  transform: TransformNodeComponent,
-  match: MatchNodeComponent,
-  action: ActionNodeComponent,
-};
 
 // Helper to generate node summary text
 const getNodeSummary = (type, config) => {
@@ -161,9 +82,8 @@ const MatchProfileStudio = () => {
   const [channels, setChannels] = useState([]);
   const { toast } = useToast();
 
-  // React Flow state
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  // Pipeline state - array of nodes in vertical order
+  const [pipelineNodes, setPipelineNodes] = useState([]);
 
   useEffect(() => {
     loadProfiles();
@@ -192,9 +112,15 @@ const MatchProfileStudio = () => {
     try {
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
       const response = await axios.get(`${API_BASE_URL}/api/m3u/accounts`);
-      setM3uAccounts(response.data);
+      console.log('M3U Accounts loaded:', response.data);
+      setM3uAccounts(response.data || []);
     } catch (error) {
       console.error('Error loading M3U accounts:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load M3U accounts',
+        variant: 'destructive',
+      });
     }
   };
 
@@ -202,9 +128,15 @@ const MatchProfileStudio = () => {
     try {
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
       const response = await axios.get(`${API_BASE_URL}/api/channels/channels?page_size=1000`);
+      console.log('Channels loaded:', response.data.results?.length || 0);
       setChannels(response.data.results || []);
     } catch (error) {
       console.error('Error loading channels:', error);
+      toast({
+        title: 'Error',
+        description: 'Failed to load channels',
+        variant: 'destructive',
+      });
     }
   };
 
@@ -219,13 +151,20 @@ const MatchProfileStudio = () => {
     }
 
     try {
+      // Create initial source node for the new profile
+      const initialSourceNode = {
+        id: `source-${Date.now()}`,
+        type: 'source',
+        config: {},
+      };
+
       const newProfile = {
         name: newProfileName,
         description: newProfileDescription,
         enabled: true,
         priority: 100,
         pipeline: {
-          nodes: [],
+          nodes: [initialSourceNode],
           edges: [],
         },
       };
@@ -290,16 +229,12 @@ const MatchProfileStudio = () => {
       const updated = {
         ...selectedProfile,
         pipeline: {
-          nodes: nodes.map(n => ({
+          nodes: pipelineNodes.map(n => ({
             id: n.id,
             type: n.type,
-            position: n.position,
             config: n.data.config || {},
           })),
-          edges: edges.map(e => ({
-            from: e.source,
-            to: e.target,
-          })),
+          edges: [], // Edges are implicit in vertical pipeline (sequential flow)
         },
       };
 
@@ -370,17 +305,24 @@ const MatchProfileStudio = () => {
   const handleSelectProfile = (profile) => {
     setSelectedProfile(profile);
     
-    // Load pipeline into React Flow
+    // Load pipeline into pipeline nodes state
     const pipeline = profile.pipeline || { nodes: [], edges: [] };
     
-    // Ensure nodes and edges are arrays to prevent .map errors
-    const pipelineNodes = Array.isArray(pipeline.nodes) ? pipeline.nodes : [];
-    const pipelineEdges = Array.isArray(pipeline.edges) ? pipeline.edges : [];
+    // Ensure nodes are arrays to prevent .map errors
+    const pipelineNodesData = Array.isArray(pipeline.nodes) ? pipeline.nodes : [];
     
-    const flowNodes = pipelineNodes.map((node, index) => ({
+    // If no nodes exist, create an initial source node
+    const nodesToLoad = pipelineNodesData.length > 0 
+      ? pipelineNodesData 
+      : [{
+          id: `source-${Date.now()}`,
+          type: 'source',
+          config: {},
+        }];
+    
+    const loadedNodes = nodesToLoad.map((node) => ({
       id: node.id,
       type: node.type,
-      position: node.position || { x: 100 + index * 200, y: 100 },
       data: {
         config: node.config || {},
         configured: Object.keys(node.config || {}).length > 0,
@@ -388,49 +330,13 @@ const MatchProfileStudio = () => {
       },
     }));
     
-    const flowEdges = pipelineEdges.map((edge, index) => ({
-      id: `edge-${index}`,
-      source: edge.from,
-      target: edge.to,
-      markerEnd: { type: MarkerType.ArrowClosed },
-      animated: true,
-      style: { stroke: 'hsl(var(--primary))', strokeWidth: 2 },
-    }));
-    
-    setNodes(flowNodes);
-    setEdges(flowEdges);
+    setPipelineNodes(loadedNodes);
   };
 
-  const onConnect = useCallback(
-    (params) => setEdges((eds) => addEdge({ 
-      ...params, 
-      markerEnd: { type: MarkerType.ArrowClosed },
-      animated: true,
-      style: { stroke: 'hsl(var(--primary))', strokeWidth: 2 },
-    }, eds)),
-    [setEdges],
-  );
-
-  const addNode = (type) => {
-    // Calculate position to the right of the last added node
-    let xPosition = 100;
-    let yPosition = 100;
-    
-    if (nodes.length > 0) {
-      // Find the rightmost node
-      const rightmostNode = nodes.reduce((max, node) => 
-        node.position.x > max.position.x ? node : max
-      , nodes[0]);
-      
-      // Position new node 200px to the right of the rightmost node
-      xPosition = rightmostNode.position.x + 200;
-      yPosition = rightmostNode.position.y;
-    }
-    
+  const handleAddNode = (referenceNodeId, position, type) => {
     const newNode = {
       id: `${type}-${Date.now()}`,
       type,
-      position: { x: xPosition, y: yPosition },
       data: {
         config: {},
         configured: false,
@@ -438,20 +344,34 @@ const MatchProfileStudio = () => {
       },
     };
     
-    setNodes((nds) => [...nds, newNode]);
+    setPipelineNodes((currentNodes) => {
+      const refIndex = currentNodes.findIndex(n => n.id === referenceNodeId);
+      if (refIndex === -1) {
+        // If reference node not found, add at the end
+        return [...currentNodes, newNode];
+      }
+      
+      const newNodes = [...currentNodes];
+      if (position === 'before') {
+        newNodes.splice(refIndex, 0, newNode);
+      } else {
+        newNodes.splice(refIndex + 1, 0, newNode);
+      }
+      return newNodes;
+    });
   };
 
-  const handleNodeClick = useCallback((event, node) => {
+  const handleNodeClick = useCallback((node) => {
     setSelectedNode(node);
   }, []);
 
-  const handleNodeDoubleClick = useCallback((event, node) => {
+  const handleNodeDoubleClick = useCallback((node) => {
     setSelectedNode(node);
     setConfigDialogOpen(true);
   }, []);
 
   const handleNodeConfigSave = (updatedNode) => {
-    setNodes((nds) =>
+    setPipelineNodes((nds) =>
       nds.map((n) => {
         if (n.id === updatedNode.id) {
           return {
@@ -472,13 +392,8 @@ const MatchProfileStudio = () => {
   const handleDeleteNode = () => {
     if (!selectedNode) return;
     
-    setNodes((nds) => nds.filter((n) => n.id !== selectedNode.id));
-    setEdges((eds) => eds.filter((e) => e.source !== selectedNode.id && e.target !== selectedNode.id));
+    setPipelineNodes((nds) => nds.filter((n) => n.id !== selectedNode.id));
     setSelectedNode(null);
-  };
-
-  const handleDeleteEdge = (edgeId) => {
-    setEdges((eds) => eds.filter((e) => e.id !== edgeId));
   };
 
   if (loading) {
@@ -637,81 +552,39 @@ const MatchProfileStudio = () => {
                   </TabsList>
                   
                   <TabsContent value="pipeline" className="space-y-4">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <div className="flex gap-2 flex-wrap">
-                        <Button size="sm" variant="outline" onClick={() => addNode('source')}>
-                          <Database className="h-4 w-4 mr-2" />
-                          Source
+                    {selectedNode && (
+                      <div className="flex gap-2 justify-end">
+                        <Button 
+                          size="sm" 
+                          variant="outline" 
+                          onClick={() => {
+                            setConfigDialogOpen(true);
+                          }}
+                        >
+                          <Edit className="h-4 w-4 mr-2" />
+                          Edit Node
                         </Button>
-                        <Button size="sm" variant="outline" onClick={() => addNode('filter')}>
-                          <Filter className="h-4 w-4 mr-2" />
-                          Filter
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => addNode('transform')}>
-                          <Wand2 className="h-4 w-4 mr-2" />
-                          Transform
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => addNode('match')}>
-                          <Link2 className="h-4 w-4 mr-2" />
-                          Match
-                        </Button>
-                        <Button size="sm" variant="outline" onClick={() => addNode('action')}>
-                          <Target className="h-4 w-4 mr-2" />
-                          Action
+                        <Button 
+                          size="sm" 
+                          variant="destructive" 
+                          onClick={handleDeleteNode}
+                        >
+                          <Trash className="h-4 w-4 mr-2" />
+                          Delete Node
                         </Button>
                       </div>
-                      
-                      {selectedNode && (
-                        <div className="flex gap-2">
-                          <Button 
-                            size="sm" 
-                            variant="outline" 
-                            onClick={() => {
-                              setConfigDialogOpen(true);
-                            }}
-                          >
-                            <Edit className="h-4 w-4 mr-2" />
-                            Edit Node
-                          </Button>
-                          <Button 
-                            size="sm" 
-                            variant="destructive" 
-                            onClick={handleDeleteNode}
-                          >
-                            <Trash className="h-4 w-4 mr-2" />
-                            Delete Node
-                          </Button>
-                        </div>
-                      )}
-                    </div>
+                    )}
                     
                     <Separator />
                     
-                    <div style={{ height: '500px' }} className="border rounded-lg bg-background">
-                      <ReactFlow
-                        nodes={nodes}
-                        edges={edges}
-                        onNodesChange={onNodesChange}
-                        onEdgesChange={onEdgesChange}
-                        onConnect={onConnect}
-                        onNodeClick={handleNodeClick}
-                        onNodeDoubleClick={handleNodeDoubleClick}
-                        nodeTypes={nodeTypes}
-                        fitView
-                        fitViewOptions={{
-                          padding: 0.3,
-                          minZoom: 0.3,
-                          maxZoom: 1,
-                        }}
-                        defaultEdgeOptions={{
-                          markerEnd: { type: MarkerType.ArrowClosed },
-                          animated: true,
-                          style: { stroke: 'hsl(var(--primary))', strokeWidth: 2 },
-                        }}
-                      >
-                        <Controls />
-                        <Background variant="dots" gap={12} size={1} />
-                      </ReactFlow>
+                    <div className="border rounded-lg bg-background overflow-y-auto" style={{ minHeight: '500px', maxHeight: '600px' }}>
+                      <PipelineColumn
+                        nodes={pipelineNodes}
+                        selectedNode={selectedNode}
+                        onNodeSelect={handleNodeClick}
+                        onAddNode={handleAddNode}
+                        pipelineId={selectedProfile?.id}
+                      />
                     </div>
                   </TabsContent>
                   
