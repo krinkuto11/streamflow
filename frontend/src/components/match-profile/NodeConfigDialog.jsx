@@ -142,7 +142,7 @@ const NodeConfigDialog = ({ open, onOpenChange, node, onSave, m3uAccounts = [], 
             </SelectTrigger>
             <SelectContent>
               {(Array.isArray(streamGroups) ? streamGroups : []).map((group) => (
-                <SelectItem key={group.name} value={group.name}>
+                <SelectItem key={group.id} value={group.name}>
                   {group.name}
                 </SelectItem>
               ))}

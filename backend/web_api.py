@@ -477,11 +477,11 @@ def get_stream_groups():
             return jsonify({"error": "Failed to fetch stream groups"}), 500
         
         # Return list of channel groups with id and name
-        # Filter out groups without names
+        # Filter out groups without valid names (None, empty strings, whitespace-only)
         groups = [
             {"id": group.get("id"), "name": group.get("name")}
             for group in channel_groups
-            if group.get("name")
+            if group.get("name") is not None and str(group.get("name")).strip()
         ]
         
         return jsonify(groups)

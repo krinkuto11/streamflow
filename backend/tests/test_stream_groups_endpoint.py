@@ -58,13 +58,15 @@ class TestStreamGroupsEndpoint(unittest.TestCase):
         """Test that groups without names are filtered out."""
         from web_api import app
         
-        # Mock UDI manager with some groups having no names
+        # Mock UDI manager with some groups having no names, empty names, or whitespace
         mock_udi = MagicMock()
         mock_udi.get_channel_groups.return_value = [
             {'id': 1, 'name': 'Sports'},
             {'id': 2, 'name': ''},  # Empty name
             {'id': 3, 'name': 'Movies'},
             {'id': 4},  # No name field
+            {'id': 5, 'name': '   '},  # Whitespace only
+            {'id': 6, 'name': None},  # None name
         ]
         mock_get_udi.return_value = mock_udi
         
@@ -72,7 +74,7 @@ class TestStreamGroupsEndpoint(unittest.TestCase):
             response = client.get('/api/stream-groups')
             data = json.loads(response.data)
             
-            # Should only return groups with names
+            # Should only return groups with valid names
             self.assertEqual(len(data), 2)
             group_names = [g['name'] for g in data]
             self.assertIn('Sports', group_names)
