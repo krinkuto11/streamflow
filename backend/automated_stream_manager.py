@@ -312,6 +312,8 @@ class RegexChannelMatcher:
     def validate_regex_patterns(self, patterns: List[str]) -> Tuple[bool, Optional[str]]:
         """Validate a list of regex patterns.
         
+        Supports both {CHANNEL_NAME} and CHANNEL_NAME variable formats.
+        
         Args:
             patterns: List of regex pattern strings to validate
             
@@ -326,9 +328,10 @@ class RegexChannelMatcher:
                 return False, f"Pattern must be a non-empty string"
             
             try:
-                # Temporarily substitute CHANNEL_NAME with a placeholder for validation
+                # Temporarily substitute both variable formats with a placeholder for validation
                 # Use a simple placeholder that won't interfere with regex syntax
-                validation_pattern = pattern.replace('CHANNEL_NAME', 'PLACEHOLDER')
+                validation_pattern = pattern.replace('{CHANNEL_NAME}', 'PLACEHOLDER')
+                validation_pattern = validation_pattern.replace('CHANNEL_NAME', 'PLACEHOLDER')
                 re.compile(validation_pattern)
             except re.error as e:
                 return False, f"Invalid regex pattern '{pattern}': {str(e)}"
@@ -387,17 +390,32 @@ class RegexChannelMatcher:
     def _substitute_channel_variables(self, pattern: str, channel_name: str) -> str:
         """Substitute channel name variables in a regex pattern.
         
+        Supports multiple variable formats for user convenience:
+        - {CHANNEL_NAME} - Primary format (intuitive, common in templating)
+        - CHANNEL_NAME - Legacy format (maintained for backward compatibility)
+        
         Args:
-            pattern: Regex pattern that may contain CHANNEL_NAME
+            pattern: Regex pattern that may contain CHANNEL_NAME variable
             channel_name: Name of the channel to substitute
             
         Returns:
             Pattern with variables substituted
+            
+        Examples:
+            >>> _substitute_channel_variables(".*{CHANNEL_NAME}.*", "HBO")
+            ".*HBO.*"
+            >>> _substitute_channel_variables(".*CHANNEL_NAME.*", "ESPN+")
+            ".*ESPN\\+.*"
         """
-        # Replace CHANNEL_NAME with the actual channel name
         # Escape special regex characters in channel name to avoid issues
         escaped_channel_name = re.escape(channel_name)
-        return pattern.replace('CHANNEL_NAME', escaped_channel_name)
+        
+        # Replace both {CHANNEL_NAME} and CHANNEL_NAME formats
+        # Process {CHANNEL_NAME} first to avoid double replacement
+        result = pattern.replace('{CHANNEL_NAME}', escaped_channel_name)
+        result = result.replace('CHANNEL_NAME', escaped_channel_name)
+        
+        return result
     
     def match_stream_to_channels(self, stream_name: str, stream_m3u_account: Optional[int] = None) -> List[str]:
         """Match a stream name to channel IDs based on regex patterns.

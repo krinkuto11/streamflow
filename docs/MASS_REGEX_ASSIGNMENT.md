@@ -31,18 +31,24 @@ Click "Add Regex to Selected" button to:
 3. Apply it to all selected channels at once
 
 ### 5. Channel Name Variables
-Use `CHANNEL_NAME` in patterns to create reusable regex rules:
+Use `{CHANNEL_NAME}` in patterns to create reusable regex rules:
 
 **Example**:
-- Pattern: `.*CHANNEL_NAME.*`
+- Pattern: `.*{CHANNEL_NAME}.*`
 - For channel "ESPN" becomes: `.*ESPN.*`
 - For channel "CNN" becomes: `.*CNN.*`
 - For channel "ABC" becomes: `.*ABC.*`
 
 One pattern works for many channels!
 
+**Variable Formats Supported**:
+- **`{CHANNEL_NAME}`** - Recommended format (clearer, follows common templating conventions)
+- **`CHANNEL_NAME`** - Legacy format (maintained for backward compatibility)
+
+Both formats work identically - use whichever you prefer!
+
 **Live Preview Support**:
-- The live regex preview automatically substitutes `CHANNEL_NAME` with the actual channel name
+- The live regex preview automatically substitutes `{CHANNEL_NAME}` or `CHANNEL_NAME` with the actual channel name
 - You can see in real-time which streams will be matched when you test your pattern
 - This ensures your pattern works correctly before applying it to channels
 
@@ -58,7 +64,7 @@ One pattern works for many channels!
    - Click "Add Regex to Selected" button
 4. **Enter pattern**:
    - Type your regex pattern
-   - Use `CHANNEL_NAME` for channel-specific matching
+   - Use `{CHANNEL_NAME}` for channel-specific matching (or legacy `CHANNEL_NAME` format)
 5. **Apply**:
    - Click "Add to X Channels"
    - Pattern is added to all selected channels
@@ -72,7 +78,7 @@ One pattern works for many channels!
    - Click "Select All" to select all channels in that group
 3. **Add pattern**:
    - Click "Add Regex to Selected"
-   - Enter pattern like: `.*CHANNEL_NAME.*|.*HD.*`
+   - Enter pattern like: `.*{CHANNEL_NAME}.*|.*HD.*`
 4. **Repeat** for other groups as needed
 
 ## Technical Details
@@ -82,11 +88,14 @@ One pattern works for many channels!
 #### 1. Pattern Variable Substitution
 File: `backend/automated_stream_manager.py`
 
-Added method to substitute `CHANNEL_NAME` at match time:
+Added method to substitute `{CHANNEL_NAME}` or `CHANNEL_NAME` at match time:
 ```python
 def _substitute_channel_variables(self, pattern: str, channel_name: str) -> str:
     escaped_channel_name = re.escape(channel_name)
-    return pattern.replace('CHANNEL_NAME', escaped_channel_name)
+    # Support both {CHANNEL_NAME} and CHANNEL_NAME formats
+    result = pattern.replace('{CHANNEL_NAME}', escaped_channel_name)
+    result = result.replace('CHANNEL_NAME', escaped_channel_name)
+    return result
 ```
 
 #### 2. Bulk Assignment Endpoint
@@ -97,7 +106,7 @@ New API endpoint:
 POST /api/regex-patterns/bulk
 {
   "channel_ids": [1, 2, 3],
-  "regex_patterns": [".*CHANNEL_NAME.*"]
+  "regex_patterns": [".*{CHANNEL_NAME}.*"]
 }
 ```
 
@@ -110,15 +119,16 @@ Features:
 #### 3. Live Regex Preview Endpoint
 File: `backend/web_api.py`
 
-Updated the `/api/test-regex-live` endpoint to support `CHANNEL_NAME` substitution:
+Updated the `/api/test-regex-live` endpoint to support both `{CHANNEL_NAME}` and `CHANNEL_NAME` substitution:
 ```python
-# Substitute CHANNEL_NAME variable with actual channel name
+# Substitute both variable formats with actual channel name
 escaped_channel_name = re.escape(channel_name)
-substituted_pattern = pattern.replace('CHANNEL_NAME', escaped_channel_name)
+substituted_pattern = pattern.replace('{CHANNEL_NAME}', escaped_channel_name)
+substituted_pattern = substituted_pattern.replace('CHANNEL_NAME', escaped_channel_name)
 ```
 
 **Key Features**:
-- Automatically substitutes `CHANNEL_NAME` before testing patterns
+- Automatically substitutes both `{CHANNEL_NAME}` and `CHANNEL_NAME` before testing patterns
 - Escapes special regex characters in channel names (e.g., `+`, `.`, `*`)
 - Provides real-time feedback on what streams will be matched
 - Works for both individual pattern editing and bulk assignment dialogs

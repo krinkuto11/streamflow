@@ -50,18 +50,18 @@ Add a single regex pattern to multiple channels at once:
 1. **Select Channels**: Use checkboxes to select target channels
 2. **Click "Add Regex to Selected"**: Opens bulk assignment dialog
 3. **Enter Pattern**: Type your regex pattern
-4. **Use Variables**: Include `CHANNEL_NAME` to create reusable patterns
+4. **Use Variables**: Include `{CHANNEL_NAME}` to create reusable patterns (legacy `CHANNEL_NAME` format also supported)
 5. **Apply**: Pattern is added to all selected channels
 
 **Pattern Variable Support**:
-- `CHANNEL_NAME` is replaced with each channel's actual name at match time
-- Example: Pattern `.*CHANNEL_NAME.*` becomes:
+- `{CHANNEL_NAME}` (recommended) or `CHANNEL_NAME` (legacy) is replaced with each channel's actual name at match time
+- Example: Pattern `.*{CHANNEL_NAME}.*` becomes:
   - `.*ESPN.*` for channel "ESPN"
   - `.*CNN.*` for channel "CNN"
   - `.*ABC.*` for channel "ABC"
 - One pattern works for multiple channels with different names
 - Reduces duplication and makes pattern management easier
-- **Live Preview**: The live regex preview automatically substitutes `CHANNEL_NAME` with the actual channel name, so you can see what streams will be matched in real-time
+- **Live Preview**: The live regex preview automatically substitutes `{CHANNEL_NAME}` or `CHANNEL_NAME` with the actual channel name, so you can see what streams will be matched in real-time
 - **Special Characters**: Channel names with special regex characters (like `+`, `.`, `*`, etc.) are automatically escaped to prevent regex errors
 
 #### 5. Search/Filter Field
@@ -103,7 +103,7 @@ Each row displays the channel's logo or icon:
 1. Set "Filter Group" to "News"
 2. Click "Select All" to select all news channels
 3. Click "Add Regex to Selected"
-4. Enter pattern: `.*CHANNEL_NAME.*|.*NEWS.*`
+4. Enter pattern: `.*{CHANNEL_NAME}.*|.*NEWS.*`
 5. Click "Add to X Channels"
 6. Pattern is now applied to all selected news channels
 
@@ -158,15 +158,15 @@ When clicking the Actions menu (⋮), you see:
 ```
 ┌─ Add Regex Pattern to Multiple Channels ───────────────────────────────────┐
 │ This pattern will be added to 2 selected channels.                         │
-│ Use CHANNEL_NAME to insert each channel's name into the pattern.        │
+│ Use {CHANNEL_NAME} to insert each channel's name into the pattern.      │
 │                                                                             │
 │ Regex Pattern                                                               │
 │ ┌─────────────────────────────────────────────────────────────────────────┐ │
-│ │ .*CHANNEL_NAME.*                                                      │ │
+│ │ .*{CHANNEL_NAME}.*                                                    │ │
 │ └─────────────────────────────────────────────────────────────────────────┘ │
 │                                                                             │
 │ Example:                                                                    │
-│ Pattern: .*CHANNEL_NAME.*                                                │
+│ Pattern: .*{CHANNEL_NAME}.*                                              │
 │ For channel "ESPN", matches: .*ESPN.*                                      │
 │ For channel "CNN", matches: .*CNN.*                                        │
 │                                                                             │
@@ -207,7 +207,7 @@ Content-Type: application/json
 
 {
   "channel_ids": [1, 2, 3],
-  "regex_patterns": [".*CHANNEL_NAME.*"]
+  "regex_patterns": [".*{CHANNEL_NAME}.*"]
 }
 
 Response:
@@ -219,12 +219,15 @@ Response:
 ```
 
 #### Pattern Variable Substitution
-The backend substitutes `CHANNEL_NAME` at match time:
+The backend substitutes both `{CHANNEL_NAME}` and `CHANNEL_NAME` at match time:
 ```python
 def _substitute_channel_variables(self, pattern: str, channel_name: str) -> str:
     """Substitute channel name variables in a regex pattern."""
     escaped_channel_name = re.escape(channel_name)
-    return pattern.replace('CHANNEL_NAME', escaped_channel_name)
+    # Support both formats
+    result = pattern.replace('{CHANNEL_NAME}', escaped_channel_name)
+    result = result.replace('CHANNEL_NAME', escaped_channel_name)
+    return result
 ```
 
 ### Filtering Logic
@@ -278,7 +281,7 @@ if (sortByGroup) {
 ## Benefits
 
 1. **Efficient Mass Configuration**: Add patterns to hundreds of channels in seconds
-2. **Reusable Patterns**: One pattern with `CHANNEL_NAME` works for many channels
+2. **Reusable Patterns**: One pattern with `{CHANNEL_NAME}` works for many channels
 3. **Better Organization**: Group filtering and sorting for focused management
 4. **Faster Navigation**: Multi-select and bulk operations save time
 5. **Clear Visual Feedback**: Table layout makes it easy to see pattern status

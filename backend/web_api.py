@@ -1010,9 +1010,11 @@ def test_regex_pattern_live():
                 
                 for pattern in regex_patterns:
                     # Substitute CHANNEL_NAME variable with actual channel name
+                    # Support both {CHANNEL_NAME} and CHANNEL_NAME formats
                     # This matches the behavior in automated_stream_manager.py
                     escaped_channel_name = re.escape(channel_name)
-                    substituted_pattern = pattern.replace('CHANNEL_NAME', escaped_channel_name)
+                    substituted_pattern = pattern.replace('{CHANNEL_NAME}', escaped_channel_name)
+                    substituted_pattern = substituted_pattern.replace('CHANNEL_NAME', escaped_channel_name)
                     
                     search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
                     

@@ -13,12 +13,17 @@ class TestRegexLivePreview(unittest.TestCase):
     def substitute_channel_variables(self, pattern: str, channel_name: str) -> str:
         """Substitute CHANNEL_NAME variable with actual channel name.
         
+        Supports both {CHANNEL_NAME} and CHANNEL_NAME formats.
+        
         This replicates the logic used in both:
         - automated_stream_manager.py (_substitute_channel_variables)
         - web_api.py (test_regex_pattern_live endpoint)
         """
         escaped_channel_name = re.escape(channel_name)
-        return pattern.replace('CHANNEL_NAME', escaped_channel_name)
+        # Process {CHANNEL_NAME} first to avoid double replacement
+        result = pattern.replace('{CHANNEL_NAME}', escaped_channel_name)
+        result = result.replace('CHANNEL_NAME', escaped_channel_name)
+        return result
     
     def test_channel_name_substitution_in_live_preview(self):
         """Test that CHANNEL_NAME is substituted correctly in live preview."""
@@ -155,6 +160,92 @@ class TestRegexLivePreview(unittest.TestCase):
         self.assertFalse(regex_sensitive.search("espn sports"))
         self.assertTrue(regex_sensitive.search("ESPN HD"))
         self.assertFalse(regex_sensitive.search("EsPn News"))
+    
+    def test_curly_brace_format_basic(self):
+        """Test that {CHANNEL_NAME} format works correctly."""
+        pattern = ".*{CHANNEL_NAME}.*"
+        channel_name = "HBO"
+        
+        substituted = self.substitute_channel_variables(pattern, channel_name)
+        
+        # Should become .*HBO.*
+        self.assertEqual(substituted, ".*HBO.*")
+        
+        # Test matching
+        regex = re.compile(substituted, re.IGNORECASE)
+        self.assertTrue(regex.search("HBO HD"))
+        self.assertTrue(regex.search("PL HBO POLSKA"))
+        self.assertFalse(regex.search("Showtime"))
+    
+    def test_curly_brace_format_complex(self):
+        """Test {CHANNEL_NAME} in complex patterns."""
+        pattern = r"^(?!.*\d{1,2}:\d{2}).*{CHANNEL_NAME}.*$"
+        channel_name = "Charlton Athletic"
+        
+        substituted = self.substitute_channel_variables(pattern, channel_name)
+        
+        # Verify substitution happened
+        self.assertNotIn("{CHANNEL_NAME}", substituted)
+        self.assertIn("Charlton", substituted)
+        self.assertIn("Athletic", substituted)
+        
+        # The key test: verify the pattern is valid regex and contains the escaped channel name
+        try:
+            regex = re.compile(substituted, re.IGNORECASE)
+        except re.error:
+            self.fail("Substituted pattern should be valid regex")
+        
+        # Should match streams with the channel name
+        self.assertTrue(regex.search("Charlton Athletic vs Leeds"))
+        self.assertTrue(regex.search("LIVE: Charlton Athletic"))
+        
+        # Should NOT match streams with time format (HH:MM format with 2 digits)
+        self.assertFalse(regex.search("Charlton Athletic 10:30 Live"))
+        self.assertFalse(regex.search("10:45 Charlton Athletic Match"))
+    
+    def test_both_formats_in_same_pattern(self):
+        """Test pattern with both {CHANNEL_NAME} and CHANNEL_NAME."""
+        # While unusual, this should work - both get replaced
+        pattern = "{CHANNEL_NAME}.*CHANNEL_NAME"
+        channel_name = "ESPN"
+        
+        substituted = self.substitute_channel_variables(pattern, channel_name)
+        
+        # Both should be replaced
+        self.assertEqual(substituted, "ESPN.*ESPN")
+        self.assertNotIn("{CHANNEL_NAME}", substituted)
+        self.assertNotIn("CHANNEL_NAME", substituted)
+    
+    def test_curly_brace_format_with_special_chars(self):
+        """Test {CHANNEL_NAME} with special regex characters."""
+        test_cases = [
+            ("ESPN+", r".*ESPN\+.*"),
+            ("ABC.com", r".*ABC\.com.*"),
+            ("HBO [Premium]", r".*HBO\ \[Premium\].*"),
+        ]
+        
+        pattern = ".*{CHANNEL_NAME}.*"
+        
+        for channel_name, expected in test_cases:
+            with self.subTest(channel_name=channel_name):
+                result = self.substitute_channel_variables(pattern, channel_name)
+                self.assertEqual(result, expected)
+    
+    def test_mixed_format_compatibility(self):
+        """Test that both old and new formats coexist."""
+        # Legacy format
+        old_pattern = ".*CHANNEL_NAME.*"
+        # New format
+        new_pattern = ".*{CHANNEL_NAME}.*"
+        
+        channel_name = "Discovery"
+        
+        old_result = self.substitute_channel_variables(old_pattern, channel_name)
+        new_result = self.substitute_channel_variables(new_pattern, channel_name)
+        
+        # Both should produce the same result
+        self.assertEqual(old_result, new_result)
+        self.assertEqual(old_result, ".*Discovery.*")
 
 
 if __name__ == '__main__':

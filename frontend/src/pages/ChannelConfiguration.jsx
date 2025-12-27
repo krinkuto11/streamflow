@@ -2639,7 +2639,7 @@ export default function ChannelConfiguration() {
               {editingPatternIndex !== null ? 'Edit' : 'Add'} Regex Pattern
             </DialogTitle>
             <DialogDescription>
-              Enter a regex pattern to match streams for this channel. Use CHANNEL_NAME to insert the channel name.
+              Enter a regex pattern to match streams for this channel. Use {'{CHANNEL_NAME}'} to insert the channel name.
             </DialogDescription>
           </DialogHeader>
           
@@ -2773,7 +2773,7 @@ export default function ChannelConfiguration() {
           <DialogHeader>
             <DialogTitle>Add Regex Pattern to Multiple Channels</DialogTitle>
             <DialogDescription>
-              This pattern will be added to {selectedChannels.size} selected channel{selectedChannels.size !== 1 ? 's' : ''}. Use CHANNEL_NAME to insert each channel's name into the pattern.
+              This pattern will be added to {selectedChannels.size} selected channel{selectedChannels.size !== 1 ? 's' : ''}. Use {'{CHANNEL_NAME}'} to insert each channel's name into the pattern.
             </DialogDescription>
           </DialogHeader>
           
@@ -2782,13 +2782,13 @@ export default function ChannelConfiguration() {
               <Label htmlFor="bulk-pattern">Regex Pattern</Label>
               <Input
                 id="bulk-pattern"
-                placeholder="e.g., .*CHANNEL_NAME.*"
+                placeholder="e.g., .*{CHANNEL_NAME}.*"
                 value={bulkPattern}
                 onChange={(e) => setBulkPattern(e.target.value)}
                 className="font-mono"
               />
               <p className="text-xs text-muted-foreground">
-                Use CHANNEL_NAME to create a pattern that works for all selected channels
+                Use {'{CHANNEL_NAME}'} to create a pattern that works for all selected channels. The legacy CHANNEL_NAME format (without braces) is also supported.
               </p>
             </div>
             
@@ -2849,7 +2849,7 @@ export default function ChannelConfiguration() {
             <div className="border rounded-md p-3 bg-muted/50">
               <div className="text-sm font-medium mb-2">Example:</div>
               <div className="text-xs text-muted-foreground space-y-1">
-                <div>Pattern: <code className="bg-background px-1 rounded">.*CHANNEL_NAME.*</code></div>
+                <div>Pattern: <code className="bg-background px-1 rounded">.*{'{CHANNEL_NAME}'}.*</code></div>
                 <div>For channel "ESPN", matches: <code className="bg-background px-1 rounded">.*ESPN.*</code></div>
                 <div>For channel "CNN", matches: <code className="bg-background px-1 rounded">.*CNN.*</code></div>
               </div>

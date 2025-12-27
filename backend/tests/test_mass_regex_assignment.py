@@ -11,9 +11,15 @@ class TestChannelNameSubstitution(unittest.TestCase):
     """Test the channel name variable substitution logic."""
     
     def substitute_channel_variables(self, pattern: str, channel_name: str) -> str:
-        """Substitute channel name variables in a regex pattern."""
+        """Substitute channel name variables in a regex pattern.
+        
+        Supports both {CHANNEL_NAME} and CHANNEL_NAME formats.
+        """
         escaped_channel_name = re.escape(channel_name)
-        return pattern.replace('CHANNEL_NAME', escaped_channel_name)
+        # Process {CHANNEL_NAME} first to avoid double replacement
+        result = pattern.replace('{CHANNEL_NAME}', escaped_channel_name)
+        result = result.replace('CHANNEL_NAME', escaped_channel_name)
+        return result
     
     def test_basic_substitution(self):
         """Test basic channel name substitution."""
@@ -87,6 +93,33 @@ class TestChannelNameSubstitution(unittest.TestCase):
         result = self.substitute_channel_variables(pattern, channel_name)
         # Dots should be escaped to \.
         self.assertIn(r"ABC\.com", result)
+    
+    def test_curly_brace_format(self):
+        """Test that {CHANNEL_NAME} format works."""
+        pattern = ".*{CHANNEL_NAME}.*"
+        channel_name = "HBO"
+        result = self.substitute_channel_variables(pattern, channel_name)
+        self.assertEqual(result, ".*HBO.*")
+    
+    def test_curly_brace_with_special_chars(self):
+        """Test {CHANNEL_NAME} format with special characters."""
+        pattern = ".*{CHANNEL_NAME}.*"
+        channel_name = "ESPN+"
+        result = self.substitute_channel_variables(pattern, channel_name)
+        self.assertEqual(result, r".*ESPN\+.*")
+    
+    def test_backward_compatibility(self):
+        """Test that old CHANNEL_NAME format still works."""
+        old_pattern = ".*CHANNEL_NAME.*"
+        new_pattern = ".*{CHANNEL_NAME}.*"
+        channel_name = "Discovery"
+        
+        old_result = self.substitute_channel_variables(old_pattern, channel_name)
+        new_result = self.substitute_channel_variables(new_pattern, channel_name)
+        
+        # Both formats should produce the same result
+        self.assertEqual(old_result, new_result)
+        self.assertEqual(old_result, ".*Discovery.*")
 
 
 class TestBulkAssignmentLogic(unittest.TestCase):
