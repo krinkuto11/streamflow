@@ -226,15 +226,15 @@ class AceStreamDatabase:
     
     def get_channel_metrics(self, channel_id: int, hours: int = 24) -> List[Dict[str, Any]]:
         """
-        Get aggregated metrics for a channel.
-        Shows total (summed) download/upload/peer counts from all streams.
+        Get individual stream metrics for a channel.
+        Returns metrics for each stream separately so they can be graphed individually.
         
         Args:
             channel_id: Channel ID
             hours: Number of hours of history to return
             
         Returns:
-            List of metric data points with summed values
+            List of metric data points with individual stream data
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -243,18 +243,21 @@ class AceStreamDatabase:
             cursor.execute('''
                 SELECT 
                     m.timestamp,
-                    AVG(m.health_score) as avg_health_score,
-                    SUM(m.peers) as total_peers,
-                    SUM(m.speed_down) as total_speed_down,
-                    SUM(m.speed_up) as total_speed_up,
-                    SUM(m.downloaded) as total_downloaded,
-                    SUM(m.uploaded) as total_uploaded,
-                    AVG(m.ffmpeg_bitrate) as avg_bitrate
+                    s.stream_id,
+                    s.acestream_id,
+                    m.health_score,
+                    m.peers,
+                    m.speed_down,
+                    m.speed_up,
+                    m.downloaded,
+                    m.uploaded,
+                    m.ffmpeg_bitrate,
+                    m.ffmpeg_resolution,
+                    m.ffmpeg_fps
                 FROM stream_metrics m
                 JOIN monitoring_sessions s ON m.session_id = s.id
                 WHERE s.channel_id = ?
                 AND m.timestamp >= datetime('now', '-' || ? || ' hours')
-                GROUP BY strftime('%Y-%m-%d %H:%M', m.timestamp)
                 ORDER BY m.timestamp ASC
             ''', (channel_id, hours))
             

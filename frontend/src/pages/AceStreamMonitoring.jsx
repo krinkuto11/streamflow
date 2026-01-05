@@ -31,7 +31,7 @@ export default function AceStreamMonitoring() {
   const [channels, setChannels] = useState([])
   const [allChannels, setAllChannels] = useState([])
   const [selectedChannel, setSelectedChannel] = useState(null)
-  const [metrics, setMetrics] = useState([])
+  const [metrics, setMetrics] = useState({ data: [], streamIds: [] })
   const [config, setConfig] = useState({
     enabled: false,
     orchestrator_url: 'http://gluetun:19000',
@@ -115,7 +115,38 @@ export default function AceStreamMonitoring() {
   const loadChannelMetrics = async (channelId) => {
     try {
       const response = await api.get(`/acestream/monitoring/channel/${channelId}/metrics?hours=24`)
-      setMetrics(response.data)
+      
+      // Transform data to group by timestamp with separate values for each stream
+      const rawMetrics = response.data
+      const timeMap = new Map()
+      const streamIds = new Set()
+      
+      // Collect all stream IDs and organize data by timestamp
+      rawMetrics.forEach(metric => {
+        const timestamp = metric.timestamp
+        streamIds.add(metric.stream_id)
+        
+        if (!timeMap.has(timestamp)) {
+          timeMap.set(timestamp, { timestamp })
+        }
+        
+        const timePoint = timeMap.get(timestamp)
+        // Add stream-specific metrics with stream ID prefix
+        timePoint[`stream_${metric.stream_id}_peers`] = metric.peers
+        timePoint[`stream_${metric.stream_id}_speed_down`] = metric.speed_down
+        timePoint[`stream_${metric.stream_id}_speed_up`] = metric.speed_up
+        timePoint[`stream_${metric.stream_id}_health`] = metric.health_score
+      })
+      
+      // Convert map to sorted array
+      const transformedMetrics = Array.from(timeMap.values()).sort((a, b) => 
+        new Date(a.timestamp) - new Date(b.timestamp)
+      )
+      
+      setMetrics({
+        data: transformedMetrics,
+        streamIds: Array.from(streamIds)
+      })
     } catch (error) {
       console.error('Error loading metrics:', error)
     }
@@ -431,59 +462,136 @@ export default function AceStreamMonitoring() {
       </Card>
 
       {/* Metrics Chart */}
-      {selectedChannel && metrics.length > 0 && (
+      {selectedChannel && metrics.data.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Stream Health Over Time</CardTitle>
             <CardDescription>
-              Combined health metrics for all streams in {selectedChannel.name} (Last 24 hours)
+              Individual stream metrics for {selectedChannel.name} (Last 24 hours)
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={400}>
-              <LineChart data={metrics}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis 
-                  dataKey="timestamp" 
-                  tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                />
-                <YAxis yAxisId="left" />
-                <YAxis yAxisId="right" orientation="right" />
-                <Tooltip 
-                  labelFormatter={(value) => new Date(value).toLocaleString()}
-                />
-                <Legend />
-                <Line
-                  yAxisId="left"
-                  type="monotone"
-                  dataKey="avg_health_score"
-                  stroke="hsl(var(--primary))"
-                  name="Avg Health Score"
-                  strokeWidth={2}
-                />
-                <Line
-                  yAxisId="right"
-                  type="monotone"
-                  dataKey="total_peers"
-                  stroke="hsl(var(--chart-2))"
-                  name="Total Peers"
-                />
-                <Line
-                  yAxisId="right"
-                  type="monotone"
-                  dataKey="total_speed_down"
-                  stroke="hsl(var(--chart-3))"
-                  name="Total Download (KB/s)"
-                />
-                <Line
-                  yAxisId="right"
-                  type="monotone"
-                  dataKey="total_speed_up"
-                  stroke="hsl(var(--chart-4))"
-                  name="Total Upload (KB/s)"
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <div className="space-y-6">
+              {/* Health Score Chart */}
+              <div>
+                <h3 className="text-sm font-medium mb-2">Health Score</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={metrics.data}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="timestamp" 
+                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
+                    />
+                    <YAxis domain={[0, 100]} />
+                    <Tooltip 
+                      labelFormatter={(value) => new Date(value).toLocaleString()}
+                    />
+                    <Legend />
+                    {metrics.streamIds.map((streamId, index) => (
+                      <Line
+                        key={`health-${streamId}`}
+                        type="monotone"
+                        dataKey={`stream_${streamId}_health`}
+                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
+                        name={`Stream ${streamId}`}
+                        strokeWidth={2}
+                        connectNulls
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Peers Chart */}
+              <div>
+                <h3 className="text-sm font-medium mb-2">Peers</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={metrics.data}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="timestamp" 
+                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
+                    />
+                    <YAxis />
+                    <Tooltip 
+                      labelFormatter={(value) => new Date(value).toLocaleString()}
+                    />
+                    <Legend />
+                    {metrics.streamIds.map((streamId, index) => (
+                      <Line
+                        key={`peers-${streamId}`}
+                        type="monotone"
+                        dataKey={`stream_${streamId}_peers`}
+                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
+                        name={`Stream ${streamId}`}
+                        strokeWidth={2}
+                        connectNulls
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Download Speed Chart */}
+              <div>
+                <h3 className="text-sm font-medium mb-2">Download Speed (KB/s)</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={metrics.data}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="timestamp" 
+                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
+                    />
+                    <YAxis />
+                    <Tooltip 
+                      labelFormatter={(value) => new Date(value).toLocaleString()}
+                    />
+                    <Legend />
+                    {metrics.streamIds.map((streamId, index) => (
+                      <Line
+                        key={`down-${streamId}`}
+                        type="monotone"
+                        dataKey={`stream_${streamId}_speed_down`}
+                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
+                        name={`Stream ${streamId}`}
+                        strokeWidth={2}
+                        connectNulls
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Upload Speed Chart */}
+              <div>
+                <h3 className="text-sm font-medium mb-2">Upload Speed (KB/s)</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={metrics.data}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="timestamp" 
+                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
+                    />
+                    <YAxis />
+                    <Tooltip 
+                      labelFormatter={(value) => new Date(value).toLocaleString()}
+                    />
+                    <Legend />
+                    {metrics.streamIds.map((streamId, index) => (
+                      <Line
+                        key={`up-${streamId}`}
+                        type="monotone"
+                        dataKey={`stream_${streamId}_speed_up`}
+                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
+                        name={`Stream ${streamId}`}
+                        strokeWidth={2}
+                        connectNulls
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}
