@@ -10,6 +10,7 @@ import requests
 import subprocess
 import threading
 import time
+import queue
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 
@@ -24,7 +25,7 @@ class AceStreamMonitor:
     Continuous monitoring service for AceStream channels.
     
     Features:
-    - FFmpeg-based stream monitoring
+    - Continuous FFmpeg-based stream monitoring (keeps streams alive)
     - Orchestrator API integration
     - Health scoring and stream ordering
     - Resource-efficient operation
@@ -48,6 +49,11 @@ class AceStreamMonitor:
         self.monitoring_threads: Dict[int, threading.Thread] = {}
         self.shutdown_event = threading.Event()
         self.running = False
+        
+        # Track continuous FFmpeg processes per stream
+        self.ffmpeg_processes: Dict[int, subprocess.Popen] = {}
+        self.ffmpeg_stats_cache: Dict[int, Dict] = {}
+        self.ffmpeg_threads: Dict[int, threading.Thread] = {}
         
         logger.info("AceStream monitor initialized")
     
@@ -100,6 +106,9 @@ class AceStreamMonitor:
         """Main monitoring loop for a channel."""
         logger.info(f"Starting monitoring for channel {channel.id}: {channel.name}")
         
+        # Track which streams are being monitored for this channel
+        monitored_stream_ids = set()
+        
         while not self.shutdown_event.is_set():
             try:
                 # Check if this channel should still be monitored
@@ -115,6 +124,17 @@ class AceStreamMonitor:
                     logger.debug(f"No streams found for channel {channel.id}")
                     time.sleep(60)
                     continue
+                
+                # Track current stream IDs
+                current_stream_ids = {s.id for s in streams}
+                
+                # Stop FFmpeg for streams that are no longer in this channel
+                removed_stream_ids = monitored_stream_ids - current_stream_ids
+                for stream_id in removed_stream_ids:
+                    logger.info(f"Stream {stream_id} removed from channel {channel.id}, stopping FFmpeg")
+                    self._stop_ffmpeg_process(stream_id)
+                
+                monitored_stream_ids = current_stream_ids
                 
                 # Get orchestrator URL (channel-specific or default)
                 orchestrator_url = getattr(channel, 'acestream_orchestrator_url', None) or self.default_orchestrator_url
@@ -142,7 +162,10 @@ class AceStreamMonitor:
                 logger.error(f"Error monitoring channel {channel.id}: {e}", exc_info=True)
                 self.shutdown_event.wait(60)
         
-        # Clean up when exiting
+        # Clean up when exiting - stop all FFmpeg processes for this channel's streams
+        for stream_id in monitored_stream_ids:
+            self._stop_ffmpeg_process(stream_id)
+        
         if channel.id in self.monitoring_threads:
             del self.monitoring_threads[channel.id]
         
@@ -178,8 +201,11 @@ class AceStreamMonitor:
             # Get stats from Orchestrator
             orchestrator_stats = self._get_orchestrator_stats(acestream_id, orchestrator_url)
             
-            # Get FFmpeg stats (lightweight check - just probe, don't download much)
-            ffmpeg_stats = self._get_ffmpeg_stats(stream.url)
+            # Ensure continuous FFmpeg process is running for this stream
+            self._ensure_ffmpeg_running(stream.id, stream.url)
+            
+            # Get cached FFmpeg stats from continuous process
+            ffmpeg_stats = self.ffmpeg_stats_cache.get(stream.id)
             
             # Calculate health score
             health_score = self._calculate_health_score(
@@ -258,38 +284,114 @@ class AceStreamMonitor:
             logger.error(f"Unexpected error querying Orchestrator: {e}")
             return None
     
-    def _get_ffmpeg_stats(self, stream_url: str, duration: Optional[int] = None) -> Optional[Dict]:
+    def _ensure_ffmpeg_running(self, stream_id: int, stream_url: str):
         """
-        Use FFmpeg to probe stream and get basic stats.
-        Keep it lightweight - just enough to verify stream is working.
+        Ensure a continuous FFmpeg process is running for a stream.
+        If not running, start it. This keeps the stream alive.
         
         Args:
-            stream_url: Stream URL to probe
-            duration: Duration in seconds (uses config if not specified)
+            stream_id: Stream ID
+            stream_url: Stream URL
         """
-        if duration is None:
-            duration = self.config.get('ffmpeg_probe_duration', 5)
+        # Check if process is already running and healthy
+        if stream_id in self.ffmpeg_processes:
+            process = self.ffmpeg_processes[stream_id]
+            if process.poll() is None:  # Still running
+                return
+            else:
+                # Process died, clean up
+                logger.warning(f"FFmpeg process for stream {stream_id} died, restarting")
+                self._stop_ffmpeg_process(stream_id)
         
+        # Start new continuous FFmpeg process
         try:
-            # Use ffmpeg with limited duration to minimize resource usage
             cmd = [
                 'ffmpeg',
                 '-i', stream_url,
-                '-t', str(duration),
                 '-f', 'null',
-                '-'
+                '-',
+                '-progress', 'pipe:1',  # Progress to stdout
+                '-nostats'  # Reduce output noise
             ]
             
-            result = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=duration + 10
+                bufsize=1  # Line buffered
             )
             
-            # Parse ffmpeg output for stats
-            output = result.stderr
+            self.ffmpeg_processes[stream_id] = process
             
+            # Start thread to read FFmpeg output continuously
+            reader_thread = threading.Thread(
+                target=self._read_ffmpeg_output,
+                args=(stream_id, process),
+                daemon=True,
+                name=f"FFmpeg-Reader-{stream_id}"
+            )
+            self.ffmpeg_threads[stream_id] = reader_thread
+            reader_thread.start()
+            
+            logger.info(f"Started continuous FFmpeg process for stream {stream_id}")
+            
+        except FileNotFoundError:
+            logger.error("FFmpeg not found - please install ffmpeg")
+        except Exception as e:
+            logger.error(f"Error starting FFmpeg process for stream {stream_id}: {e}")
+    
+    def _read_ffmpeg_output(self, stream_id: int, process: subprocess.Popen):
+        """
+        Continuously read FFmpeg output and parse stats.
+        
+        Args:
+            stream_id: Stream ID
+            process: FFmpeg process
+        """
+        logger.debug(f"Started FFmpeg output reader for stream {stream_id}")
+        
+        stderr_buffer = []
+        last_stats_update = time.time()
+        
+        try:
+            # Read stderr for stream info (codec, resolution, etc.)
+            while process.poll() is None and not self.shutdown_event.is_set():
+                line = process.stderr.readline()
+                if not line:
+                    break
+                
+                stderr_buffer.append(line)
+                
+                # Update stats periodically (every 10 seconds) from stderr
+                if time.time() - last_stats_update > 10:
+                    stderr_text = ''.join(stderr_buffer)
+                    stats = self._parse_ffmpeg_stderr(stderr_text)
+                    if stats:
+                        self.ffmpeg_stats_cache[stream_id] = stats
+                        last_stats_update = time.time()
+                        logger.debug(f"Updated FFmpeg stats for stream {stream_id}: {stats}")
+                
+                # Keep only recent lines (last 100)
+                if len(stderr_buffer) > 100:
+                    stderr_buffer = stderr_buffer[-50:]
+            
+        except Exception as e:
+            logger.error(f"Error reading FFmpeg output for stream {stream_id}: {e}")
+        finally:
+            logger.debug(f"FFmpeg output reader stopped for stream {stream_id}")
+    
+    def _parse_ffmpeg_stderr(self, output: str) -> Optional[Dict]:
+        """
+        Parse FFmpeg stderr output for stream statistics.
+        
+        Args:
+            output: FFmpeg stderr output
+            
+        Returns:
+            Dictionary with parsed stats or None
+        """
+        try:
             stats = {
                 'bitrate': self._parse_bitrate(output),
                 'resolution': self._parse_resolution(output),
@@ -298,17 +400,40 @@ class AceStreamMonitor:
                 'errors': self._count_errors(output)
             }
             
-            return stats
+            # Only return if we got at least some valid data
+            if any(stats.values()):
+                return stats
+            return None
             
-        except subprocess.TimeoutExpired:
-            logger.warning(f"FFmpeg timeout for URL: {stream_url}")
-            return None
-        except FileNotFoundError:
-            logger.error("FFmpeg not found - please install ffmpeg")
-            return None
         except Exception as e:
-            logger.error(f"Error getting FFmpeg stats: {e}")
+            logger.error(f"Error parsing FFmpeg output: {e}")
             return None
+    
+    def _stop_ffmpeg_process(self, stream_id: int):
+        """
+        Stop the continuous FFmpeg process for a stream.
+        
+        Args:
+            stream_id: Stream ID
+        """
+        if stream_id in self.ffmpeg_processes:
+            try:
+                process = self.ffmpeg_processes[stream_id]
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                logger.info(f"Stopped FFmpeg process for stream {stream_id}")
+            except Exception as e:
+                logger.error(f"Error stopping FFmpeg process for stream {stream_id}: {e}")
+            finally:
+                del self.ffmpeg_processes[stream_id]
+                if stream_id in self.ffmpeg_stats_cache:
+                    del self.ffmpeg_stats_cache[stream_id]
+                if stream_id in self.ffmpeg_threads:
+                    del self.ffmpeg_threads[stream_id]
     
     def _parse_bitrate(self, output: str) -> Optional[int]:
         """Parse bitrate from FFmpeg output."""
@@ -478,6 +603,11 @@ class AceStreamMonitor:
         
         # Signal all threads to stop
         self.shutdown_event.set()
+        
+        # Stop all continuous FFmpeg processes first
+        logger.info("Stopping all continuous FFmpeg processes...")
+        for stream_id in list(self.ffmpeg_processes.keys()):
+            self._stop_ffmpeg_process(stream_id)
         
         # Send cleanup requests to Orchestrator
         self._cleanup_orchestrator_sessions()

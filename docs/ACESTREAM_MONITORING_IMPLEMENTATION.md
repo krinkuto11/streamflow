@@ -1083,7 +1083,7 @@ health_score_warning = 50
 2. **Configure Orchestrator Connection**
    - In the Configuration section, set the Orchestrator URL (default: `http://gluetun:19000`)
    - Adjust monitoring interval (10-300 seconds, default: 30)
-   - Adjust FFmpeg probe duration (3-15 seconds, default: 5)
+   - Note: FFmpeg probe duration is no longer used - streams run continuously
    - Enable "AceStream Monitoring" switch
    - Click "Save Configuration"
 
@@ -1112,16 +1112,23 @@ Streams are scored 0-100 based on:
 - Bitrate quality (0-15 points)
 - Error penalty (-5 per error, max -20)
 
+**Continuous Monitoring (Keeps Streams Alive)**
+- FFmpeg processes run continuously for each stream (not just probes)
+- This keeps streams alive in the Orchestrator without disconnecting
+- Stats are parsed from continuous FFmpeg output every 10 seconds
+- Prevents stream restart issues when disconnecting/reconnecting
+
 **Automatic Reordering**
 - Every monitoring interval, all streams are checked
-- Health scores are calculated
+- Health scores are calculated from Orchestrator stats and cached FFmpeg data
 - Streams are reordered in Dispatcharr with healthiest first
 - This ensures viewers always get the best available stream
 
 **Resource Efficient**
-- FFmpeg probes are short (default 5 seconds)
+- Continuous FFmpeg processes use minimal CPU (just reading, not transcoding)
 - Lightweight Orchestrator API calls
-- Configurable intervals to reduce load
+- Configurable monitoring intervals to reduce load
+- Automatic cleanup of FFmpeg processes when streams are removed
 - Graceful cleanup on shutdown
 
 ### Troubleshooting
@@ -1146,9 +1153,10 @@ Streams are scored 0-100 based on:
 | Setting | Default | Range | Description |
 |---------|---------|-------|-------------|
 | Orchestrator URL | `http://gluetun:19000` | - | AceStream Orchestrator API endpoint |
-| Monitoring Interval | 30 | 10-300 seconds | How often to check streams |
-| FFmpeg Probe Duration | 5 | 3-15 seconds | How long to probe each stream |
+| Monitoring Interval | 30 | 10-300 seconds | How often to check Orchestrator stats and reorder streams |
 | Enabled | false | boolean | Enable/disable monitoring service |
+
+**Note**: FFmpeg probe duration setting is deprecated - FFmpeg now runs continuously to keep streams alive.
 
 ### API Endpoints
 
