@@ -561,8 +561,15 @@ class AceStreamMonitor:
             channel: Channel dict
             stream_health: List of (stream, health_dict) tuples
         """
+        if not channel:
+            logger.error("Cannot reorder streams: channel is None")
+            return
+            
         try:
             channel_id = channel.get('id')
+            if not channel_id:
+                logger.error("Cannot reorder streams: channel has no ID")
+                return
             
             # Sort by health score (descending)
             sorted_streams = sorted(
@@ -577,8 +584,8 @@ class AceStreamMonitor:
             # Only update if order has changed
             current_order = channel.get('streams', [])
             if new_order != current_order:
-                # Update channel via UDI manager
-                channel_data = channel.copy()
+                # Update channel via UDI manager - create a new dict to avoid modifying the original
+                channel_data = dict(channel)
                 channel_data['streams'] = new_order
                 
                 # Update in UDI cache
@@ -593,7 +600,9 @@ class AceStreamMonitor:
                     logger.warning(f"Failed to update channel {channel_id} stream order in UDI")
             
         except Exception as e:
-            logger.error(f"Error reordering streams for channel {channel.get('id')}: {e}")
+            # Safely get channel ID for error message
+            channel_id = channel.get('id') if channel else 'unknown'
+            logger.error(f"Error reordering streams for channel {channel_id}: {e}")
     
     def stop_monitoring_channel(self, channel_id: int):
         """Stop monitoring a specific channel."""
