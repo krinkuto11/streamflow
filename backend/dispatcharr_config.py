@@ -11,7 +11,7 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 
 from logging_config import setup_logging
 
@@ -165,6 +165,52 @@ class DispatcharrConfig:
             self.get_username(),
             self.get_password()
         ])
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get a configuration value by key.
+        
+        Args:
+            key: Configuration key
+            default: Default value if key not found
+            
+        Returns:
+            Configuration value or default
+        """
+        with self._lock:
+            return self._config.get(key, default)
+    
+    def __getitem__(self, key: str) -> Any:
+        """Get a configuration value using dictionary syntax.
+        
+        Args:
+            key: Configuration key
+            
+        Returns:
+            Configuration value
+            
+        Raises:
+            KeyError: If key not found
+        """
+        with self._lock:
+            return self._config[key]
+    
+    def __setitem__(self, key: str, value: Any) -> None:
+        """Set a configuration value using dictionary syntax.
+        
+        Args:
+            key: Configuration key
+            value: Configuration value
+        """
+        with self._lock:
+            self._config[key] = value
+    
+    def save(self) -> bool:
+        """Save configuration to file.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        return self._save_config()
 
 
 # Global singleton instance
