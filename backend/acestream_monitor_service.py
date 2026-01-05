@@ -31,16 +31,18 @@ class AceStreamMonitor:
     - Graceful shutdown with cleanup
     """
     
-    def __init__(self, udi_manager, default_orchestrator_url: str = "http://gluetun:19000"):
+    def __init__(self, udi_manager, default_orchestrator_url: str = "http://gluetun:19000", config: Dict[str, Any] = None):
         """
         Initialize AceStream monitor.
         
         Args:
             udi_manager: UDI manager instance for accessing channels/streams
             default_orchestrator_url: Default Orchestrator URL
+            config: Configuration dictionary with monitoring_interval and ffmpeg_probe_duration
         """
         self.udi_manager = udi_manager
         self.default_orchestrator_url = default_orchestrator_url
+        self.config = config or {}
         self.db = AceStreamDatabase()
         
         self.monitoring_threads: Dict[int, threading.Thread] = {}
@@ -126,8 +128,9 @@ class AceStreamMonitor:
                 if stream_health and len(stream_health) > 1:
                     self._reorder_streams_by_health(channel, stream_health)
                 
-                # Wait before next check (30 seconds)
-                self.shutdown_event.wait(30)
+                # Wait before next check (use configured interval or default 30 seconds)
+                interval = self.config.get('monitoring_interval', 30)
+                self.shutdown_event.wait(interval)
                 
             except Exception as e:
                 logger.error(f"Error monitoring channel {channel.id}: {e}", exc_info=True)
@@ -245,11 +248,18 @@ class AceStreamMonitor:
             logger.error(f"Unexpected error querying Orchestrator: {e}")
             return None
     
-    def _get_ffmpeg_stats(self, stream_url: str, duration: int = 5) -> Optional[Dict]:
+    def _get_ffmpeg_stats(self, stream_url: str, duration: Optional[int] = None) -> Optional[Dict]:
         """
         Use FFmpeg to probe stream and get basic stats.
         Keep it lightweight - just enough to verify stream is working.
+        
+        Args:
+            stream_url: Stream URL to probe
+            duration: Duration in seconds (uses config if not specified)
         """
+        if duration is None:
+            duration = self.config.get('ffmpeg_probe_duration', 5)
+        
         try:
             # Use ffmpeg with limited duration to minimize resource usage
             cmd = [
@@ -393,13 +403,23 @@ class AceStreamMonitor:
             # Only update if order has changed
             current_order = channel.streams if hasattr(channel, 'streams') else []
             if new_order != current_order:
-                # Update channel stream order via UDI
-                self.udi_manager.update_channel_streams(channel.id, new_order)
+                # Update channel via UDI manager
+                channel_data = channel.to_dict() if hasattr(channel, 'to_dict') else {
+                    'id': channel.id,
+                    'streams': new_order
+                }
+                channel_data['streams'] = new_order
                 
-                logger.info(
-                    f"Reordered {len(new_order)} streams for channel {channel.id} "
-                    f"by health (best: {sorted_streams[0][1]['health_score']:.1f})"
-                )
+                # Update in UDI cache
+                success = self.udi_manager.update_channel(channel.id, channel_data)
+                
+                if success:
+                    logger.info(
+                        f"Reordered {len(new_order)} streams for channel {channel.id} "
+                        f"by health (best: {sorted_streams[0][1]['health_score']:.1f})"
+                    )
+                else:
+                    logger.warning(f"Failed to update channel {channel.id} stream order in UDI")
             
         except Exception as e:
             logger.error(f"Error reordering streams for channel {channel.id}: {e}")

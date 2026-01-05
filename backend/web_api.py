@@ -3519,17 +3519,21 @@ def get_acestream_monitor():
             from acestream_monitor_service import AceStreamMonitor
             udi_manager = get_udi_manager()
             
-            # Get default orchestrator URL from config if available
+            # Get configuration from dispatcharr config
             default_url = "http://gluetun:19000"
+            config_dict = {}
             try:
                 from dispatcharr_config import get_dispatcharr_config
                 config = get_dispatcharr_config()
-                # Could add acestream_orchestrator_url to config if needed
                 default_url = config.get('acestream_orchestrator_url', default_url)
+                config_dict = {
+                    'monitoring_interval': config.get('acestream_monitoring_interval', 30),
+                    'ffmpeg_probe_duration': config.get('acestream_ffmpeg_probe_duration', 5)
+                }
             except:
                 pass
             
-            acestream_monitor = AceStreamMonitor(udi_manager, default_url)
+            acestream_monitor = AceStreamMonitor(udi_manager, default_url, config_dict)
             logger.info("AceStream monitor instance created")
         except Exception as e:
             logger.error(f"Failed to create AceStream monitor: {e}")
@@ -3666,16 +3670,19 @@ def tag_channel_as_acestream(channel_id):
         if not channel:
             return jsonify({"error": "Channel not found"}), 404
         
-        # Update channel properties
+        # Update channel properties in the Channel object
         channel.is_acestream = is_acestream
         if orchestrator_url:
             channel.acestream_orchestrator_url = orchestrator_url
         
-        # Update channel in Dispatcharr via UDI
-        # The UDI manager should handle updating custom metadata
-        # For now, we'll store it locally and propagate on next sync
+        # Update channel in UDI cache with modified data
+        channel_data = channel.to_dict()
+        success = udi_manager.update_channel(channel_id, channel_data)
         
-        # If monitoring is enabled and channel is now AceStream, start monitoring
+        if not success:
+            logger.warning(f"Failed to update channel {channel_id} in UDI cache")
+        
+        # If monitoring is enabled and channel is now AceStream, refresh monitoring
         monitor = get_acestream_monitor()
         if monitor and is_acestream and monitor.running:
             monitor.refresh_channels()

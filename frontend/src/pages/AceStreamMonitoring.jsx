@@ -310,7 +310,12 @@ export default function AceStreamMonitoring() {
                   min="10"
                   max="300"
                   value={config.monitoring_interval}
-                  onChange={(e) => setConfig({ ...config, monitoring_interval: parseInt(e.target.value) })}
+                  onChange={(e) => {
+                    const value = parseInt(e.target.value, 10)
+                    if (!isNaN(value) && value >= 10 && value <= 300) {
+                      setConfig({ ...config, monitoring_interval: value })
+                    }
+                  }}
                 />
               </div>
 
@@ -322,7 +327,12 @@ export default function AceStreamMonitoring() {
                   min="3"
                   max="15"
                   value={config.ffmpeg_probe_duration}
-                  onChange={(e) => setConfig({ ...config, ffmpeg_probe_duration: parseInt(e.target.value) })}
+                  onChange={(e) => {
+                    const value = parseInt(e.target.value, 10)
+                    if (!isNaN(value) && value >= 3 && value <= 15) {
+                      setConfig({ ...config, ffmpeg_probe_duration: value })
+                    }
+                  }}
                 />
               </div>
             </div>
