@@ -227,13 +227,14 @@ class AceStreamDatabase:
     def get_channel_metrics(self, channel_id: int, hours: int = 24) -> List[Dict[str, Any]]:
         """
         Get aggregated metrics for a channel.
+        Shows total (summed) download/upload/peer counts from all streams.
         
         Args:
             channel_id: Channel ID
             hours: Number of hours of history to return
             
         Returns:
-            List of metric data points
+            List of metric data points with summed values
         """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -243,9 +244,11 @@ class AceStreamDatabase:
                 SELECT 
                     m.timestamp,
                     AVG(m.health_score) as avg_health_score,
-                    AVG(m.peers) as avg_peers,
-                    AVG(m.speed_down) as avg_speed_down,
-                    AVG(m.speed_up) as avg_speed_up,
+                    SUM(m.peers) as total_peers,
+                    SUM(m.speed_down) as total_speed_down,
+                    SUM(m.speed_up) as total_speed_up,
+                    SUM(m.downloaded) as total_downloaded,
+                    SUM(m.uploaded) as total_uploaded,
                     AVG(m.ffmpeg_bitrate) as avg_bitrate
                 FROM stream_metrics m
                 JOIN monitoring_sessions s ON m.session_id = s.id

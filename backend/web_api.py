@@ -3528,7 +3528,8 @@ def get_acestream_monitor():
                 default_url = config.get('acestream_orchestrator_url', default_url)
                 config_dict = {
                     'monitoring_interval': config.get('acestream_monitoring_interval', 30),
-                    'ffmpeg_probe_duration': config.get('acestream_ffmpeg_probe_duration', 5)
+                    'dead_stream_retry_interval': config.get('acestream_dead_stream_retry_interval', 300),
+                    'max_ffmpeg_failures': config.get('acestream_max_ffmpeg_failures', 3)
                 }
             except:
                 pass
@@ -3558,7 +3559,8 @@ def get_acestream_config():
             'enabled': config.get('acestream_enabled', False),
             'orchestrator_url': config.get('acestream_orchestrator_url', 'http://gluetun:19000'),
             'monitoring_interval': config.get('acestream_monitoring_interval', 30),
-            'ffmpeg_probe_duration': config.get('acestream_ffmpeg_probe_duration', 5)
+            'dead_stream_retry_interval': config.get('acestream_dead_stream_retry_interval', 300),
+            'max_ffmpeg_failures': config.get('acestream_max_ffmpeg_failures', 3)
         }
         
         return jsonify(acestream_config)
@@ -3577,7 +3579,8 @@ def update_acestream_config():
             "enabled": bool,
             "orchestrator_url": str,
             "monitoring_interval": int,
-            "ffmpeg_probe_duration": int
+            "dead_stream_retry_interval": int,
+            "max_ffmpeg_failures": int
         }
     
     Returns:
@@ -3596,8 +3599,10 @@ def update_acestream_config():
             config['acestream_orchestrator_url'] = data['orchestrator_url']
         if 'monitoring_interval' in data:
             config['acestream_monitoring_interval'] = data['monitoring_interval']
-        if 'ffmpeg_probe_duration' in data:
-            config['acestream_ffmpeg_probe_duration'] = data['ffmpeg_probe_duration']
+        if 'dead_stream_retry_interval' in data:
+            config['acestream_dead_stream_retry_interval'] = data['dead_stream_retry_interval']
+        if 'max_ffmpeg_failures' in data:
+            config['acestream_max_ffmpeg_failures'] = data['max_ffmpeg_failures']
         
         # Save config
         config.save()
