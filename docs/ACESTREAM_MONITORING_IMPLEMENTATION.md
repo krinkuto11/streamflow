@@ -1073,6 +1073,96 @@ health_score_warning = 50
 - API documentation needed
 - Configuration reference needed
 
+## User Guide
+
+### Getting Started
+
+1. **Access the AceStream Monitoring Page**
+   - Navigate to "AceStream Monitoring" in the sidebar (Radio icon)
+
+2. **Configure Orchestrator Connection**
+   - In the Configuration section, set the Orchestrator URL (default: `http://gluetun:19000`)
+   - Adjust monitoring interval (10-300 seconds, default: 30)
+   - Adjust FFmpeg probe duration (3-15 seconds, default: 5)
+   - Enable "AceStream Monitoring" switch
+   - Click "Save Configuration"
+
+3. **Tag Channels as AceStream**
+   - Scroll to "Channel Tagging" section
+   - Toggle the switch next to channels that contain AceStream streams
+   - Tagged channels will appear in "AceStream Channels" section
+
+4. **Start Monitoring**
+   - Click "Start Monitoring" button in the Status section
+   - Monitor will check streams every interval and reorder by health
+
+5. **View Metrics**
+   - Click on any AceStream channel in the list
+   - View health score trends over 24 hours
+   - See peers, download speed, and health metrics
+
+### How It Works
+
+**Health Scoring**
+Streams are scored 0-100 based on:
+- Peer count (0-25 points)
+- Download speed (0-25 points)
+- Upload contribution (0-10 points)
+- FFmpeg working (20 points)
+- Bitrate quality (0-15 points)
+- Error penalty (-5 per error, max -20)
+
+**Automatic Reordering**
+- Every monitoring interval, all streams are checked
+- Health scores are calculated
+- Streams are reordered in Dispatcharr with healthiest first
+- This ensures viewers always get the best available stream
+
+**Resource Efficient**
+- FFmpeg probes are short (default 5 seconds)
+- Lightweight Orchestrator API calls
+- Configurable intervals to reduce load
+- Graceful cleanup on shutdown
+
+### Troubleshooting
+
+**Monitoring Won't Start**
+- Check Orchestrator URL is correct and reachable
+- Ensure FFmpeg is installed in the container
+- Check logs for error messages
+
+**No Metrics Showing**
+- Ensure channels are tagged as AceStream
+- Verify streams have AceStream URLs (contain `?id=`)
+- Wait for one monitoring cycle to complete
+
+**Streams Not Reordering**
+- Check that monitoring is running
+- Verify health scores are being calculated
+- Ensure UDI sync is working
+
+### Configuration Reference
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| Orchestrator URL | `http://gluetun:19000` | - | AceStream Orchestrator API endpoint |
+| Monitoring Interval | 30 | 10-300 seconds | How often to check streams |
+| FFmpeg Probe Duration | 5 | 3-15 seconds | How long to probe each stream |
+| Enabled | false | boolean | Enable/disable monitoring service |
+
+### API Endpoints
+
+See the main implementation guide for full API documentation. Key endpoints:
+
+- `GET /api/acestream/config` - Get configuration
+- `POST /api/acestream/config` - Update configuration
+- `GET /api/acestream/channels` - List AceStream channels
+- `POST /api/acestream/channels/<id>/tag` - Tag/untag channel
+- `GET /api/acestream/monitoring/status` - Get monitoring status
+- `POST /api/acestream/monitoring/start` - Start monitoring
+- `POST /api/acestream/monitoring/stop` - Stop monitoring
+- `GET /api/acestream/monitoring/channel/<id>/metrics` - Get channel metrics
+
 ## Documentation Requirements
 
 1. **User Guide**: How to configure and use AceStream monitoring
