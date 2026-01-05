@@ -10,7 +10,6 @@ import requests
 import subprocess
 import threading
 import time
-import queue
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 
@@ -310,7 +309,6 @@ class AceStreamMonitor:
                 '-i', stream_url,
                 '-f', 'null',
                 '-',
-                '-progress', 'pipe:1',  # Progress to stdout
                 '-nostats'  # Reduce output noise
             ]
             
@@ -351,30 +349,61 @@ class AceStreamMonitor:
         """
         logger.debug(f"Started FFmpeg output reader for stream {stream_id}")
         
+        # Buffer size constants
+        BUFFER_MAX_LINES = 100
+        BUFFER_KEEP_LINES = 50
+        STATS_UPDATE_INTERVAL = 10  # seconds
+        
         stderr_buffer = []
         last_stats_update = time.time()
         
         try:
             # Read stderr for stream info (codec, resolution, etc.)
-            while process.poll() is None and not self.shutdown_event.is_set():
-                line = process.stderr.readline()
-                if not line:
+            while not self.shutdown_event.is_set():
+                # Check if process is still running
+                if process.poll() is not None:
+                    logger.warning(f"FFmpeg process for stream {stream_id} ended")
                     break
                 
-                stderr_buffer.append(line)
+                # Use a short timeout to check periodically
+                try:
+                    # Set a small timeout on the readline to avoid blocking indefinitely
+                    import select
+                    import sys
+                    
+                    # For Unix-like systems, use select for timeout
+                    if hasattr(select, 'select'):
+                        ready, _, _ = select.select([process.stderr], [], [], 0.5)
+                        if not ready:
+                            continue
+                    
+                    line = process.stderr.readline()
+                    if not line:
+                        # If we get empty line and process is still running, continue
+                        if process.poll() is None:
+                            continue
+                        else:
+                            break
+                    
+                    stderr_buffer.append(line)
+                    
+                    # Update stats periodically from stderr
+                    if time.time() - last_stats_update > STATS_UPDATE_INTERVAL:
+                        stderr_text = ''.join(stderr_buffer)
+                        stats = self._parse_ffmpeg_stderr(stderr_text)
+                        if stats:
+                            self.ffmpeg_stats_cache[stream_id] = stats
+                            last_stats_update = time.time()
+                            logger.debug(f"Updated FFmpeg stats for stream {stream_id}: {stats}")
+                    
+                    # Keep only recent lines
+                    if len(stderr_buffer) > BUFFER_MAX_LINES:
+                        stderr_buffer = stderr_buffer[-BUFFER_KEEP_LINES:]
                 
-                # Update stats periodically (every 10 seconds) from stderr
-                if time.time() - last_stats_update > 10:
-                    stderr_text = ''.join(stderr_buffer)
-                    stats = self._parse_ffmpeg_stderr(stderr_text)
-                    if stats:
-                        self.ffmpeg_stats_cache[stream_id] = stats
-                        last_stats_update = time.time()
-                        logger.debug(f"Updated FFmpeg stats for stream {stream_id}: {stats}")
-                
-                # Keep only recent lines (last 100)
-                if len(stderr_buffer) > 100:
-                    stderr_buffer = stderr_buffer[-50:]
+                except Exception as read_error:
+                    # Log but don't crash on individual read errors
+                    logger.debug(f"Error reading line for stream {stream_id}: {read_error}")
+                    time.sleep(0.1)
             
         except Exception as e:
             logger.error(f"Error reading FFmpeg output for stream {stream_id}: {e}")
