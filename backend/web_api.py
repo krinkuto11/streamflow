@@ -3628,11 +3628,11 @@ def get_acestream_channels():
     """
     try:
         udi_manager = get_udi_manager()
-        all_channels = udi_manager.get_all_channels()
+        all_channels = udi_manager.get_channels()
         
         acestream_channels = [
-            ch.to_dict() for ch in all_channels 
-            if getattr(ch, 'is_acestream', False)
+            ch for ch in all_channels 
+            if ch.get('is_acestream', False)
         ]
         
         return jsonify(acestream_channels)
@@ -3666,18 +3666,17 @@ def tag_channel_as_acestream(channel_id):
         udi_manager = get_udi_manager()
         
         # Get channel
-        channel = udi_manager.get_channel(channel_id)
+        channel = udi_manager.get_channel_by_id(channel_id)
         if not channel:
             return jsonify({"error": "Channel not found"}), 404
         
-        # Update channel properties in the Channel object
-        channel.is_acestream = is_acestream
+        # Update channel properties (channel is a dict)
+        channel['is_acestream'] = is_acestream
         if orchestrator_url:
-            channel.acestream_orchestrator_url = orchestrator_url
+            channel['acestream_orchestrator_url'] = orchestrator_url
         
         # Update channel in UDI cache with modified data
-        channel_data = channel.to_dict()
-        success = udi_manager.update_channel(channel_id, channel_data)
+        success = udi_manager.update_channel(channel_id, channel)
         
         if not success:
             logger.warning(f"Failed to update channel {channel_id} in UDI cache")

@@ -78,8 +78,8 @@ class AceStreamMonitor:
     def _get_acestream_channels(self) -> List[Any]:
         """Get all channels marked as AceStream channels."""
         try:
-            all_channels = self.udi_manager.get_all_channels()
-            acestream_channels = [ch for ch in all_channels if getattr(ch, 'is_acestream', False)]
+            all_channels = self.udi_manager.get_channels()
+            acestream_channels = [ch for ch in all_channels if ch.get('is_acestream', False)]
             return acestream_channels
         except Exception as e:
             logger.error(f"Error getting AceStream channels: {e}")
@@ -87,23 +87,26 @@ class AceStreamMonitor:
     
     def _start_channel_monitoring(self, channel):
         """Start monitoring a specific channel."""
-        if channel.id in self.monitoring_threads:
-            logger.debug(f"Channel {channel.id} already being monitored")
+        channel_id = channel.get('id')
+        if channel_id in self.monitoring_threads:
+            logger.debug(f"Channel {channel_id} already being monitored")
             return
         
         thread = threading.Thread(
             target=self._monitor_channel,
             args=(channel,),
             daemon=True,
-            name=f"AceStreamMonitor-Channel{channel.id}"
+            name=f"AceStreamMonitor-Channel{channel_id}"
         )
-        self.monitoring_threads[channel.id] = thread
+        self.monitoring_threads[channel_id] = thread
         thread.start()
-        logger.info(f"Started monitoring thread for channel {channel.id}: {channel.name}")
+        logger.info(f"Started monitoring thread for channel {channel_id}: {channel.get('name')}")
     
     def _monitor_channel(self, channel):
         """Main monitoring loop for a channel."""
-        logger.info(f"Starting monitoring for channel {channel.id}: {channel.name}")
+        channel_id = channel.get('id')
+        channel_name = channel.get('name')
+        logger.info(f"Starting monitoring for channel {channel_id}: {channel_name}")
         
         # Track which streams are being monitored for this channel
         monitored_stream_ids = set()
@@ -112,31 +115,31 @@ class AceStreamMonitor:
             try:
                 # Check if this channel should still be monitored
                 current_acestream_channels = self._get_acestream_channels()
-                if not any(ch.id == channel.id for ch in current_acestream_channels):
-                    logger.info(f"Channel {channel.id} is no longer AceStream, stopping monitoring")
+                if not any(ch.get('id') == channel_id for ch in current_acestream_channels):
+                    logger.info(f"Channel {channel_id} is no longer AceStream, stopping monitoring")
                     break
                 
                 # Get channel streams
                 streams = self._get_channel_streams(channel)
                 
                 if not streams:
-                    logger.debug(f"No streams found for channel {channel.id}")
+                    logger.debug(f"No streams found for channel {channel_id}")
                     time.sleep(60)
                     continue
                 
                 # Track current stream IDs
-                current_stream_ids = {s.id for s in streams}
+                current_stream_ids = {s.get('id') for s in streams}
                 
                 # Stop FFmpeg for streams that are no longer in this channel
                 removed_stream_ids = monitored_stream_ids - current_stream_ids
                 for stream_id in removed_stream_ids:
-                    logger.info(f"Stream {stream_id} removed from channel {channel.id}, stopping FFmpeg")
+                    logger.info(f"Stream {stream_id} removed from channel {channel_id}, stopping FFmpeg")
                     self._stop_ffmpeg_process(stream_id)
                 
                 monitored_stream_ids = current_stream_ids
                 
                 # Get orchestrator URL (channel-specific or default)
-                orchestrator_url = getattr(channel, 'acestream_orchestrator_url', None) or self.default_orchestrator_url
+                orchestrator_url = channel.get('acestream_orchestrator_url') or self.default_orchestrator_url
                 
                 # Monitor each stream and collect health data
                 stream_health = []
@@ -158,30 +161,31 @@ class AceStreamMonitor:
                 self.shutdown_event.wait(interval)
                 
             except Exception as e:
-                logger.error(f"Error monitoring channel {channel.id}: {e}", exc_info=True)
+                logger.error(f"Error monitoring channel {channel_id}: {e}", exc_info=True)
                 self.shutdown_event.wait(60)
         
         # Clean up when exiting - stop all FFmpeg processes for this channel's streams
         for stream_id in monitored_stream_ids:
             self._stop_ffmpeg_process(stream_id)
         
-        if channel.id in self.monitoring_threads:
-            del self.monitoring_threads[channel.id]
+        if channel_id in self.monitoring_threads:
+            del self.monitoring_threads[channel_id]
         
-        logger.info(f"Stopped monitoring channel {channel.id}")
+        logger.info(f"Stopped monitoring channel {channel_id}")
     
     def _get_channel_streams(self, channel) -> List[Any]:
         """Get streams for a channel from UDI."""
         try:
-            stream_ids = channel.streams if hasattr(channel, 'streams') else []
+            channel_id = channel.get('id')
+            stream_ids = channel.get('streams', [])
             streams = []
             for stream_id in stream_ids:
-                stream = self.udi_manager.get_stream(stream_id)
+                stream = self.udi_manager.get_stream_by_id(stream_id)
                 if stream:
                     streams.append(stream)
             return streams
         except Exception as e:
-            logger.error(f"Error getting streams for channel {channel.id}: {e}")
+            logger.error(f"Error getting streams for channel {channel.get('id')}: {e}")
             return []
     
     def _check_stream_health(self, channel, stream, orchestrator_url: str) -> Optional[Dict]:
@@ -191,20 +195,24 @@ class AceStreamMonitor:
         Returns health metrics dict or None if check failed.
         """
         try:
+            stream_id = stream.get('id')
+            stream_url = stream.get('url')
+            channel_id = channel.get('id')
+            
             # Extract AceStream ID from URL
-            acestream_id = self._extract_acestream_id(stream.url)
+            acestream_id = self._extract_acestream_id(stream_url)
             if not acestream_id:
-                logger.debug(f"Cannot extract AceStream ID from URL: {stream.url}")
+                logger.debug(f"Cannot extract AceStream ID from URL: {stream_url}")
                 return None
             
             # Get stats from Orchestrator
             orchestrator_stats = self._get_orchestrator_stats(acestream_id, orchestrator_url)
             
             # Ensure continuous FFmpeg process is running for this stream
-            self._ensure_ffmpeg_running(stream.id, stream.url)
+            self._ensure_ffmpeg_running(stream_id, stream_url)
             
             # Get cached FFmpeg stats from continuous process
-            ffmpeg_stats = self.ffmpeg_stats_cache.get(stream.id)
+            ffmpeg_stats = self.ffmpeg_stats_cache.get(stream_id)
             
             # Calculate health score
             health_score = self._calculate_health_score(
@@ -213,20 +221,20 @@ class AceStreamMonitor:
             )
             
             # Get or create session and save metrics
-            session = self.db.get_active_session(stream.id)
+            session = self.db.get_active_session(stream_id)
             if session:
                 session_id = session['id']
             else:
                 session_id = self.db.create_session(
-                    stream_id=stream.id,
-                    channel_id=channel.id,
+                    stream_id=stream_id,
+                    channel_id=channel_id,
                     acestream_id=acestream_id
                 )
             
             self.db.save_metrics(session_id, health_score, orchestrator_stats, ffmpeg_stats)
             
             return {
-                'stream_id': stream.id,
+                'stream_id': stream_id,
                 'acestream_id': acestream_id,
                 'health_score': health_score,
                 'orchestrator_stats': orchestrator_stats,
@@ -234,7 +242,7 @@ class AceStreamMonitor:
             }
             
         except Exception as e:
-            logger.error(f"Error checking stream {stream.id} health: {e}")
+            logger.error(f"Error checking stream {stream.get('id')} health: {e}")
             return None
     
     def _extract_acestream_id(self, url: str) -> Optional[str]:
@@ -550,10 +558,12 @@ class AceStreamMonitor:
         Reorder streams in Dispatcharr channel based on health scores.
         
         Args:
-            channel: Channel object
+            channel: Channel dict
             stream_health: List of (stream, health_dict) tuples
         """
         try:
+            channel_id = channel.get('id')
+            
             # Sort by health score (descending)
             sorted_streams = sorted(
                 stream_health,
@@ -562,31 +572,28 @@ class AceStreamMonitor:
             )
             
             # Get stream IDs in new order
-            new_order = [s[0].id for s in sorted_streams]
+            new_order = [s[0].get('id') for s in sorted_streams]
             
             # Only update if order has changed
-            current_order = channel.streams if hasattr(channel, 'streams') else []
+            current_order = channel.get('streams', [])
             if new_order != current_order:
                 # Update channel via UDI manager
-                channel_data = channel.to_dict() if hasattr(channel, 'to_dict') else {
-                    'id': channel.id,
-                    'streams': new_order
-                }
+                channel_data = channel.copy()
                 channel_data['streams'] = new_order
                 
                 # Update in UDI cache
-                success = self.udi_manager.update_channel(channel.id, channel_data)
+                success = self.udi_manager.update_channel(channel_id, channel_data)
                 
                 if success:
                     logger.info(
-                        f"Reordered {len(new_order)} streams for channel {channel.id} "
+                        f"Reordered {len(new_order)} streams for channel {channel_id} "
                         f"by health (best: {sorted_streams[0][1]['health_score']:.1f})"
                     )
                 else:
-                    logger.warning(f"Failed to update channel {channel.id} stream order in UDI")
+                    logger.warning(f"Failed to update channel {channel_id} stream order in UDI")
             
         except Exception as e:
-            logger.error(f"Error reordering streams for channel {channel.id}: {e}")
+            logger.error(f"Error reordering streams for channel {channel.get('id')}: {e}")
     
     def stop_monitoring_channel(self, channel_id: int):
         """Stop monitoring a specific channel."""
@@ -599,12 +606,13 @@ class AceStreamMonitor:
         """Refresh the list of monitored channels (start new, stop removed)."""
         try:
             current_channels = self._get_acestream_channels()
-            current_ids = {ch.id for ch in current_channels}
+            current_ids = {ch.get('id') for ch in current_channels}
             monitored_ids = set(self.monitoring_threads.keys())
             
             # Start monitoring for new channels
             for channel in current_channels:
-                if channel.id not in monitored_ids:
+                channel_id = channel.get('id')
+                if channel_id not in monitored_ids:
                     self._start_channel_monitoring(channel)
             
             # Stop monitoring for channels that are no longer AceStream
@@ -664,10 +672,11 @@ class AceStreamMonitor:
             channels = self._get_acestream_channels()
             
             for channel in channels:
-                orchestrator_url = getattr(channel, 'acestream_orchestrator_url', None) or self.default_orchestrator_url
+                channel_id = channel.get('id')
+                orchestrator_url = channel.get('acestream_orchestrator_url') or self.default_orchestrator_url
                 
                 # Get active sessions for this channel
-                sessions = self.db.get_active_sessions_for_channel(channel.id)
+                sessions = self.db.get_active_sessions_for_channel(channel_id)
                 
                 if not sessions:
                     continue
