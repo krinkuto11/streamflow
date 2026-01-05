@@ -1017,20 +1017,159 @@ health_score_warning = 50
 
 ## Testing Checklist
 
-- [ ] Database creation and migration
-- [ ] Channel tagging/untagging
-- [ ] Orchestrator API connection
-- [ ] FFmpeg stream monitoring
-- [ ] Health score calculation
-- [ ] Stream reordering
-- [ ] Graceful shutdown
-- [ ] Cleanup requests sent
-- [ ] UI configuration form
-- [ ] UI metrics display
-- [ ] Real-time updates
-- [ ] Error handling
-- [ ] Resource usage (memory, CPU)
-- [ ] Long-running stability
+- [x] Database creation and migration
+- [ ] Channel tagging/untagging (API tested, UI needs manual testing)
+- [ ] Orchestrator API connection (needs integration testing)
+- [ ] FFmpeg stream monitoring (needs integration testing)
+- [ ] Health score calculation (logic implemented)
+- [ ] Stream reordering (logic implemented)
+- [ ] Graceful shutdown (implemented)
+- [ ] Cleanup requests sent (implemented)
+- [x] UI configuration form (implemented)
+- [x] UI metrics display (implemented)
+- [x] Real-time updates (implemented)
+- [x] Error handling (implemented)
+- [ ] Resource usage (memory, CPU) - needs monitoring
+- [ ] Long-running stability - needs extended testing
+
+## Implementation Status (Updated)
+
+**Phase 1: Foundation** ✅ COMPLETE
+- Database module created with SQLite schema
+- Channel model extended with AceStream fields
+- All database operations tested and passing
+
+**Phase 2: Core Monitoring Service** ✅ COMPLETE
+- Monitoring service implemented with threading
+- FFmpeg integration for stream probing
+- Orchestrator API client implemented
+- Health scoring algorithm complete
+- Stream reordering logic complete
+- Graceful shutdown with cleanup
+
+**Phase 3: Backend API Integration** ✅ COMPLETE
+- Configuration endpoints added
+- Channel tagging endpoints added
+- Monitoring control endpoints added
+- Metrics query endpoints added
+- Auto-start integration complete
+
+**Phase 4: Frontend UI** ✅ COMPLETE
+- AceStream monitoring page created
+- Configuration form with ShadCN components
+- Channel list with tagging UI
+- Metrics visualization with Recharts
+- Navigation and routing complete
+- Real-time polling every 30 seconds
+
+**Phase 5: Testing** 🟡 IN PROGRESS
+- Database tests written and passing (9/9)
+- Integration tests needed
+- Manual UI testing needed
+- CodeQL security scan pending
+
+**Phase 6: Documentation** 📝 NEEDED
+- User guide needed
+- API documentation needed
+- Configuration reference needed
+
+## User Guide
+
+### Getting Started
+
+1. **Access the AceStream Monitoring Page**
+   - Navigate to "AceStream Monitoring" in the sidebar (Radio icon)
+
+2. **Configure Orchestrator Connection**
+   - In the Configuration section, set the Orchestrator URL (default: `http://gluetun:19000`)
+   - Adjust monitoring interval (10-300 seconds, default: 30)
+   - Note: FFmpeg probe duration is no longer used - streams run continuously
+   - Enable "AceStream Monitoring" switch
+   - Click "Save Configuration"
+
+3. **Tag Channels as AceStream**
+   - Scroll to "Channel Tagging" section
+   - Toggle the switch next to channels that contain AceStream streams
+   - Tagged channels will appear in "AceStream Channels" section
+
+4. **Start Monitoring**
+   - Click "Start Monitoring" button in the Status section
+   - Monitor will check streams every interval and reorder by health
+
+5. **View Metrics**
+   - Click on any AceStream channel in the list
+   - View health score trends over 24 hours
+   - See peers, download speed, and health metrics
+
+### How It Works
+
+**Health Scoring**
+Streams are scored 0-100 based on:
+- Peer count (0-25 points)
+- Download speed (0-25 points)
+- Upload contribution (0-10 points)
+- FFmpeg working (20 points)
+- Bitrate quality (0-15 points)
+- Error penalty (-5 per error, max -20)
+
+**Continuous Monitoring (Keeps Streams Alive)**
+- FFmpeg processes run continuously for each stream (not just probes)
+- This keeps streams alive in the Orchestrator without disconnecting
+- Stats are parsed from continuous FFmpeg output every 10 seconds
+- Prevents stream restart issues when disconnecting/reconnecting
+
+**Automatic Reordering**
+- Every monitoring interval, all streams are checked
+- Health scores are calculated from Orchestrator stats and cached FFmpeg data
+- Streams are reordered in Dispatcharr with healthiest first
+- This ensures viewers always get the best available stream
+
+**Resource Efficient**
+- Continuous FFmpeg processes use minimal CPU (just reading, not transcoding)
+- Lightweight Orchestrator API calls
+- Configurable monitoring intervals to reduce load
+- Automatic cleanup of FFmpeg processes when streams are removed
+- Graceful cleanup on shutdown
+
+### Troubleshooting
+
+**Monitoring Won't Start**
+- Check Orchestrator URL is correct and reachable
+- Ensure FFmpeg is installed in the container
+- Check logs for error messages
+
+**No Metrics Showing**
+- Ensure channels are tagged as AceStream
+- Verify streams have AceStream URLs (contain `?id=`)
+- Wait for one monitoring cycle to complete
+
+**Streams Not Reordering**
+- Check that monitoring is running
+- Verify health scores are being calculated
+- Ensure UDI sync is working
+
+### Configuration Reference
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| Orchestrator URL | `http://gluetun:19000` | - | AceStream Orchestrator API endpoint |
+| Monitoring Interval | 30 | 10-300 seconds | How often to check Orchestrator stats and reorder streams |
+| Enabled | false | boolean | Enable/disable monitoring service |
+
+**Note**: FFmpeg probe duration setting is deprecated - FFmpeg now runs continuously to keep streams alive.
+
+### API Endpoints
+
+See the main implementation guide for full API documentation. Key endpoints:
+
+- `GET /api/acestream/config` - Get configuration
+- `POST /api/acestream/config` - Update configuration
+- `GET /api/acestream/channels` - List AceStream channels
+- `POST /api/acestream/channels/<id>/tag` - Tag/untag channel
+- `GET /api/acestream/monitoring/status` - Get monitoring status
+- `POST /api/acestream/monitoring/start` - Start monitoring
+- `POST /api/acestream/monitoring/stop` - Stop monitoring
+- `GET /api/acestream/monitoring/channel/<id>/metrics` - Get channel metrics
 
 ## Documentation Requirements
 

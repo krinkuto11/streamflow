@@ -32,6 +32,10 @@ class Channel:
     auto_created_by: Optional[int] = None
     auto_created_by_name: Optional[str] = None
     tvc_guide_stationid: Optional[str] = None
+    # AceStream monitoring fields
+    is_acestream: bool = False
+    acestream_orchestrator_url: Optional[str] = None
+    acestream_config: Optional[Dict[str, Any]] = None
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'Channel':
@@ -51,7 +55,10 @@ class Channel:
             auto_created=data.get('auto_created', False),
             auto_created_by=data.get('auto_created_by'),
             auto_created_by_name=data.get('auto_created_by_name'),
-            tvc_guide_stationid=data.get('tvc_guide_stationid')
+            tvc_guide_stationid=data.get('tvc_guide_stationid'),
+            is_acestream=data.get('is_acestream', False),
+            acestream_orchestrator_url=data.get('acestream_orchestrator_url'),
+            acestream_config=data.get('acestream_config')
         )
     
     def to_dict(self) -> Dict[str, Any]:
@@ -71,7 +78,10 @@ class Channel:
             'auto_created': self.auto_created,
             'auto_created_by': self.auto_created_by,
             'auto_created_by_name': self.auto_created_by_name,
-            'tvc_guide_stationid': self.tvc_guide_stationid
+            'tvc_guide_stationid': self.tvc_guide_stationid,
+            'is_acestream': self.is_acestream,
+            'acestream_orchestrator_url': self.acestream_orchestrator_url,
+            'acestream_config': self.acestream_config
         }
 
 

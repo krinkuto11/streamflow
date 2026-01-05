@@ -13,6 +13,7 @@ import AutomationSettings from '@/pages/AutomationSettings'
 import Changelog from '@/pages/Changelog'
 import SetupWizard from '@/pages/SetupWizard'
 import Scheduling from '@/pages/Scheduling'
+import AceStreamMonitoring from '@/pages/AceStreamMonitoring'
 
 function App() {
   const [setupStatus, setSetupStatus] = useState(null)
@@ -92,6 +93,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/stream-checker" element={<StreamChecker />} />
             <Route path="/channels" element={<ChannelConfiguration />} />
+            <Route path="/acestream" element={<AceStreamMonitoring />} />
             <Route path="/settings" element={<AutomationSettings />} />
             <Route path="/scheduling" element={<Scheduling />} />
             <Route path="/changelog" element={<Changelog />} />

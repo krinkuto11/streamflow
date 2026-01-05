@@ -3504,6 +3504,315 @@ def trigger_epg_refresh():
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================================
+# AceStream Monitoring API Endpoints
+# ============================================================================
+
+# Global instance of AceStream monitor (initialized lazily)
+acestream_monitor = None
+
+def get_acestream_monitor():
+    """Get or create AceStream monitor instance."""
+    global acestream_monitor
+    if acestream_monitor is None:
+        try:
+            from acestream_monitor_service import AceStreamMonitor
+            udi_manager = get_udi_manager()
+            
+            # Get configuration from dispatcharr config
+            default_url = "http://gluetun:19000"
+            config_dict = {}
+            try:
+                from dispatcharr_config import get_dispatcharr_config
+                config = get_dispatcharr_config()
+                default_url = config.get('acestream_orchestrator_url', default_url)
+                config_dict = {
+                    'monitoring_interval': config.get('acestream_monitoring_interval', 30),
+                    'ffmpeg_probe_duration': config.get('acestream_ffmpeg_probe_duration', 5)
+                }
+            except:
+                pass
+            
+            acestream_monitor = AceStreamMonitor(udi_manager, default_url, config_dict)
+            logger.info("AceStream monitor instance created")
+        except Exception as e:
+            logger.error(f"Failed to create AceStream monitor: {e}")
+            return None
+    return acestream_monitor
+
+
+@app.route('/api/acestream/config', methods=['GET'])
+@log_function_call
+def get_acestream_config():
+    """Get AceStream configuration.
+    
+    Returns:
+        JSON with AceStream configuration
+    """
+    try:
+        from dispatcharr_config import get_dispatcharr_config
+        config = get_dispatcharr_config()
+        
+        # Get AceStream-related configuration
+        acestream_config = {
+            'enabled': config.get('acestream_enabled', False),
+            'orchestrator_url': config.get('acestream_orchestrator_url', 'http://gluetun:19000'),
+            'monitoring_interval': config.get('acestream_monitoring_interval', 30),
+            'ffmpeg_probe_duration': config.get('acestream_ffmpeg_probe_duration', 5)
+        }
+        
+        return jsonify(acestream_config)
+    except Exception as e:
+        logger.error(f"Error getting AceStream config: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/acestream/config', methods=['POST'])
+@log_function_call
+def update_acestream_config():
+    """Update AceStream configuration.
+    
+    Expected JSON:
+        {
+            "enabled": bool,
+            "orchestrator_url": str,
+            "monitoring_interval": int,
+            "ffmpeg_probe_duration": int
+        }
+    
+    Returns:
+        JSON with success status
+    """
+    try:
+        data = request.json
+        
+        from dispatcharr_config import get_dispatcharr_config
+        config = get_dispatcharr_config()
+        
+        # Update AceStream config
+        if 'enabled' in data:
+            config['acestream_enabled'] = data['enabled']
+        if 'orchestrator_url' in data:
+            config['acestream_orchestrator_url'] = data['orchestrator_url']
+        if 'monitoring_interval' in data:
+            config['acestream_monitoring_interval'] = data['monitoring_interval']
+        if 'ffmpeg_probe_duration' in data:
+            config['acestream_ffmpeg_probe_duration'] = data['ffmpeg_probe_duration']
+        
+        # Save config
+        config.save()
+        
+        # Restart monitoring if enabled
+        monitor = get_acestream_monitor()
+        if monitor:
+            if data.get('enabled', False):
+                if not monitor.running:
+                    monitor.start_monitoring()
+            else:
+                if monitor.running:
+                    monitor.shutdown()
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Error updating AceStream config: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/acestream/channels', methods=['GET'])
+@log_function_call
+def get_acestream_channels():
+    """Get all channels marked as AceStream channels.
+    
+    Returns:
+        JSON with list of AceStream channels
+    """
+    try:
+        udi_manager = get_udi_manager()
+        all_channels = udi_manager.get_all_channels()
+        
+        acestream_channels = [
+            ch.to_dict() for ch in all_channels 
+            if getattr(ch, 'is_acestream', False)
+        ]
+        
+        return jsonify(acestream_channels)
+    except Exception as e:
+        logger.error(f"Error getting AceStream channels: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/acestream/channels/<int:channel_id>/tag', methods=['POST'])
+@log_function_call
+def tag_channel_as_acestream(channel_id):
+    """Mark a channel as AceStream channel.
+    
+    Args:
+        channel_id: Channel ID
+    
+    Expected JSON:
+        {
+            "is_acestream": bool,
+            "orchestrator_url": str (optional)
+        }
+    
+    Returns:
+        JSON with success status
+    """
+    try:
+        data = request.json
+        is_acestream = data.get('is_acestream', False)
+        orchestrator_url = data.get('orchestrator_url')
+        
+        udi_manager = get_udi_manager()
+        
+        # Get channel
+        channel = udi_manager.get_channel(channel_id)
+        if not channel:
+            return jsonify({"error": "Channel not found"}), 404
+        
+        # Update channel properties in the Channel object
+        channel.is_acestream = is_acestream
+        if orchestrator_url:
+            channel.acestream_orchestrator_url = orchestrator_url
+        
+        # Update channel in UDI cache with modified data
+        channel_data = channel.to_dict()
+        success = udi_manager.update_channel(channel_id, channel_data)
+        
+        if not success:
+            logger.warning(f"Failed to update channel {channel_id} in UDI cache")
+        
+        # If monitoring is enabled and channel is now AceStream, refresh monitoring
+        monitor = get_acestream_monitor()
+        if monitor and is_acestream and monitor.running:
+            monitor.refresh_channels()
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        logger.error(f"Error tagging channel as AceStream: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/acestream/monitoring/status', methods=['GET'])
+@log_function_call
+def get_acestream_monitoring_status():
+    """Get current monitoring status for all AceStream channels.
+    
+    Returns:
+        JSON with monitoring status
+    """
+    try:
+        monitor = get_acestream_monitor()
+        if not monitor:
+            return jsonify({'error': 'Monitoring service not available'}), 503
+        
+        status = monitor.get_status()
+        return jsonify(status)
+    except Exception as e:
+        logger.error(f"Error getting monitoring status: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/acestream/monitoring/start', methods=['POST'])
+@log_function_call
+def start_acestream_monitoring():
+    """Start AceStream monitoring service.
+    
+    Returns:
+        JSON with success status
+    """
+    try:
+        monitor = get_acestream_monitor()
+        if not monitor:
+            return jsonify({'error': 'Monitoring service not available'}), 503
+        
+        if monitor.running:
+            return jsonify({'message': 'Monitoring already running'}), 200
+        
+        monitor.start_monitoring()
+        return jsonify({'success': True, 'message': 'Monitoring started'})
+    except Exception as e:
+        logger.error(f"Error starting monitoring: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/acestream/monitoring/stop', methods=['POST'])
+@log_function_call
+def stop_acestream_monitoring():
+    """Stop AceStream monitoring service.
+    
+    Returns:
+        JSON with success status
+    """
+    try:
+        monitor = get_acestream_monitor()
+        if not monitor:
+            return jsonify({'error': 'Monitoring service not available'}), 503
+        
+        if not monitor.running:
+            return jsonify({'message': 'Monitoring not running'}), 200
+        
+        monitor.shutdown()
+        return jsonify({'success': True, 'message': 'Monitoring stopped'})
+    except Exception as e:
+        logger.error(f"Error stopping monitoring: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/acestream/monitoring/channel/<int:channel_id>/metrics', methods=['GET'])
+@log_function_call
+def get_channel_metrics(channel_id):
+    """Get monitoring metrics for a specific channel.
+    
+    Args:
+        channel_id: Channel ID
+    
+    Query params:
+        hours: Number of hours of history (default: 24)
+    
+    Returns:
+        JSON with metrics data
+    """
+    try:
+        hours = request.args.get('hours', 24, type=int)
+        
+        from acestream_db import AceStreamDatabase
+        db = AceStreamDatabase()
+        
+        metrics = db.get_channel_metrics(channel_id, hours)
+        
+        return jsonify(metrics)
+    except Exception as e:
+        logger.error(f"Error getting channel metrics: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/acestream/monitoring/stream/<int:stream_id>/health', methods=['GET'])
+@log_function_call
+def get_stream_health(stream_id):
+    """Get current health score and stats for a stream.
+    
+    Args:
+        stream_id: Stream ID
+    
+    Returns:
+        JSON with health data
+    """
+    try:
+        from acestream_db import AceStreamDatabase
+        db = AceStreamDatabase()
+        
+        health = db.get_latest_stream_health(stream_id)
+        
+        if health:
+            return jsonify(health)
+        else:
+            return jsonify({"message": "No health data available"}), 404
+    except Exception as e:
+        logger.error(f"Error getting stream health: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 # Serve React app for all frontend routes (catch-all - must be last!)
 @app.route('/<path:path>')
 def serve_frontend(path):
@@ -3603,5 +3912,25 @@ if __name__ == '__main__':
             logger.info("EPG refresh processor auto-started")
     except Exception as e:
         logger.error(f"Failed to auto-start EPG refresh processor: {e}")
+    
+    # Auto-start AceStream monitoring if enabled and wizard is complete
+    try:
+        if not check_wizard_complete():
+            logger.info("AceStream monitoring will not start - setup wizard has not been completed")
+        else:
+            from dispatcharr_config import get_dispatcharr_config
+            config = get_dispatcharr_config()
+            
+            if config.get('acestream_enabled', False):
+                monitor = get_acestream_monitor()
+                if monitor:
+                    monitor.start_monitoring()
+                    logger.info("AceStream monitoring auto-started")
+                else:
+                    logger.warning("Failed to create AceStream monitor instance")
+            else:
+                logger.info("AceStream monitoring is disabled in configuration")
+    except Exception as e:
+        logger.error(f"Failed to auto-start AceStream monitoring: {e}")
     
     app.run(host=args.host, port=args.port, debug=args.debug)
