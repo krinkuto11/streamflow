@@ -36,7 +36,8 @@ export default function AceStreamMonitoring() {
     enabled: false,
     orchestrator_url: 'http://gluetun:19000',
     monitoring_interval: 30,
-    ffmpeg_probe_duration: 5
+    dead_stream_retry_interval: 300,
+    max_ffmpeg_failures: 3
   })
   const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -323,30 +324,62 @@ export default function AceStreamMonitoring() {
                     }
                   }}
                 />
+                <p className="text-sm text-muted-foreground">
+                  How often to check stream health
+                </p>
               </div>
 
               <div className="grid gap-2">
-                <Label htmlFor="ffmpeg-duration">FFmpeg Probe Duration (seconds)</Label>
+                <Label htmlFor="dead-stream-retry">Dead Stream Retry Interval (seconds)</Label>
                 <Input
-                  id="ffmpeg-duration"
+                  id="dead-stream-retry"
                   type="number"
-                  min="3"
-                  max="15"
-                  value={config.ffmpeg_probe_duration}
+                  min="60"
+                  max="3600"
+                  value={config.dead_stream_retry_interval}
                   onChange={(e) => {
                     const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
-                    if (value === '' || (!isNaN(value) && value >= 3 && value <= 15)) {
-                      setConfig({ ...config, ffmpeg_probe_duration: value === '' ? 5 : value })
+                    if (value === '' || (!isNaN(value) && value >= 60 && value <= 3600)) {
+                      setConfig({ ...config, dead_stream_retry_interval: value === '' ? 300 : value })
                     }
                   }}
                   onBlur={(e) => {
                     // Restore default if empty on blur
                     if (e.target.value === '') {
-                      setConfig({ ...config, ffmpeg_probe_duration: 5 })
+                      setConfig({ ...config, dead_stream_retry_interval: 300 })
                     }
                   }}
                 />
+                <p className="text-sm text-muted-foreground">
+                  Time to wait before retrying dead streams
+                </p>
               </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="max-failures">Max FFmpeg Failures</Label>
+              <Input
+                id="max-failures"
+                type="number"
+                min="1"
+                max="10"
+                value={config.max_ffmpeg_failures}
+                onChange={(e) => {
+                  const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
+                  if (value === '' || (!isNaN(value) && value >= 1 && value <= 10)) {
+                    setConfig({ ...config, max_ffmpeg_failures: value === '' ? 3 : value })
+                  }
+                }}
+                onBlur={(e) => {
+                  // Restore default if empty on blur
+                  if (e.target.value === '') {
+                    setConfig({ ...config, max_ffmpeg_failures: 3 })
+                  }
+                }}
+              />
+              <p className="text-sm text-muted-foreground">
+                Number of FFmpeg failures before marking stream as dead
+              </p>
             </div>
           </div>
 
@@ -403,7 +436,7 @@ export default function AceStreamMonitoring() {
           <CardHeader>
             <CardTitle>Stream Health Over Time</CardTitle>
             <CardDescription>
-              Health metrics for {selectedChannel.name} (Last 24 hours)
+              Combined health metrics for all streams in {selectedChannel.name} (Last 24 hours)
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -425,22 +458,29 @@ export default function AceStreamMonitoring() {
                   type="monotone"
                   dataKey="avg_health_score"
                   stroke="hsl(var(--primary))"
-                  name="Health Score"
+                  name="Avg Health Score"
                   strokeWidth={2}
                 />
                 <Line
                   yAxisId="right"
                   type="monotone"
-                  dataKey="avg_peers"
+                  dataKey="total_peers"
                   stroke="hsl(var(--chart-2))"
-                  name="Peers"
+                  name="Total Peers"
                 />
                 <Line
                   yAxisId="right"
                   type="monotone"
-                  dataKey="avg_speed_down"
+                  dataKey="total_speed_down"
                   stroke="hsl(var(--chart-3))"
-                  name="Download Speed (KB/s)"
+                  name="Total Download (KB/s)"
+                />
+                <Line
+                  yAxisId="right"
+                  type="monotone"
+                  dataKey="total_speed_up"
+                  stroke="hsl(var(--chart-4))"
+                  name="Total Upload (KB/s)"
                 />
               </LineChart>
             </ResponsiveContainer>
