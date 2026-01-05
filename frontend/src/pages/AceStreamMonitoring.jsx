@@ -311,9 +311,15 @@ export default function AceStreamMonitoring() {
                   max="300"
                   value={config.monitoring_interval}
                   onChange={(e) => {
-                    const value = parseInt(e.target.value, 10)
-                    if (!isNaN(value) && value >= 10 && value <= 300) {
-                      setConfig({ ...config, monitoring_interval: value })
+                    const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
+                    if (value === '' || (!isNaN(value) && value >= 10 && value <= 300)) {
+                      setConfig({ ...config, monitoring_interval: value === '' ? 30 : value })
+                    }
+                  }}
+                  onBlur={(e) => {
+                    // Restore default if empty on blur
+                    if (e.target.value === '') {
+                      setConfig({ ...config, monitoring_interval: 30 })
                     }
                   }}
                 />
@@ -328,9 +334,15 @@ export default function AceStreamMonitoring() {
                   max="15"
                   value={config.ffmpeg_probe_duration}
                   onChange={(e) => {
-                    const value = parseInt(e.target.value, 10)
-                    if (!isNaN(value) && value >= 3 && value <= 15) {
-                      setConfig({ ...config, ffmpeg_probe_duration: value })
+                    const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
+                    if (value === '' || (!isNaN(value) && value >= 3 && value <= 15)) {
+                      setConfig({ ...config, ffmpeg_probe_duration: value === '' ? 5 : value })
+                    }
+                  }}
+                  onBlur={(e) => {
+                    // Restore default if empty on blur
+                    if (e.target.value === '') {
+                      setConfig({ ...config, ffmpeg_probe_duration: 5 })
                     }
                   }}
                 />

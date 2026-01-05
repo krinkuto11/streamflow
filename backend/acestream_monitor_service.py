@@ -102,6 +102,12 @@ class AceStreamMonitor:
         
         while not self.shutdown_event.is_set():
             try:
+                # Check if this channel should still be monitored
+                current_acestream_channels = self._get_acestream_channels()
+                if not any(ch.id == channel.id for ch in current_acestream_channels):
+                    logger.info(f"Channel {channel.id} is no longer AceStream, stopping monitoring")
+                    break
+                
                 # Get channel streams
                 streams = self._get_channel_streams(channel)
                 
@@ -135,6 +141,10 @@ class AceStreamMonitor:
             except Exception as e:
                 logger.error(f"Error monitoring channel {channel.id}: {e}", exc_info=True)
                 self.shutdown_event.wait(60)
+        
+        # Clean up when exiting
+        if channel.id in self.monitoring_threads:
+            del self.monitoring_threads[channel.id]
         
         logger.info(f"Stopped monitoring channel {channel.id}")
     
@@ -432,7 +442,7 @@ class AceStreamMonitor:
             # We could add per-channel events if needed, but for now this is simple
     
     def refresh_channels(self):
-        """Refresh the list of monitored channels (start new, keep existing)."""
+        """Refresh the list of monitored channels (start new, stop removed)."""
         try:
             current_channels = self._get_acestream_channels()
             current_ids = {ch.id for ch in current_channels}
@@ -443,8 +453,19 @@ class AceStreamMonitor:
                 if channel.id not in monitored_ids:
                     self._start_channel_monitoring(channel)
             
-            # Note: We don't stop threads for channels that are no longer AceStream
-            # They will stop on next iteration when they don't find themselves in the list
+            # Stop monitoring for channels that are no longer AceStream
+            removed_ids = monitored_ids - current_ids
+            for channel_id in removed_ids:
+                logger.info(f"Channel {channel_id} is no longer AceStream, stopping monitoring")
+                # Thread will stop on next iteration when it checks the channel list
+                # and doesn't find itself. We could set a per-channel event here
+                # for immediate stopping, but for simplicity we let it exit naturally.
+                
+                # Remove from tracking (thread will exit on next iteration)
+                if channel_id in self.monitoring_threads:
+                    # Note: Thread will stop itself when it checks _get_acestream_channels
+                    # and doesn't find itself in the list anymore
+                    pass
             
         except Exception as e:
             logger.error(f"Error refreshing channels: {e}")
