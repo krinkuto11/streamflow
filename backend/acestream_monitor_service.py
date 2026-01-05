@@ -163,8 +163,9 @@ class AceStreamMonitor:
                 orchestrator_url = channel.get('acestream_orchestrator_url') or self.default_orchestrator_url
                 
                 # Monitor each stream and collect health data
-                # Stagger stream starts with 0.5 second delay between each
+                # Stagger stream starts with configurable delay between each
                 stream_health = []
+                stream_start_stagger = self.config.get('stream_start_stagger', 0.5)
                 
                 for i, stream in enumerate(streams):
                     if self.shutdown_event.is_set():
@@ -175,7 +176,7 @@ class AceStreamMonitor:
                     # Add to monitored set for new streams (with staggering)
                     if stream_id not in monitored_stream_ids:
                         if i > 0:  # Don't delay the first stream
-                            time.sleep(0.5)  # 0.5 second stagger between starts
+                            time.sleep(stream_start_stagger)  # Configurable stagger between starts
                         monitored_stream_ids.add(stream_id)
                     
                     health = self._check_stream_health(channel, stream, orchestrator_url)
@@ -239,7 +240,7 @@ class AceStreamMonitor:
             orchestrator_stats = self._get_orchestrator_stats(acestream_id, orchestrator_url)
             
             # Ensure continuous FFmpeg process is running for this stream
-            self._ensure_ffmpeg_running(stream_id, stream_url)
+            self._ensure_ffmpeg_running(stream_id, stream_url, channel_id)
             
             # Get cached FFmpeg stats from continuous process
             ffmpeg_stats = self.ffmpeg_stats_cache.get(stream_id)
@@ -330,7 +331,7 @@ class AceStreamMonitor:
             logger.error(f"Unexpected error querying Orchestrator: {e}")
             return None
     
-    def _ensure_ffmpeg_running(self, stream_id: int, stream_url: str):
+    def _ensure_ffmpeg_running(self, stream_id: int, stream_url: str, channel_id: int = None):
         """
         Ensure a continuous FFmpeg process is running for a stream.
         If not running, start it. This keeps the stream alive.
@@ -340,6 +341,7 @@ class AceStreamMonitor:
         Args:
             stream_id: Stream ID
             stream_url: Stream URL
+            channel_id: Channel ID (optional, for dead stream tracking)
         """
         # Check if stream is marked as dead and should be retried
         if stream_id in self.dead_stream_retry_times:
@@ -383,7 +385,8 @@ class AceStreamMonitor:
                         self.dead_streams_tracker.mark_as_dead(
                             stream_url=stream.get('url', stream_url),
                             stream_id=stream_id,
-                            stream_name=stream.get('name', f'Stream {stream_id}')
+                            stream_name=stream.get('name', f'Stream {stream_id}'),
+                            channel_id=channel_id
                         )
                     
                     # Schedule retry check

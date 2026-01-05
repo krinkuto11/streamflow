@@ -3529,7 +3529,8 @@ def get_acestream_monitor():
                 config_dict = {
                     'monitoring_interval': config.get('acestream_monitoring_interval', 30),
                     'dead_stream_retry_interval': config.get('acestream_dead_stream_retry_interval', 300),
-                    'max_ffmpeg_failures': config.get('acestream_max_ffmpeg_failures', 3)
+                    'max_ffmpeg_failures': config.get('acestream_max_ffmpeg_failures', 3),
+                    'stream_start_stagger': config.get('acestream_stream_start_stagger', 0.5)
                 }
             except:
                 pass
