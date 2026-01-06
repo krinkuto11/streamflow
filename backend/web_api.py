@@ -3530,7 +3530,9 @@ def get_acestream_monitor():
                     'monitoring_interval': config.get('acestream_monitoring_interval', 30),
                     'dead_stream_retry_interval': config.get('acestream_dead_stream_retry_interval', 300),
                     'max_ffmpeg_failures': config.get('acestream_max_ffmpeg_failures', 3),
-                    'stream_start_stagger': config.get('acestream_stream_start_stagger', 0.5)
+                    'stream_start_stagger': config.get('acestream_stream_start_stagger', 0.5),
+                    'livepos_buffer_tolerance': config.get('acestream_livepos_buffer_tolerance', 30),
+                    'speed_down_timeout': config.get('acestream_speed_down_timeout', 10)
                 }
             except:
                 pass
@@ -3561,7 +3563,9 @@ def get_acestream_config():
             'orchestrator_url': config.get('acestream_orchestrator_url', 'http://gluetun:19000'),
             'monitoring_interval': config.get('acestream_monitoring_interval', 30),
             'dead_stream_retry_interval': config.get('acestream_dead_stream_retry_interval', 300),
-            'max_ffmpeg_failures': config.get('acestream_max_ffmpeg_failures', 3)
+            'max_ffmpeg_failures': config.get('acestream_max_ffmpeg_failures', 3),
+            'livepos_buffer_tolerance': config.get('acestream_livepos_buffer_tolerance', 30),
+            'speed_down_timeout': config.get('acestream_speed_down_timeout', 10)
         }
         
         return jsonify(acestream_config)
@@ -3581,7 +3585,9 @@ def update_acestream_config():
             "orchestrator_url": str,
             "monitoring_interval": int,
             "dead_stream_retry_interval": int,
-            "max_ffmpeg_failures": int
+            "max_ffmpeg_failures": int,
+            "livepos_buffer_tolerance": int,
+            "speed_down_timeout": int
         }
     
     Returns:
@@ -3604,6 +3610,10 @@ def update_acestream_config():
             config['acestream_dead_stream_retry_interval'] = data['dead_stream_retry_interval']
         if 'max_ffmpeg_failures' in data:
             config['acestream_max_ffmpeg_failures'] = data['max_ffmpeg_failures']
+        if 'livepos_buffer_tolerance' in data:
+            config['acestream_livepos_buffer_tolerance'] = data['livepos_buffer_tolerance']
+        if 'speed_down_timeout' in data:
+            config['acestream_speed_down_timeout'] = data['speed_down_timeout']
         
         # Save config
         config.save()
