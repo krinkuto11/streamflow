@@ -43,7 +43,9 @@ export default function AceStreamMonitoring() {
     loadData()
     const interval = setInterval(() => {
       loadStatus()
-      loadChannelStreamsHealth()
+      loadAceStreamChannels().then(() => {
+        loadChannelStreamsHealth()
+      })
     }, 30000) // Refresh every 30 seconds
     return () => clearInterval(interval)
   }, []) // Empty dependency array - only run once on mount
