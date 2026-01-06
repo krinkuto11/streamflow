@@ -209,6 +209,63 @@ All changes are backward compatible:
 - ✅ Consistent error handling
 - ✅ Proper logging throughout
 
+## Frontend UI Refresh Fix (January 2026)
+
+### Problem
+The AceStream Monitoring page showed stream health data (alive/dead counts and stream details) only when clicking the Reload button. When the 30-second monitoring interval kicked in, the stats would reset to "0 alive, 0 dead" with no stream details visible.
+
+### Root Cause
+**File**: `frontend/src/pages/AceStreamMonitoring.jsx`
+
+The interval refresh (lines 44-47) only called:
+- `loadStatus()`
+- `loadChannelStreamsHealth()`
+
+It did NOT call `loadAceStreamChannels()` to refresh the `channels` state. Since `loadChannelStreamsHealth()` depends on the `channels` state to iterate over channels and fetch stream health data, when the interval ran with a stale/empty `channels` array, no health data was loaded.
+
+### Solution
+Updated the interval refresh to:
+1. Call `loadAceStreamChannels()` to refresh the channels state
+2. Then call `loadChannelStreamsHealth()` to load health data
+3. Use proper async/await pattern with error handling
+4. Add a guard flag to prevent overlapping executions
+
+```javascript
+useEffect(() => {
+  loadData()
+  let isRefreshing = false
+  const interval = setInterval(async () => {
+    if (isRefreshing) {
+      return // Skip if previous refresh is still running
+    }
+    try {
+      isRefreshing = true
+      await loadStatus()
+      await loadAceStreamChannels()
+      await loadChannelStreamsHealth()
+    } catch (error) {
+      console.error('Error during interval refresh:', error)
+    } finally {
+      isRefreshing = false
+    }
+  }, 30000) // Refresh every 30 seconds
+  return () => clearInterval(interval)
+}, [])
+```
+
+### Impact
+- ✅ Stream health data now persists across interval refreshes
+- ✅ Alive/dead counts update correctly every 30 seconds
+- ✅ Stream details remain visible in dropdown menus
+- ✅ Proper error handling prevents silent failures
+- ✅ Guard flag prevents overlapping API calls
+
+### Testing
+- ✅ Frontend builds successfully
+- ✅ No syntax errors
+- ✅ No security vulnerabilities (CodeQL)
+- ✅ Code review completed
+
 ## Conclusion
 
-All four backend errors have been successfully fixed. The AceStream Monitor service is now fully functional and ready for use.
+All four backend errors have been successfully fixed. The AceStream Monitor service is now fully functional and ready for use. The frontend UI refresh issue has also been resolved, ensuring consistent data display.
