@@ -2,7 +2,7 @@
 """
 Test HTTP-based AceStream Monitoring
 
-Verifies that the HTTP range request approach works as a lightweight
+Verifies that the HTTP persistent streaming approach works as a lightweight
 alternative to ffmpeg for keeping streams alive in the orchestrator.
 """
 
@@ -36,11 +36,12 @@ class TestHTTPStreamKeepAlive(unittest.TestCase):
     
     @patch('acestream_http_monitor.requests.Session')
     def test_start_keepalive(self, mock_session_class):
-        """Test starting HTTP keep-alive for a stream."""
-        # Mock successful HTTP response
+        """Test starting HTTP keep-alive for a stream with persistent connection."""
+        # Mock successful HTTP streaming response
         mock_response = Mock()
-        mock_response.status_code = 206  # Partial Content
-        mock_response.content = b'x' * 1024  # 1KB of data
+        mock_response.status_code = 200  # OK for streaming
+        # Mock iter_content to return chunks
+        mock_response.iter_content = Mock(return_value=[b'x' * 1024] * 3)  # 3 chunks
         
         mock_session = Mock()
         mock_session.get.return_value = mock_response
@@ -53,7 +54,7 @@ class TestHTTPStreamKeepAlive(unittest.TestCase):
         self.keepalive.start_keepalive(
             stream_id=stream_id,
             stream_url=stream_url,
-            interval=1,  # Short interval for testing
+            interval=1,  # Retry interval for testing
             chunk_size=1024
         )
         
@@ -94,12 +95,17 @@ class TestHTTPStreamKeepAlive(unittest.TestCase):
         self.assertNotIn(stream_id, self.keepalive.active_streams)
     
     @patch('acestream_http_monitor.requests.Session')
-    def test_health_tracking_success(self, mock_session_class):
-        """Test that successful requests update health correctly."""
-        # Mock successful responses
+    @patch('acestream_http_monitor.time.sleep')  # Mock sleep to speed up test
+    def test_health_tracking_success(self, mock_sleep, mock_session_class):
+        """Test that successful streaming updates health correctly."""
+        # Mock successful streaming responses
         mock_response = Mock()
-        mock_response.status_code = 206
-        mock_response.content = b'x' * 1024
+        mock_response.status_code = 200
+        # Mock iter_content to yield chunks continuously
+        def mock_iter():
+            for _ in range(5):  # Yield 5 chunks
+                yield b'x' * 1024
+        mock_response.iter_content = Mock(return_value=mock_iter())
         
         mock_session = Mock()
         mock_session.get.return_value = mock_response
@@ -115,8 +121,8 @@ class TestHTTPStreamKeepAlive(unittest.TestCase):
             chunk_size=1024
         )
         
-        # Wait for a few requests
-        time.sleep(2)
+        # Wait for processing
+        time.sleep(0.5)  # Real sleep, not mocked
         
         # Check health
         health = self.keepalive.get_stream_health(stream_id)
@@ -132,7 +138,7 @@ class TestHTTPStreamKeepAlive(unittest.TestCase):
     
     @patch('acestream_http_monitor.requests.Session')
     def test_health_tracking_failure(self, mock_session_class):
-        """Test that failed requests update health correctly."""
+        """Test that failed connections update health correctly."""
         # Mock failed responses
         mock_session = Mock()
         mock_session.get.side_effect = Exception("Connection error")
@@ -160,11 +166,12 @@ class TestHTTPStreamKeepAlive(unittest.TestCase):
     
     @patch('acestream_http_monitor.requests.Session')
     def test_eof_detection(self, mock_session_class):
-        """Test that EOF (empty response) is detected."""
-        # Mock EOF response (empty content)
+        """Test that EOF (stream end) is detected when iter_content finishes."""
+        # Mock response that ends after a few chunks
         mock_response = Mock()
-        mock_response.status_code = 206
-        mock_response.content = b''  # Empty = EOF
+        mock_response.status_code = 200
+        # iter_content returns iterator that ends (simulating stream end)
+        mock_response.iter_content = Mock(return_value=iter([b'x' * 1024, b'y' * 1024]))
         
         mock_session = Mock()
         mock_session.get.return_value = mock_response
