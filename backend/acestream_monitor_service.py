@@ -11,9 +11,10 @@ import subprocess
 import threading
 import time
 from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from acestream_db import AceStreamDatabase
+from dead_streams_tracker import DeadStreamsTracker
 from logging_config import setup_logging
 
 logger = setup_logging(__name__)
@@ -38,12 +39,13 @@ class AceStreamMonitor:
         Args:
             udi_manager: UDI manager instance for accessing channels/streams
             default_orchestrator_url: Default Orchestrator URL
-            config: Configuration dictionary with monitoring_interval and ffmpeg_probe_duration
+            config: Configuration dictionary with monitoring_interval and dead_stream_retry_interval
         """
         self.udi_manager = udi_manager
         self.default_orchestrator_url = default_orchestrator_url
         self.config = config or {}
         self.db = AceStreamDatabase()
+        self.dead_streams_tracker = DeadStreamsTracker()
         
         self.monitoring_threads: Dict[int, threading.Thread] = {}
         self.shutdown_event = threading.Event()
@@ -53,6 +55,14 @@ class AceStreamMonitor:
         self.ffmpeg_processes: Dict[int, subprocess.Popen] = {}
         self.ffmpeg_stats_cache: Dict[int, Dict] = {}
         self.ffmpeg_threads: Dict[int, threading.Thread] = {}
+        
+        # Track FFmpeg failures per stream to mark as dead after repeated failures
+        # Format: {stream_id: {'failures': count, 'last_failure': timestamp}}
+        self.ffmpeg_failures: Dict[int, Dict[str, Any]] = {}
+        
+        # Track when dead streams were last checked for retry
+        # Format: {stream_id: timestamp}
+        self.dead_stream_retry_times: Dict[int, datetime] = {}
         
         logger.info("AceStream monitor initialized")
     
@@ -113,10 +123,23 @@ class AceStreamMonitor:
         
         while not self.shutdown_event.is_set():
             try:
-                # Check if this channel should still be monitored
-                current_acestream_channels = self._get_acestream_channels()
-                if not any(ch.get('id') == channel_id for ch in current_acestream_channels):
-                    logger.info(f"Channel {channel_id} is no longer AceStream, stopping monitoring")
+                # Refresh the channel data to get latest information, but preserve AceStream flag
+                # This fixes the issue where UDI refresh would cause "no longer AceStream" message
+                refreshed_channel = self.udi_manager.get_channel_by_id(channel_id)
+                if refreshed_channel:
+                    # Update channel reference with fresh data while preserving is_acestream flag
+                    if not refreshed_channel.get('is_acestream', False):
+                        # Channel was updated but lost the AceStream flag - restore it
+                        logger.warning(f"Channel {channel_id} lost AceStream flag during refresh, preserving it")
+                        refreshed_channel['is_acestream'] = channel.get('is_acestream', False)
+                        refreshed_channel['acestream_orchestrator_url'] = channel.get('acestream_orchestrator_url')
+                        refreshed_channel['acestream_config'] = channel.get('acestream_config')
+                        # Update in UDI to persist the flag
+                        self.udi_manager.update_channel(channel_id, refreshed_channel)
+                    channel = refreshed_channel
+                else:
+                    # Channel no longer exists
+                    logger.info(f"Channel {channel_id} no longer exists, stopping monitoring")
                     break
                 
                 # Get channel streams
@@ -136,17 +159,25 @@ class AceStreamMonitor:
                     logger.info(f"Stream {stream_id} removed from channel {channel_id}, stopping FFmpeg")
                     self._stop_ffmpeg_process(stream_id)
                 
-                monitored_stream_ids = current_stream_ids
-                
                 # Get orchestrator URL (channel-specific or default)
                 orchestrator_url = channel.get('acestream_orchestrator_url') or self.default_orchestrator_url
                 
                 # Monitor each stream and collect health data
+                # Stagger stream starts with configurable delay between each
                 stream_health = []
+                stream_start_stagger = self.config.get('stream_start_stagger', 0.5)
                 
-                for stream in streams:
+                for i, stream in enumerate(streams):
                     if self.shutdown_event.is_set():
                         break
+                    
+                    stream_id = stream.get('id')
+                    
+                    # Add to monitored set for new streams (with staggering)
+                    if stream_id not in monitored_stream_ids:
+                        if i > 0:  # Don't delay the first stream
+                            time.sleep(stream_start_stagger)  # Configurable stagger between starts
+                        monitored_stream_ids.add(stream_id)
                     
                     health = self._check_stream_health(channel, stream, orchestrator_url)
                     if health:
@@ -209,7 +240,7 @@ class AceStreamMonitor:
             orchestrator_stats = self._get_orchestrator_stats(acestream_id, orchestrator_url)
             
             # Ensure continuous FFmpeg process is running for this stream
-            self._ensure_ffmpeg_running(stream_id, stream_url)
+            self._ensure_ffmpeg_running(stream_id, stream_url, channel_id)
             
             # Get cached FFmpeg stats from continuous process
             ffmpeg_stats = self.ffmpeg_stats_cache.get(stream_id)
@@ -253,6 +284,7 @@ class AceStreamMonitor:
     def _get_orchestrator_stats(self, acestream_id: str, orchestrator_url: str) -> Optional[Dict]:
         """
         Query Orchestrator /streams endpoint for stream stats.
+        Only returns streams with status="started" (active streams).
         
         Example response:
         {
@@ -263,7 +295,8 @@ class AceStreamMonitor:
             "speed_up": 17,
             "downloaded": 203423744,
             "uploaded": 753664,
-            "livepos": {...}
+            "livepos": {...},
+            "status": "started"
         }
         """
         try:
@@ -274,9 +307,16 @@ class AceStreamMonitor:
             streams = response.json()
             
             # Find stream by matching acestream_id with key field
+            # and filter by status="started" to only check active streams
             for stream_data in streams:
                 if stream_data.get('key') == acestream_id:
-                    return stream_data
+                    # Check if stream has started status
+                    if stream_data.get('status') == 'started':
+                        return stream_data
+                    else:
+                        # Stream exists but not started - don't use it
+                        logger.debug(f"Stream {acestream_id} found but status is {stream_data.get('status')}, not 'started'")
+                        return None
             
             # Stream not found in Orchestrator (may not be running yet)
             return None
@@ -291,24 +331,76 @@ class AceStreamMonitor:
             logger.error(f"Unexpected error querying Orchestrator: {e}")
             return None
     
-    def _ensure_ffmpeg_running(self, stream_id: int, stream_url: str):
+    def _ensure_ffmpeg_running(self, stream_id: int, stream_url: str, channel_id: int = None):
         """
         Ensure a continuous FFmpeg process is running for a stream.
         If not running, start it. This keeps the stream alive.
         
+        Tracks failures and marks stream as dead after repeated failures.
+        
         Args:
             stream_id: Stream ID
             stream_url: Stream URL
+            channel_id: Channel ID (optional, for dead stream tracking)
         """
+        # Check if stream is marked as dead and should be retried
+        if stream_id in self.dead_stream_retry_times:
+            retry_interval = self.config.get('dead_stream_retry_interval', 300)  # Default 5 minutes
+            last_retry = self.dead_stream_retry_times[stream_id]
+            if datetime.now() < last_retry + timedelta(seconds=retry_interval):
+                # Not yet time to retry this dead stream
+                return
+            else:
+                # Time to retry - remove from dead retry tracking
+                logger.info(f"Retrying dead stream {stream_id} after {retry_interval}s interval")
+                del self.dead_stream_retry_times[stream_id]
+                # Reset failure count for retry
+                if stream_id in self.ffmpeg_failures:
+                    del self.ffmpeg_failures[stream_id]
+        
         # Check if process is already running and healthy
         if stream_id in self.ffmpeg_processes:
             process = self.ffmpeg_processes[stream_id]
             if process.poll() is None:  # Still running
                 return
             else:
-                # Process died, clean up
-                logger.warning(f"FFmpeg process for stream {stream_id} died, restarting")
-                self._stop_ffmpeg_process(stream_id)
+                # Process died, track failure
+                logger.warning(f"FFmpeg process for stream {stream_id} died")
+                
+                # Track failure
+                if stream_id not in self.ffmpeg_failures:
+                    self.ffmpeg_failures[stream_id] = {'failures': 0, 'last_failure': None}
+                
+                self.ffmpeg_failures[stream_id]['failures'] += 1
+                self.ffmpeg_failures[stream_id]['last_failure'] = datetime.now()
+                
+                failure_count = self.ffmpeg_failures[stream_id]['failures']
+                max_failures = self.config.get('max_ffmpeg_failures', 3)  # Default 3 failures before marking dead
+                
+                if failure_count >= max_failures:
+                    # Stream has failed too many times, mark as dead
+                    logger.error(f"Stream {stream_id} failed {failure_count} times, marking as dead")
+                    stream = self.udi_manager.get_stream_by_id(stream_id)
+                    if stream:
+                        self.dead_streams_tracker.mark_as_dead(
+                            stream_url=stream.get('url', stream_url),
+                            stream_id=stream_id,
+                            stream_name=stream.get('name', f'Stream {stream_id}'),
+                            channel_id=channel_id
+                        )
+                    
+                    # Schedule retry check
+                    retry_interval = self.config.get('dead_stream_retry_interval', 300)
+                    self.dead_stream_retry_times[stream_id] = datetime.now()
+                    logger.info(f"Stream {stream_id} will be retried after {retry_interval}s")
+                    
+                    # Stop the process and don't restart
+                    self._stop_ffmpeg_process(stream_id)
+                    return
+                else:
+                    # Haven't hit max failures yet, restart
+                    logger.warning(f"FFmpeg process for stream {stream_id} died (failure {failure_count}/{max_failures}), restarting")
+                    self._stop_ffmpeg_process(stream_id)
         
         # Start new continuous FFmpeg process
         try:
@@ -471,6 +563,8 @@ class AceStreamMonitor:
                     del self.ffmpeg_stats_cache[stream_id]
                 if stream_id in self.ffmpeg_threads:
                     del self.ffmpeg_threads[stream_id]
+                # Don't delete failure tracking here - we want to track across restarts
+                # Only delete if stream is removed from channel or monitoring stops
     
     def _parse_bitrate(self, output: str) -> Optional[int]:
         """Parse bitrate from FFmpeg output."""

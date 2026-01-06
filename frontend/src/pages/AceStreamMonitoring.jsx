@@ -31,12 +31,13 @@ export default function AceStreamMonitoring() {
   const [channels, setChannels] = useState([])
   const [allChannels, setAllChannels] = useState([])
   const [selectedChannel, setSelectedChannel] = useState(null)
-  const [metrics, setMetrics] = useState([])
+  const [metrics, setMetrics] = useState({ data: [], streamIds: [] })
   const [config, setConfig] = useState({
     enabled: false,
     orchestrator_url: 'http://gluetun:19000',
     monitoring_interval: 30,
-    ffmpeg_probe_duration: 5
+    dead_stream_retry_interval: 300,
+    max_ffmpeg_failures: 3
   })
   const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -114,7 +115,38 @@ export default function AceStreamMonitoring() {
   const loadChannelMetrics = async (channelId) => {
     try {
       const response = await api.get(`/acestream/monitoring/channel/${channelId}/metrics?hours=24`)
-      setMetrics(response.data)
+      
+      // Transform data to group by timestamp with separate values for each stream
+      const rawMetrics = response.data
+      const timeMap = new Map()
+      const streamIds = new Set()
+      
+      // Collect all stream IDs and organize data by timestamp
+      rawMetrics.forEach(metric => {
+        const timestamp = metric.timestamp
+        streamIds.add(metric.stream_id)
+        
+        if (!timeMap.has(timestamp)) {
+          timeMap.set(timestamp, { timestamp })
+        }
+        
+        const timePoint = timeMap.get(timestamp)
+        // Add stream-specific metrics with stream ID prefix
+        timePoint[`stream_${metric.stream_id}_peers`] = metric.peers
+        timePoint[`stream_${metric.stream_id}_speed_down`] = metric.speed_down
+        timePoint[`stream_${metric.stream_id}_speed_up`] = metric.speed_up
+        timePoint[`stream_${metric.stream_id}_health`] = metric.health_score
+      })
+      
+      // Convert map to sorted array
+      const transformedMetrics = Array.from(timeMap.values()).sort((a, b) => 
+        new Date(a.timestamp) - new Date(b.timestamp)
+      )
+      
+      setMetrics({
+        data: transformedMetrics,
+        streamIds: Array.from(streamIds)
+      })
     } catch (error) {
       console.error('Error loading metrics:', error)
     }
@@ -323,30 +355,62 @@ export default function AceStreamMonitoring() {
                     }
                   }}
                 />
+                <p className="text-sm text-muted-foreground">
+                  How often to check stream health
+                </p>
               </div>
 
               <div className="grid gap-2">
-                <Label htmlFor="ffmpeg-duration">FFmpeg Probe Duration (seconds)</Label>
+                <Label htmlFor="dead-stream-retry">Dead Stream Retry Interval (seconds)</Label>
                 <Input
-                  id="ffmpeg-duration"
+                  id="dead-stream-retry"
                   type="number"
-                  min="3"
-                  max="15"
-                  value={config.ffmpeg_probe_duration}
+                  min="60"
+                  max="3600"
+                  value={config.dead_stream_retry_interval}
                   onChange={(e) => {
                     const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
-                    if (value === '' || (!isNaN(value) && value >= 3 && value <= 15)) {
-                      setConfig({ ...config, ffmpeg_probe_duration: value === '' ? 5 : value })
+                    if (value === '' || (!isNaN(value) && value >= 60 && value <= 3600)) {
+                      setConfig({ ...config, dead_stream_retry_interval: value === '' ? 300 : value })
                     }
                   }}
                   onBlur={(e) => {
                     // Restore default if empty on blur
                     if (e.target.value === '') {
-                      setConfig({ ...config, ffmpeg_probe_duration: 5 })
+                      setConfig({ ...config, dead_stream_retry_interval: 300 })
                     }
                   }}
                 />
+                <p className="text-sm text-muted-foreground">
+                  Time to wait before retrying dead streams
+                </p>
               </div>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="max-failures">Max FFmpeg Failures</Label>
+              <Input
+                id="max-failures"
+                type="number"
+                min="1"
+                max="10"
+                value={config.max_ffmpeg_failures}
+                onChange={(e) => {
+                  const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
+                  if (value === '' || (!isNaN(value) && value >= 1 && value <= 10)) {
+                    setConfig({ ...config, max_ffmpeg_failures: value === '' ? 3 : value })
+                  }
+                }}
+                onBlur={(e) => {
+                  // Restore default if empty on blur
+                  if (e.target.value === '') {
+                    setConfig({ ...config, max_ffmpeg_failures: 3 })
+                  }
+                }}
+              />
+              <p className="text-sm text-muted-foreground">
+                Number of FFmpeg failures before marking stream as dead
+              </p>
             </div>
           </div>
 
@@ -398,52 +462,136 @@ export default function AceStreamMonitoring() {
       </Card>
 
       {/* Metrics Chart */}
-      {selectedChannel && metrics.length > 0 && (
+      {selectedChannel && metrics.data.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle>Stream Health Over Time</CardTitle>
             <CardDescription>
-              Health metrics for {selectedChannel.name} (Last 24 hours)
+              Individual stream metrics for {selectedChannel.name} (Last 24 hours)
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <ResponsiveContainer width="100%" height={400}>
-              <LineChart data={metrics}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis 
-                  dataKey="timestamp" 
-                  tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                />
-                <YAxis yAxisId="left" />
-                <YAxis yAxisId="right" orientation="right" />
-                <Tooltip 
-                  labelFormatter={(value) => new Date(value).toLocaleString()}
-                />
-                <Legend />
-                <Line
-                  yAxisId="left"
-                  type="monotone"
-                  dataKey="avg_health_score"
-                  stroke="hsl(var(--primary))"
-                  name="Health Score"
-                  strokeWidth={2}
-                />
-                <Line
-                  yAxisId="right"
-                  type="monotone"
-                  dataKey="avg_peers"
-                  stroke="hsl(var(--chart-2))"
-                  name="Peers"
-                />
-                <Line
-                  yAxisId="right"
-                  type="monotone"
-                  dataKey="avg_speed_down"
-                  stroke="hsl(var(--chart-3))"
-                  name="Download Speed (KB/s)"
-                />
-              </LineChart>
-            </ResponsiveContainer>
+            <div className="space-y-6">
+              {/* Health Score Chart */}
+              <div>
+                <h3 className="text-sm font-medium mb-2">Health Score</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={metrics.data}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="timestamp" 
+                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
+                    />
+                    <YAxis domain={[0, 100]} />
+                    <Tooltip 
+                      labelFormatter={(value) => new Date(value).toLocaleString()}
+                    />
+                    <Legend />
+                    {metrics.streamIds.map((streamId, index) => (
+                      <Line
+                        key={`health-${streamId}`}
+                        type="monotone"
+                        dataKey={`stream_${streamId}_health`}
+                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
+                        name={`Stream ${streamId}`}
+                        strokeWidth={2}
+                        connectNulls
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Peers Chart */}
+              <div>
+                <h3 className="text-sm font-medium mb-2">Peers</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={metrics.data}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="timestamp" 
+                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
+                    />
+                    <YAxis />
+                    <Tooltip 
+                      labelFormatter={(value) => new Date(value).toLocaleString()}
+                    />
+                    <Legend />
+                    {metrics.streamIds.map((streamId, index) => (
+                      <Line
+                        key={`peers-${streamId}`}
+                        type="monotone"
+                        dataKey={`stream_${streamId}_peers`}
+                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
+                        name={`Stream ${streamId}`}
+                        strokeWidth={2}
+                        connectNulls
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Download Speed Chart */}
+              <div>
+                <h3 className="text-sm font-medium mb-2">Download Speed (KB/s)</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={metrics.data}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="timestamp" 
+                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
+                    />
+                    <YAxis />
+                    <Tooltip 
+                      labelFormatter={(value) => new Date(value).toLocaleString()}
+                    />
+                    <Legend />
+                    {metrics.streamIds.map((streamId, index) => (
+                      <Line
+                        key={`down-${streamId}`}
+                        type="monotone"
+                        dataKey={`stream_${streamId}_speed_down`}
+                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
+                        name={`Stream ${streamId}`}
+                        strokeWidth={2}
+                        connectNulls
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Upload Speed Chart */}
+              <div>
+                <h3 className="text-sm font-medium mb-2">Upload Speed (KB/s)</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <LineChart data={metrics.data}>
+                    <CartesianGrid strokeDasharray="3 3" />
+                    <XAxis 
+                      dataKey="timestamp" 
+                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
+                    />
+                    <YAxis />
+                    <Tooltip 
+                      labelFormatter={(value) => new Date(value).toLocaleString()}
+                    />
+                    <Legend />
+                    {metrics.streamIds.map((streamId, index) => (
+                      <Line
+                        key={`up-${streamId}`}
+                        type="monotone"
+                        dataKey={`stream_${streamId}_speed_up`}
+                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
+                        name={`Stream ${streamId}`}
+                        strokeWidth={2}
+                        connectNulls
+                      />
+                    ))}
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}
