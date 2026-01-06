@@ -2,7 +2,7 @@
 AceStream Monitoring Service
 
 Continuous monitoring service for AceStream channels with health tracking,
-FFmpeg-based stream monitoring, and automatic stream ordering.
+stream monitoring (FFmpeg or HTTP-based), and automatic stream ordering.
 """
 
 import re
@@ -14,6 +14,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime, timedelta
 
 from acestream_db import AceStreamDatabase
+from acestream_http_monitor import HTTPStreamKeepAlive
 from dead_streams_tracker import DeadStreamsTracker
 from logging_config import setup_logging
 
@@ -25,7 +26,7 @@ class AceStreamMonitor:
     Continuous monitoring service for AceStream channels.
     
     Features:
-    - Continuous FFmpeg-based stream monitoring (keeps streams alive)
+    - Stream monitoring (FFmpeg or HTTP-based) to keep streams alive
     - Orchestrator API integration
     - Health scoring and stream ordering
     - Resource-efficient operation
@@ -39,7 +40,12 @@ class AceStreamMonitor:
         Args:
             udi_manager: UDI manager instance for accessing channels/streams
             default_orchestrator_url: Default Orchestrator URL
-            config: Configuration dictionary with monitoring_interval and dead_stream_retry_interval
+            config: Configuration dictionary with monitoring settings
+                - monitoring_interval: Seconds between checks (default: 30)
+                - dead_stream_retry_interval: Seconds before retrying dead streams (default: 300)
+                - monitoring_method: 'ffmpeg' or 'http' (default: 'http')
+                - http_keepalive_interval: Seconds between HTTP requests (default: 10, for HTTP method)
+                - http_chunk_size: Bytes per HTTP request (default: 65536, for HTTP method)
         """
         self.udi_manager = udi_manager
         self.default_orchestrator_url = default_orchestrator_url
@@ -51,20 +57,24 @@ class AceStreamMonitor:
         self.shutdown_event = threading.Event()
         self.running = False
         
+        # Determine monitoring method (ffmpeg or http)
+        self.monitoring_method = self.config.get('monitoring_method', 'http')
+        
+        # FFmpeg-based monitoring (original approach)
         # Track continuous FFmpeg processes per stream
         self.ffmpeg_processes: Dict[int, subprocess.Popen] = {}
         self.ffmpeg_stats_cache: Dict[int, Dict] = {}
         self.ffmpeg_threads: Dict[int, threading.Thread] = {}
-        
-        # Track FFmpeg failures per stream to mark as dead after repeated failures
-        # Format: {stream_id: {'failures': count, 'last_failure': timestamp}}
         self.ffmpeg_failures: Dict[int, Dict[str, Any]] = {}
+        
+        # HTTP-based monitoring (new lightweight approach)
+        self.http_keepalive = HTTPStreamKeepAlive()
         
         # Track when dead streams were last checked for retry
         # Format: {stream_id: timestamp}
         self.dead_stream_retry_times: Dict[int, datetime] = {}
         
-        logger.info("AceStream monitor initialized")
+        logger.info(f"AceStream monitor initialized with {self.monitoring_method} monitoring method")
     
     def start_monitoring(self):
         """Start monitoring all AceStream channels."""
@@ -195,9 +205,9 @@ class AceStreamMonitor:
                 logger.error(f"Error monitoring channel {channel_id}: {e}", exc_info=True)
                 self.shutdown_event.wait(60)
         
-        # Clean up when exiting - stop all FFmpeg processes for this channel's streams
+        # Clean up when exiting - stop all monitoring for this channel's streams
         for stream_id in monitored_stream_ids:
-            self._stop_ffmpeg_process(stream_id)
+            self._stop_stream_keepalive(stream_id)
         
         if channel_id in self.monitoring_threads:
             del self.monitoring_threads[channel_id]
@@ -221,7 +231,9 @@ class AceStreamMonitor:
     
     def _check_stream_health(self, channel, stream, orchestrator_url: str) -> Optional[Dict]:
         """
-        Check stream health by combining FFmpeg stats and Orchestrator data.
+        Check stream health by combining stream monitoring stats and Orchestrator data.
+        
+        Uses either FFmpeg or HTTP monitoring based on configuration.
         
         Returns health metrics dict or None if check failed.
         """
@@ -239,17 +251,157 @@ class AceStreamMonitor:
             # Get stats from Orchestrator
             orchestrator_stats = self._get_orchestrator_stats(acestream_id, orchestrator_url)
             
-            # Ensure continuous FFmpeg process is running for this stream
-            self._ensure_ffmpeg_running(stream_id, stream_url, channel_id)
+            # Ensure stream keep-alive is running (FFmpeg or HTTP)
+            self._ensure_stream_keepalive(stream_id, stream_url, channel_id)
             
-            # Get cached FFmpeg stats from continuous process
-            ffmpeg_stats = self.ffmpeg_stats_cache.get(stream_id)
+            # Get stream monitoring stats (from FFmpeg or HTTP)
+            monitoring_stats = self._get_monitoring_stats(stream_id)
             
             # Calculate health score
             health_score = self._calculate_health_score(
                 orchestrator_stats, 
-                ffmpeg_stats
+                monitoring_stats
             )
+            
+            # Get or create session and save metrics
+            session = self.db.get_active_session(stream_id)
+            if session:
+                session_id = session['id']
+            else:
+                session_id = self.db.create_session(
+                    stream_id=stream_id,
+                    channel_id=channel_id,
+                    acestream_id=acestream_id
+                )
+            
+            self.db.save_metrics(session_id, health_score, orchestrator_stats, monitoring_stats)
+            
+            return {
+                'stream_id': stream_id,
+                'acestream_id': acestream_id,
+                'health_score': health_score,
+                'orchestrator_stats': orchestrator_stats,
+                'monitoring_stats': monitoring_stats
+            }
+            
+        except Exception as e:
+            logger.error(f"Error checking stream {stream.get('id')} health: {e}")
+            return None
+    
+    def _ensure_stream_keepalive(self, stream_id: int, stream_url: str, channel_id: int = None):
+        """
+        Ensure stream keep-alive is running using the configured method.
+        
+        Args:
+            stream_id: Stream ID
+            stream_url: Stream URL
+            channel_id: Channel ID (optional, for dead stream tracking)
+        """
+        if self.monitoring_method == 'http':
+            self._ensure_http_keepalive(stream_id, stream_url, channel_id)
+        else:  # ffmpeg
+            self._ensure_ffmpeg_running(stream_id, stream_url, channel_id)
+    
+    def _ensure_http_keepalive(self, stream_id: int, stream_url: str, channel_id: int = None):
+        """
+        Ensure HTTP keep-alive is running for a stream.
+        
+        Args:
+            stream_id: Stream ID
+            stream_url: Stream URL
+            channel_id: Channel ID (optional, for dead stream tracking)
+        """
+        # Check if stream is marked as dead and should be retried
+        if stream_id in self.dead_stream_retry_times:
+            retry_interval = self.config.get('dead_stream_retry_interval', 300)
+            last_retry = self.dead_stream_retry_times[stream_id]
+            if datetime.now() < last_retry + timedelta(seconds=retry_interval):
+                return  # Not yet time to retry
+            else:
+                logger.info(f"Retrying dead stream {stream_id} after {retry_interval}s interval")
+                del self.dead_stream_retry_times[stream_id]
+        
+        # Check if HTTP keep-alive is already running
+        if self.http_keepalive.is_stream_alive(stream_id):
+            # Already running, check health
+            health = self.http_keepalive.get_stream_health(stream_id)
+            if health and health.get('failures', 0) >= 3:
+                # Too many failures, mark as dead
+                logger.error(f"Stream {stream_id} has {health['failures']} failures, marking as dead")
+                self._mark_stream_dead(stream_id, stream_url, channel_id)
+                self.http_keepalive.stop_keepalive(stream_id)
+                return
+            return  # Keep-alive is running and healthy
+        
+        # Start HTTP keep-alive
+        interval = self.config.get('http_keepalive_interval', 10)
+        chunk_size = self.config.get('http_chunk_size', 65536)  # 64KB
+        
+        try:
+            self.http_keepalive.start_keepalive(
+                stream_id=stream_id,
+                stream_url=stream_url,
+                interval=interval,
+                chunk_size=chunk_size
+            )
+            logger.info(f"Started HTTP keep-alive for stream {stream_id}")
+        except Exception as e:
+            logger.error(f"Error starting HTTP keep-alive for stream {stream_id}: {e}")
+    
+    def _get_monitoring_stats(self, stream_id: int) -> Optional[Dict]:
+        """
+        Get monitoring statistics for a stream based on the monitoring method.
+        
+        Args:
+            stream_id: Stream ID
+            
+        Returns:
+            Dict with monitoring stats or None
+        """
+        if self.monitoring_method == 'http':
+            # Get HTTP keep-alive stats
+            stats = self.http_keepalive.get_stream_stats(stream_id)
+            if stats:
+                # Transform to format compatible with health calculation
+                http_stats = stats.get('stats', {})
+                health = stats.get('health', {})
+                
+                return {
+                    'method': 'http',
+                    'is_alive': health.get('is_alive', False),
+                    'requests_sent': http_stats.get('requests_sent', 0),
+                    'bytes_received': http_stats.get('bytes_received', 0),
+                    'last_success': http_stats.get('last_success_time'),
+                    'last_error': http_stats.get('last_error'),
+                    'failures': health.get('failures', 0)
+                }
+            return None
+        else:  # ffmpeg
+            # Get cached FFmpeg stats
+            return self.ffmpeg_stats_cache.get(stream_id)
+    
+    def _mark_stream_dead(self, stream_id: int, stream_url: str, channel_id: int = None):
+        """
+        Mark a stream as dead.
+        
+        Args:
+            stream_id: Stream ID
+            stream_url: Stream URL
+            channel_id: Channel ID
+        """
+        stream = self.udi_manager.get_stream_by_id(stream_id)
+        if stream:
+            self.dead_streams_tracker.mark_as_dead(
+                stream_url=stream.get('url', stream_url),
+                stream_id=stream_id,
+                stream_name=stream.get('name', f'Stream {stream_id}'),
+                channel_id=channel_id
+            )
+        
+        # Schedule retry check
+        retry_interval = self.config.get('dead_stream_retry_interval', 300)
+        self.dead_stream_retry_times[stream_id] = datetime.now()
+        logger.info(f"Stream {stream_id} will be retried after {retry_interval}s")
             
             # Get or create session and save metrics
             session = self.db.get_active_session(stream_id)
@@ -598,17 +750,18 @@ class AceStreamMonitor:
     def _calculate_health_score(
         self, 
         orchestrator_stats: Optional[Dict], 
-        ffmpeg_stats: Optional[Dict]
+        monitoring_stats: Optional[Dict]
     ) -> float:
         """
         Calculate health score (0-100) based on available metrics.
+        
+        Works with both FFmpeg and HTTP monitoring stats.
         
         Scoring factors:
         - Peers count (more = better)
         - Download speed (higher = better)
         - Upload speed (should be reasonable)
-        - FFmpeg bitrate (higher = better, within reason)
-        - FFmpeg errors (fewer = better)
+        - Stream monitoring stats (bitrate, errors, or alive status)
         - Stream availability (working = better)
         """
         score = 0.0
@@ -630,19 +783,41 @@ class AceStreamMonitor:
             if speed_up > 0:
                 score += min(speed_up / 5, 10)
         
-        # FFmpeg stats score
-        if ffmpeg_stats:
-            # Stream is working (20 points)
-            score += 20
+        # Monitoring stats score (FFmpeg or HTTP)
+        if monitoring_stats:
+            method = monitoring_stats.get('method', 'ffmpeg')
             
-            # Bitrate score (0-15 points)
-            # Assume good bitrate is 3000+ kbps
-            bitrate = ffmpeg_stats.get('bitrate', 0) or 0
-            score += min((bitrate / 3000) * 15, 15)
-            
-            # Penalty for errors (-5 points per error, max -20)
-            errors = ffmpeg_stats.get('errors', 0)
-            score -= min(errors * 5, 20)
+            if method == 'http':
+                # HTTP monitoring stats
+                # Stream is working (20 points)
+                if monitoring_stats.get('is_alive', False):
+                    score += 20
+                
+                # Minimal failures is good (0-15 points)
+                failures = monitoring_stats.get('failures', 0)
+                if failures == 0:
+                    score += 15
+                elif failures == 1:
+                    score += 10
+                elif failures == 2:
+                    score += 5
+                
+                # Penalty for errors (-5 points per failure beyond 2)
+                if failures > 2:
+                    score -= min((failures - 2) * 5, 20)
+            else:
+                # FFmpeg stats
+                # Stream is working (20 points)
+                score += 20
+                
+                # Bitrate score (0-15 points)
+                # Assume good bitrate is 3000+ kbps
+                bitrate = monitoring_stats.get('bitrate', 0) or 0
+                score += min((bitrate / 3000) * 15, 15)
+                
+                # Penalty for errors (-5 points per error, max -20)
+                errors = monitoring_stats.get('errors', 0)
+                score -= min(errors * 5, 20)
         
         # Ensure score is between 0 and 100
         return max(0, min(score, 100))
@@ -735,6 +910,18 @@ class AceStreamMonitor:
         except Exception as e:
             logger.error(f"Error refreshing channels: {e}")
     
+    def _stop_stream_keepalive(self, stream_id: int):
+        """
+        Stop stream keep-alive (FFmpeg or HTTP) for a stream.
+        
+        Args:
+            stream_id: Stream ID
+        """
+        if self.monitoring_method == 'http':
+            self.http_keepalive.stop_keepalive(stream_id)
+        else:  # ffmpeg
+            self._stop_ffmpeg_process(stream_id)
+    
     def shutdown(self):
         """Gracefully shutdown monitoring and cleanup resources."""
         logger.info("Shutting down AceStream monitoring service...")
@@ -744,10 +931,13 @@ class AceStreamMonitor:
         # Signal all threads to stop
         self.shutdown_event.set()
         
-        # Stop all continuous FFmpeg processes first
-        logger.info("Stopping all continuous FFmpeg processes...")
-        for stream_id in list(self.ffmpeg_processes.keys()):
-            self._stop_ffmpeg_process(stream_id)
+        # Stop all stream keep-alive (FFmpeg or HTTP)
+        logger.info(f"Stopping all stream keep-alive processes ({self.monitoring_method} method)...")
+        if self.monitoring_method == 'http':
+            self.http_keepalive.stop_all()
+        else:  # ffmpeg
+            for stream_id in list(self.ffmpeg_processes.keys()):
+                self._stop_ffmpeg_process(stream_id)
         
         # Send cleanup requests to Orchestrator
         self._cleanup_orchestrator_sessions()
