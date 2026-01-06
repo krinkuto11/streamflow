@@ -221,11 +221,6 @@ export default function AceStreamMonitoring() {
     }
   }
 
-  const handleChannelSelect = (channel) => {
-    setSelectedChannel(channel)
-    loadChannelMetrics(channel.id)
-  }
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-96">
@@ -472,7 +467,7 @@ export default function AceStreamMonitoring() {
             AceStream Channels
           </CardTitle>
           <CardDescription>
-            Channels currently being monitored. Click to view metrics.
+            Channels with alive/dead stream counts. Click chevron to expand and view live stats.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -481,163 +476,98 @@ export default function AceStreamMonitoring() {
               No AceStream channels configured. Tag channels below to start monitoring.
             </div>
           ) : (
-            <div className="space-y-2">
-              {channels.map((channel) => (
-                <div
-                  key={channel.id}
-                  className="flex items-center justify-between p-3 border rounded-lg cursor-pointer hover:bg-accent transition-colors"
-                  onClick={() => handleChannelSelect(channel)}
-                >
-                  <div>
-                    <div className="font-medium">{channel.name}</div>
-                    <div className="text-sm text-muted-foreground">
-                      Channel #{channel.channel_number} • {channel.streams?.length || 0} streams
-                    </div>
-                  </div>
-                  <Badge variant={selectedChannel?.id === channel.id ? "default" : "outline"}>
-                    {selectedChannel?.id === channel.id ? "Selected" : "View"}
-                  </Badge>
-                </div>
-              ))}
-            </div>
+            <Accordion type="single" collapsible className="w-full">
+              {channels.map((channel) => {
+                const streams = channelStreams[channel.id] || []
+                const aliveCount = streams.filter(s => {
+                  const health = streamHealth[s.id]
+                  return health && health.is_alive
+                }).length
+                const deadCount = streams.length - aliveCount
+                
+                return (
+                  <AccordionItem key={channel.id} value={`channel-${channel.id}`}>
+                    <AccordionTrigger className="hover:no-underline">
+                      <div className="flex items-center justify-between w-full pr-4">
+                        <div className="text-left">
+                          <div className="font-medium">{channel.name}</div>
+                          <div className="text-sm text-muted-foreground">
+                            Channel #{channel.channel_number}
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <Badge variant="default" className="bg-green-500">
+                            <CheckCircle className="h-3 w-3 mr-1" />
+                            {aliveCount} Alive
+                          </Badge>
+                          <Badge variant="destructive">
+                            <XCircle className="h-3 w-3 mr-1" />
+                            {deadCount} Dead
+                          </Badge>
+                        </div>
+                      </div>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="space-y-3 pt-2">
+                        {streams.length === 0 ? (
+                          <div className="text-sm text-muted-foreground text-center py-4">
+                            No streams in this channel
+                          </div>
+                        ) : (
+                          streams.map((stream) => {
+                            const health = streamHealth[stream.id]
+                            const isAlive = health && health.is_alive
+                            
+                            return (
+                              <div
+                                key={stream.id}
+                                className="flex items-center justify-between p-3 border rounded-lg"
+                              >
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <div className="font-medium">{stream.name || `Stream ${stream.id}`}</div>
+                                    {isAlive ? (
+                                      <Badge variant="default" className="bg-green-500">
+                                        <CheckCircle className="h-3 w-3 mr-1" />
+                                        Alive
+                                      </Badge>
+                                    ) : (
+                                      <Badge variant="destructive">
+                                        <XCircle className="h-3 w-3 mr-1" />
+                                        Dead
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  {health && (
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-sm text-muted-foreground">
+                                      <div>
+                                        <span className="font-medium">Health:</span> {health.health_score?.toFixed(1) || 'N/A'}
+                                      </div>
+                                      <div>
+                                        <span className="font-medium">Peers:</span> {health.peers || 0}
+                                      </div>
+                                      <div>
+                                        <span className="font-medium">Down:</span> {health.speed_down || 0} KB/s
+                                      </div>
+                                      <div>
+                                        <span className="font-medium">Up:</span> {health.speed_up || 0} KB/s
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })
+                        )}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                )
+              })}
+            </Accordion>
           )}
         </CardContent>
       </Card>
-
-      {/* Metrics Chart */}
-      {selectedChannel && metrics.data.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Stream Health Over Time</CardTitle>
-            <CardDescription>
-              Individual stream metrics for {selectedChannel.name} (Last 24 hours)
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-6">
-              {/* Health Score Chart */}
-              <div>
-                <h3 className="text-sm font-medium mb-2">Health Score</h3>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={metrics.data}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
-                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                    />
-                    <YAxis domain={[0, 100]} />
-                    <Tooltip 
-                      labelFormatter={(value) => new Date(value).toLocaleString()}
-                    />
-                    <Legend />
-                    {metrics.streamIds.map((streamId, index) => (
-                      <Line
-                        key={`health-${streamId}`}
-                        type="monotone"
-                        dataKey={`stream_${streamId}_health`}
-                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
-                        name={`Stream ${streamId}`}
-                        strokeWidth={2}
-                        connectNulls
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* Peers Chart */}
-              <div>
-                <h3 className="text-sm font-medium mb-2">Peers</h3>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={metrics.data}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
-                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                    />
-                    <YAxis />
-                    <Tooltip 
-                      labelFormatter={(value) => new Date(value).toLocaleString()}
-                    />
-                    <Legend />
-                    {metrics.streamIds.map((streamId, index) => (
-                      <Line
-                        key={`peers-${streamId}`}
-                        type="monotone"
-                        dataKey={`stream_${streamId}_peers`}
-                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
-                        name={`Stream ${streamId}`}
-                        strokeWidth={2}
-                        connectNulls
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* Download Speed Chart */}
-              <div>
-                <h3 className="text-sm font-medium mb-2">Download Speed (KB/s)</h3>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={metrics.data}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
-                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                    />
-                    <YAxis />
-                    <Tooltip 
-                      labelFormatter={(value) => new Date(value).toLocaleString()}
-                    />
-                    <Legend />
-                    {metrics.streamIds.map((streamId, index) => (
-                      <Line
-                        key={`down-${streamId}`}
-                        type="monotone"
-                        dataKey={`stream_${streamId}_speed_down`}
-                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
-                        name={`Stream ${streamId}`}
-                        strokeWidth={2}
-                        connectNulls
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* Upload Speed Chart */}
-              <div>
-                <h3 className="text-sm font-medium mb-2">Upload Speed (KB/s)</h3>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={metrics.data}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
-                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                    />
-                    <YAxis />
-                    <Tooltip 
-                      labelFormatter={(value) => new Date(value).toLocaleString()}
-                    />
-                    <Legend />
-                    {metrics.streamIds.map((streamId, index) => (
-                      <Line
-                        key={`up-${streamId}`}
-                        type="monotone"
-                        dataKey={`stream_${streamId}_speed_up`}
-                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
-                        name={`Stream ${streamId}`}
-                        strokeWidth={2}
-                        connectNulls
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {/* All Channels - Tag Management */}
       <Card>
