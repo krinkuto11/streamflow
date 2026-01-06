@@ -46,6 +46,9 @@ class AceStreamMonitor:
                 - monitoring_method: 'ffmpeg' or 'http' (default: 'http')
                 - http_keepalive_interval: Seconds between HTTP requests (default: 10, for HTTP method)
                 - http_chunk_size: Bytes per HTTP request (default: 65536, for HTTP method)
+                - http_use_range_requests: Use Range requests instead of persistent streaming (default: False)
+                - livepos_buffer_tolerance: Seconds before marking stuck stream dead (default: 30)
+                - speed_down_timeout: Seconds of zero speed before marking dead (default: 10)
         """
         self.udi_manager = udi_manager
         self.default_orchestrator_url = default_orchestrator_url
@@ -362,15 +365,18 @@ class AceStreamMonitor:
         # Start HTTP keep-alive
         interval = self.config.get('http_keepalive_interval', 10)
         chunk_size = self.config.get('http_chunk_size', 65536)  # 64KB
+        use_range_requests = self.config.get('http_use_range_requests', False)
         
         try:
             self.http_keepalive.start_keepalive(
                 stream_id=stream_id,
                 stream_url=stream_url,
                 interval=interval,
-                chunk_size=chunk_size
+                chunk_size=chunk_size,
+                use_range_requests=use_range_requests
             )
-            logger.info(f"Started HTTP keep-alive for stream {stream_id}")
+            method_type = "range requests" if use_range_requests else "persistent streaming"
+            logger.info(f"Started HTTP keep-alive for stream {stream_id} using {method_type}")
         except Exception as e:
             logger.error(f"Error starting HTTP keep-alive for stream {stream_id}: {e}")
     

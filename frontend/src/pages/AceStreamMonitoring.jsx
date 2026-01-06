@@ -32,7 +32,8 @@ export default function AceStreamMonitoring() {
     dead_stream_retry_interval: 300,
     max_ffmpeg_failures: 3,
     livepos_buffer_tolerance: 30,
-    speed_down_timeout: 10
+    speed_down_timeout: 10,
+    http_use_range_requests: false
   })
   const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -454,6 +455,20 @@ export default function AceStreamMonitoring() {
                   Mark stream dead if download speed is 0 for this long
                 </p>
               </div>
+            </div>
+
+            <div className="flex items-center justify-between">
+              <div className="space-y-0.5">
+                <Label htmlFor="use-range-requests">Use HTTP Range Requests</Label>
+                <p className="text-sm text-muted-foreground">
+                  Use periodic Range requests instead of persistent streaming (may help with livepos advancement)
+                </p>
+              </div>
+              <Switch
+                id="use-range-requests"
+                checked={config.http_use_range_requests}
+                onCheckedChange={(checked) => setConfig({ ...config, http_use_range_requests: checked })}
+              />
             </div>
           </div>
 

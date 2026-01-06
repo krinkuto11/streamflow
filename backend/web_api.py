@@ -3532,7 +3532,8 @@ def get_acestream_monitor():
                     'max_ffmpeg_failures': config.get('acestream_max_ffmpeg_failures', 3),
                     'stream_start_stagger': config.get('acestream_stream_start_stagger', 0.5),
                     'livepos_buffer_tolerance': config.get('acestream_livepos_buffer_tolerance', 30),
-                    'speed_down_timeout': config.get('acestream_speed_down_timeout', 10)
+                    'speed_down_timeout': config.get('acestream_speed_down_timeout', 10),
+                    'http_use_range_requests': config.get('acestream_http_use_range_requests', False)
                 }
             except:
                 pass
@@ -3565,7 +3566,8 @@ def get_acestream_config():
             'dead_stream_retry_interval': config.get('acestream_dead_stream_retry_interval', 300),
             'max_ffmpeg_failures': config.get('acestream_max_ffmpeg_failures', 3),
             'livepos_buffer_tolerance': config.get('acestream_livepos_buffer_tolerance', 30),
-            'speed_down_timeout': config.get('acestream_speed_down_timeout', 10)
+            'speed_down_timeout': config.get('acestream_speed_down_timeout', 10),
+            'http_use_range_requests': config.get('acestream_http_use_range_requests', False)
         }
         
         return jsonify(acestream_config)
@@ -3614,6 +3616,8 @@ def update_acestream_config():
             config['acestream_livepos_buffer_tolerance'] = data['livepos_buffer_tolerance']
         if 'speed_down_timeout' in data:
             config['acestream_speed_down_timeout'] = data['speed_down_timeout']
+        if 'http_use_range_requests' in data:
+            config['acestream_http_use_range_requests'] = data['http_use_range_requests']
         
         # Save config
         config.save()
