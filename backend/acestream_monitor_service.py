@@ -46,9 +46,6 @@ class AceStreamMonitor:
                 - monitoring_method: 'ffmpeg' or 'http' (default: 'http')
                 - http_keepalive_interval: Seconds between HTTP requests (default: 10, for HTTP method)
                 - http_chunk_size: Bytes per HTTP request (default: 65536, for HTTP method)
-                - http_use_range_requests: Use Range requests instead of persistent streaming (default: False)
-                - livepos_buffer_tolerance: Seconds before marking stuck stream dead (default: 30)
-                - speed_down_timeout: Seconds of zero speed before marking dead (default: 10)
         """
         self.udi_manager = udi_manager
         self.default_orchestrator_url = default_orchestrator_url
@@ -365,18 +362,15 @@ class AceStreamMonitor:
         # Start HTTP keep-alive
         interval = self.config.get('http_keepalive_interval', 10)
         chunk_size = self.config.get('http_chunk_size', 65536)  # 64KB
-        use_range_requests = self.config.get('http_use_range_requests', False)
         
         try:
             self.http_keepalive.start_keepalive(
                 stream_id=stream_id,
                 stream_url=stream_url,
                 interval=interval,
-                chunk_size=chunk_size,
-                use_range_requests=use_range_requests
+                chunk_size=chunk_size
             )
-            method_type = "range requests" if use_range_requests else "persistent streaming"
-            logger.info(f"Started HTTP keep-alive for stream {stream_id} using {method_type}")
+            logger.info(f"Started HTTP keep-alive for stream {stream_id}")
         except Exception as e:
             logger.error(f"Error starting HTTP keep-alive for stream {stream_id}: {e}")
     
@@ -439,6 +433,9 @@ class AceStreamMonitor:
         """
         Check if a stream should be marked as dead based on livepos and download speed.
         
+        The best indicator is live_last field (shows stream is advancing).
+        Zero download speed is only considered dead if livepos is also NOT advancing.
+        
         Args:
             stream_id: Stream ID
             orchestrator_stats: Stats from orchestrator
@@ -473,25 +470,32 @@ class AceStreamMonitor:
         # Extract download speed
         speed_down = orchestrator_stats.get('speed_down', 0)
         
+        # Track whether livepos is advancing
+        livepos_advancing = False
+        livepos_stuck_duration = 0
+        
         # Check livepos advancement (only if we have livepos data)
         if current_livepos is not None:
             if tracking['last_livepos'] is not None:
                 # Check if livepos hasn't advanced
                 if current_livepos == tracking['last_livepos']:
                     # Livepos hasn't changed, check how long
-                    time_stuck = (now - tracking['last_check']).total_seconds()
-                    if time_stuck > livepos_buffer_tolerance:
-                        return f"livepos stuck for {time_stuck:.1f}s (tolerance: {livepos_buffer_tolerance}s)"
+                    livepos_stuck_duration = (now - tracking['last_check']).total_seconds()
+                    if livepos_stuck_duration > livepos_buffer_tolerance:
+                        return f"livepos stuck for {livepos_stuck_duration:.1f}s (tolerance: {livepos_buffer_tolerance}s)"
                 else:
                     # Livepos advanced, reset
                     tracking['last_livepos'] = current_livepos
                     tracking['last_check'] = now
+                    livepos_advancing = True
             else:
                 # First time seeing livepos
                 tracking['last_livepos'] = current_livepos
                 tracking['last_check'] = now
+                livepos_advancing = True
         
         # Check download speed
+        # Only mark as dead for zero speed if livepos is also NOT advancing
         if speed_down == 0:
             if tracking['speed_down_zero_since'] is None:
                 # Just went to zero
@@ -499,8 +503,9 @@ class AceStreamMonitor:
             else:
                 # Has been zero, check how long
                 zero_duration = (now - tracking['speed_down_zero_since']).total_seconds()
-                if zero_duration > speed_down_timeout:
-                    return f"download speed 0 for {zero_duration:.1f}s (timeout: {speed_down_timeout}s)"
+                # Only fail on zero speed if livepos is also not advancing
+                if zero_duration > speed_down_timeout and not livepos_advancing:
+                    return f"download speed 0 for {zero_duration:.1f}s and livepos not advancing (timeout: {speed_down_timeout}s)"
         else:
             # Speed is non-zero, reset
             tracking['speed_down_zero_since'] = None

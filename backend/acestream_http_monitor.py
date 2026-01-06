@@ -53,18 +53,16 @@ class HTTPStreamKeepAlive:
         stream_id: int,
         stream_url: str,
         interval: int = 10,
-        chunk_size: int = 65536,  # 64KB chunks
-        use_range_requests: bool = False
+        chunk_size: int = 65536  # 64KB chunks
     ):
         """
-        Start HTTP keep-alive for a stream.
+        Start HTTP keep-alive for a stream with persistent connection.
         
         Args:
             stream_id: Stream ID
             stream_url: Stream URL to connect to
-            interval: Request interval in seconds (for range mode) or retry interval (for streaming mode) 
-            chunk_size: Bytes to read per chunk (default: 64KB)
-            use_range_requests: If True, use Range requests instead of persistent streaming (default: False)
+            interval: Retry interval in seconds if connection fails (default: 10)
+            chunk_size: Bytes to read per chunk continuously (default: 64KB)
         """
         if stream_id in self.active_streams:
             logger.debug(f"Stream {stream_id} already has active keep-alive")
@@ -73,15 +71,9 @@ class HTTPStreamKeepAlive:
         # Create stop event for this stream
         stop_event = threading.Event()
         
-        # Choose the appropriate keep-alive method
-        if use_range_requests:
-            target_func = self._keepalive_range_loop
-        else:
-            target_func = self._keepalive_loop
-        
         # Start keep-alive thread
         thread = threading.Thread(
-            target=target_func,
+            target=self._keepalive_loop,
             args=(stream_id, stream_url, interval, chunk_size, stop_event),
             daemon=True,
             name=f"HTTPKeepAlive-{stream_id}"
@@ -303,152 +295,6 @@ class HTTPStreamKeepAlive:
         finally:
             session.close()
             logger.debug(f"Keep-alive loop ended for stream {stream_id}")
-    
-    def _keepalive_range_loop(
-        self,
-        stream_id: int,
-        stream_url: str,
-        interval: int,
-        chunk_size: int,
-        stop_event: threading.Event
-    ):
-        """
-        Alternative keep-alive loop using HTTP Range requests.
-        
-        Instead of maintaining a persistent connection, this periodically requests
-        small byte ranges to simulate a player seeking/reading from the stream.
-        This may help keep the orchestrator from marking the stream as "paused"
-        and avoids "broken pipe" errors from long-running connections.
-        
-        Args:
-            stream_id: Stream ID
-            stream_url: Stream URL
-            interval: Seconds between range requests (default: 10)
-            chunk_size: Bytes per range request (default: 64KB)
-            stop_event: Event to signal loop should stop
-        """
-        logger.debug(f"Range request keep-alive loop started for stream {stream_id}")
-        
-        # Use a session for connection pooling
-        session = requests.Session()
-        
-        # Track byte position for range requests
-        # Start at a random position to avoid always hitting the same data
-        import random
-        current_position = random.randint(0, 1024 * 1024)  # Random position within first 1MB
-        
-        # Consecutive failures counter
-        consecutive_failures = 0
-        max_consecutive_failures = 3
-        
-        # Total bytes received
-        total_bytes = 0
-        
-        try:
-            while not stop_event.is_set():
-                request_start = datetime.now()
-                stats = self.active_streams[stream_id]['stats']
-                stats['last_request_time'] = request_start
-                stats['requests_sent'] += 1
-                
-                try:
-                    # Prepare Range request headers
-                    # Request a specific byte range to simulate player behavior
-                    end_position = current_position + chunk_size - 1
-                    headers = {
-                        'User-Agent': DEFAULT_USER_AGENT,
-                        'Range': f'bytes={current_position}-{end_position}'
-                    }
-                    
-                    logger.debug(
-                        f"Stream {stream_id} requesting range bytes={current_position}-{end_position}"
-                    )
-                    
-                    # Make range request
-                    response = session.get(
-                        stream_url,
-                        headers=headers,
-                        timeout=30,
-                        stream=False  # Read all data at once for range requests
-                    )
-                    
-                    # Check response status
-                    # 206 Partial Content = success
-                    # 200 OK = server doesn't support ranges but sent full content
-                    if response.status_code in [200, 206]:
-                        # Success
-                        bytes_received = len(response.content)
-                        total_bytes += bytes_received
-                        stats['bytes_received'] = total_bytes
-                        stats['last_success_time'] = datetime.now()
-                        
-                        # Update health tracking
-                        self.stream_health[stream_id]['last_success'] = datetime.now()
-                        self.stream_health[stream_id]['is_alive'] = True
-                        self.stream_health[stream_id]['failures'] = 0
-                        consecutive_failures = 0
-                        
-                        logger.debug(
-                            f"Stream {stream_id} received {bytes_received} bytes "
-                            f"(status: {response.status_code}, total: {total_bytes} bytes)"
-                        )
-                        
-                        # Advance position for next request
-                        # Move forward by the chunk size to simulate continuous playback
-                        current_position += chunk_size
-                        
-                    elif response.status_code == 416:
-                        # 416 Range Not Satisfiable - we've gone past the end
-                        # Loop back to beginning or a random position
-                        logger.debug(f"Stream {stream_id} reached end of available data, looping back")
-                        current_position = random.randint(0, 1024 * 1024)
-                        
-                    else:
-                        # Unexpected status code
-                        error_msg = f"HTTP {response.status_code}: {response.reason}"
-                        logger.warning(f"Stream {stream_id} range request failed: {error_msg}")
-                        self._handle_stream_failure(stream_id, 'http_error', error_msg)
-                        consecutive_failures += 1
-                    
-                except requests.exceptions.Timeout:
-                    error_msg = "Request timeout"
-                    logger.warning(f"Stream {stream_id} range request timeout")
-                    self._handle_stream_failure(stream_id, 'timeout', error_msg)
-                    consecutive_failures += 1
-                    
-                except requests.exceptions.ConnectionError as e:
-                    error_msg = f"Connection error: {str(e)}"
-                    logger.warning(f"Stream {stream_id} connection error: {e}")
-                    self._handle_stream_failure(stream_id, 'connection_error', error_msg)
-                    consecutive_failures += 1
-                    
-                except Exception as e:
-                    error_msg = f"Unexpected error: {str(e)}"
-                    logger.error(f"Stream {stream_id} unexpected error during range request: {e}")
-                    self._handle_stream_failure(stream_id, 'unknown_error', error_msg)
-                    consecutive_failures += 1
-                
-                # Check if we've exceeded max failures
-                if consecutive_failures >= max_consecutive_failures:
-                    logger.error(
-                        f"Stream {stream_id} exceeded max consecutive failures "
-                        f"({consecutive_failures}/{max_consecutive_failures}), "
-                        f"marking as dead"
-                    )
-                    self.stream_health[stream_id]['is_alive'] = False
-                    break
-                
-                # Wait for interval before next request
-                # Use stop_event.wait() so we can be interrupted
-                if not stop_event.wait(interval):
-                    # Timeout expired normally, continue loop
-                    pass
-                    
-        except Exception as e:
-            logger.error(f"Fatal error in range keep-alive loop for stream {stream_id}: {e}", exc_info=True)
-        finally:
-            session.close()
-            logger.debug(f"Range keep-alive loop ended for stream {stream_id}")
     
     def _handle_stream_failure(self, stream_id: int, error_type: str, error_msg: str):
         """
