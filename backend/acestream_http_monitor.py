@@ -21,6 +21,9 @@ from logging_config import setup_logging
 
 logger = setup_logging(__name__)
 
+# Default User-Agent for HTTP requests
+DEFAULT_USER_AGENT = 'AceStream/3.1.0'
+
 
 class HTTPStreamKeepAlive:
     """
@@ -161,7 +164,7 @@ class HTTPStreamKeepAlive:
                     # This simulates a player consuming data without actually processing it
                     headers = {
                         'Range': f'bytes={byte_position}-{byte_position + chunk_size - 1}',
-                        'User-Agent': 'AceStream/3.1.0'
+                        'User-Agent': DEFAULT_USER_AGENT
                     }
                     
                     response = session.get(

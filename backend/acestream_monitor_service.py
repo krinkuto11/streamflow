@@ -205,7 +205,7 @@ class AceStreamMonitor:
                 logger.error(f"Error monitoring channel {channel_id}: {e}", exc_info=True)
                 self.shutdown_event.wait(60)
         
-        # Clean up when exiting - stop all monitoring for this channel's streams
+        # Clean up when exiting - stop all stream monitoring (HTTP or FFmpeg) for this channel's streams
         for stream_id in monitored_stream_ids:
             self._stop_stream_keepalive(stream_id)
         
@@ -234,6 +234,9 @@ class AceStreamMonitor:
         Check stream health by combining stream monitoring stats and Orchestrator data.
         
         Uses either FFmpeg or HTTP monitoring based on configuration.
+        Stream monitoring stats vary by method:
+        - HTTP: is_alive, requests_sent, bytes_received, failures
+        - FFmpeg: bitrate, resolution, fps, codec, errors
         
         Returns health metrics dict or None if check failed.
         """
@@ -402,31 +405,6 @@ class AceStreamMonitor:
         retry_interval = self.config.get('dead_stream_retry_interval', 300)
         self.dead_stream_retry_times[stream_id] = datetime.now()
         logger.info(f"Stream {stream_id} will be retried after {retry_interval}s")
-            
-            # Get or create session and save metrics
-            session = self.db.get_active_session(stream_id)
-            if session:
-                session_id = session['id']
-            else:
-                session_id = self.db.create_session(
-                    stream_id=stream_id,
-                    channel_id=channel_id,
-                    acestream_id=acestream_id
-                )
-            
-            self.db.save_metrics(session_id, health_score, orchestrator_stats, ffmpeg_stats)
-            
-            return {
-                'stream_id': stream_id,
-                'acestream_id': acestream_id,
-                'health_score': health_score,
-                'orchestrator_stats': orchestrator_stats,
-                'ffmpeg_stats': ffmpeg_stats
-            }
-            
-        except Exception as e:
-            logger.error(f"Error checking stream {stream.get('id')} health: {e}")
-            return None
     
     def _extract_acestream_id(self, url: str) -> Optional[str]:
         """Extract AceStream ID from URL like http://host:port/ace/getstream?id=<id>"""
