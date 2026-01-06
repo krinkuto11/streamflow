@@ -1185,6 +1185,177 @@ See the main implementation guide for full API documentation. Key endpoints:
 4. **Troubleshooting Guide**: Common issues and solutions
 5. **Configuration Reference**: All configuration options
 
+## Recent Improvements (2026-01-06)
+
+### Health Detection Enhancements
+
+The monitoring system now includes advanced health detection to identify dead or stuck streams:
+
+#### 1. Livepos Stuck Detection
+**Implementation**: `backend/acestream_monitor_service.py` - `_check_stream_is_dead()` method
+
+- Tracks the `live_last` timestamp from orchestrator's livepos data
+- Detects when livepos doesn't advance (indicating stuck/buffering stream)
+- Configurable tolerance period via `livepos_buffer_tolerance` (default: 30 seconds, range: 5-120s)
+- Marks stream as dead if stuck beyond tolerance
+- Maintains state in `stream_health_tracking` dict per stream
+
+**Configuration**:
+- Backend: `acestream_livepos_buffer_tolerance` in dispatcharr_config.json
+- Frontend: "Livepos Buffer Tolerance" input in Configuration section
+- API: Exposed via `/api/acestream/config` endpoints
+
+**How it works**:
+```python
+# Tracks last known livepos and time checked
+tracking = {
+    'last_livepos': 12345,  # Last position seen
+    'last_check': datetime.now(),
+    ...
+}
+
+# If livepos hasn't changed for > tolerance seconds, mark dead
+if current_livepos == last_livepos:
+    time_stuck = (now - last_check).total_seconds()
+    if time_stuck > livepos_buffer_tolerance:
+        return f"livepos stuck for {time_stuck}s"
+```
+
+#### 2. Zero Download Speed Detection
+**Implementation**: `backend/acestream_monitor_service.py` - `_check_stream_is_dead()` method
+
+- Tracks `speed_down` from orchestrator stats
+- Detects when download speed is 0 KB/s
+- Configurable timeout via `speed_down_timeout` (default: 10 seconds, range: 5-60s)
+- Marks stream as dead if speed remains 0 beyond timeout
+- Maintains zero-speed start time in `stream_health_tracking`
+
+**Configuration**:
+- Backend: `acestream_speed_down_timeout` in dispatcharr_config.json
+- Frontend: "Zero Speed Timeout" input in Configuration section
+- API: Exposed via `/api/acestream/config` endpoints
+
+**How it works**:
+```python
+# Track when speed first went to zero
+if speed_down == 0:
+    if not tracking['speed_down_zero_since']:
+        tracking['speed_down_zero_since'] = now
+    else:
+        # Check how long it's been zero
+        zero_duration = (now - tracking['speed_down_zero_since']).total_seconds()
+        if zero_duration > speed_down_timeout:
+            return f"download speed 0 for {zero_duration}s"
+```
+
+#### 3. Dead Stream Keep-Alive Prevention
+**Implementation**: `backend/acestream_monitor_service.py` - `_ensure_http_keepalive()` method
+
+- Checks `dead_streams_tracker` before starting HTTP keep-alive
+- Prevents "Started HTTP keep-alive for stream X" logs for dead streams
+- Stops keep-alive if stream becomes dead during monitoring
+- Integrates with existing dead stream retry logic
+
+**Implementation**:
+```python
+# Check if stream is in dead tracker
+if self.dead_streams_tracker.is_dead(stream_url):
+    # Stop keep-alive if running
+    if self.http_keepalive.is_stream_alive(stream_id):
+        self.http_keepalive.stop_keepalive(stream_id)
+    return  # Don't start keep-alive
+```
+
+#### 4. Stream Reordering Sync Fix
+**Implementation**: `backend/acestream_monitor_service.py` - `_reorder_streams_by_health()` method
+
+**Before**:
+- Only updated UDI cache locally
+- Changes didn't persist to Dispatcharr
+
+**After**:
+- Calls `update_channel_streams()` API function
+- Syncs changes to Dispatcharr via PATCH request
+- Updates UDI cache only after successful API update
+- Ensures stream order persists across restarts
+
+**Implementation**:
+```python
+# Update in Dispatcharr via API
+from api_utils import update_channel_streams
+api_success = update_channel_streams(channel_id, new_order, allow_dead_streams=False)
+if api_success:
+    # Update UDI cache after successful API update
+    channel_data = dict(channel)
+    channel_data['streams'] = new_order
+    self.udi_manager.update_channel(channel_id, channel_data)
+```
+
+### Outstanding Investigation
+
+#### HTTP Keep-Alive and Livepos Advancement
+**Issue**: Livepos may not advance when using lightweight HTTP keep-alive, as orchestrator might detect stream as "paused".
+
+**Current Implementation**: Continuous chunk reading from stream
+```python
+for chunk in response.iter_content(chunk_size=chunk_size):
+    if chunk:
+        # Process chunk, update stats
+        time.sleep(read_delay)
+```
+
+**Potential Solution: HTTP Range Requests**
+Instead of maintaining a persistent connection, periodically request small byte ranges:
+```python
+# Example Range request approach
+headers = {
+    'User-Agent': 'AceStream/3.1.0',
+    'Range': f'bytes={current_position}-{current_position + chunk_size - 1}'
+}
+response = requests.get(stream_url, headers=headers, timeout=10)
+```
+
+**Benefits**:
+- Avoids "broken pipe" errors from long-running connections
+- Simulates real player behavior (seeking/reading specific ranges)
+- May keep orchestrator from marking stream as "paused"
+- Cleaner connection management
+
+**Considerations**:
+- Server must support Range requests (HTTP 206 Partial Content)
+- Need to track current byte position
+- May increase request overhead vs continuous streaming
+- Requires testing to verify orchestrator sees it as "active"
+
+#### Dead Stream Removal from Dispatcharr
+**Current State**: Dead streams are tracked locally but not actively removed from Dispatcharr channels when marked dead.
+
+**Recommendation**: Add proactive removal in `_mark_stream_dead()`:
+```python
+def _mark_stream_dead(self, stream_id: int, stream_url: str, channel_id: int = None):
+    # Existing code to mark dead in tracker...
+    
+    # NEW: Remove from Dispatcharr channels
+    if channel_id:
+        channel = self.udi_manager.get_channel_by_id(channel_id)
+        if channel and stream_id in channel.get('streams', []):
+            new_streams = [s for s in channel['streams'] if s != stream_id]
+            from api_utils import update_channel_streams
+            update_channel_streams(channel_id, new_streams, allow_dead_streams=False)
+```
+
+### Configuration Reference (Updated)
+
+| Setting | Default | Range | Description |
+|---------|---------|-------|-------------|
+| Orchestrator URL | `http://gluetun:19000` | - | AceStream Orchestrator API endpoint |
+| Monitoring Interval | 30 | 10-300 seconds | How often to check Orchestrator stats and reorder streams |
+| Dead Stream Retry Interval | 300 | 60-3600 seconds | Time before retrying dead streams |
+| Max FFmpeg Failures | 3 | 1-10 | Failures before marking stream dead (FFmpeg mode) |
+| **Livepos Buffer Tolerance** | **30** | **5-120 seconds** | **Mark stream dead if livepos stuck for this long** |
+| **Zero Speed Timeout** | **10** | **5-60 seconds** | **Mark stream dead if download speed is 0 for this long** |
+| Enabled | false | boolean | Enable/disable monitoring service |
+
 ## Notes for Next Agent
 
 This is a substantial feature that requires:
@@ -1195,12 +1366,21 @@ This is a substantial feature that requires:
 - FFmpeg integration for stream monitoring
 - Real-time data visualization
 
+**Recent Changes (2026-01-06)**:
+- ✅ Health detection logic implemented (livepos + speed)
+- ✅ Dead stream keep-alive prevention
+- ✅ Stream reordering sync to Dispatcharr fixed
+- ✅ Configuration options added to backend and frontend
+- ⏳ Frontend UI refactor for expandable cards (partially complete)
+- ⏳ HTTP Range request approach needs implementation/testing
+- ⏳ Dead stream proactive removal needs implementation
+
 Estimated effort: 3-5 days of focused development work.
 
 Priority order if implementing incrementally:
-1. Database and data models
-2. Basic monitoring service without auto-ordering
-3. API endpoints
-4. Frontend UI
-5. Auto-ordering functionality
-6. Polish and optimization
+1. Database and data models ✅ COMPLETE
+2. Basic monitoring service without auto-ordering ✅ COMPLETE
+3. API endpoints ✅ COMPLETE
+4. Frontend UI ✅ MOSTLY COMPLETE
+5. Auto-ordering functionality ✅ COMPLETE
+6. Polish and optimization ⏳ IN PROGRESS

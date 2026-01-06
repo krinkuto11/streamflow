@@ -5,18 +5,9 @@ import { Badge } from '@/components/ui/badge.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { api } from '@/services/api.js'
-import { 
-  LineChart, 
-  Line, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  Legend, 
-  ResponsiveContainer 
-} from 'recharts'
 import {
   Activity,
   Settings,
@@ -24,20 +15,24 @@ import {
   StopCircle,
   RefreshCw,
   Loader2,
-  Radio
+  Radio,
+  CheckCircle,
+  XCircle
 } from 'lucide-react'
 
 export default function AceStreamMonitoring() {
   const [channels, setChannels] = useState([])
   const [allChannels, setAllChannels] = useState([])
-  const [selectedChannel, setSelectedChannel] = useState(null)
-  const [metrics, setMetrics] = useState({ data: [], streamIds: [] })
+  const [channelStreams, setChannelStreams] = useState({}) // {channelId: [streams]}
+  const [streamHealth, setStreamHealth] = useState({}) // {streamId: health_data}
   const [config, setConfig] = useState({
     enabled: false,
     orchestrator_url: 'http://gluetun:19000',
     monitoring_interval: 30,
     dead_stream_retry_interval: 300,
-    max_ffmpeg_failures: 3
+    max_ffmpeg_failures: 3,
+    livepos_buffer_tolerance: 30,
+    speed_down_timeout: 10
   })
   const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -48,12 +43,10 @@ export default function AceStreamMonitoring() {
     loadData()
     const interval = setInterval(() => {
       loadStatus()
-      if (selectedChannel) {
-        loadChannelMetrics(selectedChannel.id)
-      }
+      loadChannelStreamsHealth()
     }, 30000) // Refresh every 30 seconds
     return () => clearInterval(interval)
-  }, [selectedChannel])
+  }, [channels])
 
   const loadData = async () => {
     try {
@@ -64,6 +57,7 @@ export default function AceStreamMonitoring() {
         loadAllChannels(),
         loadStatus()
       ])
+      await loadChannelStreamsHealth()
     } catch (error) {
       console.error('Error loading AceStream data:', error)
       toast({
@@ -112,43 +106,40 @@ export default function AceStreamMonitoring() {
     }
   }
 
-  const loadChannelMetrics = async (channelId) => {
+  const loadChannelStreamsHealth = async () => {
     try {
-      const response = await api.get(`/acestream/monitoring/channel/${channelId}/metrics?hours=24`)
+      // Load streams and their health for each channel
+      const streamsData = {}
+      const healthData = {}
       
-      // Transform data to group by timestamp with separate values for each stream
-      const rawMetrics = response.data
-      const timeMap = new Map()
-      const streamIds = new Set()
-      
-      // Collect all stream IDs and organize data by timestamp
-      rawMetrics.forEach(metric => {
-        const timestamp = metric.timestamp
-        streamIds.add(metric.stream_id)
-        
-        if (!timeMap.has(timestamp)) {
-          timeMap.set(timestamp, { timestamp })
+      for (const channel of channels) {
+        if (channel.streams && channel.streams.length > 0) {
+          // Get stream details
+          const streamPromises = channel.streams.map(streamId =>
+            api.get(`/streams/${streamId}`).catch(() => null)
+          )
+          const streams = (await Promise.all(streamPromises)).filter(s => s !== null).map(s => s.data)
+          streamsData[channel.id] = streams
+          
+          // Get health for each stream
+          const healthPromises = channel.streams.map(streamId =>
+            api.get(`/acestream/monitoring/stream/${streamId}/health`).catch(() => null)
+          )
+          const healthResults = await Promise.all(healthPromises)
+          healthResults.forEach((result, idx) => {
+            if (result && result.data) {
+              healthData[channel.streams[idx]] = result.data
+            }
+          })
+        } else {
+          streamsData[channel.id] = []
         }
-        
-        const timePoint = timeMap.get(timestamp)
-        // Add stream-specific metrics with stream ID prefix
-        timePoint[`stream_${metric.stream_id}_peers`] = metric.peers
-        timePoint[`stream_${metric.stream_id}_speed_down`] = metric.speed_down
-        timePoint[`stream_${metric.stream_id}_speed_up`] = metric.speed_up
-        timePoint[`stream_${metric.stream_id}_health`] = metric.health_score
-      })
+      }
       
-      // Convert map to sorted array
-      const transformedMetrics = Array.from(timeMap.values()).sort((a, b) => 
-        new Date(a.timestamp) - new Date(b.timestamp)
-      )
-      
-      setMetrics({
-        data: transformedMetrics,
-        streamIds: Array.from(streamIds)
-      })
+      setChannelStreams(streamsData)
+      setStreamHealth(healthData)
     } catch (error) {
-      console.error('Error loading metrics:', error)
+      console.error('Error loading channel streams health:', error)
     }
   }
 
@@ -228,11 +219,6 @@ export default function AceStreamMonitoring() {
         variant: "destructive"
       })
     }
-  }
-
-  const handleChannelSelect = (channel) => {
-    setSelectedChannel(channel)
-    loadChannelMetrics(channel.id)
   }
 
   if (loading) {
@@ -412,6 +398,58 @@ export default function AceStreamMonitoring() {
                 Number of FFmpeg failures before marking stream as dead
               </p>
             </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="livepos-tolerance">Livepos Buffer Tolerance (seconds)</Label>
+                <Input
+                  id="livepos-tolerance"
+                  type="number"
+                  min="5"
+                  max="120"
+                  value={config.livepos_buffer_tolerance}
+                  onChange={(e) => {
+                    const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
+                    if (value === '' || (!isNaN(value) && value >= 5 && value <= 120)) {
+                      setConfig({ ...config, livepos_buffer_tolerance: value === '' ? 30 : value })
+                    }
+                  }}
+                  onBlur={(e) => {
+                    if (e.target.value === '') {
+                      setConfig({ ...config, livepos_buffer_tolerance: 30 })
+                    }
+                  }}
+                />
+                <p className="text-sm text-muted-foreground">
+                  Mark stream dead if livepos doesn't advance for this long
+                </p>
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="speed-timeout">Zero Speed Timeout (seconds)</Label>
+                <Input
+                  id="speed-timeout"
+                  type="number"
+                  min="5"
+                  max="60"
+                  value={config.speed_down_timeout}
+                  onChange={(e) => {
+                    const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
+                    if (value === '' || (!isNaN(value) && value >= 5 && value <= 60)) {
+                      setConfig({ ...config, speed_down_timeout: value === '' ? 10 : value })
+                    }
+                  }}
+                  onBlur={(e) => {
+                    if (e.target.value === '') {
+                      setConfig({ ...config, speed_down_timeout: 10 })
+                    }
+                  }}
+                />
+                <p className="text-sm text-muted-foreground">
+                  Mark stream dead if download speed is 0 for this long
+                </p>
+              </div>
+            </div>
           </div>
 
           <Button onClick={saveConfig} disabled={configLoading}>
@@ -429,7 +467,7 @@ export default function AceStreamMonitoring() {
             AceStream Channels
           </CardTitle>
           <CardDescription>
-            Channels currently being monitored. Click to view metrics.
+            Channels with alive/dead stream counts. Click chevron to expand and view live stats.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -438,163 +476,98 @@ export default function AceStreamMonitoring() {
               No AceStream channels configured. Tag channels below to start monitoring.
             </div>
           ) : (
-            <div className="space-y-2">
-              {channels.map((channel) => (
-                <div
-                  key={channel.id}
-                  className="flex items-center justify-between p-3 border rounded-lg cursor-pointer hover:bg-accent transition-colors"
-                  onClick={() => handleChannelSelect(channel)}
-                >
-                  <div>
-                    <div className="font-medium">{channel.name}</div>
-                    <div className="text-sm text-muted-foreground">
-                      Channel #{channel.channel_number} • {channel.streams?.length || 0} streams
-                    </div>
-                  </div>
-                  <Badge variant={selectedChannel?.id === channel.id ? "default" : "outline"}>
-                    {selectedChannel?.id === channel.id ? "Selected" : "View"}
-                  </Badge>
-                </div>
-              ))}
-            </div>
+            <Accordion type="single" collapsible className="w-full">
+              {channels.map((channel) => {
+                const streams = channelStreams[channel.id] || []
+                const aliveCount = streams.filter(s => {
+                  const health = streamHealth[s.id]
+                  return health && health.is_alive
+                }).length
+                const deadCount = streams.length - aliveCount
+                
+                return (
+                  <AccordionItem key={channel.id} value={`channel-${channel.id}`}>
+                    <AccordionTrigger className="hover:no-underline">
+                      <div className="flex items-center justify-between w-full pr-4">
+                        <div className="text-left">
+                          <div className="font-medium">{channel.name}</div>
+                          <div className="text-sm text-muted-foreground">
+                            Channel #{channel.channel_number}
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <Badge variant="default" className="bg-green-500">
+                            <CheckCircle className="h-3 w-3 mr-1" />
+                            {aliveCount} Alive
+                          </Badge>
+                          <Badge variant="destructive">
+                            <XCircle className="h-3 w-3 mr-1" />
+                            {deadCount} Dead
+                          </Badge>
+                        </div>
+                      </div>
+                    </AccordionTrigger>
+                    <AccordionContent>
+                      <div className="space-y-3 pt-2">
+                        {streams.length === 0 ? (
+                          <div className="text-sm text-muted-foreground text-center py-4">
+                            No streams in this channel
+                          </div>
+                        ) : (
+                          streams.map((stream) => {
+                            const health = streamHealth[stream.id]
+                            const isAlive = health && health.is_alive
+                            
+                            return (
+                              <div
+                                key={stream.id}
+                                className="flex items-center justify-between p-3 border rounded-lg"
+                              >
+                                <div className="flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <div className="font-medium">{stream.name || `Stream ${stream.id}`}</div>
+                                    {isAlive ? (
+                                      <Badge variant="default" className="bg-green-500">
+                                        <CheckCircle className="h-3 w-3 mr-1" />
+                                        Alive
+                                      </Badge>
+                                    ) : (
+                                      <Badge variant="destructive">
+                                        <XCircle className="h-3 w-3 mr-1" />
+                                        Dead
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  {health && (
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-2 text-sm text-muted-foreground">
+                                      <div>
+                                        <span className="font-medium">Health:</span> {health.health_score?.toFixed(1) || 'N/A'}
+                                      </div>
+                                      <div>
+                                        <span className="font-medium">Peers:</span> {health.peers || 0}
+                                      </div>
+                                      <div>
+                                        <span className="font-medium">Down:</span> {health.speed_down || 0} KB/s
+                                      </div>
+                                      <div>
+                                        <span className="font-medium">Up:</span> {health.speed_up || 0} KB/s
+                                      </div>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })
+                        )}
+                      </div>
+                    </AccordionContent>
+                  </AccordionItem>
+                )
+              })}
+            </Accordion>
           )}
         </CardContent>
       </Card>
-
-      {/* Metrics Chart */}
-      {selectedChannel && metrics.data.length > 0 && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Stream Health Over Time</CardTitle>
-            <CardDescription>
-              Individual stream metrics for {selectedChannel.name} (Last 24 hours)
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-6">
-              {/* Health Score Chart */}
-              <div>
-                <h3 className="text-sm font-medium mb-2">Health Score</h3>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={metrics.data}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
-                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                    />
-                    <YAxis domain={[0, 100]} />
-                    <Tooltip 
-                      labelFormatter={(value) => new Date(value).toLocaleString()}
-                    />
-                    <Legend />
-                    {metrics.streamIds.map((streamId, index) => (
-                      <Line
-                        key={`health-${streamId}`}
-                        type="monotone"
-                        dataKey={`stream_${streamId}_health`}
-                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
-                        name={`Stream ${streamId}`}
-                        strokeWidth={2}
-                        connectNulls
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* Peers Chart */}
-              <div>
-                <h3 className="text-sm font-medium mb-2">Peers</h3>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={metrics.data}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
-                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                    />
-                    <YAxis />
-                    <Tooltip 
-                      labelFormatter={(value) => new Date(value).toLocaleString()}
-                    />
-                    <Legend />
-                    {metrics.streamIds.map((streamId, index) => (
-                      <Line
-                        key={`peers-${streamId}`}
-                        type="monotone"
-                        dataKey={`stream_${streamId}_peers`}
-                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
-                        name={`Stream ${streamId}`}
-                        strokeWidth={2}
-                        connectNulls
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* Download Speed Chart */}
-              <div>
-                <h3 className="text-sm font-medium mb-2">Download Speed (KB/s)</h3>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={metrics.data}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
-                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                    />
-                    <YAxis />
-                    <Tooltip 
-                      labelFormatter={(value) => new Date(value).toLocaleString()}
-                    />
-                    <Legend />
-                    {metrics.streamIds.map((streamId, index) => (
-                      <Line
-                        key={`down-${streamId}`}
-                        type="monotone"
-                        dataKey={`stream_${streamId}_speed_down`}
-                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
-                        name={`Stream ${streamId}`}
-                        strokeWidth={2}
-                        connectNulls
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* Upload Speed Chart */}
-              <div>
-                <h3 className="text-sm font-medium mb-2">Upload Speed (KB/s)</h3>
-                <ResponsiveContainer width="100%" height={300}>
-                  <LineChart data={metrics.data}>
-                    <CartesianGrid strokeDasharray="3 3" />
-                    <XAxis 
-                      dataKey="timestamp" 
-                      tickFormatter={(value) => new Date(value).toLocaleTimeString()}
-                    />
-                    <YAxis />
-                    <Tooltip 
-                      labelFormatter={(value) => new Date(value).toLocaleString()}
-                    />
-                    <Legend />
-                    {metrics.streamIds.map((streamId, index) => (
-                      <Line
-                        key={`up-${streamId}`}
-                        type="monotone"
-                        dataKey={`stream_${streamId}_speed_up`}
-                        stroke={`hsl(var(--chart-${(index % 5) + 1}))`}
-                        name={`Stream ${streamId}`}
-                        strokeWidth={2}
-                        connectNulls
-                      />
-                    ))}
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
 
       {/* All Channels - Tag Management */}
       <Card>

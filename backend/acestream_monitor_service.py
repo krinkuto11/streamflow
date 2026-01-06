@@ -74,6 +74,10 @@ class AceStreamMonitor:
         # Format: {stream_id: timestamp}
         self.dead_stream_retry_times: Dict[int, datetime] = {}
         
+        # Track livepos and download speed for health detection
+        # Format: {stream_id: {'last_livepos': int, 'last_check': datetime, 'last_speed_down': int, 'speed_down_zero_since': datetime}}
+        self.stream_health_tracking: Dict[int, Dict[str, Any]] = {}
+        
         logger.info(f"AceStream monitor initialized with {self.monitoring_method} monitoring method")
     
     def start_monitoring(self):
@@ -254,6 +258,16 @@ class AceStreamMonitor:
             # Get stats from Orchestrator
             orchestrator_stats = self._get_orchestrator_stats(acestream_id, orchestrator_url)
             
+            # Check stream health before continuing
+            if orchestrator_stats:
+                dead_reason = self._check_stream_is_dead(stream_id, orchestrator_stats)
+                if dead_reason:
+                    logger.warning(f"Stream {stream_id} detected as dead: {dead_reason}")
+                    self._mark_stream_dead(stream_id, stream_url, channel_id)
+                    # Stop keep-alive for dead stream
+                    self._stop_stream_keepalive(stream_id)
+                    return None
+            
             # Ensure stream keep-alive is running (FFmpeg or HTTP)
             self._ensure_stream_keepalive(stream_id, stream_url, channel_id)
             
@@ -314,6 +328,15 @@ class AceStreamMonitor:
             stream_url: Stream URL
             channel_id: Channel ID (optional, for dead stream tracking)
         """
+        # Check if stream is in dead streams tracker (globally dead)
+        if self.dead_streams_tracker.is_dead(stream_url):
+            # Stream is permanently dead, don't start keep-alive
+            # Stop it if it's running
+            if self.http_keepalive.is_stream_alive(stream_id):
+                logger.debug(f"Stopping keep-alive for dead stream {stream_id}")
+                self.http_keepalive.stop_keepalive(stream_id)
+            return
+        
         # Check if stream is marked as dead and should be retried
         if stream_id in self.dead_stream_retry_times:
             retry_interval = self.config.get('dead_stream_retry_interval', 300)
@@ -405,6 +428,92 @@ class AceStreamMonitor:
         retry_interval = self.config.get('dead_stream_retry_interval', 300)
         self.dead_stream_retry_times[stream_id] = datetime.now()
         logger.info(f"Stream {stream_id} will be retried after {retry_interval}s")
+    
+    def _check_stream_is_dead(self, stream_id: int, orchestrator_stats: Dict) -> Optional[str]:
+        """
+        Check if a stream should be marked as dead based on livepos and download speed.
+        
+        The best indicator is live_last field (shows stream is advancing).
+        Zero download speed is only considered dead if livepos is also NOT advancing.
+        
+        Args:
+            stream_id: Stream ID
+            orchestrator_stats: Stats from orchestrator
+            
+        Returns:
+            Reason string if dead, None if alive
+        """
+        now = datetime.now()
+        
+        # Get configuration parameters
+        livepos_buffer_tolerance = self.config.get('livepos_buffer_tolerance', 30)  # Default 30 seconds
+        speed_down_timeout = self.config.get('speed_down_timeout', 10)  # Default 10 seconds
+        
+        # Initialize tracking for this stream if not present
+        if stream_id not in self.stream_health_tracking:
+            self.stream_health_tracking[stream_id] = {
+                'last_livepos': None,
+                'last_check': now,
+                'last_speed_down': None,
+                'speed_down_zero_since': None
+            }
+        
+        tracking = self.stream_health_tracking[stream_id]
+        
+        # Extract livepos data
+        livepos = orchestrator_stats.get('livepos', {})
+        current_livepos = None
+        if isinstance(livepos, dict):
+            # Try different keys that might contain the live position timestamp
+            current_livepos = livepos.get('live_last') or livepos.get('last') or livepos.get('pos')
+        
+        # Extract download speed
+        speed_down = orchestrator_stats.get('speed_down', 0)
+        
+        # Track whether livepos is advancing
+        livepos_advancing = False
+        livepos_stuck_duration = 0
+        
+        # Check livepos advancement (only if we have livepos data)
+        if current_livepos is not None:
+            if tracking['last_livepos'] is not None:
+                # Check if livepos hasn't advanced
+                if current_livepos == tracking['last_livepos']:
+                    # Livepos hasn't changed, check how long
+                    livepos_stuck_duration = (now - tracking['last_check']).total_seconds()
+                    if livepos_stuck_duration > livepos_buffer_tolerance:
+                        return f"livepos stuck for {livepos_stuck_duration:.1f}s (tolerance: {livepos_buffer_tolerance}s)"
+                else:
+                    # Livepos advanced, reset
+                    tracking['last_livepos'] = current_livepos
+                    tracking['last_check'] = now
+                    livepos_advancing = True
+            else:
+                # First time seeing livepos
+                tracking['last_livepos'] = current_livepos
+                tracking['last_check'] = now
+                livepos_advancing = True
+        
+        # Check download speed
+        # Only mark as dead for zero speed if livepos is also NOT advancing
+        if speed_down == 0:
+            if tracking['speed_down_zero_since'] is None:
+                # Just went to zero
+                tracking['speed_down_zero_since'] = now
+            else:
+                # Has been zero, check how long
+                zero_duration = (now - tracking['speed_down_zero_since']).total_seconds()
+                # Only fail on zero speed if livepos is also not advancing
+                if zero_duration > speed_down_timeout and not livepos_advancing:
+                    return f"download speed 0 for {zero_duration:.1f}s and livepos not advancing (timeout: {speed_down_timeout}s)"
+        else:
+            # Speed is non-zero, reset
+            tracking['speed_down_zero_since'] = None
+        
+        tracking['last_speed_down'] = speed_down
+        
+        # Stream is healthy
+        return None
     
     def _extract_acestream_id(self, url: str) -> Optional[str]:
         """Extract AceStream ID from URL like http://host:port/ace/getstream?id=<id>"""
@@ -831,20 +940,24 @@ class AceStreamMonitor:
             # Only update if order has changed
             current_order = channel.get('streams', [])
             if new_order != current_order:
-                # Update channel via UDI manager - create a new dict to avoid modifying the original
-                channel_data = dict(channel)
-                channel_data['streams'] = new_order
-                
-                # Update in UDI cache
-                success = self.udi_manager.update_channel(channel_id, channel_data)
-                
-                if success:
-                    logger.info(
-                        f"Reordered {len(new_order)} streams for channel {channel_id} "
-                        f"by health (best: {sorted_streams[0][1]['health_score']:.1f})"
-                    )
-                else:
-                    logger.warning(f"Failed to update channel {channel_id} stream order in UDI")
+                # Update in Dispatcharr via API
+                from api_utils import update_channel_streams
+                try:
+                    api_success = update_channel_streams(channel_id, new_order, allow_dead_streams=False)
+                    if api_success:
+                        # Update in UDI cache after successful API update
+                        channel_data = dict(channel)
+                        channel_data['streams'] = new_order
+                        self.udi_manager.update_channel(channel_id, channel_data)
+                        
+                        logger.info(
+                            f"Reordered {len(new_order)} streams for channel {channel_id} "
+                            f"by health (best: {sorted_streams[0][1]['health_score']:.1f})"
+                        )
+                    else:
+                        logger.warning(f"Failed to update channel {channel_id} stream order in Dispatcharr")
+                except Exception as api_error:
+                    logger.error(f"Error updating channel {channel_id} in Dispatcharr: {api_error}")
             
         except Exception as e:
             # Safely get channel ID for error message
