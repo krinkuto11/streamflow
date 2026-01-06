@@ -158,8 +158,12 @@ class HTTPStreamKeepAlive:
         max_consecutive_failures = 3
         
         # Read interval - how often to read chunks (in seconds)
-        # Use interval parameter as read delay, default to 0.5s for continuous reading
-        read_delay = min(interval / 10.0, 0.5)  # More frequent reads, max 0.5s
+        # Smaller values = more responsive but more CPU, larger values = less CPU
+        # We derive from interval parameter but cap it:
+        # - Minimum 0.1s to avoid busy-waiting
+        # - Maximum 0.5s for reasonable responsiveness
+        # - Default calculation: interval/10 (e.g., interval=10 → read_delay=0.5s)
+        read_delay = max(0.1, min(interval / 10.0, 0.5))
         
         try:
             while not stop_event.is_set():
@@ -189,6 +193,10 @@ class HTTPStreamKeepAlive:
                         # Success - now continuously read chunks
                         logger.info(f"Stream {stream_id} connection established, reading continuously...")
                         
+                        # Track last successful read to detect hanging connections
+                        last_read_time = time.time()
+                        read_timeout = 60  # If no data for 60s, consider connection hung
+                        
                         # Read chunks continuously from the stream
                         # This keeps the connection alive and simulates a real player
                         for chunk in response.iter_content(chunk_size=chunk_size):
@@ -198,11 +206,12 @@ class HTTPStreamKeepAlive:
                                 break
                             
                             if chunk:
-                                # Got data - update stats
+                                # Got data - update stats and timeout tracker
                                 bytes_received = len(chunk)
                                 total_bytes += bytes_received
                                 stats['bytes_received'] = total_bytes
                                 stats['last_success_time'] = datetime.now()
+                                last_read_time = time.time()  # Reset timeout
                                 
                                 # Update health tracking
                                 self.stream_health[stream_id]['last_success'] = datetime.now()
@@ -220,9 +229,18 @@ class HTTPStreamKeepAlive:
                                 if read_delay > 0:
                                     time.sleep(read_delay)
                             else:
-                                # Empty chunk might indicate end of stream or temporary pause
-                                # Don't fail immediately, just log
-                                logger.debug(f"Stream {stream_id} received empty chunk")
+                                # Empty chunk - check if connection is hung
+                                if time.time() - last_read_time > read_timeout:
+                                    logger.warning(f"Stream {stream_id} connection hung (no data for {read_timeout}s)")
+                                    self._handle_stream_failure(
+                                        stream_id,
+                                        'timeout',
+                                        f"No data received for {read_timeout}s"
+                                    )
+                                    consecutive_failures += 1
+                                    break
+                                # Otherwise just log and continue
+                                logger.debug(f"Stream {stream_id} received empty chunk, waiting for data...")
                         
                         # If we exited the loop normally (not due to stop), stream ended
                         if not stop_event.is_set():
@@ -266,8 +284,9 @@ class HTTPStreamKeepAlive:
                     self.stream_health[stream_id]['is_alive'] = False
                     break
                 
-                # If connection failed, wait before retry
-                if consecutive_failures > 0:
+                # If connection failed or ended, wait before retry
+                # Only wait if we have failures and haven't exceeded max failures
+                if consecutive_failures > 0 and consecutive_failures < max_consecutive_failures:
                     logger.info(f"Stream {stream_id} will retry in {interval}s (failure {consecutive_failures}/{max_consecutive_failures})")
                     stop_event.wait(interval)
                 
