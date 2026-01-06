@@ -121,12 +121,12 @@ export default function AceStreamMonitoring() {
           const streams = (await Promise.all(streamPromises)).filter(s => s !== null).map(s => s.data)
           streamsData[channel.id] = streams
           
-          // Get health for each stream
-          const healthPromises = channel.streams.map(streamId =>
-            api.get(`/acestream/monitoring/stream/${streamId}/health`).catch(() => null)
+          // Get live stats from orchestrator for each stream
+          const liveStatsPromises = channel.streams.map(streamId =>
+            api.get(`/acestream/monitoring/stream/${streamId}/live-stats`).catch(() => null)
           )
-          const healthResults = await Promise.all(healthPromises)
-          healthResults.forEach((result, idx) => {
+          const liveStatsResults = await Promise.all(liveStatsPromises)
+          liveStatsResults.forEach((result, idx) => {
             if (result && result.data) {
               healthData[channel.streams[idx]] = result.data
             }
