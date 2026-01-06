@@ -41,11 +41,21 @@ export default function AceStreamMonitoring() {
 
   useEffect(() => {
     loadData()
-    const interval = setInterval(() => {
-      loadStatus()
-      loadAceStreamChannels().then(() => {
-        loadChannelStreamsHealth()
-      })
+    let isRefreshing = false
+    const interval = setInterval(async () => {
+      if (isRefreshing) {
+        return // Skip if previous refresh is still running
+      }
+      try {
+        isRefreshing = true
+        await loadStatus()
+        await loadAceStreamChannels()
+        await loadChannelStreamsHealth()
+      } catch (error) {
+        console.error('Error during interval refresh:', error)
+      } finally {
+        isRefreshing = false
+      }
     }, 30000) // Refresh every 30 seconds
     return () => clearInterval(interval)
   }, []) // Empty dependency array - only run once on mount
