@@ -294,6 +294,9 @@ class HTTPStreamKeepAlive:
             logger.error(f"Fatal error in keep-alive loop for stream {stream_id}: {e}", exc_info=True)
         finally:
             session.close()
+            # Clean up from active_streams when thread exits
+            if stream_id in self.active_streams:
+                del self.active_streams[stream_id]
             logger.debug(f"Keep-alive loop ended for stream {stream_id}")
     
     def _handle_stream_failure(self, stream_id: int, error_type: str, error_msg: str):
@@ -352,13 +355,30 @@ class HTTPStreamKeepAlive:
     
     def is_stream_alive(self, stream_id: int) -> bool:
         """
-        Check if a stream is considered alive.
+        Check if a stream has an active keep-alive thread running.
+        
+        This checks if there's an active keep-alive thread, regardless of 
+        whether the stream is currently healthy or not.
         
         Args:
             stream_id: Stream ID
             
         Returns:
-            True if stream is alive, False otherwise
+            True if stream has active keep-alive thread, False otherwise
+        """
+        return stream_id in self.active_streams
+    
+    def is_stream_healthy(self, stream_id: int) -> bool:
+        """
+        Check if a stream is considered healthy/alive.
+        
+        This checks the health status, not just if there's a thread running.
+        
+        Args:
+            stream_id: Stream ID
+            
+        Returns:
+            True if stream is healthy, False otherwise
         """
         health = self.stream_health.get(stream_id)
         if not health:

@@ -274,6 +274,15 @@ class AceStreamMonitor:
             # Get stream monitoring stats (from FFmpeg or HTTP)
             monitoring_stats = self._get_monitoring_stats(stream_id)
             
+            # Determine if stream is alive based on monitoring method
+            is_alive = True
+            if self.monitoring_method == 'http':
+                # For HTTP monitoring, check the health status from HTTPStreamKeepAlive
+                is_alive = self.http_keepalive.is_stream_healthy(stream_id)
+            elif monitoring_stats:
+                # For FFmpeg, consider alive if we have recent stats
+                is_alive = True
+            
             # Calculate health score
             health_score = self._calculate_health_score(
                 orchestrator_stats, 
@@ -291,12 +300,13 @@ class AceStreamMonitor:
                     acestream_id=acestream_id
                 )
             
-            self.db.save_metrics(session_id, health_score, orchestrator_stats, monitoring_stats)
+            self.db.save_metrics(session_id, health_score, orchestrator_stats, monitoring_stats, is_alive)
             
             return {
                 'stream_id': stream_id,
                 'acestream_id': acestream_id,
                 'health_score': health_score,
+                'is_alive': is_alive,
                 'orchestrator_stats': orchestrator_stats,
                 'monitoring_stats': monitoring_stats
             }
@@ -927,15 +937,25 @@ class AceStreamMonitor:
                 logger.error("Cannot reorder streams: channel has no ID")
                 return
             
+            # Filter out dead streams before sorting and counting
+            alive_streams = [
+                (stream, health) for stream, health in stream_health
+                if health.get('is_alive', True)
+            ]
+            
             # Sort by health score (descending)
             sorted_streams = sorted(
-                stream_health,
+                alive_streams,
                 key=lambda x: x[1]['health_score'],
                 reverse=True
             )
             
-            # Get stream IDs in new order
+            # Get stream IDs in new order (only alive streams)
             new_order = [s[0].get('id') for s in sorted_streams]
+            
+            if not new_order:
+                logger.warning(f"No alive streams to reorder for channel {channel_id}")
+                return
             
             # Only update if order has changed
             current_order = channel.get('streams', [])
@@ -951,7 +971,7 @@ class AceStreamMonitor:
                         self.udi_manager.update_channel(channel_id, channel_data)
                         
                         logger.info(
-                            f"Reordered {len(new_order)} streams for channel {channel_id} "
+                            f"Reordered {len(new_order)} alive streams for channel {channel_id} "
                             f"by health (best: {sorted_streams[0][1]['health_score']:.1f})"
                         )
                     else:

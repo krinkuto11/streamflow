@@ -73,9 +73,18 @@ class AceStreamDatabase:
                     ffmpeg_resolution TEXT,
                     ffmpeg_fps REAL,
                     health_score REAL,
+                    is_alive INTEGER DEFAULT 1,
                     FOREIGN KEY (session_id) REFERENCES monitoring_sessions(id)
                 )
             ''')
+            
+            # Add is_alive column if it doesn't exist (migration)
+            try:
+                cursor.execute('ALTER TABLE stream_metrics ADD COLUMN is_alive INTEGER DEFAULT 1')
+                conn.commit()
+            except sqlite3.OperationalError:
+                # Column already exists, ignore
+                pass
             
             # Create indexes for better query performance
             cursor.execute('''
@@ -187,7 +196,8 @@ class AceStreamDatabase:
         session_id: int,
         health_score: float,
         orchestrator_stats: Optional[Dict[str, Any]] = None,
-        ffmpeg_stats: Optional[Dict[str, Any]] = None
+        ffmpeg_stats: Optional[Dict[str, Any]] = None,
+        is_alive: bool = True
     ):
         """
         Save stream metrics to database.
@@ -197,6 +207,7 @@ class AceStreamDatabase:
             health_score: Calculated health score (0-100)
             orchestrator_stats: Optional stats from Orchestrator
             ffmpeg_stats: Optional stats from FFmpeg
+            is_alive: Whether the stream is alive (default: True)
         """
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -205,8 +216,8 @@ class AceStreamDatabase:
                 INSERT INTO stream_metrics (
                     session_id, timestamp, peers, speed_down, speed_up,
                     downloaded, uploaded, buffer_pieces, ffmpeg_bitrate,
-                    ffmpeg_resolution, ffmpeg_fps, health_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ffmpeg_resolution, ffmpeg_fps, health_score, is_alive
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 session_id,
                 datetime.now(),
@@ -219,7 +230,8 @@ class AceStreamDatabase:
                 ffmpeg_stats.get('bitrate') if ffmpeg_stats else None,
                 ffmpeg_stats.get('resolution') if ffmpeg_stats else None,
                 ffmpeg_stats.get('fps') if ffmpeg_stats else None,
-                health_score
+                health_score,
+                1 if is_alive else 0
             ))
             
             conn.commit()
