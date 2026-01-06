@@ -5,18 +5,9 @@ import { Badge } from '@/components/ui/badge.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { api } from '@/services/api.js'
-import { 
-  LineChart, 
-  Line, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  Legend, 
-  ResponsiveContainer 
-} from 'recharts'
 import {
   Activity,
   Settings,
@@ -24,20 +15,24 @@ import {
   StopCircle,
   RefreshCw,
   Loader2,
-  Radio
+  Radio,
+  CheckCircle,
+  XCircle
 } from 'lucide-react'
 
 export default function AceStreamMonitoring() {
   const [channels, setChannels] = useState([])
   const [allChannels, setAllChannels] = useState([])
-  const [selectedChannel, setSelectedChannel] = useState(null)
-  const [metrics, setMetrics] = useState({ data: [], streamIds: [] })
+  const [channelStreams, setChannelStreams] = useState({}) // {channelId: [streams]}
+  const [streamHealth, setStreamHealth] = useState({}) // {streamId: health_data}
   const [config, setConfig] = useState({
     enabled: false,
     orchestrator_url: 'http://gluetun:19000',
     monitoring_interval: 30,
     dead_stream_retry_interval: 300,
-    max_ffmpeg_failures: 3
+    max_ffmpeg_failures: 3,
+    livepos_buffer_tolerance: 30,
+    speed_down_timeout: 10
   })
   const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -48,12 +43,10 @@ export default function AceStreamMonitoring() {
     loadData()
     const interval = setInterval(() => {
       loadStatus()
-      if (selectedChannel) {
-        loadChannelMetrics(selectedChannel.id)
-      }
-    }, 30000) // Refresh every 30 seconds
+      loadChannelStreamsHealth()
+    }, 10000) // Refresh every 10 seconds for live updates
     return () => clearInterval(interval)
-  }, [selectedChannel])
+  }, [channels])
 
   const loadData = async () => {
     try {
@@ -64,6 +57,7 @@ export default function AceStreamMonitoring() {
         loadAllChannels(),
         loadStatus()
       ])
+      await loadChannelStreamsHealth()
     } catch (error) {
       console.error('Error loading AceStream data:', error)
       toast({
@@ -112,43 +106,40 @@ export default function AceStreamMonitoring() {
     }
   }
 
-  const loadChannelMetrics = async (channelId) => {
+  const loadChannelStreamsHealth = async () => {
     try {
-      const response = await api.get(`/acestream/monitoring/channel/${channelId}/metrics?hours=24`)
+      // Load streams and their health for each channel
+      const streamsData = {}
+      const healthData = {}
       
-      // Transform data to group by timestamp with separate values for each stream
-      const rawMetrics = response.data
-      const timeMap = new Map()
-      const streamIds = new Set()
-      
-      // Collect all stream IDs and organize data by timestamp
-      rawMetrics.forEach(metric => {
-        const timestamp = metric.timestamp
-        streamIds.add(metric.stream_id)
-        
-        if (!timeMap.has(timestamp)) {
-          timeMap.set(timestamp, { timestamp })
+      for (const channel of channels) {
+        if (channel.streams && channel.streams.length > 0) {
+          // Get stream details
+          const streamPromises = channel.streams.map(streamId =>
+            api.get(`/streams/${streamId}`).catch(() => null)
+          )
+          const streams = (await Promise.all(streamPromises)).filter(s => s !== null).map(s => s.data)
+          streamsData[channel.id] = streams
+          
+          // Get health for each stream
+          const healthPromises = channel.streams.map(streamId =>
+            api.get(`/acestream/monitoring/stream/${streamId}/health`).catch(() => null)
+          )
+          const healthResults = await Promise.all(healthPromises)
+          healthResults.forEach((result, idx) => {
+            if (result && result.data) {
+              healthData[channel.streams[idx]] = result.data
+            }
+          })
+        } else {
+          streamsData[channel.id] = []
         }
-        
-        const timePoint = timeMap.get(timestamp)
-        // Add stream-specific metrics with stream ID prefix
-        timePoint[`stream_${metric.stream_id}_peers`] = metric.peers
-        timePoint[`stream_${metric.stream_id}_speed_down`] = metric.speed_down
-        timePoint[`stream_${metric.stream_id}_speed_up`] = metric.speed_up
-        timePoint[`stream_${metric.stream_id}_health`] = metric.health_score
-      })
+      }
       
-      // Convert map to sorted array
-      const transformedMetrics = Array.from(timeMap.values()).sort((a, b) => 
-        new Date(a.timestamp) - new Date(b.timestamp)
-      )
-      
-      setMetrics({
-        data: transformedMetrics,
-        streamIds: Array.from(streamIds)
-      })
+      setChannelStreams(streamsData)
+      setStreamHealth(healthData)
     } catch (error) {
-      console.error('Error loading metrics:', error)
+      console.error('Error loading channel streams health:', error)
     }
   }
 
