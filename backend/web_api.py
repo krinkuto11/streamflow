@@ -3837,6 +3837,9 @@ def get_channel_metrics(channel_id):
 def get_stream_health(stream_id):
     """Get current health score and stats for a stream.
     
+    This endpoint returns historical health data from the database.
+    For live orchestrator stats, use /api/acestream/monitoring/stream/{id}/live-stats
+    
     Args:
         stream_id: Stream ID
     
@@ -3856,6 +3859,95 @@ def get_stream_health(stream_id):
             return jsonify({"message": "No health data available"}), 404
     except Exception as e:
         logger.error(f"Error getting stream health: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/acestream/monitoring/stream/<int:stream_id>/live-stats', methods=['GET'])
+@log_function_call
+def get_stream_live_stats(stream_id):
+    """Get live stats from orchestrator for a stream.
+    
+    This queries the orchestrator's /streams endpoint directly to get current
+    real-time stats (peers, speed_down, speed_up, etc.) for the stream.
+    
+    Args:
+        stream_id: Stream ID
+    
+    Returns:
+        JSON with live orchestrator stats or empty if stream not found
+    """
+    try:
+        # Get stream from UDI to extract AceStream ID
+        udi = get_udi_manager()
+        stream = udi.get_stream_by_id(stream_id)
+        
+        if not stream:
+            return jsonify({'error': 'Stream not found'}), 404
+        
+        # Extract AceStream ID from URL
+        stream_url = stream.get('url', '')
+        import re
+        match = re.search(r'[?&]id=([a-f0-9]+)', stream_url, re.IGNORECASE)
+        if not match:
+            return jsonify({'error': 'Not an AceStream URL'}), 400
+        
+        acestream_id = match.group(1)
+        
+        # Get channel to find orchestrator URL
+        # Find which channel this stream belongs to
+        channels = udi.get_channels()
+        orchestrator_url = None
+        for channel in channels:
+            if channel.get('is_acestream') and stream_id in channel.get('streams', []):
+                orchestrator_url = channel.get('acestream_orchestrator_url')
+                break
+        
+        # Use default if no channel-specific URL
+        if not orchestrator_url:
+            from dispatcharr_config import get_dispatcharr_config
+            config = get_dispatcharr_config()
+            orchestrator_url = config.get('acestream_orchestrator_url', 'http://gluetun:19000')
+        
+        # Query orchestrator /streams endpoint
+        import requests
+        try:
+            response = requests.get(f"{orchestrator_url}/streams", timeout=5)
+            response.raise_for_status()
+            streams = response.json()
+            
+            # Find stream by acestream_id (key field)
+            for stream_data in streams:
+                if stream_data.get('key') == acestream_id and stream_data.get('status') == 'started':
+                    # Return relevant stats
+                    return jsonify({
+                        'stream_id': stream_id,
+                        'acestream_id': acestream_id,
+                        'peers': stream_data.get('peers', 0),
+                        'speed_down': stream_data.get('speed_down', 0),
+                        'speed_up': stream_data.get('speed_up', 0),
+                        'downloaded': stream_data.get('downloaded', 0),
+                        'uploaded': stream_data.get('uploaded', 0),
+                        'status': stream_data.get('status'),
+                        'livepos': stream_data.get('livepos', {}),
+                        'is_alive': True
+                    })
+            
+            # Stream not found in orchestrator (not running)
+            return jsonify({
+                'stream_id': stream_id,
+                'acestream_id': acestream_id,
+                'is_alive': False,
+                'message': 'Stream not found in orchestrator'
+            })
+            
+        except requests.Timeout:
+            return jsonify({'error': 'Orchestrator timeout'}), 504
+        except requests.RequestException as e:
+            logger.error(f"Error querying orchestrator: {e}")
+            return jsonify({'error': f'Orchestrator error: {str(e)}'}), 502
+            
+    except Exception as e:
+        logger.error(f"Error getting live stream stats: {e}")
         return jsonify({"error": str(e)}), 500
 
 
