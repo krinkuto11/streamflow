@@ -239,9 +239,29 @@ class TestHTTPStreamKeepAlive(unittest.TestCase):
             self.assertEqual(last_error.get('type'), 'http_error')
     
     def test_is_stream_alive(self):
-        """Test is_stream_alive method."""
+        """Test is_stream_alive method - checks for active thread."""
         # Non-existent stream
         self.assertFalse(self.keepalive.is_stream_alive(999))
+        
+        # Add a stream with active thread
+        stream_id = 123
+        self.keepalive.active_streams[stream_id] = {
+            'thread': Mock(),
+            'stop_event': Mock(),
+            'stats': {}
+        }
+        
+        # Should return True if thread exists, regardless of health
+        self.assertTrue(self.keepalive.is_stream_alive(stream_id))
+        
+        # Remove from active_streams
+        del self.keepalive.active_streams[stream_id]
+        self.assertFalse(self.keepalive.is_stream_alive(stream_id))
+    
+    def test_is_stream_healthy(self):
+        """Test is_stream_healthy method - checks actual health status."""
+        # Non-existent stream
+        self.assertFalse(self.keepalive.is_stream_healthy(999))
         
         # Add a healthy stream
         stream_id = 123
@@ -252,11 +272,11 @@ class TestHTTPStreamKeepAlive(unittest.TestCase):
             'is_alive': True
         }
         
-        self.assertTrue(self.keepalive.is_stream_alive(stream_id))
+        self.assertTrue(self.keepalive.is_stream_healthy(stream_id))
         
         # Mark as not alive
         self.keepalive.stream_health[stream_id]['is_alive'] = False
-        self.assertFalse(self.keepalive.is_stream_alive(stream_id))
+        self.assertFalse(self.keepalive.is_stream_healthy(stream_id))
     
     def test_stop_all(self):
         """Test stopping all keep-alive threads."""

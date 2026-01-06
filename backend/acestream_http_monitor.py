@@ -48,6 +48,9 @@ class HTTPStreamKeepAlive:
         # Format: {stream_id: {'failures': int, 'last_failure': datetime, 'last_success': datetime}}
         self.stream_health: Dict[int, Dict[str, Any]] = {}
         
+        # Lock for thread-safe access to active_streams and stream_health
+        self._lock = threading.Lock()
+        
     def start_keepalive(
         self,
         stream_id: int,
@@ -64,44 +67,45 @@ class HTTPStreamKeepAlive:
             interval: Retry interval in seconds if connection fails (default: 10)
             chunk_size: Bytes to read per chunk continuously (default: 64KB)
         """
-        if stream_id in self.active_streams:
-            logger.debug(f"Stream {stream_id} already has active keep-alive")
-            return
-        
-        # Create stop event for this stream
-        stop_event = threading.Event()
-        
-        # Start keep-alive thread
-        thread = threading.Thread(
-            target=self._keepalive_loop,
-            args=(stream_id, stream_url, interval, chunk_size, stop_event),
-            daemon=True,
-            name=f"HTTPKeepAlive-{stream_id}"
-        )
-        
-        self.active_streams[stream_id] = {
-            'thread': thread,
-            'stop_event': stop_event,
-            'stats': {
-                'url': stream_url,
-                'started_at': datetime.now(),
-                'requests_sent': 0,
-                'bytes_received': 0,
-                'last_request_time': None,
-                'last_success_time': None,
-                'last_error': None
+        with self._lock:
+            if stream_id in self.active_streams:
+                logger.debug(f"Stream {stream_id} already has active keep-alive")
+                return
+            
+            # Create stop event for this stream
+            stop_event = threading.Event()
+            
+            # Start keep-alive thread
+            thread = threading.Thread(
+                target=self._keepalive_loop,
+                args=(stream_id, stream_url, interval, chunk_size, stop_event),
+                daemon=True,
+                name=f"HTTPKeepAlive-{stream_id}"
+            )
+            
+            self.active_streams[stream_id] = {
+                'thread': thread,
+                'stop_event': stop_event,
+                'stats': {
+                    'url': stream_url,
+                    'started_at': datetime.now(),
+                    'requests_sent': 0,
+                    'bytes_received': 0,
+                    'last_request_time': None,
+                    'last_success_time': None,
+                    'last_error': None
+                }
             }
-        }
-        
-        # Initialize health tracking
-        self.stream_health[stream_id] = {
-            'failures': 0,
-            'last_failure': None,
-            'last_success': None,
-            'is_alive': True
-        }
-        
-        thread.start()
+            
+            # Initialize health tracking
+            self.stream_health[stream_id] = {
+                'failures': 0,
+                'last_failure': None,
+                'last_success': None,
+                'is_alive': True
+            }
+            
+            thread.start()
         logger.info(f"Started HTTP keep-alive for stream {stream_id} (interval: {interval}s, chunk: {chunk_size} bytes)")
     
     def stop_keepalive(self, stream_id: int):
@@ -111,22 +115,27 @@ class HTTPStreamKeepAlive:
         Args:
             stream_id: Stream ID
         """
-        if stream_id not in self.active_streams:
-            logger.debug(f"Stream {stream_id} has no active keep-alive to stop")
-            return
+        with self._lock:
+            if stream_id not in self.active_streams:
+                logger.debug(f"Stream {stream_id} has no active keep-alive to stop")
+                return
+            
+            # Signal thread to stop
+            self.active_streams[stream_id]['stop_event'].set()
+            
+            # Get thread reference before releasing lock
+            thread = self.active_streams[stream_id]['thread']
         
-        # Signal thread to stop
-        self.active_streams[stream_id]['stop_event'].set()
-        
-        # Wait for thread to finish (with timeout)
-        thread = self.active_streams[stream_id]['thread']
+        # Wait for thread to finish (outside lock to avoid deadlock)
         thread.join(timeout=5)
         
         if thread.is_alive():
             logger.warning(f"Keep-alive thread for stream {stream_id} did not stop in time")
         
-        # Clean up
-        del self.active_streams[stream_id]
+        # Clean up (thread-safe)
+        with self._lock:
+            if stream_id in self.active_streams:
+                del self.active_streams[stream_id]
         logger.info(f"Stopped HTTP keep-alive for stream {stream_id}")
     
     def _keepalive_loop(
@@ -294,6 +303,10 @@ class HTTPStreamKeepAlive:
             logger.error(f"Fatal error in keep-alive loop for stream {stream_id}: {e}", exc_info=True)
         finally:
             session.close()
+            # Clean up from active_streams when thread exits (thread-safe)
+            with self._lock:
+                if stream_id in self.active_streams:
+                    del self.active_streams[stream_id]
             logger.debug(f"Keep-alive loop ended for stream {stream_id}")
     
     def _handle_stream_failure(self, stream_id: int, error_type: str, error_msg: str):
@@ -352,13 +365,30 @@ class HTTPStreamKeepAlive:
     
     def is_stream_alive(self, stream_id: int) -> bool:
         """
-        Check if a stream is considered alive.
+        Check if a stream has an active keep-alive thread running.
+        
+        This checks if there's an active keep-alive thread, regardless of 
+        whether the stream is currently healthy or not.
         
         Args:
             stream_id: Stream ID
             
         Returns:
-            True if stream is alive, False otherwise
+            True if stream has active keep-alive thread, False otherwise
+        """
+        return stream_id in self.active_streams
+    
+    def is_stream_healthy(self, stream_id: int) -> bool:
+        """
+        Check if a stream is considered healthy/alive.
+        
+        This checks the health status, not just if there's a thread running.
+        
+        Args:
+            stream_id: Stream ID
+            
+        Returns:
+            True if stream is healthy, False otherwise
         """
         health = self.stream_health.get(stream_id)
         if not health:
