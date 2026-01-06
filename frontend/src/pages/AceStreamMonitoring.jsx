@@ -44,7 +44,7 @@ export default function AceStreamMonitoring() {
     const interval = setInterval(() => {
       loadStatus()
       loadChannelStreamsHealth()
-    }, 10000) // Refresh every 10 seconds for live updates
+    }, 30000) // Refresh every 30 seconds
     return () => clearInterval(interval)
   }, [channels])
 
