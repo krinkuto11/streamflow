@@ -1,15 +1,16 @@
 """
 AceStream HTTP-based Monitoring
 
-Alternative to ffmpeg-based monitoring using lightweight HTTP range requests
+Alternative to ffmpeg-based monitoring using persistent HTTP streaming connections
 to keep streams alive in the orchestrator while consuming minimal resources.
 
 This approach:
-1. Makes periodic HTTP range requests to the stream URL
-2. Requests small chunks (e.g., 64KB) to verify stream is alive
-3. Detects stream health issues (EOF, connection errors, timeouts)
-4. Uses significantly less CPU/memory than continuous ffmpeg processes
-5. Still provides health metrics from orchestrator /streams endpoint
+1. Opens a persistent HTTP streaming connection to the stream URL
+2. Continuously reads small chunks (e.g., 64KB) to simulate a real player
+3. Keeps connection alive to prevent "broken pipe" errors on orchestrator
+4. Detects stream health issues (EOF, connection errors, timeouts)
+5. Uses significantly less CPU/memory than ffmpeg (no decoding)
+6. Provides health metrics from orchestrator /streams endpoint
 """
 
 import requests
@@ -29,11 +30,12 @@ class HTTPStreamKeepAlive:
     """
     Lightweight HTTP-based stream keep-alive mechanism.
     
-    Instead of using ffmpeg to continuously consume stream data,
-    this class makes periodic HTTP range requests to:
+    Instead of using ffmpeg to continuously consume and decode stream data,
+    this class maintains persistent HTTP streaming connections to:
     1. Keep the stream registered in orchestrator's /streams endpoint
     2. Detect dead/broken streams (connection errors, EOF, timeouts)
-    3. Consume minimal resources (only small chunks periodically)
+    3. Consume minimal resources (no decoding, just reading raw bytes)
+    4. Prevent "broken pipe" errors by keeping connection continuously open
     """
     
     def __init__(self):
@@ -54,13 +56,13 @@ class HTTPStreamKeepAlive:
         chunk_size: int = 65536  # 64KB chunks
     ):
         """
-        Start HTTP keep-alive for a stream.
+        Start HTTP keep-alive for a stream with persistent connection.
         
         Args:
             stream_id: Stream ID
-            stream_url: Stream URL to request
-            interval: Seconds between requests (default: 10)
-            chunk_size: Bytes to request per chunk (default: 64KB)
+            stream_url: Stream URL to connect to
+            interval: Retry interval in seconds if connection fails (default: 10)
+            chunk_size: Bytes to read per chunk continuously (default: 64KB)
         """
         if stream_id in self.active_streams:
             logger.debug(f"Stream {stream_id} already has active keep-alive")
@@ -136,21 +138,28 @@ class HTTPStreamKeepAlive:
         stop_event: threading.Event
     ):
         """
-        Main keep-alive loop that periodically requests stream chunks.
+        Main keep-alive loop that maintains a persistent streaming connection.
         
         This runs in a separate thread for each stream.
+        Unlike the previous approach which made periodic disconnected requests,
+        this maintains a single continuous connection like a real player,
+        preventing "broken pipe" errors on the orchestrator.
         """
         logger.debug(f"Keep-alive loop started for stream {stream_id}")
         
         # Use a session for connection pooling
         session = requests.Session()
         
-        # Current byte position in stream
-        byte_position = 0
+        # Total bytes received
+        total_bytes = 0
         
         # Consecutive failures counter
         consecutive_failures = 0
         max_consecutive_failures = 3
+        
+        # Read interval - how often to read chunks (in seconds)
+        # Use interval parameter as read delay, default to 0.5s for continuous reading
+        read_delay = min(interval / 10.0, 0.5)  # More frequent reads, max 0.5s
         
         try:
             while not stop_event.is_set():
@@ -160,51 +169,70 @@ class HTTPStreamKeepAlive:
                 stats['requests_sent'] += 1
                 
                 try:
-                    # Make HTTP range request for a small chunk
-                    # This simulates a player consuming data without actually processing it
+                    # Open a persistent streaming connection
+                    # Don't use Range header - just stream continuously like a player
                     headers = {
-                        'Range': f'bytes={byte_position}-{byte_position + chunk_size - 1}',
                         'User-Agent': DEFAULT_USER_AGENT
                     }
+                    
+                    logger.info(f"Opening persistent stream connection for stream {stream_id}")
                     
                     response = session.get(
                         stream_url,
                         headers=headers,
-                        timeout=10,
-                        stream=True  # Stream mode to avoid loading all into memory
+                        timeout=30,  # Longer timeout for initial connection
+                        stream=True  # Stream mode - keeps connection open
                     )
                     
                     # Check response status
-                    if response.status_code in (200, 206):  # OK or Partial Content
-                        # Read the chunk
-                        chunk_data = response.content
-                        bytes_received = len(chunk_data)
+                    if response.status_code == 200:
+                        # Success - now continuously read chunks
+                        logger.info(f"Stream {stream_id} connection established, reading continuously...")
                         
-                        if bytes_received == 0:
-                            # EOF or stream ended
-                            logger.warning(f"Stream {stream_id} reached EOF (no data received)")
+                        # Read chunks continuously from the stream
+                        # This keeps the connection alive and simulates a real player
+                        for chunk in response.iter_content(chunk_size=chunk_size):
+                            # Check if we should stop
+                            if stop_event.is_set():
+                                logger.info(f"Stop requested for stream {stream_id}, closing connection")
+                                break
+                            
+                            if chunk:
+                                # Got data - update stats
+                                bytes_received = len(chunk)
+                                total_bytes += bytes_received
+                                stats['bytes_received'] = total_bytes
+                                stats['last_success_time'] = datetime.now()
+                                
+                                # Update health tracking
+                                self.stream_health[stream_id]['last_success'] = datetime.now()
+                                self.stream_health[stream_id]['is_alive'] = True
+                                self.stream_health[stream_id]['failures'] = 0
+                                consecutive_failures = 0
+                                
+                                logger.debug(
+                                    f"Stream {stream_id} received {bytes_received} bytes "
+                                    f"(total: {total_bytes} bytes)"
+                                )
+                                
+                                # Small delay between chunk reads to control bandwidth
+                                # This prevents overwhelming the system while keeping connection alive
+                                if read_delay > 0:
+                                    time.sleep(read_delay)
+                            else:
+                                # Empty chunk might indicate end of stream or temporary pause
+                                # Don't fail immediately, just log
+                                logger.debug(f"Stream {stream_id} received empty chunk")
+                        
+                        # If we exited the loop normally (not due to stop), stream ended
+                        if not stop_event.is_set():
+                            logger.warning(f"Stream {stream_id} ended (connection closed by server)")
                             self._handle_stream_failure(
                                 stream_id,
                                 'eof',
-                                "Stream reached end of file"
+                                "Stream connection closed by server"
                             )
                             consecutive_failures += 1
-                        else:
-                            # Success - update stats
-                            stats['bytes_received'] += bytes_received
-                            stats['last_success_time'] = datetime.now()
-                            byte_position += bytes_received
-                            
-                            # Update health tracking
-                            self.stream_health[stream_id]['last_success'] = datetime.now()
-                            self.stream_health[stream_id]['is_alive'] = True
-                            self.stream_health[stream_id]['failures'] = 0
-                            consecutive_failures = 0
-                            
-                            logger.debug(
-                                f"Stream {stream_id} keep-alive: received {bytes_received} bytes "
-                                f"(total: {stats['bytes_received']} bytes, position: {byte_position})"
-                            )
                     else:
                         # Unexpected status code
                         error_msg = f"HTTP {response.status_code}"
@@ -215,8 +243,8 @@ class HTTPStreamKeepAlive:
                     response.close()
                     
                 except requests.Timeout:
-                    logger.warning(f"Stream {stream_id} request timed out")
-                    self._handle_stream_failure(stream_id, 'timeout', "Request timed out")
+                    logger.warning(f"Stream {stream_id} connection timed out")
+                    self._handle_stream_failure(stream_id, 'timeout', "Connection timed out")
                     consecutive_failures += 1
                     
                 except requests.ConnectionError as e:
@@ -238,8 +266,10 @@ class HTTPStreamKeepAlive:
                     self.stream_health[stream_id]['is_alive'] = False
                     break
                 
-                # Wait for next interval (unless stopping)
-                stop_event.wait(interval)
+                # If connection failed, wait before retry
+                if consecutive_failures > 0:
+                    logger.info(f"Stream {stream_id} will retry in {interval}s (failure {consecutive_failures}/{max_consecutive_failures})")
+                    stop_event.wait(interval)
                 
         except Exception as e:
             logger.error(f"Fatal error in keep-alive loop for stream {stream_id}: {e}", exc_info=True)
