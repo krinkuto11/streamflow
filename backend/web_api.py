@@ -3886,7 +3886,6 @@ def get_stream_live_stats(stream_id):
         
         # Extract AceStream ID from URL
         stream_url = stream.get('url', '')
-        import re
         match = re.search(r'[?&]id=([a-f0-9]+)', stream_url, re.IGNORECASE)
         if not match:
             return jsonify({'error': 'Not an AceStream URL'}), 400
@@ -3904,12 +3903,10 @@ def get_stream_live_stats(stream_id):
         
         # Use default if no channel-specific URL
         if not orchestrator_url:
-            from dispatcharr_config import get_dispatcharr_config
             config = get_dispatcharr_config()
             orchestrator_url = config.get('acestream_orchestrator_url', 'http://gluetun:19000')
         
         # Query orchestrator /streams endpoint
-        import requests
         try:
             response = requests.get(f"{orchestrator_url}/streams", timeout=5)
             response.raise_for_status()
