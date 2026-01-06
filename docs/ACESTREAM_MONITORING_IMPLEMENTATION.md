@@ -4,6 +4,12 @@
 
 This document provides a comprehensive implementation guide for adding AceStream monitoring capabilities to StreamFlow. The feature will enable continuous monitoring of AceStream channels, health tracking, automatic stream ordering, and resource-efficient operation.
 
+**UPDATE (2026-01-06)**: The monitoring service now supports two methods for keeping streams alive:
+1. **HTTP Method (Recommended)**: Lightweight HTTP range requests - uses ~95% less resources
+2. **FFmpeg Method**: Traditional continuous ffmpeg processes - provides detailed stream metrics
+
+See [ACESTREAM_HTTP_VS_FFMPEG.md](ACESTREAM_HTTP_VS_FFMPEG.md) for detailed comparison and configuration guide.
+
 ## Feature Requirements
 
 ### Core Functionality
