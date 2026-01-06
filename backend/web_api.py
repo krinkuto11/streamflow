@@ -467,6 +467,21 @@ def get_channels():
         logger.error(f"Error fetching channels: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/streams/<int:stream_id>', methods=['GET'])
+def get_stream(stream_id):
+    """Get a specific stream by ID from UDI."""
+    try:
+        udi = get_udi_manager()
+        stream = udi.get_stream_by_id(stream_id)
+        
+        if stream is None:
+            return jsonify({"error": "Stream not found"}), 404
+        
+        return jsonify(stream)
+    except Exception as e:
+        logger.error(f"Error fetching stream {stream_id}: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/channels/<channel_id>/stats', methods=['GET'])
 def get_channel_stats(channel_id):
     """Get channel statistics including stream count, dead streams, resolution, and bitrate."""
