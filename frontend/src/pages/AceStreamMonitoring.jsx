@@ -403,6 +403,58 @@ export default function AceStreamMonitoring() {
                 Number of FFmpeg failures before marking stream as dead
               </p>
             </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="grid gap-2">
+                <Label htmlFor="livepos-tolerance">Livepos Buffer Tolerance (seconds)</Label>
+                <Input
+                  id="livepos-tolerance"
+                  type="number"
+                  min="5"
+                  max="120"
+                  value={config.livepos_buffer_tolerance}
+                  onChange={(e) => {
+                    const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
+                    if (value === '' || (!isNaN(value) && value >= 5 && value <= 120)) {
+                      setConfig({ ...config, livepos_buffer_tolerance: value === '' ? 30 : value })
+                    }
+                  }}
+                  onBlur={(e) => {
+                    if (e.target.value === '') {
+                      setConfig({ ...config, livepos_buffer_tolerance: 30 })
+                    }
+                  }}
+                />
+                <p className="text-sm text-muted-foreground">
+                  Mark stream dead if livepos doesn't advance for this long
+                </p>
+              </div>
+
+              <div className="grid gap-2">
+                <Label htmlFor="speed-timeout">Zero Speed Timeout (seconds)</Label>
+                <Input
+                  id="speed-timeout"
+                  type="number"
+                  min="5"
+                  max="60"
+                  value={config.speed_down_timeout}
+                  onChange={(e) => {
+                    const value = e.target.value === '' ? '' : parseInt(e.target.value, 10)
+                    if (value === '' || (!isNaN(value) && value >= 5 && value <= 60)) {
+                      setConfig({ ...config, speed_down_timeout: value === '' ? 10 : value })
+                    }
+                  }}
+                  onBlur={(e) => {
+                    if (e.target.value === '') {
+                      setConfig({ ...config, speed_down_timeout: 10 })
+                    }
+                  }}
+                />
+                <p className="text-sm text-muted-foreground">
+                  Mark stream dead if download speed is 0 for this long
+                </p>
+              </div>
+            </div>
           </div>
 
           <Button onClick={saveConfig} disabled={configLoading}>
