@@ -167,11 +167,11 @@ class AceStreamMonitor:
                 # Track current stream IDs
                 current_stream_ids = {s.get('id') for s in streams}
                 
-                # Stop FFmpeg for streams that are no longer in this channel
+                # Stop stream monitoring for streams that are no longer in this channel
                 removed_stream_ids = monitored_stream_ids - current_stream_ids
                 for stream_id in removed_stream_ids:
-                    logger.info(f"Stream {stream_id} removed from channel {channel_id}, stopping FFmpeg")
-                    self._stop_ffmpeg_process(stream_id)
+                    logger.info(f"Stream {stream_id} removed from channel {channel_id}, stopping stream monitoring")
+                    self._stop_stream_keepalive(stream_id)
                 
                 # Get orchestrator URL (channel-specific or default)
                 orchestrator_url = channel.get('acestream_orchestrator_url') or self.default_orchestrator_url
@@ -360,6 +360,9 @@ class AceStreamMonitor:
             else:
                 logger.info(f"Retrying dead stream {stream_id} after {retry_interval}s interval")
                 del self.dead_stream_retry_times[stream_id]
+                # Clear health status to allow retry
+                if stream_id in self.http_keepalive.stream_health:
+                    del self.http_keepalive.stream_health[stream_id]
         
         # Check if HTTP keep-alive is already running
         if self.http_keepalive.is_stream_alive(stream_id):
@@ -372,6 +375,16 @@ class AceStreamMonitor:
                 self.http_keepalive.stop_keepalive(stream_id)
                 return
             return  # Keep-alive is running and healthy
+        
+        # Check if stream was marked as not alive by HTTP keepalive thread
+        # This prevents restarting a stream that just failed with 3 consecutive failures
+        health = self.http_keepalive.get_stream_health(stream_id)
+        if health and not health.get('is_alive', True):
+            # Stream is marked as dead by the keepalive loop
+            # Don't restart - mark as dead and schedule retry
+            logger.warning(f"Stream {stream_id} is marked as dead by keepalive, not restarting")
+            self._mark_stream_dead(stream_id, stream_url, channel_id)
+            return
         
         # Start HTTP keep-alive
         interval = self.config.get('http_keepalive_interval', 10)
