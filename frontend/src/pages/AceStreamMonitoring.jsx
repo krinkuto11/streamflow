@@ -46,7 +46,7 @@ export default function AceStreamMonitoring() {
       loadChannelStreamsHealth()
     }, 30000) // Refresh every 30 seconds
     return () => clearInterval(interval)
-  }, [channels])
+  }, []) // Empty dependency array - only run once on mount
 
   const loadData = async () => {
     try {

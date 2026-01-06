@@ -3510,6 +3510,7 @@ def trigger_epg_refresh():
 
 # Global instance of AceStream monitor (initialized lazily)
 acestream_monitor = None
+acestream_db = None
 
 def get_acestream_monitor():
     """Get or create AceStream monitor instance."""
@@ -3543,6 +3544,19 @@ def get_acestream_monitor():
             logger.error(f"Failed to create AceStream monitor: {e}")
             return None
     return acestream_monitor
+
+def get_acestream_db():
+    """Get or create AceStream database instance."""
+    global acestream_db
+    if acestream_db is None:
+        try:
+            from acestream_db import AceStreamDatabase
+            acestream_db = AceStreamDatabase()
+            logger.info("AceStream database instance created (shared)")
+        except Exception as e:
+            logger.error(f"Failed to create AceStream database: {e}")
+            return None
+    return acestream_db
 
 
 @app.route('/api/acestream/config', methods=['GET'])
@@ -3791,8 +3805,9 @@ def get_channel_metrics(channel_id):
     try:
         hours = request.args.get('hours', 24, type=int)
         
-        from acestream_db import AceStreamDatabase
-        db = AceStreamDatabase()
+        db = get_acestream_db()
+        if not db:
+            return jsonify({'error': 'Database not available'}), 503
         
         metrics = db.get_channel_metrics(channel_id, hours)
         
@@ -3814,8 +3829,9 @@ def get_stream_health(stream_id):
         JSON with health data
     """
     try:
-        from acestream_db import AceStreamDatabase
-        db = AceStreamDatabase()
+        db = get_acestream_db()
+        if not db:
+            return jsonify({'error': 'Database not available'}), 503
         
         health = db.get_latest_stream_health(stream_id)
         
