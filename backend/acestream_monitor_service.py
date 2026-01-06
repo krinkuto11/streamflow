@@ -281,7 +281,11 @@ class AceStreamMonitor:
                 is_alive = self.http_keepalive.is_stream_healthy(stream_id)
             elif monitoring_stats:
                 # For FFmpeg, consider alive if we have recent stats
-                is_alive = True
+                # Check if monitoring is actually running and getting data
+                is_alive = monitoring_stats.get('bitrate', 0) > 0 or monitoring_stats.get('errors', 0) == 0
+            else:
+                # No monitoring stats means stream is likely not alive
+                is_alive = False
             
             # Calculate health score
             health_score = self._calculate_health_score(
@@ -940,7 +944,7 @@ class AceStreamMonitor:
             # Filter out dead streams before sorting and counting
             alive_streams = [
                 (stream, health) for stream, health in stream_health
-                if health.get('is_alive', True)
+                if health.get('is_alive', False)  # Default to False if missing - safer assumption
             ]
             
             # Sort by health score (descending)

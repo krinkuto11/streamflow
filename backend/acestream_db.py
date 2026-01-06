@@ -79,12 +79,12 @@ class AceStreamDatabase:
             ''')
             
             # Add is_alive column if it doesn't exist (migration)
-            try:
+            # Check if column exists first to avoid unnecessary exception handling
+            cursor.execute("PRAGMA table_info(stream_metrics)")
+            columns = [row[1] for row in cursor.fetchall()]
+            if 'is_alive' not in columns:
                 cursor.execute('ALTER TABLE stream_metrics ADD COLUMN is_alive INTEGER DEFAULT 1')
                 conn.commit()
-            except sqlite3.OperationalError:
-                # Column already exists, ignore
-                pass
             
             # Create indexes for better query performance
             cursor.execute('''
