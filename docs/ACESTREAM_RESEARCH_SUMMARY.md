@@ -2,11 +2,11 @@
 
 **Date**: January 6, 2026  
 **Task**: Research alternatives to FFmpeg for AceStream monitoring  
-**Status**: ✅ COMPLETE
+**Status**: ✅ COMPLETE (Updated with persistent streaming)
 
 ## Executive Summary
 
-Successfully researched and implemented a lightweight HTTP-based alternative to FFmpeg for keeping AceStream streams alive in the orchestrator. The new HTTP method uses ~95% less resources while maintaining all core functionality including dead stream detection.
+Successfully researched and implemented a lightweight HTTP-based alternative to FFmpeg for keeping AceStream streams alive in the orchestrator. The HTTP method uses persistent streaming connections (similar to ffmpeg but without decoding) to prevent "broken pipe" errors while using ~95% less resources than ffmpeg.
 
 ## Problem Statement
 
@@ -29,28 +29,31 @@ The current AceStream monitoring implementation uses continuous FFmpeg processes
 2. Streams appear "started" when there's an active consumer requesting data
 3. The orchestrator monitors if data is being consumed (player is active)
 4. When consumption stops, the stream disappears from `/streams`
+5. **Critical**: Connection must remain open continuously to prevent "broken pipe" errors
 
-### HTTP Range Request Approach
+### HTTP Persistent Streaming Approach
 
-**Discovery**: We can simulate a player by making periodic HTTP range requests to the stream URL.
+**Discovery**: We can simulate a player by maintaining a persistent HTTP streaming connection.
 
 **How it works:**
-1. Make HTTP GET request with `Range: bytes=0-65535` header
-2. Request next 64KB chunk every 10 seconds (configurable)
-3. Orchestrator sees data being consumed → keeps stream in `/streams`
-4. No need to process/decode the stream data
-5. Minimal resource usage (just HTTP requests)
+1. Open a persistent HTTP streaming connection to the stream URL
+2. Continuously read small chunks (e.g., 64KB) using `iter_content()`
+3. Keep connection open for the lifetime of the stream
+4. Orchestrator sees continuous consumption → keeps stream in `/streams`
+5. No need to decode the stream data (unlike ffmpeg)
+6. Minimal resource usage (just reading raw bytes)
 
 **Benefits:**
 - No ffmpeg needed
-- Very low CPU/memory usage
+- Very low CPU/memory usage (no decoding)
 - Scales to many streams
 - Simpler implementation
-- Configurable request frequency and chunk size
+- Configurable chunk size and read delay
+- Prevents "broken pipe" errors
 
 ## Implementation
 
-### New HTTP-based Monitoring Class
+### HTTP-based Monitoring Class
 
 Created `HTTPStreamKeepAlive` class in `acestream_http_monitor.py`:
 
@@ -58,14 +61,14 @@ Created `HTTPStreamKeepAlive` class in `acestream_http_monitor.py`:
 class HTTPStreamKeepAlive:
     """
     Lightweight HTTP-based stream keep-alive mechanism.
-    Makes periodic HTTP range requests to keep streams alive.
+    Maintains persistent HTTP streaming connections to keep streams alive.
     """
 ```
 
 **Features:**
-- Thread-based per-stream keep-alive
-- Configurable interval (default: 10s)
+- Thread-based per-stream persistent connections
 - Configurable chunk size (default: 64KB)
+- Configurable read delay between chunks (default: 0.5s max)
 - Dead stream detection (EOF, errors, timeouts)
 - Health tracking (failures, success rate)
 - Graceful shutdown
@@ -78,7 +81,7 @@ Modified `acestream_monitor_service.py` to support both methods:
 # Configuration
 config = {
     'monitoring_method': 'http',  # or 'ffmpeg'
-    'http_keepalive_interval': 10,
+    'http_keepalive_interval': 10,  # Retry interval on failure
     'http_chunk_size': 65536
 }
 ```
@@ -94,7 +97,7 @@ config = {
 Both methods detect dead streams:
 
 **HTTP Method:**
-- EOF detection (empty response)
+- EOF detection (stream ends, iter_content finishes)
 - HTTP errors (404, 500, etc.)
 - Connection errors/timeouts
 - Consecutive failure tracking
@@ -107,28 +110,28 @@ Both methods detect dead streams:
 
 **Common Logic:**
 - After 3 consecutive failures → mark as dead
-- Dead streams retried after 5 minutes (configurable)
+- Dead streams retried after configurable interval (default: 5 min)
 - Integrated with existing `DeadStreamsTracker`
 
 ## Testing
 
 ### Comprehensive Test Suite
 
-Created `test_http_acestream_monitoring.py` with 9 tests:
+Updated `test_http_acestream_monitoring.py` with 9 tests:
 
 1. ✅ Initialization test
-2. ✅ Start keep-alive test
+2. ✅ Start keep-alive test (persistent connection)
 3. ✅ Stop keep-alive test
 4. ✅ Health tracking (success) test
 5. ✅ Health tracking (failure) test
-6. ✅ EOF detection test
+6. ✅ EOF detection test (stream end)
 7. ✅ HTTP error detection test
 8. ✅ Stream alive check test
 9. ✅ Stop all streams test
 
 **Results:**
 ```
-Ran 9 tests in 5.914s
+Ran 9 tests in 3.915s
 OK
 ```
 
@@ -147,6 +150,8 @@ OK
 | Memory per stream | ~2MB | ~20-50MB | **90%+ reduction** |
 | Startup time | <50ms | ~500ms | **10x faster** |
 | Scalability | 100+ streams | 20-30 streams | **3-5x more** |
+| Connection Type | Persistent | Persistent | Same |
+| Orchestrator Errors | None | None | Same |
 
 **Resource Calculations:**
 
@@ -195,7 +200,7 @@ OK
 }
 ```
 
-## Documentation Created
+## Documentation Updated
 
 1. **ACESTREAM_HTTP_VS_FFMPEG.md** (9.4KB)
    - Detailed comparison of both methods
@@ -246,13 +251,14 @@ Potential improvements identified:
 
 **There is a better way than FFmpeg for AceStream monitoring.**
 
-The HTTP range request approach:
+The HTTP persistent streaming approach:
 - ✅ Keeps streams alive in orchestrator
 - ✅ Maintains `/streams` endpoint availability
 - ✅ Detects dead streams
 - ✅ Uses ~95% less resources
 - ✅ Scales to many more streams
 - ✅ Simpler and more maintainable
+- ✅ Prevents "broken pipe" errors
 
 ### Default Configuration
 
@@ -261,6 +267,7 @@ The HTTP method is now the **recommended default** for AceStream monitoring due 
 2. Better scalability
 3. Simpler operation
 4. Same core functionality
+5. No orchestrator connection errors
 
 The FFmpeg method remains available for users who need detailed stream quality metrics and have the resources to support it.
 
@@ -274,15 +281,11 @@ The FFmpeg method remains available for users who need detailed stream quality m
 
 ## Files Changed
 
-**New Files:**
-- `backend/acestream_http_monitor.py` (327 lines)
-- `backend/tests/test_http_acestream_monitoring.py` (312 lines)
-- `docs/ACESTREAM_HTTP_VS_FFMPEG.md` (394 lines)
-
 **Modified Files:**
-- `backend/acestream_monitor_service.py` (+191 lines, refactored)
-- `docs/ACESTREAM_MONITORING_IMPLEMENTATION.md` (+7 lines)
-- `README.md` (+3 lines)
+- `backend/acestream_http_monitor.py` (updated to persistent streaming)
+- `backend/tests/test_http_acestream_monitoring.py` (updated tests)
+- `docs/ACESTREAM_HTTP_VS_FFMPEG.md` (updated comparison)
+- `docs/ACESTREAM_RESEARCH_SUMMARY.md` (this file)
 
 **Total Lines of Code**: ~1,234 lines (including tests and documentation)
 

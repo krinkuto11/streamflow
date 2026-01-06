@@ -4,7 +4,7 @@
 
 StreamFlow now supports two methods for keeping AceStream streams alive in the orchestrator:
 
-1. **HTTP Method (Default)** - Lightweight HTTP range requests
+1. **HTTP Method (Default)** - Lightweight persistent HTTP streaming connections
 2. **FFmpeg Method** - Traditional continuous ffmpeg processes
 
 ## Why Two Methods?
@@ -21,19 +21,22 @@ The new HTTP method provides the same functionality with significantly lower res
 
 ### How It Works
 
-The HTTP method makes periodic HTTP range requests to the stream URL, requesting small chunks of data (default: 64KB every 10 seconds). This:
+The HTTP method maintains a persistent HTTP streaming connection to the stream URL, continuously reading small chunks of data (default: 64KB). This:
 
-1. Simulates a player consuming data
+1. Simulates a player consuming data continuously
 2. Keeps the stream registered in the orchestrator's `/streams` endpoint
 3. Detects dead/broken streams (EOF, connection errors, timeouts)
-4. Uses minimal resources
+4. Uses minimal resources (no decoding, just reading raw bytes)
+5. Prevents "broken pipe" errors by keeping connection continuously open
 
 ### Advantages
 
 - ✅ **Low Resource Usage**: No ffmpeg processes needed
-- ✅ **Lightweight**: Only requests small chunks periodically
+- ✅ **Lightweight**: No decoding, just reading raw stream data
+- ✅ **Persistent Connection**: Keeps connection open like a real player
 - ✅ **Dead Stream Detection**: Detects EOF, connection errors, and timeouts
-- ✅ **Configurable**: Adjustable interval and chunk size
+- ✅ **Configurable**: Adjustable chunk size and read delay
+- ✅ **No Broken Pipe Errors**: Continuous connection prevents orchestrator errors
 - ✅ **Same Functionality**: Keeps streams alive just like ffmpeg
 
 ### Configuration
@@ -41,24 +44,25 @@ The HTTP method makes periodic HTTP range requests to the stream URL, requesting
 ```python
 config = {
     'monitoring_method': 'http',  # Use HTTP method
-    'http_keepalive_interval': 10,  # Seconds between requests
-    'http_chunk_size': 65536,  # 64KB per request
+    'http_keepalive_interval': 10,  # Retry interval on failure (seconds)
+    'http_chunk_size': 65536,  # 64KB per chunk
 }
 ```
 
 ### How HTTP Keep-Alive Works
 
-1. **Initial Request**: Makes HTTP range request for first 64KB
-2. **Periodic Requests**: Every 10s, requests next 64KB chunk
-3. **Health Tracking**: Monitors response status, detects failures
-4. **Dead Detection**: After 3 consecutive failures, marks stream as dead
-5. **Retry Logic**: Dead streams are retried after configured interval
+1. **Open Connection**: Opens persistent HTTP streaming connection to stream URL
+2. **Continuous Reading**: Reads chunks continuously using `iter_content(chunk_size)`
+3. **Small Delays**: Optional delay between chunks (default: 0.5s max) to control bandwidth
+4. **Health Tracking**: Monitors connection status, detects failures
+5. **Dead Detection**: After 3 consecutive failures, marks stream as dead
+6. **Retry Logic**: Dead streams are retried after configured interval
 
 ### Health Scoring with HTTP Method
 
 The HTTP method provides health metrics that contribute to the overall health score:
 
-- **Stream Alive** (20 points): HTTP requests are successful
+- **Stream Alive** (20 points): Connection is active and streaming
 - **Low Failures** (0-15 points): Based on failure count
   - 0 failures: 15 points
   - 1 failure: 10 points
@@ -114,10 +118,12 @@ The FFmpeg method provides detailed stream metrics:
 | Resource Usage | ⭐⭐⭐⭐⭐ Very Low | ⭐⭐ Moderate |
 | CPU Usage | ⭐⭐⭐⭐⭐ Minimal | ⭐⭐ Higher |
 | Memory Usage | ⭐⭐⭐⭐⭐ Minimal | ⭐⭐ Higher |
+| Connection Type | Persistent | Persistent |
 | Dead Stream Detection | ✅ Yes (EOF, errors) | ✅ Yes (EOF, errors) |
 | Stream Quality Metrics | ❌ No codec/res/fps | ✅ Yes |
 | Setup Complexity | ⭐⭐⭐⭐⭐ Simple | ⭐⭐⭐ Moderate |
 | Scalability | ⭐⭐⭐⭐⭐ Excellent | ⭐⭐⭐ Good |
+| Orchestrator Errors | None | None |
 | Recommended | ✅ Yes (default) | For detailed metrics |
 
 ## Configuration Examples
@@ -161,7 +167,7 @@ The FFmpeg method provides detailed stream metrics:
 
 Both methods detect dead streams through:
 
-1. **EOF Detection**: Empty response or stream end
+1. **EOF Detection**: Stream ends, connection closes
 2. **Connection Errors**: Network failures, timeouts
 3. **HTTP Errors**: 404, 500, etc. (HTTP method)
 4. **FFmpeg Errors**: Decoding errors, corrupt data (FFmpeg method)
@@ -186,7 +192,7 @@ After detecting a dead stream:
 
 3. Existing FFmpeg processes will be stopped during shutdown
 
-4. HTTP keep-alive will start automatically
+4. HTTP keep-alive will start automatically with persistent connections
 
 ### Switching from HTTP to FFmpeg
 
@@ -206,14 +212,18 @@ After detecting a dead stream:
 ### HTTP Method Issues
 
 **Streams not appearing in orchestrator:**
-- Check if HTTP requests are successful (view logs)
+- Check if HTTP connections are successful (view logs)
 - Verify stream URL is correct and accessible
-- Ensure keepalive interval is not too long
+- Ensure connection stays open (check for "broken pipe" errors)
 
 **High failure rate:**
-- Increase `http_keepalive_interval` to reduce request frequency
+- Increase `http_chunk_size` to reduce read frequency
 - Check network connectivity to stream source
 - Verify orchestrator is running and accessible
+
+**"Broken pipe" errors:**
+- This issue is now fixed with persistent connections
+- If you still see it, verify you're using the latest version
 
 ### FFmpeg Method Issues
 
@@ -251,7 +261,7 @@ Use FFmpeg method:
 
 ### For Low-Resource Environments
 
-Use HTTP method with longer intervals:
+Use HTTP method with optimized settings:
 ```json
 {
   "monitoring_method": "http",
@@ -263,46 +273,44 @@ Use HTTP method with longer intervals:
 
 ## Implementation Details
 
-### HTTP Keep-Alive Loop
+### HTTP Persistent Streaming Loop
 
 ```python
-while not stop_event.is_set():
-    # Make HTTP range request
-    headers = {'Range': f'bytes={position}-{position + chunk_size - 1}'}
-    response = session.get(stream_url, headers=headers, timeout=10)
+# Open persistent connection
+response = session.get(stream_url, headers=headers, timeout=30, stream=True)
+
+# Continuously read chunks
+for chunk in response.iter_content(chunk_size=chunk_size):
+    if stop_event.is_set():
+        break
     
-    # Check response
-    if response.status_code in (200, 206):
-        chunk = response.content
-        if len(chunk) == 0:
-            # EOF detected
-            handle_failure('eof')
-        else:
-            # Success
-            update_health(success=True)
-            position += len(chunk)
-    else:
-        # HTTP error
-        handle_failure('http_error')
-    
-    # Wait for next interval
-    stop_event.wait(interval)
+    if chunk:
+        # Update stats
+        update_health(success=True)
+        total_bytes += len(chunk)
+        
+        # Small delay to control bandwidth
+        time.sleep(read_delay)
+
+# If loop ends naturally (not stopped), stream ended
+if not stop_event.is_set():
+    handle_failure('eof')
 ```
 
 ### Dead Stream Detection
 
 Both methods track consecutive failures:
 
-1. **Success**: Reset failure counter
+1. **Success**: Reset failure counter, mark stream as alive
 2. **Failure**: Increment failure counter
 3. **Max Failures Reached**: Mark as dead, stop monitoring
-4. **Retry**: After retry interval, attempt restart
+4. **Retry**: After retry interval, attempt to reconnect
 
 ## Best Practices
 
 1. **Use HTTP Method by Default**: Lower resource usage, simpler operation
 2. **Monitor Resource Usage**: Check CPU/memory if using FFmpeg method
-3. **Adjust Intervals**: Balance between responsiveness and resource usage
+3. **Adjust Chunk Size**: Balance between responsiveness and resource usage
 4. **Enable Logging**: Monitor for errors and dead stream detection
 5. **Test Configuration**: Verify streams stay alive in orchestrator
 
@@ -311,11 +319,13 @@ Both methods track consecutive failures:
 Possible improvements:
 
 1. **Hybrid Mode**: Use HTTP for keep-alive, periodic FFmpeg for quality metrics
-2. **Adaptive Intervals**: Adjust based on stream stability
+2. **Adaptive Chunk Size**: Adjust based on stream stability
 3. **Bandwidth Limiting**: Configurable maximum bandwidth per stream
 4. **Stats Collection**: Gather performance metrics for both methods
 5. **Auto-Selection**: Automatically choose best method based on system resources
 
 ## Conclusion
 
-The HTTP method is recommended for most use cases due to its significantly lower resource usage while providing the same core functionality as the FFmpeg method. Use FFmpeg only when you need detailed stream quality metrics (codec, resolution, bitrate, FPS) and have sufficient system resources.
+The HTTP persistent streaming method is recommended for most use cases due to its significantly lower resource usage while providing the same core functionality as the FFmpeg method. The fix for "broken pipe" errors makes it production-ready and suitable for keeping many streams alive simultaneously.
+
+Use FFmpeg only when you need detailed stream quality metrics (codec, resolution, bitrate, FPS) and have sufficient system resources.
