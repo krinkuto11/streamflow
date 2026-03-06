@@ -362,7 +362,12 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
         'fps': 0,
         'bitrate_kbps': None,
         'status': 'OK',
-        'elapsed_time': 0
+        'elapsed_time': 0,
+        'video_profile': None,
+        'video_bit_depth': None,
+        'audio_language': None,
+        'sample_rate': None,
+        'audio_channels': None,
     }
 
     # Add buffer to timeout to account for ffmpeg startup, network latency, and shutdown overhead
@@ -435,6 +440,25 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
                     if fps_match:
                         result_data['fps'] = round(float(fps_match.group(1)), 2)
                         logger.debug(f"  → Detected FPS: {result_data['fps']}")
+
+                    # Extract video profile — e.g. "h264 (High)" or "hevc (Main 10)"
+                    # Skip if it looks like a codec alias (contains / or 0x)
+                    profile_match = re.search(r'Video:\s+\w+\s+\(([^)]+)\)', line)
+                    if profile_match:
+                        candidate = profile_match.group(1).strip()
+                        if '/' not in candidate and '0x' not in candidate:
+                            result_data['video_profile'] = candidate
+                            logger.debug(f"  → Detected video profile: {candidate}")
+
+                    # Extract bit depth from pixel format
+                    # e.g. yuv420p10le → 10, yuv420p12le → 12, yuv420p → 8
+                    depth_match = re.search(r'yuv[j\d]+p(\d{2})', line)
+                    if depth_match:
+                        result_data['video_bit_depth'] = int(depth_match.group(1))
+                        logger.debug(f"  → Detected bit depth: {result_data['video_bit_depth']}")
+                    elif re.search(r'yuv[j\d]+p\b', line):
+                        result_data['video_bit_depth'] = 8
+                        logger.debug(f"  → Detected bit depth: 8 (standard yuv)")
                 except (ValueError, AttributeError) as e:
                     logger.debug(f"  → Error parsing video stream line: {e}")
             
@@ -454,6 +478,32 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
                         if audio_codec != 'N/A':
                             result_data['audio_codec'] = audio_codec
                             logger.debug(f"  → Final audio codec: {result_data['audio_codec']}")
+
+                    # Extract audio language from stream specifier e.g. "Stream #0:1(eng):"
+                    lang_match = re.search(r'Stream #\d+:\d+\((\w+)\):', line)
+                    if lang_match:
+                        lang = lang_match.group(1)
+                        if lang.lower() not in ('und', 'unknown'):
+                            result_data['audio_language'] = lang
+                            logger.debug(f"  → Detected audio language: {lang}")
+
+                    # Extract sample rate e.g. "48000 Hz"
+                    sr_match = re.search(r'(\d+)\s+Hz', line)
+                    if sr_match:
+                        result_data['sample_rate'] = int(sr_match.group(1))
+                        logger.debug(f"  → Detected sample rate: {result_data['sample_rate']}")
+
+                    # Extract channel layout e.g. "stereo", "5.1(side)", "7.1"
+                    # Strip trailing (side)/(back) qualifiers so "5.1(side)" → "5.1"
+                    ch_match = re.search(r'\d+\s+Hz,\s+([^,\s]+)', line)
+                    if ch_match:
+                        layout = ch_match.group(1)
+                        paren = layout.find('(')
+                        if paren > 0:
+                            layout = layout[:paren]
+                        if layout:
+                            result_data['audio_channels'] = layout.strip()
+                            logger.debug(f"  → Detected audio channels: {result_data['audio_channels']}")
                 except (ValueError, AttributeError) as e:
                     logger.debug(f"  → Error parsing audio stream line: {e}")
             
@@ -536,128 +586,6 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
 
     return result_data
 
-
-def get_stream_metadata(url: str, timeout: int = 15, user_agent: str = 'VLC/3.0.14') -> Dict[str, Any]:
-    """
-    Extract stream metadata using a quick ffprobe JSON call.
-
-    Runs ffprobe once to collect structured metadata that ffmpeg debug output
-    does not expose reliably: H.264/HEVC profile, level, bit depth, reference
-    frames, audio language, sample rate, and channel layout.
-
-    Args:
-        url: Stream URL to analyse
-        timeout: Timeout in seconds (default: 15)
-        user_agent: User-Agent string for HTTP requests
-
-    Returns:
-        Dictionary with any of the following keys that could be extracted:
-        - video_profile (str): e.g. "High", "Main"
-        - video_level (int): raw ffprobe level integer, e.g. 42 for Level 4.2
-        - video_bit_depth (int): e.g. 8, 10
-        - video_ref_frames (int): reference frame count
-        - audio_language (str): ISO 639-2 language tag, e.g. "eng", "dut"
-        - sample_rate (int): audio sample rate in Hz, e.g. 48000
-        - audio_channels (str): normalised channel layout, e.g. "5.1", "stereo"
-        Returns empty dict on any failure.
-    """
-    command = [
-        'ffprobe',
-        '-user_agent', user_agent,
-        '-v', 'quiet',
-        '-print_format', 'json',
-        '-show_streams',
-        '-show_entries',
-        'stream=codec_type,profile,level,bit_depth,refs,sample_rate,channels,channel_layout'
-        ':stream_tags=language',
-        '-read_ahead_limit', '5M',
-        '-analyzeduration', '5000000',
-        url,
-    ]
-
-    try:
-        result = subprocess.run(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            text=True,
-        )
-
-        if not result.stdout:
-            logger.debug(f"ffprobe metadata: no output for {url[:50]}...")
-            return {}
-
-        data = json.loads(result.stdout)
-        streams = data.get('streams', [])
-        metadata = {}
-
-        # Video stream
-        video_stream = next((s for s in streams if s.get('codec_type') == 'video'), None)
-        if video_stream:
-            profile = video_stream.get('profile')
-            if profile and profile.lower() not in ('unknown', 'n/a', 'none', ''):
-                metadata['video_profile'] = profile
-
-            level = video_stream.get('level')
-            if level is not None:
-                try:
-                    lvl_int = int(level)
-                    if lvl_int > 0:
-                        metadata['video_level'] = lvl_int
-                except (ValueError, TypeError):
-                    pass
-
-            bit_depth = video_stream.get('bit_depth')
-            if bit_depth is not None:
-                try:
-                    metadata['video_bit_depth'] = int(bit_depth)
-                except (ValueError, TypeError):
-                    pass
-
-            refs = video_stream.get('refs')
-            if refs is not None:
-                try:
-                    metadata['video_ref_frames'] = int(refs)
-                except (ValueError, TypeError):
-                    pass
-
-        # Audio stream
-        audio_stream = next((s for s in streams if s.get('codec_type') == 'audio'), None)
-        if audio_stream:
-            tags = audio_stream.get('tags', {}) or {}
-            language = tags.get('language', '')
-            if language and language.lower() not in ('und', 'n/a', ''):
-                metadata['audio_language'] = language
-
-            sample_rate = audio_stream.get('sample_rate')
-            if sample_rate:
-                try:
-                    metadata['sample_rate'] = int(sample_rate)
-                except (ValueError, TypeError):
-                    pass
-
-            # Normalise channel_layout: strip trailing "(side)" / "(back)" qualifiers
-            # so "5.1(side)" becomes "5.1", which ParseAudioChannelCount can parse.
-            channel_layout = audio_stream.get('channel_layout', '')
-            if channel_layout and channel_layout.lower() not in ('unknown', ''):
-                paren = channel_layout.find('(')
-                normalised = channel_layout[:paren].strip() if paren > 0 else channel_layout.strip()
-                if normalised:
-                    metadata['audio_channels'] = normalised
-
-        logger.debug(f"ffprobe metadata for {url[:50]}...: {metadata}")
-        return metadata
-
-    except subprocess.TimeoutExpired:
-        logger.warning(f"ffprobe metadata timeout ({timeout}s) for {url[:50]}...")
-        return {}
-    except json.JSONDecodeError as e:
-        logger.warning(f"ffprobe metadata JSON decode error for {url[:50]}...: {e}")
-        return {}
-    except Exception as e:
-        logger.warning(f"ffprobe metadata failed for {url[:50]}...: {e}")
-        return {}
 
 
 def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_agent: str = 'VLC/3.0.14', stream_startup_buffer: int = 10) -> Tuple[Optional[float], str, float]:
@@ -885,13 +813,7 @@ def analyze_stream(
                     stream_startup_buffer=stream_startup_buffer
                 )
 
-                # Augment with structured metadata from a fast ffprobe call.
-                # This adds profile, level, bit depth, ref frames, audio language,
-                # sample rate, and channel layout — fields not reliably extractable
-                # from ffmpeg debug output.
-                metadata = get_stream_metadata(stream_url, timeout=15, user_agent=user_agent)
-
-                # Build result dictionary with metadata
+                # Build result dictionary
                 result = {
                     'stream_id': stream_id,
                     'stream_name': stream_name,
@@ -903,8 +825,12 @@ def analyze_stream(
                     'fps': result_data['fps'],
                     'bitrate_kbps': result_data['bitrate_kbps'],
                     'status': result_data['status'],
+                    'video_profile': result_data.get('video_profile'),
+                    'video_bit_depth': result_data.get('video_bit_depth'),
+                    'audio_language': result_data.get('audio_language'),
+                    'sample_rate': result_data.get('sample_rate'),
+                    'audio_channels': result_data.get('audio_channels'),
                 }
-                result.update(metadata)
 
                 # Log results
                 # In debug mode, show detailed multi-line logs

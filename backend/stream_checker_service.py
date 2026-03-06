@@ -1460,7 +1460,7 @@ class StreamCheckerService:
             "video_codec": stream_data.get("video_codec"),
             "audio_codec": stream_data.get("audio_codec"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
-            # Extended metadata from ffprobe
+            # Extended stream metadata
             "video_profile": stream_data.get("video_profile"),
             "video_level": stream_data.get("video_level"),
             "video_bit_depth": stream_data.get("video_bit_depth"),
@@ -1543,7 +1543,7 @@ class StreamCheckerService:
             "video_codec": stream_data.get("video_codec"),
             "audio_codec": stream_data.get("audio_codec"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
-            # Extended metadata from ffprobe
+            # Extended stream metadata
             "video_profile": stream_data.get("video_profile"),
             "video_level": stream_data.get("video_level"),
             "video_bit_depth": stream_data.get("video_bit_depth"),
