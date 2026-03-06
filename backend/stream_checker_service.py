@@ -1460,15 +1460,23 @@ class StreamCheckerService:
             "video_codec": stream_data.get("video_codec"),
             "audio_codec": stream_data.get("audio_codec"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
+            # Extended metadata from ffprobe
+            "video_profile": stream_data.get("video_profile"),
+            "video_level": stream_data.get("video_level"),
+            "video_bit_depth": stream_data.get("video_bit_depth"),
+            "video_ref_frames": stream_data.get("video_ref_frames"),
+            "audio_language": stream_data.get("audio_language"),
+            "sample_rate": stream_data.get("sample_rate"),
+            "audio_channels": stream_data.get("audio_channels"),
         }
-        
+
         # Clean up the payload, removing any None values or N/A values
         stream_stats_payload = {k: v for k, v in stream_stats_payload.items() if v not in [None, "N/A"]}
-        
+
         if not stream_stats_payload:
             logger.debug(f"No data to update for stream {stream_id}. Skipping.")
             return False
-        
+
         # Construct the URL for the specific stream
         stream_url = f"{base_url}/api/channels/streams/{int(stream_id)}/"
         
@@ -1535,15 +1543,23 @@ class StreamCheckerService:
             "video_codec": stream_data.get("video_codec"),
             "audio_codec": stream_data.get("audio_codec"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
+            # Extended metadata from ffprobe
+            "video_profile": stream_data.get("video_profile"),
+            "video_level": stream_data.get("video_level"),
+            "video_bit_depth": stream_data.get("video_bit_depth"),
+            "video_ref_frames": stream_data.get("video_ref_frames"),
+            "audio_language": stream_data.get("audio_language"),
+            "sample_rate": stream_data.get("sample_rate"),
+            "audio_channels": stream_data.get("audio_channels"),
         }
-        
+
         # Clean up the payload, removing any None values or N/A values
         stream_stats_payload = {k: v for k, v in stream_stats_payload.items() if v not in [None, "N/A"]}
-        
+
         if not stream_stats_payload:
             logger.debug(f"No data to update for stream {stream_id}. Skipping.")
             return None
-        
+
         return {
             'stream_id': stream_id,
             'stream_stats': stream_stats_payload
