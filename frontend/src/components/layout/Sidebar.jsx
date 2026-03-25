@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button.jsx'
 import { ThemeToggle } from '@/components/ThemeToggle.jsx'
-import { versionAPI } from '@/services/api.js'
+import { versionAPI, environmentAPI } from '@/services/api.js'
 import {
   Tooltip,
   TooltipContent,
@@ -39,52 +39,33 @@ const menuItems = [
 export function Sidebar({ isCollapsed, setIsCollapsed }) {
   const [isOpen, setIsOpen] = useState(false)
   const [version, setVersion] = useState(null)
-  const [buildDate, setBuildDate] = useState(null)
+  const [publicIp, setPublicIp] = useState(null)
   const location = useLocation()
 
-  const formatVersionLabel = (rawVersion) => {
-    if (!rawVersion) return ''
-    const v = String(rawVersion).trim()
-    if (!v) return ''
-
-    // Prefix semantic versions with "v" (e.g., 1.2.3 -> v1.2.3),
-    // but keep dev/fallback strings as-is (e.g., dev-unknown).
-    const looksLikeSemver = /^v?\d+\.\d+\.\d+(?:[-+].*)?$/.test(v)
-    if (looksLikeSemver) {
-      return v.startsWith('v') ? v : `v${v}`
-    }
-    return v
-  }
-
-  const formatBuildDateLabel = (rawBuildDate) => {
-    if (!rawBuildDate) return null
-    const parsed = new Date(rawBuildDate)
-    if (Number.isNaN(parsed.getTime())) {
-      return String(rawBuildDate)
-    }
-    const year = parsed.getFullYear()
-    const month = String(parsed.getMonth() + 1).padStart(2, '0')
-    const day = String(parsed.getDate()).padStart(2, '0')
-    return `${year}-${month}-${day}`
-  }
-
   useEffect(() => {
-    // Fetch version on mount
     const fetchVersion = async () => {
       try {
         const response = await versionAPI.getVersion()
         setVersion(response.data.version)
-        setBuildDate(response.data.build_date || null)
       } catch (error) {
         console.error('Failed to fetch version:', error)
         setVersion('dev-unknown')
-        setBuildDate(null)
       }
     }
     fetchVersion()
   }, [])
 
-  const buildDateLabel = formatBuildDateLabel(buildDate)
+  useEffect(() => {
+    const fetchEnvironment = async () => {
+      try {
+        const response = await environmentAPI.getEnvironment()
+        setPublicIp(response.data.public_ip)
+      } catch (error) {
+        console.error('Failed to fetch environment:', error)
+      }
+    }
+    fetchEnvironment()
+  }, [])
 
   return (
     <>
@@ -205,14 +186,22 @@ export function Sidebar({ isCollapsed, setIsCollapsed }) {
               <ThemeToggle />
             </div>
           </div>
-          {(buildDateLabel || version) && (
+          {!isCollapsed && publicIp && (
+            <div className="px-2 space-y-1">
+              <span className="text-xs text-muted-foreground font-medium">Public IP</span>
+              <div className="rounded-md border border-border bg-background px-2 py-1.5">
+                <span className="text-xs font-mono text-foreground truncate block">
+                  {publicIp}
+                </span>
+              </div>
+            </div>
+          )}
+          {version && (
             <div className={cn(
               "pt-2 text-[10px] text-muted-foreground text-center font-mono opacity-60",
               isCollapsed ? "w-full overflow-hidden truncate px-1" : ""
             )}>
-              {buildDateLabel
-                ? (isCollapsed ? buildDateLabel.slice(5) : `Build ${buildDateLabel}`)
-                : (isCollapsed ? version.split('-')[0] : formatVersionLabel(version))}
+              {isCollapsed ? version.split('-')[0] : `v${version}`}
             </div>
           )}
         </div>
