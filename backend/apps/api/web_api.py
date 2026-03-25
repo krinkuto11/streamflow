@@ -577,32 +577,55 @@ def health_check_stripped():
 def get_version():
     """Get application version."""
     try:
-        build_date = None
         version_file = Path(__file__).parent / 'version.txt'
         if version_file.exists():
             version = version_file.read_text().strip()
-
-            # Prefer build date embedded in CI version strings (e.g. branch-20260324).
-            date_match = re.search(r'(?<!\d)(20\d{6})(?!\d)', version)
-            if date_match:
-                try:
-                    build_date = datetime.strptime(date_match.group(1), '%Y%m%d').date().isoformat()
-                except ValueError:
-                    build_date = None
-
-            # Fallback: use version file modified date as latest build date.
-            if not build_date:
-                try:
-                    build_date = datetime.fromtimestamp(version_file.stat().st_mtime).date().isoformat()
-                except Exception:
-                    build_date = None
         else:
             version = "dev-unknown"
-
-        return jsonify({"version": version, "build_date": build_date})
+        return jsonify({"version": version})
     except Exception as e:
         logger.error(f"Failed to read version: {e}")
-        return jsonify({"version": "dev-unknown", "build_date": None})
+        return jsonify({"version": "dev-unknown"})
+
+
+@app.route('/api/environment', methods=['GET'])
+def get_environment():
+    """Get environment info including public IP and geolocation."""
+    public_ip = None
+    country_code = None
+    country_name = None
+
+    # 1) Get public IP from ipify
+    try:
+        r = requests.get("https://api64.ipify.org?format=json", timeout=5)
+        r.raise_for_status()
+        public_ip = r.json().get("ip")
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch public IP: {e}")
+        public_ip = None
+
+    # 2) Geo lookup — ipapi.co with fallback to ip-api.com
+    if public_ip:
+        try:
+            r = requests.get(f"https://ipapi.co/{public_ip}/json/", timeout=5)
+            if r.status_code == 200:
+                geo = r.json()
+                country_code = geo.get("country_code")
+                country_name = geo.get("country_name")
+            else:
+                r = requests.get("http://ip-api.com/json/", timeout=5)
+                if r.status_code == 200:
+                    geo = r.json()
+                    country_code = geo.get("countryCode")
+                    country_name = geo.get("country")
+        except Exception as e:
+            logger.error(f"Failed to fetch geolocation: {e}")
+
+    return jsonify({
+        "public_ip": public_ip,
+        "country_code": country_code,
+        "country_name": country_name,
+    })
 
 # Legacy automation endpoints removed. Using newer implementations in 'Automation Service API' section.
 
@@ -4500,15 +4523,6 @@ def get_group_automation_periods(group_id):
         return jsonify({"error": "Internal Server Error"}), 500
 
 
-def _invalidate_events_cache_safely() -> None:
-    """Best-effort cache invalidation after period/assignment changes."""
-    try:
-        from apps.automation.automation_events_scheduler import get_events_scheduler
-        get_events_scheduler().invalidate_cache()
-    except Exception as e:
-        logger.debug(f"Could not invalidate automation events cache: {e}")
-
-
 @app.route('/api/automation/periods/<period_id>/assign-groups', methods=['POST'])
 @log_function_call
 def assign_period_to_groups(period_id):
@@ -4527,7 +4541,6 @@ def assign_period_to_groups(period_id):
             return jsonify({"error": "profile_id is required"}), 400
 
         if automation_config.assign_period_to_groups(period_id, group_ids, profile_id, replace):
-            _invalidate_events_cache_safely()
             return jsonify({
                 "message": f"Period {period_id} with profile {profile_id} assigned to {len(group_ids)} groups",
                 "group_ids": group_ids
@@ -4554,7 +4567,6 @@ def remove_period_from_groups(period_id):
             return jsonify({"error": "group_ids list is required"}), 400
 
         if automation_config.remove_period_from_groups(period_id, group_ids):
-            _invalidate_events_cache_safely()
             return jsonify({
                 "message": f"Period {period_id} removed from {len(group_ids)} groups"
             }), 200
@@ -4604,8 +4616,6 @@ def batch_assign_periods_to_groups():
             profile_id = assignment['profile_id']
             automation_config.assign_period_to_groups(pid, group_ids, profile_id, replace and is_first)
             is_first = False
-
-        _invalidate_events_cache_safely()
 
         return jsonify({
             "message": f"Assigned {len(period_assignments)} period-profile pairs to {len(group_ids)} groups"
@@ -4684,7 +4694,6 @@ def handle_automation_periods():
                 
             period_id = automation_config.create_period(data)
             if period_id:
-                _invalidate_events_cache_safely()
                 period = automation_config.get_period(period_id)
                 return jsonify(period), 201
             else:
@@ -4726,7 +4735,6 @@ def handle_automation_period(period_id):
                         return jsonify({"error": "Invalid cron expression"}), 400
                 
             if automation_config.update_period(period_id, data):
-                _invalidate_events_cache_safely()
                 period = automation_config.get_period(period_id)
                 return jsonify(period), 200
             else:
@@ -4734,7 +4742,6 @@ def handle_automation_period(period_id):
                 
         elif request.method == 'DELETE':
             if automation_config.delete_period(period_id):
-                _invalidate_events_cache_safely()
                 return jsonify({"message": "Period deleted"}), 200
             else:
                 return jsonify({"error": "Period not found or delete failed"}), 404
@@ -4762,7 +4769,6 @@ def assign_period_to_channels(period_id):
             return jsonify({"error": "profile_id is required"}), 400
             
         if automation_config.assign_period_to_channels(period_id, channel_ids, profile_id, replace):
-            _invalidate_events_cache_safely()
             return jsonify({
                 "message": f"Period {period_id} with profile {profile_id} assigned to {len(channel_ids)} channels",
                 "channel_ids": channel_ids
@@ -4789,7 +4795,6 @@ def remove_period_from_channels(period_id):
             return jsonify({"error": "channel_ids list is required"}), 400
             
         if automation_config.remove_period_from_channels(period_id, channel_ids):
-            _invalidate_events_cache_safely()
             return jsonify({
                 "message": f"Period {period_id} removed from {len(channel_ids)} channels"
             }), 200
