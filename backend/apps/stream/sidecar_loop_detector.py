@@ -112,13 +112,24 @@ class SidecarLoopDetector:
             self.is_closed = True
             logger.info(f"SidecarLoopDetector worker stopped for {stream_ctx}")
 
-    def detect_loop(self) -> Optional[float]:
+    def detect_loop(self, hamming_tolerance: Optional[int] = None) -> Optional[float]:
         """
         Scans the buffer for content loops.
-        
+
+        Args:
+            hamming_tolerance: Hamming distance threshold for frame matching.
+                               Defaults to the module-level HAMMING_TOLERANCE (5)
+                               when not supplied.  Pass an explicit value to use a
+                               different tolerance without mutating the module
+                               constant — important for one-shot probes running
+                               concurrently with live monitoring sidecars.
+
         Returns:
             The duration of the detected loop in seconds, or None if no loop is detected.
         """
+        # Resolve tolerance — caller may override for tighter one-shot probes
+        tolerance = hamming_tolerance if hamming_tolerance is not None else HAMMING_TOLERANCE
+
         # Stale buffer protection
         if time.monotonic() - self.last_frame_time > STALE_THRESHOLD:
             return None
@@ -133,9 +144,7 @@ class SidecarLoopDetector:
         
         # Static image / Black screen filter
         # If the 3 most recent are nearly identical, it's a static image or black screen
-        if (h0 - h_1 <= HAMMING_TOLERANCE) and (h_1 - h_2 <= HAMMING_TOLERANCE):
-            # Also check if it's "black" (very low hash value complexity - implementation dependent)
-            # For pHash, a very "flat" image has a specific profile, but Hamming dist covers "static" well.
+        if (h0 - h_1 <= tolerance) and (h_1 - h_2 <= tolerance):
             return None
 
         # Iterate backward through history (skipping the most recent sequence)
@@ -145,9 +154,9 @@ class SidecarLoopDetector:
         for i in range(len(history) - SEQUENCE_LENGTH + 1):
             # Match recent sequence [H0, H-1, H-2] against [H-t, H-(t+1), H-(t+2)]
             # Note: history[i] is [H-(t+2)], history[i+1] is [H-(t+1)], history[i+2] is [H-t]
-            match_t2 = history[i][1] - h_2 <= HAMMING_TOLERANCE
-            match_t1 = history[i+1][1] - h_1 <= HAMMING_TOLERANCE
-            match_t0 = history[i+2][1] - h0 <= HAMMING_TOLERANCE
+            match_t2 = history[i][1] - h_2 <= tolerance
+            match_t1 = history[i+1][1] - h_1 <= tolerance
+            match_t0 = history[i+2][1] - h0 <= tolerance
             
             if match_t2 and match_t1 and match_t0:
                 # Found a matching sequence!

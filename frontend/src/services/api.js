@@ -84,6 +84,13 @@ export const automationAPI = {
   getChannelPeriods: (channelId) => api.get(`/channels/${channelId}/automation-periods`),
   batchAssignPeriods: (channelIds, periodAssignments, replace = false) =>
     api.post('/channels/batch/assign-periods', { channel_ids: channelIds, period_assignments: periodAssignments, replace }),
+  assignPeriodToGroups: (periodId, groupIds, profileId, replace = false) =>
+    api.post(`/automation/periods/${periodId}/assign-groups`, { group_ids: groupIds, profile_id: profileId, replace }),
+  removePeriodFromGroups: (periodId, groupIds) =>
+    api.post(`/automation/periods/${periodId}/remove-groups`, { group_ids: groupIds }),
+  getGroupPeriods: (groupId) => api.get(`/channels/groups/${groupId}/automation-periods`),
+  batchAssignPeriodsToGroups: (groupIds, periodAssignments, replace = false) =>
+    api.post('/channels/groups/batch/assign-periods', { group_ids: groupIds, period_assignments: periodAssignments, replace }),
 
   getBatchPeriodUsage: (channelIds) =>
     api.post('/channels/batch/period-usage', { channel_ids: channelIds }),
@@ -126,6 +133,9 @@ export const regexAPI = {
   getPatterns: () => api.get('/regex-patterns'),
   addPattern: (pattern) => api.post('/regex-patterns', pattern),
   deletePattern: (channelId) => api.delete(`/regex-patterns/${channelId}`),
+  getGroupConfig: (groupId) => api.get(`/channels/groups/${groupId}/regex-config`),
+  saveGroupConfig: (groupId, config) => api.post(`/channels/groups/${groupId}/regex-config`, config),
+  deleteGroupConfig: (groupId) => api.delete(`/channels/groups/${groupId}/regex-config`),
   testPattern: (data) => api.post('/test-regex', data),
   testPatternLive: (data) => api.post('/test-regex-live', data),
   /**
@@ -145,6 +155,7 @@ export const regexAPI = {
   massEditPreview: (data) => api.post('/regex-patterns/mass-edit-preview', data),
   massEdit: (data) => api.post('/regex-patterns/mass-edit', data),
   updateMatchSettings: (channelId, settings) => api.post(`/channels/${channelId}/match-settings`, settings),
+  updateGroupMatchSettings: (groupId, settings) => api.post(`/channels/groups/${groupId}/match-settings`, settings),
   testMatchLive: (data) => api.post('/test-match-live', data),
   bulkMatchCounts: (data) => api.post('/regex-match-counts', data),
   updateBulkMatchSettings: (data) => api.post('/regex-patterns/bulk-settings', data),

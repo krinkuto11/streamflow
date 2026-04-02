@@ -34,6 +34,7 @@ const DEFAULT_PROFILE = {
         allow_revive: true,
         remove_dead_streams: true,
         check_all_streams: false,
+        loop_check_enabled: false,
         stream_limit: 0,
         min_resolution: 'any',
         min_fps: 0,
@@ -46,7 +47,8 @@ const DEFAULT_PROFILE = {
         resolution: 0.35,
         fps: 0.15,
         codec: 0.10,
-        prefer_h265: true
+        prefer_h265: true,
+        loop_penalty: 0
     }
 }
 

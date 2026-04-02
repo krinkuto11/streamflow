@@ -39,19 +39,32 @@ stats line is produced the stream is considered unanalyzable — a missing
 bitrate is a meaningful signal that the stream is dead or unresponsive.
 """
 
+import io
 import json
 import logging
 import os
 import re
 import shlex
 import subprocess
+import threading
 import time
 from datetime import datetime
 from typing import Dict, Optional, Tuple, Any
 
+from PIL import Image
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
+
+# ── Loop probe constants ──────────────────────────────────────────────────────
+# Hamming tolerance for one-shot probes is tighter than the live sidecar value
+# (5) — one-shot probes see limited frame diversity so a stricter threshold
+# reduces false positives without meaningful impact on recall.
+# To catch loops up to 3 minutes, probe for 6 minutes (2 full cycles needed).
+_LOOP_PROBE_HAMMING_TOLERANCE = 3
+_LOOP_PROBE_DURATION          = 360   # 6 minutes — catches loops up to 3 min period
+_LOOP_PROBE_DURATION_MIN      = 60    # enforced floor
+_LOOP_PROBE_DURATION_MAX      = 720   # 12 minutes — ceiling for future flexibility
 
 # Constants for error detection and logging
 EARLY_EXIT_THRESHOLD = 0.8  # Consider ffmpeg exited early if elapsed < 80% of expected duration
@@ -831,6 +844,191 @@ def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_age
     return bitrate, status, elapsed
 
 
+
+def _probe_stream_for_loops(
+    url: str,
+    stream_tag: str,
+    probe_duration: int = _LOOP_PROBE_DURATION,
+    user_agent: str = 'VLC/3.0.14',
+) -> 'tuple[bool, float | None, int]':
+    """
+    Probe a stream for looping content using a single lightweight FFmpeg process.
+
+    Architecture — one provider connection, one FFmpeg process, one output:
+
+        FFmpeg -i <url> -t <probe_duration>
+            └── stdout (subprocess.PIPE)   32x32 grayscale PPM frames
+                                           consumed by SidecarLoopDetector
+                                           in a daemon thread
+
+    Runs sequentially after quality analysis — the quality analysis connection
+    has already been closed before this is called.
+
+    Args:
+        url:            Stream URL to probe.
+        stream_tag:     Short identifier for log messages (hostname/path).
+        probe_duration: Seconds to run. Clamped to
+                        [_LOOP_PROBE_DURATION_MIN, _LOOP_PROBE_DURATION_MAX].
+        user_agent:     HTTP User-Agent forwarded to FFmpeg.
+
+    Returns:
+        (loop_detected, loop_duration_secs, frames_processed)
+        loop_duration_secs is None when loop_detected is False.
+        frames_processed is 0 when the probe produced no usable frames.
+    """
+    try:
+        from apps.stream.sidecar_loop_detector import SidecarLoopDetector
+    except ImportError:
+        logger.error(f"[loop-probe:{stream_tag}] SidecarLoopDetector unavailable")
+        return False, None, 0
+
+    try:
+        import imagehash as _imagehash
+    except ImportError:
+        _imagehash = None
+
+    clamped = max(_LOOP_PROBE_DURATION_MIN, min(_LOOP_PROBE_DURATION_MAX, probe_duration))
+
+    logger.info(
+        f"[loop-probe:{stream_tag}] Starting {clamped}s probe "
+        f"(hamming_tolerance={_LOOP_PROBE_HAMMING_TOLERANCE}, "
+        f"sequence_length=3, duration_threshold=10.0s)"
+    )
+
+    cmd = [
+        'ffmpeg',
+        '-hide_banner',
+        '-nostdin',
+        '-loglevel', 'warning',
+        '-user_agent', user_agent,
+        '-i', url,
+        '-t', str(clamped),
+        '-map', '0:v:0',
+        '-an', '-sn',
+        '-vf', 'scale=32:32:flags=fast_bilinear,format=gray',
+        '-c:v', 'ppm',
+        '-f', 'image2pipe',
+        'pipe:1',
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            bufsize=0,
+        )
+    except Exception as exc:
+        logger.error(f"[loop-probe:{stream_tag}] FFmpeg failed to start: {exc}")
+        return False, None, 0
+
+    detector      = SidecarLoopDetector(proc.stdout, stream_id=None)
+    frames_done   = [0]
+    loop_detected = False
+    loop_duration = None
+
+    def _reader():
+        nonlocal loop_detected, loop_duration
+        logger.debug(f"[loop-probe:{stream_tag}] Reader thread started")
+        try:
+            while not detector.is_closed:
+                frame_data = detector._read_ppm_frame()
+                if not frame_data:
+                    logger.debug(f"[loop-probe:{stream_tag}] Pipe EOF — reader exiting")
+                    break
+
+                ts = time.monotonic()
+                detector.last_frame_time = ts
+
+                try:
+                    img = Image.open(io.BytesIO(frame_data))
+                    h   = _imagehash.phash(img) if _imagehash else detector._simple_hash(img)
+                    detector.buffer.append((ts, h))
+                    frames_done[0] += 1
+
+                    logger.debug(
+                        f"[loop-probe:{stream_tag}] "
+                        f"frame={frames_done[0]:4d}  hash={h}  buffer={len(detector.buffer)}"
+                    )
+
+                    detected = detector.detect_loop(
+                        hamming_tolerance=_LOOP_PROBE_HAMMING_TOLERANCE
+                    )
+                    if detected:
+                        detector._is_looping   = True
+                        detector._loop_duration = detected
+                        logger.debug(
+                            f"[loop-probe:{stream_tag}] Loop signal at "
+                            f"frame {frames_done[0]}: period={detected:.1f}s"
+                        )
+                    else:
+                        detector._is_looping   = False
+                        detector._loop_duration = 0.0
+
+                except Exception as frame_err:
+                    logger.debug(f"[loop-probe:{stream_tag}] Frame error: {frame_err}")
+                    continue
+
+        except Exception as err:
+            logger.debug(f"[loop-probe:{stream_tag}] Reader error: {err}")
+        finally:
+            detector.is_closed = True
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+
+        loop_detected = detector.is_looping()
+        loop_duration = detector.get_loop_duration() if loop_detected else None
+
+    reader = threading.Thread(
+        target=_reader, daemon=True,
+        name=f"LoopProbe-Reader[{stream_tag}]"
+    )
+    reader.start()
+
+    # Wait for FFmpeg; hard-kill if it overshoots
+    try:
+        proc.wait(timeout=clamped + 20)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            f"[loop-probe:{stream_tag}] FFmpeg exceeded {clamped + 20}s — killing"
+        )
+        proc.kill()
+        proc.wait()
+
+    detector.is_closed = True
+    reader.join(timeout=10)
+
+    n = frames_done[0]
+
+    # Capture stderr for diagnostics on zero-frame failures
+    try:
+        stderr_out = proc.stderr.read().decode('utf-8', errors='replace').strip()
+    except Exception:
+        stderr_out = ''
+
+    if n == 0:
+        logger.warning(
+            f"[loop-probe:{stream_tag}] 0 frames received — loop detection "
+            f"inconclusive. Stream may not expose decodable video frames."
+        )
+        if stderr_out:
+            logger.warning(f"[loop-probe:{stream_tag}] FFmpeg said: {stderr_out[:300]}")
+    elif loop_detected:
+        logger.warning(
+            f"[loop-probe:{stream_tag}] LOOP DETECTED — "
+            f"period~{loop_duration:.1f}s  frames={n}"
+        )
+    else:
+        logger.info(
+            f"[loop-probe:{stream_tag}] Clean — no loop detected  frames={n}"
+        )
+
+    return loop_detected, loop_duration, n
+
+
 def analyze_stream(
     stream_url: str,
     stream_id: int,
@@ -889,7 +1087,9 @@ def analyze_stream(
         'audio_channels': None,
         'channel_layout': None,
         'audio_bitrate': None,
-        'status': 'Error'
+        'status': 'Error',
+        'elapsed_time': 0,
+        'ffmpeg_duration': ffmpeg_duration,
     }
 
     try:
@@ -930,7 +1130,9 @@ def analyze_stream(
                     'audio_channels': result_data['audio_channels'],
                     'channel_layout': result_data['channel_layout'],
                     'audio_bitrate': result_data['audio_bitrate'],
-                    'status': result_data['status']
+                    'status': result_data['status'],
+                    'elapsed_time': result_data.get('elapsed_time', 0),
+                    'ffmpeg_duration': ffmpeg_duration,
                 }
 
                 if logger.isEnabledFor(logging.DEBUG):
@@ -961,7 +1163,29 @@ def analyze_stream(
                         logger.warning(f"  {stream_name}: Check failed - {result['status']} ({result_data['elapsed_time']:.2f}s)")
 
                 if result['status'] == "OK":
-                    break
+                    # Check whether FFmpeg ran for a meaningful portion of the
+                    # probe window.  A stream that exits early produced partial
+                    # data that is not representative of sustained delivery.
+                    # Give it another attempt rather than accepting the result.
+                    elapsed  = result_data.get('elapsed_time', ffmpeg_duration)
+                    completed = elapsed >= ffmpeg_duration * EARLY_EXIT_THRESHOLD
+                    if completed:
+                        break
+                    elif attempt < total_attempts - 1:
+                        if logger.isEnabledFor(logging.DEBUG):
+                            logger.warning(
+                                f"  Stream '{stream_name}' exited early "
+                                f"({elapsed:.1f}s / {ffmpeg_duration}s expected) — "
+                                f"retrying (attempt {attempt + 2}/{total_attempts})"
+                            )
+                        else:
+                            logger.warning(
+                                f"  {stream_name} exited early "
+                                f"({elapsed:.1f}s/{ffmpeg_duration}s) — "
+                                f"retrying (attempt {attempt + 2}/{total_attempts})"
+                            )
+                    # If this was the last attempt, fall through without break.
+                    # is_stream_dead() will classify it as 'unstable'.
                 else:
                     if attempt < total_attempts - 1:
                         if logger.isEnabledFor(logging.DEBUG):

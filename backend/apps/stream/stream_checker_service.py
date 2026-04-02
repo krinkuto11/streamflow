@@ -935,6 +935,8 @@ class StreamCheckerService:
         stream_limit = 0
         allow_revive = True
         grace_period = False
+        loop_check_enabled = False
+        loop_penalty = 0.0
         priority_m3u_ids = []
         priority_mode = 'absolute'
         scoring_weights = None
@@ -971,6 +973,11 @@ class StreamCheckerService:
                         channel_id,
                     )
                 scoring_weights = profile.get('scoring_weights', None)
+                loop_penalty = float(
+                    (scoring_weights or {}).get('loop_penalty', 0.0)
+                )
+                # Clamp to valid range: -0.25 to 0.0
+                loop_penalty = max(-0.25, min(0.0, loop_penalty))
                 
                 # Also check if checking is enabled at all for this profile
                 if not profile_stream_checking.get('enabled', False):
@@ -1409,11 +1416,6 @@ class StreamCheckerService:
                     analyzed_streams.extend(cached_analyzed_streams)
                     logger.info(f"Merged {len(cached_analyzed_streams)} cached streams with {len(results)} new results. Total candidates: {len(analyzed_streams)}")
 
-                if batch_enabled and batch_stats_list:
-                    logger.info(f"Batch updating stats for {len(batch_stats_list)} streams (batch_size={batch_size})")
-                    successful, failed = batch_update_stream_stats(batch_stats_list, batch_size=batch_size)
-                    logger.info(f"Batch update complete: {successful} successful, {failed} failed")
-                
                 logger.info(f"Completed smart parallel analysis of {len(results)} streams with account-aware limits")
 
             # Run loop probes on eligible streams (top 25% scoring >= 0.5).
@@ -1571,7 +1573,13 @@ class StreamCheckerService:
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                     else:
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
-                    
+
+                    # Include loop detection results if the probe ran
+                    if analyzed.get('loop_probe_ran'):
+                        stream_stat['loop_probe_ran']      = True
+                        stream_stat['loop_detected']       = analyzed.get('loop_detected')
+                        stream_stat['loop_duration_secs']  = analyzed.get('loop_duration_secs')
+
                     # Clean up N/A values for cleaner JSON
                     cleaned_stat = {k: v for k, v in stream_stat.items() if v not in [None]}
                     stream_stats.append(cleaned_stat)
@@ -1714,6 +1722,8 @@ class StreamCheckerService:
         stream_limit = 0
         allow_revive = True
         grace_period = False
+        loop_check_enabled = False
+        loop_penalty = 0.0
         priority_m3u_ids = []
         priority_mode = 'absolute'
         scoring_weights = None
@@ -1746,6 +1756,11 @@ class StreamCheckerService:
                         channel_id,
                     )
                 scoring_weights = profile.get('scoring_weights', None)
+                loop_penalty = float(
+                    (scoring_weights or {}).get('loop_penalty', 0.0)
+                )
+                # Clamp to valid range: -0.25 to 0.0
+                loop_penalty = max(-0.25, min(0.0, loop_penalty))
                 
                 # Also check if checking is enabled at all for this profile
                 if not profile_stream_checking.get('enabled', False):
@@ -3248,8 +3263,8 @@ class StreamCheckerService:
                     from apps.automation.automated_stream_manager import AutomatedStreamManager
                     automation_manager = AutomatedStreamManager()
                     
-                    # Run validation - respects automation_controls.remove_non_matching_streams setting
-                    validation_results = automation_manager.validate_and_remove_non_matching_streams()
+                    # Run validation scoped to this channel only
+                    validation_results = automation_manager.validate_and_remove_non_matching_streams(channel_id=channel_id)
                     if validation_results.get("streams_removed", 0) > 0:
                         logger.info(f"✓ Removed {validation_results['streams_removed']} non-matching streams")
                     else:
@@ -3268,9 +3283,9 @@ class StreamCheckerService:
                     from apps.automation.automated_stream_manager import AutomatedStreamManager
                     automation_manager = AutomatedStreamManager()
                     
-                    # Run full discovery (this will add new matching streams but skip dead ones)
+                    # Run discovery scoped to this channel only
                     # Skip automatic check trigger since we'll perform the check explicitly in Step 6
-                    assignments = automation_manager.discover_and_assign_streams(force=True, skip_check_trigger=True)
+                    assignments = automation_manager.discover_and_assign_streams(force=True, skip_check_trigger=True, channel_id=channel_id)
                     if assignments:
                         logger.info(f"✓ Stream matching completed")
                     else:
@@ -3318,7 +3333,11 @@ class StreamCheckerService:
                 logger.info(f"Step 6/6: Skipping stream checking (checking is disabled for this channel)")
                 analyzed_lookup = {}
             
-            # Gather statistics after check using centralized utility
+            # Gather statistics after check using centralized utility.
+            # Refresh UDI cache first so stream_stats reflect the post-probe
+            # database state — loop fields written by _update_stream_stats
+            # won't be visible otherwise.
+            udi.refresh_streams()
             streams = fetch_channel_streams(channel_id)
             total_streams = len(streams)
             
@@ -3334,8 +3353,16 @@ class StreamCheckerService:
                 'stream_details': []
             }
             
-            # Add top stream details using centralized extraction
-            for stream in streams[:10]:  # Top 10 streams
+            # Sort streams by persisted quality_score descending so the
+            # highest-ranked streams (including any that were loop-probed)
+            # appear first. No arbitrary cap — all streams are included so
+            # loop results are never hidden by a slice.
+            streams_sorted = sorted(
+                streams,
+                key=lambda s: (s.get('stream_stats') or {}).get('quality_score') or 0,
+                reverse=True
+            )
+            for stream in streams_sorted:
                 # Extract stats using centralized utility
                 extracted_stats = extract_stream_stats(stream)
                 formatted_stats = format_stream_stats_for_display(extracted_stats)
@@ -3384,6 +3411,7 @@ class StreamCheckerService:
                     if m3u_account_id:
                         m3u_account_name = self._get_m3u_account_name(stream.get('id'), udi)
                 
+                # Build stream detail dict — include loop results if persisted
                 stream_detail = {
                     'stream_id': stream.get('id'),
                     'stream_name': stream.get('name', 'Unknown'),

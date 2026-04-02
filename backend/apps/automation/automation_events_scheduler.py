@@ -139,18 +139,17 @@ class AutomationEventsScheduler:
             if not period_name:
                 period_name = f"Period {period_id}"
             
-            # Get channels assigned to this period (now returns dict of channel_id -> profile_id)
-            channels = automation_config.get_period_channels(period_id)
-            channel_count = len(channels)
+            # Resolve effective channel -> profile assignments for this period.
+            # Includes group-level assignments with channel-level overrides.
+            channel_profile_map = automation_config.get_effective_period_channel_profiles(period_id)
+            channel_count = len(channel_profile_map)
             
             if channel_count == 0:
                 continue  # Skip periods with no channels assigned
             
             # Group channels by profile to show which profiles will be used
             profile_counts = {}
-            for channel_id in channels:
-                period_to_profile = automation_config.get_channel_periods(channel_id)
-                profile_id = period_to_profile.get(period_id)
+            for profile_id in channel_profile_map.values():
                 if profile_id:
                     profile_counts[profile_id] = profile_counts.get(profile_id, 0) + 1
             
