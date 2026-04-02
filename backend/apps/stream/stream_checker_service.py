@@ -3384,7 +3384,7 @@ class StreamCheckerService:
                     if m3u_account_id:
                         m3u_account_name = self._get_m3u_account_name(stream.get('id'), udi)
                 
-                check_stats['stream_details'].append({
+                stream_detail = {
                     'stream_id': stream.get('id'),
                     'stream_name': stream.get('name', 'Unknown'),
                     'resolution': formatted_stats['resolution'],
