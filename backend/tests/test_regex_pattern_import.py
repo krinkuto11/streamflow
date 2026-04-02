@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 """
 Unit tests for regex pattern import functionality.
@@ -173,6 +174,93 @@ class TestRegexPatternImport(unittest.TestCase):
             matches = matcher.match_stream_to_channels("ESPN Sports")
             self.assertNotIn("1", matches)
 
+
+
+    def test_import_does_not_duplicate_patterns_on_repeated_import(self):
+        """Regression test: repeated non-merge imports must not accumulate pattern rows.
+
+        Root cause: import_channel_regex_configs_from_json used SQLAlchemy bulk
+        query.delete() which bypasses ORM cascade. SQLite does not enforce foreign
+        key CASCADE without PRAGMA foreign_keys = ON, so ChannelRegexPattern rows
+        survived the ChannelRegexConfig wipe and became orphans. A second import
+        then added new pattern rows on top, causing duplicates. The fix explicitly
+        deletes ChannelRegexPattern rows before ChannelRegexConfig rows.
+        """
+        from apps.database.manager import get_db_manager
+        from apps.database.models import ChannelRegexPattern
+        from apps.database.connection import get_session
+
+        db = get_db_manager()
+
+        payload = {
+            "patterns": {
+                "1": {
+                    "name": "Fox News",
+                    "enabled": True,
+                    "match_by_tvg_id": False,
+                    "regex_patterns": [
+                        {"pattern": "(?i)fox\\s+news", "m3u_accounts": None, "priority": 0}
+                    ],
+                },
+                "2": {
+                    "name": "ESPN",
+                    "enabled": True,
+                    "match_by_tvg_id": False,
+                    "regex_patterns": [
+                        {"pattern": "(?i)ESPN", "m3u_accounts": None, "priority": 0}
+                    ],
+                },
+            }
+        }
+
+        # First import
+        imported, errors = db.import_channel_regex_configs_from_json(payload, merge=False)
+        self.assertEqual(errors, [], f"First import had errors: {errors}")
+        self.assertEqual(imported, 2)
+
+        # Second import — must fully replace, not append
+        imported, errors = db.import_channel_regex_configs_from_json(payload, merge=False)
+        self.assertEqual(errors, [], f"Second import had errors: {errors}")
+        self.assertEqual(imported, 2)
+
+        # Verify pattern counts — each channel must have exactly 1 pattern row
+        session = get_session()
+        try:
+            for channel_id in ("1", "2"):
+                count = (
+                    session.query(ChannelRegexPattern)
+                    .filter(ChannelRegexPattern.channel_id == channel_id)
+                    .count()
+                )
+                self.assertEqual(
+                    count,
+                    1,
+                    f"Channel {channel_id} has {count} pattern rows after two imports "
+                    f"(expected 1) — duplicate pattern bug has regressed",
+                )
+        finally:
+            session.close()
+
+        # Also verify no orphaned pattern rows exist
+        session = get_session()
+        try:
+            from apps.database.models import ChannelRegexConfig
+            config_ids = {
+                row.channel_id
+                for row in session.query(ChannelRegexConfig).all()
+            }
+            orphan_count = (
+                session.query(ChannelRegexPattern)
+                .filter(ChannelRegexPattern.channel_id.notin_(config_ids))
+                .count()
+            )
+            self.assertEqual(
+                orphan_count,
+                0,
+                f"Found {orphan_count} orphaned ChannelRegexPattern rows after import",
+            )
+        finally:
+            session.close()
 
 if __name__ == '__main__':
     unittest.main()

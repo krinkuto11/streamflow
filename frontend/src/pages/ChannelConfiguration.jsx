@@ -1,3 +1,4 @@
+
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
@@ -14,10 +15,17 @@ import { Alert, AlertDescription } from '@/components/ui/alert.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { channelsAPI, regexAPI, streamCheckerAPI, channelOrderAPI, automationAPI, m3uAPI } from '@/services/api.js'
-import { CheckCircle, Edit, Plus, Trash2, Loader2, Search, X, Download, Upload, GripVertical, Save, RotateCcw, ArrowUpDown, MoreVertical, Eye, ChevronDown, Info, Activity, Edit2, ArrowRight, Clock, Calendar } from 'lucide-react'
+import { CheckCircle, Edit, Plus, Trash2, Loader2, Search, X, Download, Upload, GripVertical, Save, RotateCcw, ArrowUpDown, MoreVertical, Eye, ChevronDown, Info, Activity, Edit2, ArrowRight, Clock, Calendar, CalendarClock } from 'lucide-react'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip.jsx'
+import { RegexTableRow } from '@/components/channel-configuration/RegexTableRow.jsx'
+import { SortableChannelItem } from '@/components/channel-configuration/SortableChannelItem.jsx'
+import {
+  BatchAssignPeriodsDialog,
+  BatchPeriodEditDialog,
+} from '@/components/channel-configuration/PeriodDialogs.jsx'
+import { MatchPreviewDialog, MatchResultsList } from '@/components/channel-configuration/MatchPreviewDialog.jsx'
 import {
   DndContext,
 
@@ -31,10 +39,8 @@ import {
   arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
-  useSortable,
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable'
-import { CSS } from '@dnd-kit/utilities'
 
 // Constants for localStorage keys
 const CHANNEL_STATS_PREFIX = 'streamflow_channel_stats_'
@@ -72,477 +78,39 @@ const normalizePatternData = (channelPatterns) => {
   return []
 }
 
-function ChannelCard({ channel, patterns, onEditRegex, onDeletePattern, onCheckChannel, loading, channelSettings, onUpdateSettings }) {
-  const [stats, setStats] = useState(null)
-  const [loadingStats, setLoadingStats] = useState(true)
-  const [expanded, setExpanded] = useState(false)
-  const [logoUrl, setLogoUrl] = useState(null)
-  const [logoError, setLogoError] = useState(false)
-  const [automationPeriods, setAutomationPeriods] = useState([])
-  const [loadingPeriods, setLoadingPeriods] = useState(false)
-  const [assignPeriodsDialogOpen, setAssignPeriodsDialogOpen] = useState(false)
-  const { toast } = useToast()
-
-  const matchingMode = channelSettings?.matching_mode || 'enabled'
-  const checkingMode = channelSettings?.checking_mode || 'enabled'
-  const matchingModeSource = channelSettings?.matching_mode_source || 'default'
-  const checkingModeSource = channelSettings?.checking_mode_source || 'default'
-  const isMatchingInherited = matchingModeSource === 'group'
-  const isCheckingInherited = checkingModeSource === 'group'
-
-  const handleMatchingModeChange = async (value) => {
-    try {
-      await onUpdateSettings(channel.id, { matching_mode: value })
-      toast({
-        title: "Success",
-        description: "Matching mode updated successfully"
-      })
-    } catch (err) {
-      toast({
-        title: "Error",
-        description: "Failed to update matching mode",
-        variant: "destructive"
-      })
-    }
-  }
-
-  const handleCheckingModeChange = async (value) => {
-    try {
-      await onUpdateSettings(channel.id, { checking_mode: value })
-      toast({
-        title: "Success",
-        description: "Checking mode updated successfully"
-      })
-    } catch (err) {
-      toast({
-        title: "Error",
-        description: "Failed to update checking mode",
-        variant: "destructive"
-      })
-    }
-  }
-
-  useEffect(() => {
-    // Try to load stats from localStorage first for instant display
-    const cachedStats = localStorage.getItem(`${CHANNEL_STATS_PREFIX}${channel.id}`)
-    if (cachedStats) {
-      try {
-        const parsed = JSON.parse(cachedStats)
-        setStats(parsed)
-        setLoadingStats(false) // Show cached data immediately
-      } catch (e) {
-        console.error('Failed to parse cached stats:', e)
-      }
-    }
-    // Always fetch fresh stats in background to keep data current
-    loadStats()
-  }, [channel.id])
-
-  // Fetch logo when logo_id is available
-  useEffect(() => {
-    const loadLogo = () => {
-      // Try cached logo first from localStorage
-      const cachedLogo = localStorage.getItem(`${CHANNEL_LOGO_PREFIX}${channel.id}`)
-      if (cachedLogo) {
-        setLogoUrl(cachedLogo)
-      }
-
-      // Set logo URL if logo_id is available using the cached endpoint
-      // This endpoint will serve cached logos or download them on first request
-      if (channel.logo_id) {
-        const logoUrl = channelsAPI.getLogoCached(channel.logo_id)
-        setLogoUrl(logoUrl)
-        localStorage.setItem(`${CHANNEL_LOGO_PREFIX}${channel.id}`, logoUrl)
-      }
-    }
-    loadLogo()
-  }, [channel.id, channel.logo_id])
-
-  // Load automation periods when expanded
-  useEffect(() => {
-    if (expanded) {
-      loadAutomationPeriods()
-    }
-  }, [expanded, channel.id])
-
-  const loadAutomationPeriods = async () => {
-    try {
-      setLoadingPeriods(true)
-      const response = await automationAPI.getChannelPeriods(channel.id)
-      const periodToProfile = response.data || {}  // {period_id: profile_id}
-
-      // Fetch full period and profile details
-      const periodsResponse = await automationAPI.getPeriods()
-      const profilesResponse = await automationAPI.getProfiles()
-
-      const allPeriods = periodsResponse.data || []
-      const allProfiles = profilesResponse.data || []
-
-      // Build enriched period list with profile names
-      const enrichedPeriods = Object.entries(periodToProfile).map(([periodId, profileId]) => {
-        const period = allPeriods.find(p => p.id === String(periodId))
-        const profile = allProfiles.find(p => p.id === String(profileId))
-        return {
-          id: String(periodId),
-          name: period?.name || 'Unknown Period',
-          schedule: period?.schedule || {},
-          profile_id: String(profileId),
-          profile_name: profile?.name || 'Unknown Profile'
-        }
-      })
-
-      setAutomationPeriods(enrichedPeriods)
-    } catch (err) {
-      console.error('Failed to load automation periods:', err)
-    } finally {
-      setLoadingPeriods(false)
-    }
-  }
-
-  const loadStats = async () => {
-    try {
-      setLoadingStats(true)
-      const response = await channelsAPI.getChannelStats(channel.id)
-      setStats(response.data)
-      // Cache stats in localStorage
-      localStorage.setItem(`${CHANNEL_STATS_PREFIX}${channel.id}`, JSON.stringify(response.data))
-    } catch (err) {
-      console.error('Failed to load channel stats:', err)
-    } finally {
-      setLoadingStats(false)
-    }
-  }
-
-  const channelPatterns = patterns[channel.id] || patterns[String(channel.id)]
-
-  return (
-    <Card className="w-full">
-      <CardContent className="p-0">
-        <div className="flex items-center gap-3 p-3">
-          {/* Channel Logo */}
-          <div className="w-24 h-12 flex-shrink-0 bg-muted rounded-md flex items-center justify-center overflow-hidden">
-            {logoUrl && !logoError ? (
-              <img
-                src={logoUrl}
-                alt={channel.name}
-                className="w-full h-full object-contain"
-                onError={() => setLogoError(true)}
-              />
-            ) : (
-              <span className="text-2xl font-bold text-muted-foreground">
-                {channel.name?.charAt(0) || '?'}
-              </span>
-            )}
-          </div>
-
-          {/* Channel Info */}
-          <div className="flex-1 min-w-0">
-            <h3 className="font-semibold text-base truncate">{channel.name}</h3>
-            <div className="flex flex-wrap gap-3 mt-1 text-sm">
-              {loadingStats ? (
-                <span className="text-muted-foreground">Loading stats...</span>
-              ) : stats ? (
-                <>
-                  <div className="flex items-center gap-1">
-                    <span className="text-muted-foreground">Streams:</span>
-                    <span className="font-medium">{stats.total_streams ?? 0}</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="text-muted-foreground">Dead:</span>
-                    <span className="font-medium text-destructive">{stats.dead_streams ?? 0}</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="text-muted-foreground">Avg.Resolution:</span>
-                    <span className="font-medium">{stats.most_common_resolution || 'Unknown'}</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="text-muted-foreground">Avg Bitrate:</span>
-                    <span className="font-medium">{stats.average_bitrate > 0 ? `${stats.average_bitrate} Kbps` : 'N/A'}</span>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="flex items-center gap-1">
-                    <span className="text-muted-foreground">Streams:</span>
-                    <span className="font-medium text-muted-foreground">--</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="text-muted-foreground">Dead:</span>
-                    <span className="font-medium text-muted-foreground">--</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="text-muted-foreground">Avg.Resolution:</span>
-                    <span className="font-medium text-muted-foreground">--</span>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <span className="text-muted-foreground">Avg Bitrate:</span>
-                    <span className="font-medium text-muted-foreground">--</span>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Action Buttons */}
-          <div className="flex gap-2 flex-shrink-0">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setExpanded(!expanded)}
-            >
-              <Edit className="h-4 w-4 mr-2" />
-              Edit Regex
-            </Button>
-            <Button
-              size="sm"
-              onClick={() => onCheckChannel(channel.id)}
-              disabled={loading}
-            >
-              {loading ? (
-                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              ) : (
-                <CheckCircle className="h-4 w-4 mr-2" />
-              )}
-              Check Channel
-            </Button>
-          </div>
-        </div>
-
-        {/* Expandable Regex Section */}
-        {expanded && (
-          <div className="border-t p-4 bg-muted/50 space-y-4">
-            {/* Channel Settings */}
-            <div className="grid grid-cols-2 gap-4 pb-4 border-b">
-              <div className="space-y-2">
-                <Label htmlFor={`matching-mode-${channel.id}`} className="text-sm font-medium">
-                  Stream Matching
-                  {isMatchingInherited && (
-                    <Badge variant="outline" className="ml-2 text-xs">From Group</Badge>
-                  )}
-                </Label>
-                <Select value={matchingMode} onValueChange={handleMatchingModeChange}>
-                  <SelectTrigger id={`matching-mode-${channel.id}`}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="enabled">Enabled</SelectItem>
-                    <SelectItem value="disabled">Disabled</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {matchingMode === 'enabled'
-                    ? 'Channel will be included in stream matching'
-                    : 'Channel will be excluded from stream matching'}
-                  {isMatchingInherited && ' (inherited from group)'}
-                </p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor={`checking-mode-${channel.id}`} className="text-sm font-medium">
-                  Stream Checking
-                  {isCheckingInherited && (
-                    <Badge variant="outline" className="ml-2 text-xs">From Group</Badge>
-                  )}
-                </Label>
-                <Select value={checkingMode} onValueChange={handleCheckingModeChange}>
-                  <SelectTrigger id={`checking-mode-${channel.id}`}>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="enabled">Enabled</SelectItem>
-                    <SelectItem value="disabled">Disabled</SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-xs text-muted-foreground">
-                  {checkingMode === 'enabled'
-                    ? 'Channel streams will be quality checked'
-                    : 'Channel streams will not be quality checked'}
-                  {isCheckingInherited && ' (inherited from group)'}
-                </p>
-              </div>
-            </div>
-
-            {/* Automation Periods */}
-            <div className="space-y-3 pb-4 border-b">
-              <div className="flex justify-between items-center">
-                <div>
-                  <h4 className="font-medium text-sm">Automation Periods</h4>
-                  <p className="text-xs text-muted-foreground">
-                    Assigned automation periods for this channel
-                  </p>
-                </div>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setAssignPeriodsDialogOpen(true)}
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  Assign Periods
-                </Button>
-              </div>
-
-              {loadingPeriods ? (
-                <div className="flex items-center justify-center py-4">
-                  <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
-                </div>
-              ) : automationPeriods.length > 0 ? (
-                <div className="space-y-2">
-                  {automationPeriods.map((period) => (
-                    <div key={period.id} className="flex items-center justify-between p-2 bg-background rounded-md border">
-                      <div className="flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-sm">{period.name}</span>
-                          <Badge variant="secondary" className="text-xs">
-                            {period.profile_name || 'Unknown Profile'}
-                          </Badge>
-                        </div>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {period.schedule?.type === 'interval'
-                            ? `Every ${period.schedule.value} minutes`
-                            : `Cron: ${period.schedule?.value || 'Not configured'}`
-                          }
-                        </p>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={async () => {
-                          try {
-                            await automationAPI.removePeriodFromChannels(period.id, [channel.id])
-                            toast({
-                              title: "Success",
-                              description: "Period removed from channel"
-                            })
-                            loadAutomationPeriods()
-                          } catch (err) {
-                            toast({
-                              title: "Error",
-                              description: "Failed to remove period",
-                              variant: "destructive"
-                            })
-                          }
-                        }}
-                      >
-                        <X className="h-4 w-4" />
-                      </Button>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <div className="text-center py-6 border rounded-lg bg-muted/50">
-                  <Activity className="h-8 w-8 mx-auto mb-2 opacity-50 text-muted-foreground" />
-                  <p className="text-sm text-muted-foreground mb-2">No automation periods assigned</p>
-                  <p className="text-xs text-muted-foreground mb-3">
-                    This channel will not participate in automation
-                  </p>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => setAssignPeriodsDialogOpen(true)}
-                  >
-                    <Plus className="h-4 w-4 mr-2" />
-                    Assign Periods
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            {/* Regex Patterns */}
-            <div>
-              <div className="flex justify-between items-center mb-3">
-                <h4 className="font-medium text-sm">Regex Patterns</h4>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => onEditRegex(channel.id, null)}
-                >
-                  <Plus className="h-4 w-4 mr-2" />
-                  Add Pattern
-                </Button>
-              </div>
-
-              {(() => {
-                const normalizedPatterns = normalizePatternData(channelPatterns)
-                return normalizedPatterns.length > 0 ? (
-                  <div className="space-y-2">
-                    {normalizedPatterns.map((patternObj, index) => (
-                      <div key={index} className="flex items-center justify-between gap-2 p-2 bg-background rounded-md">
-                        <code className="text-sm flex-1 break-all">{patternObj.pattern}</code>
-                        <div className="flex gap-1">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => onEditRegex(channel.id, index)}
-                          >
-                            <Edit className="h-4 w-4" />
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => onDeletePattern(channel.id, index)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">No regex patterns configured</p>
-                )
-              })()}
-            </div>
-          </div>
-        )}
-      </CardContent>
-
-      {/* Assign Periods Dialog */}
-      <AssignPeriodsDialog
-        open={assignPeriodsDialogOpen}
-        onOpenChange={setAssignPeriodsDialogOpen}
-        channelId={channel.id}
-        channelName={channel.name}
-        onSuccess={loadAutomationPeriods}
-      />
-    </Card>
-  )
-}
-
-// Helper component for assigning periods dialog
-// Helper component for assigning periods dialog with profile selection per period
-function AssignPeriodsDialog({ open, onOpenChange, channelId, channelName, onSuccess }) {
+// Dialog for assigning automation periods to a group
+function GroupAssignPeriodsDialog({ open, onOpenChange, group, initialPeriods, onSave, saving }) {
   const [allPeriods, setAllPeriods] = useState([])
   const [allProfiles, setAllProfiles] = useState([])
   const [periodAssignments, setPeriodAssignments] = useState({})  // {period_id: profile_id}
   const [loading, setLoading] = useState(false)
-  const [saving, setSaving] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
     if (open) {
       loadData()
     }
-  }, [open, channelId])
+  }, [open])
 
   const loadData = async () => {
     try {
       setLoading(true)
-      const [periodsResponse, profilesResponse, assignedResponse] = await Promise.all([
+      const [periodsResponse, profilesResponse] = await Promise.all([
         automationAPI.getPeriods(),
-        automationAPI.getProfiles(),
-        automationAPI.getChannelPeriods(channelId)
+        automationAPI.getProfiles()
       ])
-      setAllPeriods(periodsResponse.data)
-      setAllProfiles(profilesResponse.data)
-
-      // assignedResponse.data is a list of periods with profile info
-      // Transform into {period_id: profile_id} map
-      const assignments = {}
-      if (Array.isArray(assignedResponse.data)) {
-        assignedResponse.data.forEach(p => {
-          assignments[p.id] = p.profile_id
+      setAllPeriods(periodsResponse.data || [])
+      setAllProfiles(profilesResponse.data || [])
+      // Pre-populate with existing group period assignments
+      const existing = {}
+      if (Array.isArray(initialPeriods)) {
+        initialPeriods.forEach((p) => {
+          if (p.id && p.profile_id) {
+            existing[p.id] = p.profile_id
+          }
         })
       }
-      setPeriodAssignments(assignments)
+      setPeriodAssignments(existing)
     } catch (err) {
       console.error('Failed to load data:', err)
       toast({
@@ -555,62 +123,12 @@ function AssignPeriodsDialog({ open, onOpenChange, channelId, channelName, onSuc
     }
   }
 
-  const handleSave = async () => {
-    try {
-      setSaving(true)
-
-      const currentResponse = await automationAPI.getChannelPeriods(channelId)
-      const currentPeriodsData = currentResponse.data || []
-      const currentAssignments = {}
-      if (Array.isArray(currentPeriodsData)) {
-        currentPeriodsData.forEach(p => {
-          currentAssignments[p.id] = p.profile_id
-        })
-      }
-
-      const newPeriods = Object.keys(periodAssignments)
-      const currentPeriods = Object.keys(currentAssignments)
-
-      const toRemove = currentPeriods.filter(p => !newPeriods.includes(p))
-
-      // Remove unassigned periods
-      for (const periodId of toRemove) {
-        await automationAPI.removePeriodFromChannels(periodId, [channelId])
-      }
-
-      // Add/update periods with profiles
-      for (const [periodId, profileId] of Object.entries(periodAssignments)) {
-        if (profileId) {
-          await automationAPI.assignPeriodToChannels(periodId, [channelId], profileId, false)
-        }
-      }
-
-      toast({
-        title: "Success",
-        description: "Automation periods updated"
-      })
-
-      onOpenChange(false)
-      if (onSuccess) onSuccess()
-    } catch (err) {
-      console.error('Failed to save:', err)
-      toast({
-        title: "Error",
-        description: "Failed to save periods",
-        variant: "destructive"
-      })
-    } finally {
-      setSaving(false)
-    }
-  }
-
   const togglePeriod = (periodId) => {
     setPeriodAssignments(prev => {
       const newAssignments = { ...prev }
       if (periodId in newAssignments) {
         delete newAssignments[periodId]
       } else {
-        // Only add if profiles are available
         if (allProfiles.length > 0) {
           newAssignments[periodId] = allProfiles[0].id
         }
@@ -626,13 +144,33 @@ function AssignPeriodsDialog({ open, onOpenChange, channelId, channelName, onSuc
     }))
   }
 
+  const handleSave = () => {
+    const selectedPeriods = Object.entries(periodAssignments).filter(([_, profileId]) => profileId && profileId !== '')
+
+    if (selectedPeriods.length === 0) {
+      toast({
+        title: "No Periods Selected",
+        description: "Please select at least one period and assign a profile",
+        variant: "destructive"
+      })
+      return
+    }
+
+    const assignments = selectedPeriods.map(([periodId, profileId]) => ({
+      period_id: periodId,
+      profile_id: profileId
+    }))
+
+    onSave(assignments, false)
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
         <DialogHeader>
-          <DialogTitle>Assign Automation Periods with Profiles</DialogTitle>
+          <DialogTitle>Assign Automation Periods to Group</DialogTitle>
           <DialogDescription>
-            Select periods and choose which profile to use for {channelName}
+            Assign automation periods with profiles to group &quot;{group?.name}&quot;. Channels in this group will inherit these periods.
           </DialogDescription>
         </DialogHeader>
 
@@ -657,8 +195,7 @@ function AssignPeriodsDialog({ open, onOpenChange, channelId, channelName, onSuc
               return (
                 <div
                   key={period.id}
-                  className={`p-3 border rounded-lg transition-colors ${isSelected ? 'border-primary bg-primary/5' : 'border-border'
-                    }`}
+                  className={`p-3 border rounded-lg transition-colors ${isSelected ? 'border-primary bg-primary/5' : 'border-border'}`}
                 >
                   <div className="flex items-start gap-3">
                     <Checkbox
@@ -670,9 +207,6 @@ function AssignPeriodsDialog({ open, onOpenChange, channelId, channelName, onSuc
                       <div>
                         <div className="flex items-center gap-2 mb-1">
                           <span className="font-medium">{period.name}</span>
-                          <Badge variant="outline" className="text-xs">
-                            {period.channel_count || 0} channel{period.channel_count !== 1 ? 's' : ''}
-                          </Badge>
                         </div>
                         <div className="text-sm text-muted-foreground">
                           {period.schedule?.type === 'interval'
@@ -717,10 +251,10 @@ function AssignPeriodsDialog({ open, onOpenChange, channelId, channelName, onSuc
           </Button>
           <Button
             onClick={handleSave}
-            disabled={saving || loading || allPeriods.length === 0 || Object.keys(periodAssignments).length === 0}
+            disabled={saving || loading || Object.keys(periodAssignments).length === 0}
           >
-            {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            Save
+            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Assign to Group
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -728,799 +262,136 @@ function AssignPeriodsDialog({ open, onOpenChange, channelId, channelName, onSuc
   )
 }
 
-// Batch Assign Periods Dialog - for assigning periods to multiple channels at once
-function BatchAssignPeriodsDialog({ open, onOpenChange, selectedChannelIds, channelsData, onSuccess }) {
-  const [allPeriods, setAllPeriods] = useState([])
-  const [allProfiles, setAllProfiles] = useState([])
-  const [periodAssignments, setPeriodAssignments] = useState({})  // {period_id: profile_id}
-  const [loading, setLoading] = useState(false)
-  const [saving, setSaving] = useState(false)
+// Dialog for assigning regex and TVG-ID matching to a group
+function GroupAssignMatchingDialog({ open, onOpenChange, group, initialConfig, onSave, onDelete, saving }) {
+  const [enabled, setEnabled] = useState(true)
+  const [matchByTvgId, setMatchByTvgId] = useState(false)
+  const [patterns, setPatterns] = useState([])
+  const [newPattern, setNewPattern] = useState('')
   const { toast } = useToast()
 
   useEffect(() => {
-    if (open) {
-      loadData()
-    }
-  }, [open])
+    if (!open) return
+    const cfg = initialConfig || {}
+    setEnabled(cfg.enabled ?? true)
+    setMatchByTvgId(Boolean(cfg.match_by_tvg_id))
 
-  const loadData = async () => {
-    try {
-      setLoading(true)
-      const [periodsResponse, profilesResponse] = await Promise.all([
-        automationAPI.getPeriods(),
-        automationAPI.getProfiles()
-      ])
-      setAllPeriods(periodsResponse.data || [])
-      setAllProfiles(profilesResponse.data || [])
-      // Start with empty assignments for batch operation
-      setPeriodAssignments({})
-    } catch (err) {
-      console.error('Failed to load data:', err)
+    const regexPatterns = cfg.regex_patterns || []
+    const normalized = regexPatterns
+      .map((p) => (typeof p === 'string' ? p : p?.pattern))
+      .filter(Boolean)
+    setPatterns(normalized)
+    setNewPattern('')
+  }, [open, initialConfig])
+
+  const handleAddPattern = () => {
+    const trimmed = (newPattern || '').trim()
+    if (!trimmed) return
+    if (patterns.includes(trimmed)) {
       toast({
-        title: "Error",
-        description: "Failed to load periods and profiles",
-        variant: "destructive"
-      })
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleSave = async () => {
-    const selectedPeriods = Object.entries(periodAssignments).filter(([_, profileId]) => profileId && profileId !== '')
-
-    if (selectedPeriods.length === 0) {
-      toast({
-        title: "No Periods Selected",
-        description: "Please select at least one period and assign a profile",
-        variant: "destructive"
+        title: 'Duplicate Pattern',
+        description: 'This regex pattern already exists for this group.',
+        variant: 'destructive'
       })
       return
     }
-
-    try {
-      setSaving(true)
-
-      // Build period assignments array: [{period_id, profile_id}, ...]
-      const assignments = selectedPeriods.map(([periodId, profileId]) => ({
-        period_id: periodId,
-        profile_id: profileId
-      }))
-
-      // Use batch assignment endpoint with replace=false to add to existing periods
-      await automationAPI.batchAssignPeriods(selectedChannelIds, assignments, false)
-
-      toast({
-        title: "Success",
-        description: `Assigned ${selectedPeriods.length} period${selectedPeriods.length > 1 ? 's' : ''} to ${selectedChannelIds.length} channel${selectedChannelIds.length > 1 ? 's' : ''}`
-      })
-
-      if (onSuccess) onSuccess()
-    } catch (err) {
-      console.error('Failed to save:', err)
-      toast({
-        title: "Error",
-        description: err.response?.data?.error || "Failed to assign periods",
-        variant: "destructive"
-      })
-    } finally {
-      setSaving(false)
-    }
+    setPatterns((prev) => [...prev, trimmed])
+    setNewPattern('')
   }
 
-  const togglePeriod = (periodId) => {
-    setPeriodAssignments(prev => {
-      const newAssignments = { ...prev }
-      if (periodId in newAssignments) {
-        delete newAssignments[periodId]
-      } else {
-        // Only add if profiles are available
-        if (allProfiles.length > 0) {
-          newAssignments[periodId] = allProfiles[0].id
-        }
-      }
-      return newAssignments
+  const handleRemovePattern = (idx) => {
+    setPatterns((prev) => prev.filter((_, i) => i !== idx))
+  }
+
+  const handleSave = () => {
+    onSave({
+      name: group?.name || '',
+      enabled,
+      match_by_tvg_id: matchByTvgId,
+      regex_patterns: patterns.map((pattern) => ({ pattern }))
     })
   }
 
-  const updateProfile = (periodId, profileId) => {
-    setPeriodAssignments(prev => ({
-      ...prev,
-      [periodId]: profileId
-    }))
-  }
-
-  const selectedChannelNames = channelsData
-    .filter(ch => selectedChannelIds.includes(ch.id))
-    .map(ch => ch.name)
-    .slice(0, 3)
-  const remainingCount = selectedChannelIds.length - 3
-
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
+      <DialogContent className="max-w-2xl max-h-[80vh] overflow-hidden flex flex-col">
         <DialogHeader>
-          <DialogTitle>Batch Assign Automation Periods</DialogTitle>
+          <DialogTitle>Configure Group Matching</DialogTitle>
           <DialogDescription>
-            Assign automation periods with profiles to {selectedChannelIds.length} selected channel{selectedChannelIds.length > 1 ? 's' : ''}
-            {selectedChannelNames.length > 0 && (
-              <span className="block mt-1 text-xs">
-                ({selectedChannelNames.join(', ')}{remainingCount > 0 ? ` and ${remainingCount} more` : ''})
-              </span>
-            )}
+            Configure regex and TVG-ID matching for group &quot;{group?.name}&quot;. Channels in this group inherit these settings unless they have channel-specific matching config.
           </DialogDescription>
         </DialogHeader>
 
-        {loading ? (
-          <div className="flex items-center justify-center py-8">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          </div>
-        ) : allPeriods.length === 0 ? (
-          <div className="text-center py-8">
-            <Calendar className="h-12 w-12 mx-auto mb-4 opacity-50 text-muted-foreground" />
-            <p className="text-muted-foreground mb-4">No automation periods available</p>
-            <p className="text-sm text-muted-foreground">
-              Create automation periods in Settings → Automation → Periods first
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-3 overflow-y-auto flex-1">
-            {allPeriods.map((period) => {
-              const isSelected = period.id in periodAssignments
-              const selectedProfile = periodAssignments[period.id]
-
-              return (
-                <div
-                  key={period.id}
-                  className={`p-3 border rounded-lg transition-colors ${isSelected ? 'border-primary bg-primary/5' : 'border-border'
-                    }`}
-                >
-                  <div className="flex items-start gap-3">
-                    <Checkbox
-                      checked={isSelected}
-                      onCheckedChange={() => togglePeriod(period.id)}
-                      className="mt-1"
-                    />
-                    <div className="flex-1 space-y-2">
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-medium">{period.name}</span>
-                          <Badge variant="outline" className="text-xs">
-                            {period.channel_count || 0} channel{period.channel_count !== 1 ? 's' : ''}
-                          </Badge>
-                        </div>
-                        <div className="text-sm text-muted-foreground">
-                          {period.schedule?.type === 'interval'
-                            ? `Every ${period.schedule.value} minutes`
-                            : `Cron: ${period.schedule?.value || 'Not configured'}`}
-                        </div>
-                      </div>
-
-                      {isSelected && (
-                        <div className="pt-2 border-t">
-                          <Label className="text-xs text-muted-foreground mb-1 block">
-                            Profile for this period:
-                          </Label>
-                          <Select
-                            value={selectedProfile}
-                            onValueChange={(value) => updateProfile(period.id, value)}
-                          >
-                            <SelectTrigger className="h-8">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {allProfiles.map((profile) => (
-                                <SelectItem key={profile.id} value={profile.id}>
-                                  {profile.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
-          </div>
-        )}
-
-        <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button onClick={handleSave} disabled={saving || loading || Object.keys(periodAssignments).length === 0}>
-            {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Assign to Channels
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
-
-// Batch Edit Periods Dialog - for editing existing period assignments across multiple channels
-function BatchPeriodEditDialog({ open, onOpenChange, selectedChannelIds, profiles, onSuccess }) {
-  const [usage, setUsage] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [updating, setUpdating] = useState(false)
-  const [removing, setRemoving] = useState(false)
-  const { toast } = useToast()
-
-  useEffect(() => {
-    if (open) {
-      loadUsage()
-    }
-  }, [open, selectedChannelIds])
-
-  const loadUsage = async () => {
-    try {
-      setLoading(true)
-      const response = await automationAPI.getBatchPeriodUsage(selectedChannelIds)
-      setUsage(response.data)
-    } catch (err) {
-      console.error('Failed to load period usage:', err)
-      toast({
-        title: "Error",
-        description: "Failed to load automation period usage",
-        variant: "destructive"
-      })
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  const handleUpdateProfile = async (periodId, profileId) => {
-    try {
-      setUpdating(periodId)
-      await automationAPI.batchAssignPeriods(selectedChannelIds, [{
-        period_id: periodId,
-        profile_id: profileId
-      }], false)
-
-      toast({
-        title: "Success",
-        description: "Profile updated for selected channels"
-      })
-      loadUsage()
-      if (onSuccess) onSuccess()
-    } catch (err) {
-      console.error('Failed to update profile:', err)
-      toast({
-        title: "Error",
-        description: "Failed to update profile",
-        variant: "destructive"
-      })
-    } finally {
-      setUpdating(false)
-    }
-  }
-
-  const handleRemovePeriod = async (periodId) => {
-    try {
-      setRemoving(periodId)
-      await automationAPI.removePeriodFromChannels(periodId, selectedChannelIds)
-      toast({
-        title: "Success",
-        description: "Period removed from selected channels"
-      })
-      loadUsage()
-      if (onSuccess) onSuccess()
-    } catch (err) {
-      console.error('Failed to remove period:', err)
-      toast({
-        title: "Error",
-        description: "Failed to remove period",
-        variant: "destructive"
-      })
-    } finally {
-      setRemoving(false)
-    }
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-4xl max-h-[85vh] overflow-hidden flex flex-col">
-        <DialogHeader>
-          <DialogTitle>Edit Common Automation Periods</DialogTitle>
-          <DialogDescription>
-            These are automation periods assigned to one or more of the {selectedChannelIds.length} selected channels.
-          </DialogDescription>
-        </DialogHeader>
-
-        {loading ? (
-          <div className="flex items-center justify-center py-12">
-            <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
-          </div>
-        ) : !usage || usage.periods.length === 0 ? (
-          <div className="text-center py-12">
-            <Clock className="h-12 w-12 mx-auto mb-4 opacity-50 text-muted-foreground" />
-            <p className="text-muted-foreground">No automation periods assigned to selected channels</p>
-          </div>
-        ) : (
-          <div className="flex-1 overflow-y-auto pr-2">
-            <div className="space-y-4">
-              {usage.periods.map((item) => (
-                <div key={item.id} className="p-4 border rounded-lg bg-card">
-                  <div className="flex items-start justify-between gap-4 mb-4">
-                    <div>
-                      <div className="flex items-center gap-2 mb-1">
-                        <span className="font-semibold">{item.name}</span>
-                        <Badge variant="secondary">
-                          Used in {item.count} channel{item.count !== 1 ? 's' : ''} ({item.percentage}%)
-                        </Badge>
-                      </div>
-                      <div className="text-sm text-muted-foreground">
-                        Manage this period's profile or remove it from all {selectedChannelIds.length} channels.
-                      </div>
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-destructive border-destructive hover:bg-destructive/10"
-                      disabled={removing === item.id}
-                      onClick={() => handleRemovePeriod(item.id)}
-                    >
-                      {removing === item.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4 mr-2" />}
-                      Remove from All
-                    </Button>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {item.profiles.map((prof) => (
-                      <div key={prof.id} className="p-3 bg-muted/50 rounded-md border flex items-center justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="text-xs text-muted-foreground mb-0.5">Profile:</div>
-                          <div className="font-medium text-sm truncate">{prof.name}</div>
-                          <div className="text-[10px] text-muted-foreground">{prof.channel_ids.length} channel{prof.channel_ids.length !== 1 ? 's' : ''}</div>
-                        </div>
-                        <div className="flex-shrink-0">
-                          <Select
-                            disabled={updating === item.id}
-                            onValueChange={(value) => handleUpdateProfile(item.id, value)}
-                          >
-                            <SelectTrigger className="h-8 w-[140px] text-xs">
-                              <SelectValue placeholder="Change Profile" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {profiles.map(p => (
-                                <SelectItem key={p.id} value={p.id} disabled={p.id === prof.id}>
-                                  {p.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
+        <div className="space-y-4 overflow-y-auto flex-1 py-1">
+          <div className="flex items-center justify-between p-3 rounded-md border bg-muted/40">
+            <div>
+              <p className="font-medium text-sm">Enable Group Regex Matching</p>
+              <p className="text-xs text-muted-foreground">When enabled, group regex patterns can match streams for channels in this group.</p>
             </div>
+            <Switch checked={enabled} onCheckedChange={setEnabled} />
           </div>
-        )}
 
-        <DialogFooter className="pt-4 border-t mt-4">
-          <Button variant="outline" onClick={() => onOpenChange(false)}>Close</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  )
-}
+          <div className="flex items-center justify-between p-3 rounded-md border bg-muted/40">
+            <div>
+              <p className="font-medium text-sm">Match by TVG-ID</p>
+              <p className="text-xs text-muted-foreground">Use TVG-ID matching as a group fallback when channel-level settings are not defined.</p>
+            </div>
+            <Switch checked={matchByTvgId} onCheckedChange={setMatchByTvgId} />
+          </div>
 
-
-function SortableChannelItem({ channel }) {
-  const [logoUrl, setLogoUrl] = useState(null)
-  const [logoError, setLogoError] = useState(false)
-
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id: channel.id })
-
-  useEffect(() => {
-    const loadLogo = () => {
-      // Try cached logo first from localStorage
-      const cachedLogo = localStorage.getItem(`${CHANNEL_LOGO_PREFIX}${channel.id}`)
-      if (cachedLogo) {
-        setLogoUrl(cachedLogo)
-        return // Use cached version, don't fetch again
-      }
-
-      // Only fetch from API if not cached and logo_id is available
-      if (channel.logo_id) {
-        const logoUrl = channelsAPI.getLogoCached(channel.logo_id)
-        setLogoUrl(logoUrl)
-        localStorage.setItem(`${CHANNEL_LOGO_PREFIX}${channel.id}`, logoUrl)
-      }
-    }
-    loadLogo()
-  }, [channel.id, channel.logo_id])
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.5 : 1,
-  }
-
-  return (
-    <div
-      ref={setNodeRef}
-      style={style}
-      className={`flex items-center gap-3 p-4 bg-card border rounded-lg ${isDragging ? 'shadow-lg' : 'shadow-sm'
-        }`}
-    >
-      <div
-        {...attributes}
-        {...listeners}
-        className="cursor-grab active:cursor-grabbing touch-none"
-      >
-        <GripVertical className="h-5 w-5 text-muted-foreground" />
-      </div>
-
-      {/* Channel Logo */}
-      <div className="w-20 h-10 flex-shrink-0 bg-muted rounded-md flex items-center justify-center overflow-hidden">
-        {logoUrl && !logoError ? (
-          <img
-            src={logoUrl}
-            alt={channel.name}
-            className="w-full h-full object-contain"
-            onError={() => setLogoError(true)}
-          />
-        ) : (
-          <span className="text-xl font-bold text-muted-foreground">
-            {channel.name?.charAt(0) || '?'}
-          </span>
-        )}
-      </div>
-
-      <div className="flex-1 flex items-center gap-4">
-        <Badge variant="outline" className="font-mono">
-          #{channel.channel_number || 'N/A'}
-        </Badge>
-        <div className="flex-1 min-w-0">
-          <div className="font-medium truncate">{channel.name}</div>
-          <div className="text-xs text-muted-foreground">ID: {channel.id}</div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-function RegexTableRow({ channel, group, groups, profiles, patterns, selectedChannels, onToggleChannel, onEditRegex, onDeletePattern, expandedRowId, onToggleExpanded, onCheckChannel, checkingChannel, m3uAccounts, onUpdateMatchSettings, onPreviewMatch, onRefresh }) {
-  const [logoUrl, setLogoUrl] = useState(null)
-  const [logoError, setLogoError] = useState(false)
-  const [channelPeriods, setChannelPeriods] = useState([])
-  const [loadingPeriods, setLoadingPeriods] = useState(false)
-  const [assignDialogOpen, setAssignDialogOpen] = useState(false)
-  const { toast } = useToast()
-
-  // Use parent-controlled expanded state
-  const expanded = expandedRowId === channel.id
-  const isChecking = checkingChannel === channel.id
-
-  const channelPatterns = patterns[channel.id] || patterns[String(channel.id)]
-  const matchByTvgId = channelPatterns?.match_by_tvg_id || false
-  const patternCount = normalizePatternData(channelPatterns).length
-
-  const loadChannelPeriods = useCallback(async () => {
-    try {
-      setLoadingPeriods(true)
-      const response = await automationAPI.getChannelPeriods(channel.id)
-      setChannelPeriods(response.data || [])
-    } catch (err) {
-      console.error('Failed to load channel periods:', err)
-    } finally {
-      setLoadingPeriods(false)
-    }
-  }, [channel.id])
-
-  useEffect(() => {
-    if (expanded) {
-      loadChannelPeriods()
-    }
-  }, [expanded, loadChannelPeriods])
-
-  const handleRemovePeriod = async (periodId) => {
-    try {
-      await automationAPI.removePeriodFromChannels(periodId, [channel.id])
-      toast({
-        title: "Success",
-        description: "Automation period removed from channel"
-      })
-      loadChannelPeriods()
-      if (onRefresh) onRefresh()
-    } catch (err) {
-      console.error('Failed to remove period:', err)
-      toast({
-        title: "Error",
-        description: "Failed to remove automation period",
-        variant: "destructive"
-      })
-    }
-  }
-
-  // Load channel logo
-  useEffect(() => {
-    const loadLogo = () => {
-      // Check localStorage cache first
-      const cachedUrl = localStorage.getItem(`${CHANNEL_LOGO_PREFIX}${channel.id}`)
-      if (cachedUrl) {
-        setLogoUrl(cachedUrl)
-        return
-      }
-
-      // Fetch logo if logo_id is available
-      if (channel.logo_id) {
-        const logoUrl = channelsAPI.getLogoCached(channel.logo_id)
-        setLogoUrl(logoUrl)
-        localStorage.setItem(`${CHANNEL_LOGO_PREFIX}${channel.id}`, logoUrl)
-      }
-    }
-    loadLogo()
-  }, [channel.id, channel.logo_id])
-
-
-
-  return (
-    <div key={channel.id}>
-      <div className={`grid gap-4 p-4 hover:bg-muted/50 transition-colors`} style={{ gridTemplateColumns: REGEX_TABLE_GRID_COLS }}>
-        <div className="flex items-center justify-center">
-          <Checkbox
-            checked={selectedChannels.has(channel.id)}
-            onCheckedChange={() => onToggleChannel(channel.id)}
-          />
-        </div>
-        <div className="flex items-center text-sm font-medium">
-          {channel.channel_number || '-'}
-        </div>
-        <div className="flex items-center">
-          <div className="w-16 h-10 flex-shrink-0 bg-muted rounded-md flex items-center justify-center overflow-hidden">
-            {logoUrl && !logoError ? (
-              <img
-                src={logoUrl}
-                alt={channel.name}
-                className="w-full h-full object-contain"
-                onError={() => setLogoError(true)}
+          <div className="space-y-2">
+            <Label>Regex Patterns</Label>
+            <div className="flex gap-2">
+              <Input
+                value={newPattern}
+                onChange={(e) => setNewPattern(e.target.value)}
+                placeholder="e.g. .*SPORT.*|.*ESPN.*"
+                className="font-mono"
               />
-            ) : (
-              <span className="text-lg font-bold text-muted-foreground">
-                {channel.name?.charAt(0) || '?'}
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="flex items-center">
-          <span className="font-medium truncate">{channel.name}</span>
-        </div>
-        <div className="flex items-center text-sm text-muted-foreground truncate">
-          {group?.name || '-'}
-        </div>
-        <div className="flex items-center">
-          <Badge variant="outline" className="text-xs font-normal">
-            {channel.automation_periods_count || 0} period{channel.automation_periods_count !== 1 ? 's' : ''}
-          </Badge>
-        </div>
-        <div className="flex items-center">
-          {patternCount > 0 ? (
-            <Badge variant="secondary">{patternCount} pattern{patternCount > 1 ? 's' : ''}</Badge>
-          ) : (
-            <span className="text-sm text-muted-foreground">No patterns</span>
-          )}
-        </div>
-        <div className="flex items-center gap-2">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => onPreviewMatch(channel.id, 'global')}
-              >
-                <Eye className="h-4 w-4 text-muted-foreground" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>Global Channel Preview</TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => onCheckChannel(channel.id)}
-                disabled={isChecking}
-                className="text-blue-600 dark:text-green-500 border-blue-600 dark:border-green-500 hover:bg-blue-50 dark:hover:bg-green-950"
-              >
-                {isChecking ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Activity className="h-4 w-4" />
-                )}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>
-              <p>Health Check Channel</p>
-            </TooltipContent>
-          </Tooltip>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => onToggleExpanded(channel.id)}
-          >
-            <ChevronDown className={`h-4 w-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-          </Button>
-        </div>
-      </div>
-
-      {/* Expanded Section */}
-      {expanded && (
-        <div className="border-t p-4 bg-muted/50 space-y-6">
-          {/* Automation Periods */}
-          <div>
-            <div className="flex justify-between items-center mb-3">
-              <h4 className="font-medium text-sm flex items-center gap-2">
-                <Calendar className="h-4 w-4" />
-                Automation Periods
-              </h4>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => setAssignDialogOpen(true)}
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                Assign to Period
+              <Button onClick={handleAddPattern} type="button" variant="outline">
+                <Plus className="h-4 w-4 mr-1" />
+                Add
               </Button>
             </div>
 
-            {loadingPeriods ? (
-              <div className="flex items-center justify-center py-4">
-                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-              </div>
-            ) : channelPeriods.length > 0 ? (
-              <div className="grid gap-2 grid-cols-1 md:grid-cols-2">
-                {channelPeriods.map(period => (
-                  <div key={period.id} className="flex items-center justify-between p-3 bg-background border rounded-lg">
-                    <div className="min-w-0">
-                      <div className="font-medium text-sm truncate">{period.name}</div>
-                      <div className="flex items-center gap-2 mt-1">
-                        <Badge variant="secondary" className="text-[10px] font-normal">
-                          {period.profile_name || 'No Profile'}
-                        </Badge>
-                        <span className="text-[10px] text-muted-foreground">
-                          {period.schedule?.type === 'interval'
-                            ? `${period.schedule.value}m`
-                            : 'Cron'}
-                        </span>
-                      </div>
-                    </div>
+            {patterns.length === 0 ? (
+              <p className="text-sm text-muted-foreground italic">No regex patterns configured for this group</p>
+            ) : (
+              <div className="space-y-2">
+                {patterns.map((pattern, idx) => (
+                  <div key={`${pattern}-${idx}`} className="flex items-center justify-between gap-2 p-2 rounded border bg-background">
+                    <code className="text-xs flex-1 truncate">{pattern}</code>
                     <Button
-                      size="sm"
                       variant="ghost"
-                      onClick={() => handleRemovePeriod(period.id)}
-                      className="text-destructive hover:text-destructive hover:bg-destructive/10 h-7 w-7 p-0"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => handleRemovePattern(idx)}
                     >
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
                 ))}
               </div>
-            ) : (
-              <p className="text-sm text-muted-foreground bg-background p-4 rounded-lg border border-dashed text-center">
-                No automation periods assigned to this channel
-              </p>
             )}
-
-            <AssignPeriodsDialog
-              open={assignDialogOpen}
-              onOpenChange={setAssignDialogOpen}
-              channelId={channel.id}
-              channelName={channel.name}
-              onSuccess={() => {
-                loadChannelPeriods()
-                if (onRefresh) onRefresh()
-              }}
-            />
-          </div>
-
-          <Separator />
-
-
-          {/* Regex Patterns */}
-          <div>
-            {/* Match Settings */}
-            <div className="flex items-center justify-between mb-4 p-3 bg-muted rounded-md">
-              <div className="flex items-center space-x-2">
-                <Switch
-                  id={`tvg-match-${channel.id}`}
-                  checked={matchByTvgId}
-                  onCheckedChange={(checked) => onUpdateMatchSettings(channel.id, { match_by_tvg_id: checked })}
-                />
-                <Label htmlFor={`tvg-match-${channel.id}`} className="flex flex-col cursor-pointer">
-                  <span className="font-medium">Match by TVG-ID</span>
-                  <span className="font-normal text-xs text-muted-foreground">
-                    Automatically match streams with TVG-ID "{channel.tvg_id || 'N/A'}"
-                  </span>
-                </Label>
-              </div>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onPreviewMatch(channel.id, 'tvg_only')}
-                disabled={!channel.tvg_id}
-                title={!channel.tvg_id ? "No TVG-ID set" : "Preview only TVG-ID matches (ignoring profile/regex)"}
-              >
-                <Eye className="h-4 w-4 mr-2" />
-                Preview Results
-              </Button>
-            </div>
-
-            <div className="flex justify-between items-center mb-3">
-              <h4 className="font-medium text-sm">Regex Patterns</h4>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => onEditRegex(channel.id, null)}
-              >
-                <Plus className="h-4 w-4 mr-2" />
-                Add Pattern
-              </Button>
-            </div>
-
-            {(() => {
-              const normalizedPatterns = normalizePatternData(channelPatterns)
-              return normalizedPatterns.length > 0 ? (
-                <div className="space-y-2">
-                  {normalizedPatterns.map((patternObj, index) => {
-                    // Get M3U account names if m3u_accounts are specified for this pattern
-                    const accountNames = patternObj.m3u_accounts && patternObj.m3u_accounts.length > 0
-                      ? patternObj.m3u_accounts.map(id => {
-                        const acc = m3uAccounts?.find(account => account.id === id)
-                        return acc ? acc.name : `Account ${id}`
-                      }).join(', ')
-                      : 'All M3U Accounts'
-
-                    return (
-                      <div key={index} className="space-y-1">
-                        <div className="flex items-center justify-between gap-2 p-2 bg-background rounded-md">
-                          <div className="flex-1 space-y-1">
-                            <code className="text-sm break-all">{patternObj.pattern}</code>
-                            <div className="text-xs text-muted-foreground">
-                              M3U Sources: {accountNames}
-                            </div>
-                          </div>
-                          <div className="flex gap-1">
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => onEditRegex(channel.id, index)}
-                            >
-                              <Edit className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              onClick={() => onDeletePattern(channel.id, index)}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">No regex patterns configured</p>
-              )
-            })()}
           </div>
         </div>
-      )}
-    </div>
+
+        <DialogFooter className="justify-between">
+          <Button variant="destructive" onClick={onDelete} disabled={saving}>
+            Clear Group Matching
+          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => onOpenChange(false)}>
+              Cancel
+            </Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Save Matching
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -1562,6 +433,8 @@ export default function ChannelConfiguration() {
 
   const [pendingChanges, setPendingChanges] = useState({})
   const [activeTab, setActiveTab] = useState('regex')
+  const [matchCounts, setMatchCounts] = useState({})        // {channelId: matchCount}
+  const [totalStreamCount, setTotalStreamCount] = useState(null)
 
   // Multi-select state for bulk regex assignment
   const [selectedChannels, setSelectedChannels] = useState(new Set())
@@ -1573,7 +446,7 @@ export default function ChannelConfiguration() {
 
   // Automation Profile state
   const [profiles, setProfiles] = useState([])
-  const [assignProfileId, setAssignProfileId] = useState('')
+  const [assignEpgProfileId, setAssignEpgProfileId] = useState('')
 
   // M3U account filtering state for regex patterns
   const [m3uAccounts, setM3uAccounts] = useState([])  // All M3U accounts
@@ -1595,6 +468,22 @@ export default function ChannelConfiguration() {
 
   // Batch automation period assignment state
   const [batchPeriodsDialogOpen, setBatchPeriodsDialogOpen] = useState(false)
+
+  // Group Configuration state
+  const [groupsConfig, setGroupsConfig] = useState({}) // {groupId: {profileId, periods: [{id, profile_id}]}}
+  const [loadingGroupsConfig, setLoadingGroupsConfig] = useState(false)
+  const [groupAssignProfileDialogOpen, setGroupAssignProfileDialogOpen] = useState(false)
+  const [groupAssignPeriodsDialogOpen, setGroupAssignPeriodsDialogOpen] = useState(false)
+  const [groupAssignMatchingDialogOpen, setGroupAssignMatchingDialogOpen] = useState(false)
+  const [groupAssignEpgProfileDialogOpen, setGroupAssignEpgProfileDialogOpen] = useState(false)
+  const [selectedGroupForConfig, setSelectedGroupForConfig] = useState(null)
+  const [groupProfileId, setGroupProfileId] = useState('')
+  const [groupPeriodAssignments, setGroupPeriodAssignments] = useState([]) // [{period_id, profile_id}]
+  const [savingGroupProfile, setSavingGroupProfile] = useState(false)
+  const [savingGroupPeriods, setSavingGroupPeriods] = useState(false)
+  const [savingGroupMatching, setSavingGroupMatching] = useState(false)
+  const [groupEpgProfileId, setGroupEpgProfileId] = useState('')
+  const [savingGroupEpgProfile, setSavingGroupEpgProfile] = useState(false)
 
   // Edit common regex dialog state
   const [editCommonDialogOpen, setEditCommonDialogOpen] = useState(false)
@@ -1628,6 +517,86 @@ export default function ChannelConfiguration() {
   useEffect(() => {
     loadData()
   }, [])
+
+  useEffect(() => {
+    if (activeTab === 'groups' && groups.length > 0) {
+      loadGroupsConfig()
+    }
+  }, [activeTab, groups])
+
+  // Bulk match count — fires when Regex tab is active, on page change, pattern edits,
+  // or after groupsConfig populates (so group-inherited channels get their counts too).
+  useEffect(() => {
+    if (activeTab !== 'regex' || channels.length === 0) return
+
+    const fetchMatchCounts = async () => {
+      // Build effective config for each channel on the current page,
+      // mirroring the global mode logic in handleTestPattern.
+      const channelConfigs = []
+
+      for (const channel of paginatedChannels) {
+        const channelId = channel.id
+        const channelPatternConfig = patterns[channelId] || patterns[String(channelId)] || {}
+        const channelGroupId = channel?.group_id ?? channel?.channel_group_id
+        const groupMatchingConfig = channelGroupId
+          ? ((groupsConfig[channelGroupId] || {}).matching || {})
+          : {}
+
+        const hasChannelRegexPatterns =
+          (Array.isArray(channelPatternConfig.regex_patterns) && channelPatternConfig.regex_patterns.length > 0) ||
+          (Array.isArray(channelPatternConfig.regex) && channelPatternConfig.regex.length > 0)
+        const hasExplicitChannelOverride =
+          hasChannelRegexPatterns ||
+          channelPatternConfig.match_by_tvg_id === true ||
+          channelPatternConfig.enabled === false
+
+        const effectivePatternConfig = hasExplicitChannelOverride ? channelPatternConfig : groupMatchingConfig
+
+        // Build regex patterns array in the normalised format
+        let regexPatterns = []
+        if (effectivePatternConfig.regex_patterns) {
+          regexPatterns = effectivePatternConfig.regex_patterns
+        } else if (effectivePatternConfig.regex) {
+          regexPatterns = effectivePatternConfig.regex.map(p => ({
+            pattern: p,
+            m3u_accounts: effectivePatternConfig.m3u_accounts || null,
+          }))
+        }
+
+        const matchByTvgId = effectivePatternConfig.match_by_tvg_id || false
+        const hasTvg = matchByTvgId && Boolean(channel.tvg_id)
+        const hasRegex = regexPatterns.length > 0
+
+        // Skip channels with nothing to evaluate — display will show '— / Y'
+        if (!hasRegex && !hasTvg) continue
+
+        channelConfigs.push({
+          channel_id: channelId,
+          channel_name: channel.name || '',
+          tvg_id: channel.tvg_id || null,
+          match_by_tvg_id: matchByTvgId,
+          regex_patterns: regexPatterns,
+          match_priority_order: ['tvg', 'regex'],
+          case_sensitive: true,
+        })
+      }
+
+      if (channelConfigs.length === 0) return
+
+      try {
+        const response = await regexAPI.bulkMatchCounts({ channels: channelConfigs })
+        const { counts, total_streams } = response.data
+        setMatchCounts(prev => ({ ...prev, ...counts }))
+        if (total_streams != null) setTotalStreamCount(total_streams)
+      } catch (err) {
+        console.error('Failed to fetch bulk match counts:', err)
+      }
+    }
+
+    fetchMatchCounts()
+  // paginatedChannels is derived — listing its deps individually avoids stale closure
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, currentPage, patterns, groupsConfig, channels])
 
   const loadData = async () => {
     try {
@@ -1794,7 +763,7 @@ export default function ChannelConfiguration() {
     }
   }
 
-  const handleBatchAssignProfile = async (profileId) => {
+  const handleBatchAssignEpgProfile = async (profileId) => {
     if (selectedChannels.size === 0) {
       toast({
         title: "No Channels Selected",
@@ -1809,26 +778,24 @@ export default function ChannelConfiguration() {
       const channelIds = Array.from(selectedChannels)
       const targetProfileId = profileId === 'none' ? null : profileId
 
-      // Use generic batch assignment endpoint
-      await automationAPI.assignChannels(channelIds, targetProfileId)
+      await automationAPI.assignEpgChannels(channelIds, targetProfileId)
 
       toast({
         title: "Success",
-        description: `Profile ${targetProfileId ? 'assigned to' : 'removed from'} ${channelIds.length} channels`,
+        description: `EPG scheduled profile ${targetProfileId ? 'assigned to' : 'removed from'} ${channelIds.length} channels`,
       })
 
-      // Reload settings to update UI
       loadData()
     } catch (err) {
-      console.error('Failed to batch assign profile:', err)
+      console.error('Failed to batch assign EPG scheduled profile:', err)
       toast({
         title: "Error",
-        description: "Failed to assign profile to channels",
+        description: "Failed to assign EPG scheduled profile to channels",
         variant: "destructive"
       })
     } finally {
       setLoading(false)
-      setAssignProfileId('') // Reset selection
+      setAssignEpgProfileId('')
     }
   }
 
@@ -1842,6 +809,211 @@ export default function ChannelConfiguration() {
       return
     }
     setBatchPeriodsDialogOpen(true)
+  }
+
+  // --- Group Configuration Handlers ---
+
+  const loadGroupsConfig = async () => {
+    if (groups.length === 0) return
+    try {
+      setLoadingGroupsConfig(true)
+      const configMap = {}
+      const [, epgAssignmentsRes, profileAssignmentsRes] = await Promise.all([
+        Promise.all(groups.map(async (group) => {
+          try {
+            const [periodsRes, regexCfgRes] = await Promise.all([
+              automationAPI.getGroupPeriods(group.id),
+              regexAPI.getGroupConfig(group.id).catch(() => ({ data: {} }))
+            ])
+            configMap[group.id] = {
+              periods: periodsRes.data || [],
+              matching: regexCfgRes.data || {}
+            }
+          } catch {
+            configMap[group.id] = { periods: [], matching: {} }
+          }
+        })),
+        automationAPI.getGroupEpgAssignments().catch(() => ({ data: {} })),
+        automationAPI.getGroupAssignments().catch(() => ({ data: {} }))
+      ])
+      const epgAssignments = epgAssignmentsRes.data || {}
+      const profileAssignments = profileAssignmentsRes.data || {}
+      // Merge EPG and automation profile assignments into configMap
+      groups.forEach((group) => {
+        if (!configMap[group.id]) {
+          configMap[group.id] = { periods: [], matching: {} }
+        }
+        configMap[group.id].epg_profile_id = epgAssignments[String(group.id)] || null
+        configMap[group.id].profile_id = profileAssignments[String(group.id)] || null
+      })
+      setGroupsConfig(configMap)
+    } catch (err) {
+      console.error('Failed to load groups config:', err)
+    } finally {
+      setLoadingGroupsConfig(false)
+    }
+  }
+
+  const handleOpenGroupAssignProfile = (group) => {
+    setSelectedGroupForConfig(group)
+    const currentAssignment = (groupsConfig[group.id] || {}).profile_id || ''
+    setGroupProfileId(currentAssignment)
+    setGroupAssignProfileDialogOpen(true)
+  }
+
+  const handleSaveGroupProfile = async () => {
+    if (!selectedGroupForConfig) return
+    try {
+      setSavingGroupProfile(true)
+      await automationAPI.assignGroup(selectedGroupForConfig.id, groupProfileId || null)
+      toast({
+        title: "Success",
+        description: groupProfileId
+          ? `Automation profile assigned to group "${selectedGroupForConfig.name}"`
+          : `Automation profile removed from group "${selectedGroupForConfig.name}"`
+      })
+      setGroupAssignProfileDialogOpen(false)
+      await loadData()
+      await loadGroupsConfig()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to assign profile to group",
+        variant: "destructive"
+      })
+    } finally {
+      setSavingGroupProfile(false)
+    }
+  }
+
+  const handleOpenGroupAssignPeriods = (group) => {
+    setSelectedGroupForConfig(group)
+    setGroupPeriodAssignments([])
+    setGroupAssignPeriodsDialogOpen(true)
+  }
+
+  const handleOpenGroupAssignEpgProfile = (group) => {
+    setSelectedGroupForConfig(group)
+    const currentAssignment = (groupsConfig[group.id] || {}).epg_profile_id || ''
+    setGroupEpgProfileId(currentAssignment)
+    setGroupAssignEpgProfileDialogOpen(true)
+  }
+
+  const handleSaveGroupEpgProfile = async () => {
+    if (!selectedGroupForConfig) return
+    try {
+      setSavingGroupEpgProfile(true)
+      await automationAPI.assignEpgGroup(selectedGroupForConfig.id, groupEpgProfileId || null)
+      toast({
+        title: "Success",
+        description: groupEpgProfileId
+          ? `EPG scheduled profile assigned to group "${selectedGroupForConfig.name}"`
+          : `EPG scheduled profile removed from group "${selectedGroupForConfig.name}"`
+      })
+      setGroupAssignEpgProfileDialogOpen(false)
+      await loadData()
+      await loadGroupsConfig()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to assign EPG scheduled profile to group",
+        variant: "destructive"
+      })
+    } finally {
+      setSavingGroupEpgProfile(false)
+    }
+  }
+
+  const handleOpenGroupAssignMatching = (group) => {
+    setSelectedGroupForConfig(group)
+    setGroupAssignMatchingDialogOpen(true)
+  }
+
+  const handleSaveGroupPeriods = async (assignments, replace = false) => {
+    if (!selectedGroupForConfig || assignments.length === 0) return
+    try {
+      setSavingGroupPeriods(true)
+      await automationAPI.batchAssignPeriodsToGroups(
+        [selectedGroupForConfig.id],
+        assignments,
+        replace
+      )
+      toast({
+        title: "Success",
+        description: `Assigned ${assignments.length} period${assignments.length !== 1 ? 's' : ''} to group "${selectedGroupForConfig.name}"`
+      })
+      setGroupAssignPeriodsDialogOpen(false)
+      await loadGroupsConfig()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to assign periods to group",
+        variant: "destructive"
+      })
+    } finally {
+      setSavingGroupPeriods(false)
+    }
+  }
+
+  const handleRemoveGroupPeriod = async (group, periodId) => {
+    try {
+      await automationAPI.removePeriodFromGroups(periodId, [group.id])
+      toast({
+        title: "Success",
+        description: `Period removed from group "${group.name}"`
+      })
+      await loadGroupsConfig()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to remove period from group",
+        variant: "destructive"
+      })
+    }
+  }
+
+  const handleSaveGroupMatching = async (payload) => {
+    if (!selectedGroupForConfig) return
+    try {
+      setSavingGroupMatching(true)
+      await regexAPI.saveGroupConfig(selectedGroupForConfig.id, payload)
+      toast({
+        title: 'Success',
+        description: `Group matching updated for "${selectedGroupForConfig.name}"`
+      })
+      setGroupAssignMatchingDialogOpen(false)
+      await loadGroupsConfig()
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Failed to update group matching',
+        variant: 'destructive'
+      })
+    } finally {
+      setSavingGroupMatching(false)
+    }
+  }
+
+  const handleDeleteGroupMatching = async () => {
+    if (!selectedGroupForConfig) return
+    try {
+      setSavingGroupMatching(true)
+      await regexAPI.deleteGroupConfig(selectedGroupForConfig.id)
+      toast({
+        title: 'Success',
+        description: `Group matching cleared for "${selectedGroupForConfig.name}"`
+      })
+      setGroupAssignMatchingDialogOpen(false)
+      await loadGroupsConfig()
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Failed to clear group matching',
+        variant: 'destructive'
+      })
+    } finally {
+      setSavingGroupMatching(false)
+    }
   }
 
   const handleUpdateMatchSettings = async (channelId, settings) => {
@@ -1869,6 +1041,31 @@ export default function ChannelConfiguration() {
       toast({
         title: "Error",
         description: "Failed to update match settings",
+        variant: "destructive"
+      })
+    }
+  }
+
+  const handleAssignEpgProfile = async (channelId, profileId) => {
+    try {
+      await automationAPI.assignEpgChannel(channelId, profileId)
+      // Update channel state locally so the dropdown reflects the change immediately
+      setChannels(prev => prev.map(ch =>
+        ch.id === channelId
+          ? { ...ch, channel_epg_scheduled_profile_id: profileId || null, epg_scheduled_profile_id: profileId || null }
+          : ch
+      ))
+      toast({
+        title: "Success",
+        description: profileId
+          ? "EPG scheduled profile assigned to channel"
+          : "EPG scheduled profile removed from channel"
+      })
+    } catch (err) {
+      console.error('Failed to assign EPG scheduled profile:', err)
+      toast({
+        title: "Error",
+        description: "Failed to assign EPG scheduled profile",
         variant: "destructive"
       })
     }
@@ -1937,6 +1134,45 @@ export default function ChannelConfiguration() {
       const channel = channels.find(ch => ch.id === contextChannelId)
       const profile = profiles.find(p => p.id === channel?.automation_profile_id)
       const channelPatternConfig = patterns[contextChannelId] || patterns[String(contextChannelId)] || {}
+      const channelGroupId = channel?.group_id ?? channel?.channel_group_id
+      let groupMatchingConfig = channelGroupId ? ((groupsConfig[channelGroupId] || {}).matching || {}) : {}
+
+      // Global preview can be opened from the Regex tab before group config is loaded.
+      // Fetch it on demand so inherited TVG-ID/group regex settings are applied.
+      if (mode === 'global' && channelGroupId && Object.keys(groupMatchingConfig).length === 0) {
+        try {
+          const groupCfgResponse = await regexAPI.getGroupConfig(channelGroupId)
+          // Merge response data with safe defaults so downstream .length and boolean
+          // checks never throw even if the API returns an unexpected shape.
+          groupMatchingConfig = {
+            regex_patterns: [],
+            match_by_tvg_id: false,
+            ...(groupCfgResponse?.data || {}),
+          }
+          setGroupsConfig(prev => ({
+            ...prev,
+            [channelGroupId]: {
+              periods: [],
+              ...(prev[channelGroupId] || {}),
+              matching: groupMatchingConfig,
+            },
+          }))
+        } catch (err) {
+          console.warn(`Failed to load group matching config for group ${channelGroupId}:`, err)
+        }
+      }
+
+      // Treat placeholder channel configs (empty patterns + TVG disabled + enabled=true) as no override,
+      // so group-level matching can still be inherited.
+      const hasChannelRegexPatterns =
+        (Array.isArray(channelPatternConfig.regex_patterns) && channelPatternConfig.regex_patterns.length > 0) ||
+        (Array.isArray(channelPatternConfig.regex) && channelPatternConfig.regex.length > 0)
+      const hasExplicitChannelOverride =
+        hasChannelRegexPatterns ||
+        channelPatternConfig.match_by_tvg_id === true ||
+        channelPatternConfig.enabled === false
+
+      const effectivePatternConfig = hasExplicitChannelOverride ? channelPatternConfig : groupMatchingConfig
 
       // Prepare request data based on mode
       let requestData = {
@@ -1970,7 +1206,6 @@ export default function ChannelConfiguration() {
           }))
         }
 
-        requestData.regex_patterns = regexPatterns
         requestData.regex_patterns = regexPatterns
       }
 
@@ -3098,6 +2333,31 @@ export default function ChannelConfiguration() {
 
                     <Separator orientation="vertical" className="h-6 hidden lg:block" />
 
+                    {/* Section: EPG Profile */}
+                    <div className="flex items-center gap-3">
+                      <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">EPG Profile</div>
+                      <Select
+                        value={assignEpgProfileId}
+                        onValueChange={(v) => {
+                          setAssignEpgProfileId(v)
+                          handleBatchAssignEpgProfile(v)
+                        }}
+                        disabled={selectedChannels.size === 0}
+                      >
+                        <SelectTrigger className="h-8 w-[160px] text-xs">
+                          <SelectValue placeholder="Assign EPG profile…" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">— Remove EPG profile —</SelectItem>
+                          {profiles.map((profile) => (
+                            <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <Separator orientation="vertical" className="h-6 hidden lg:block" />
+
                     <div className="flex items-center gap-2 ml-auto">
                       <Badge variant="secondary" className="whitespace-nowrap text-[10px]">
                         {selectedChannels.size} selected
@@ -3213,6 +2473,7 @@ export default function ChannelConfiguration() {
                               channel={channel}
                               group={group}
                               groups={groups}
+                              groupsConfig={groupsConfig}
                               profiles={profiles}
                               patterns={patterns}
                               selectedChannels={selectedChannels}
@@ -3227,6 +2488,9 @@ export default function ChannelConfiguration() {
                               onUpdateMatchSettings={handleUpdateMatchSettings}
                               onPreviewMatch={handlePreviewMatch}
                               onRefresh={loadData}
+                              onAssignEpgProfile={handleAssignEpgProfile}
+                              matchCount={matchCounts[String(channel.id)]}
+                              totalStreamCount={totalStreamCount}
                             />
                           )
                         })}
@@ -3483,7 +2747,245 @@ export default function ChannelConfiguration() {
               </div>
             )}
           </TabsContent>
+
+          <TabsContent value="groups" className="space-y-6">
+            <Card>
+              <CardHeader>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Group Configuration</CardTitle>
+                    <CardDescription>
+                      Assign automation profiles and periods to channel groups. New channels added to a group will inherit these settings.
+                    </CardDescription>
+                  </div>
+                  <Button variant="outline" size="sm" onClick={loadGroupsConfig} disabled={loadingGroupsConfig}>
+                    {loadingGroupsConfig ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {groups.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    No channel groups found
+                  </div>
+                ) : loadingGroupsConfig ? (
+                  <div className="flex items-center justify-center py-8">
+                    <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {groups.map((group) => {
+                      const config = groupsConfig[group.id] || { periods: [], matching: {} }
+                      const matching = config.matching || {}
+                      const matchingPatterns = Array.isArray(matching.regex_patterns)
+                        ? matching.regex_patterns
+                        : []
+                      const matchingPatternCount = matchingPatterns.length
+                      const groupTvgEnabled = Boolean(matching.match_by_tvg_id)
+                      const groupEpgProfile = config.epg_profile_id
+                        ? (profiles || []).find(p => String(p.id) === String(config.epg_profile_id))
+                        : null
+                      return (
+                        <Card key={group.id} className="border">
+                          <CardContent className="p-4">
+                            <div className="flex items-start justify-between gap-4">
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <h3 className="font-semibold text-base">{group.name}</h3>
+                                  <Badge variant="secondary" className="text-xs">
+                                    ID: {group.id}
+                                  </Badge>
+                                </div>
+
+                                {/* Periods section */}
+                                <div className="space-y-1">
+                                  <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider mb-1">
+                                    Automation Periods ({config.periods.length})
+                                  </div>
+                                  {config.periods.length === 0 ? (
+                                    <p className="text-sm text-muted-foreground italic">No periods assigned</p>
+                                  ) : (
+                                    <div className="flex flex-wrap gap-2">
+                                      {config.periods.map((period) => (
+                                        <Badge key={period.id} variant="outline" className="gap-1 pr-1">
+                                          <Clock className="h-3 w-3" />
+                                          <span>{period.name}</span>
+                                          {period.profile_name && (
+                                            <span className="text-muted-foreground">· {period.profile_name}</span>
+                                          )}
+                                          <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            className="h-4 w-4 p-0 ml-1 hover:bg-destructive hover:text-destructive-foreground rounded-full"
+                                            onClick={() => handleRemoveGroupPeriod(group, period.id)}
+                                          >
+                                            <X className="h-3 w-3" />
+                                          </Button>
+                                        </Badge>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Matching section */}
+                                <div className="space-y-1 mt-4">
+                                  <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider mb-1">
+                                    Matching
+                                  </div>
+                                  <div className="flex flex-wrap gap-2">
+                                    <Badge variant="outline" className="text-xs">
+                                      {matchingPatternCount} regex pattern{matchingPatternCount !== 1 ? 's' : ''}
+                                    </Badge>
+                                    <Badge variant={groupTvgEnabled ? 'default' : 'secondary'} className="text-xs">
+                                      TVG-ID {groupTvgEnabled ? 'On' : 'Off'}
+                                    </Badge>
+                                  </div>
+                                </div>
+
+                                {/* EPG Profile section */}
+                                <div className="space-y-1 mt-4">
+                                  <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider mb-1">
+                                    EPG Profile
+                                  </div>
+                                  {groupEpgProfile ? (
+                                    <Badge variant="outline" className="gap-1 text-xs">
+                                      <CalendarClock className="h-3 w-3" />
+                                      {groupEpgProfile.name}
+                                    </Badge>
+                                  ) : (
+                                    <p className="text-sm text-muted-foreground italic">No profile assigned</p>
+                                  )}
+                                </div>
+                              </div>
+
+                              {/* Action buttons */}
+                              <div className="flex gap-2 flex-shrink-0 flex-wrap">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => handleOpenGroupAssignPeriods(group)}
+                                      className="h-8"
+                                    >
+                                      <Clock className="h-4 w-4 mr-1" />
+                                      Periods
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Assign automation periods and profiles to group</TooltipContent>
+                                </Tooltip>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => handleOpenGroupAssignMatching(group)}
+                                      className="h-8"
+                                    >
+                                      <Edit2 className="h-4 w-4 mr-1" />
+                                      Matching
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Configure group regex and TVG-ID matching</TooltipContent>
+                                </Tooltip>
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => handleOpenGroupAssignEpgProfile(group)}
+                                      className="h-8"
+                                    >
+                                      <CalendarClock className="h-4 w-4 mr-1" />
+                                      EPG Profile
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Assign EPG scheduled profile to group</TooltipContent>
+                                </Tooltip>
+                              </div>
+                            </div>
+                          </CardContent>
+                        </Card>
+                      )
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
         </Tabs>
+
+        {/* Group Assign Periods Dialog */}
+        {selectedGroupForConfig && (
+          <GroupAssignPeriodsDialog
+            open={groupAssignPeriodsDialogOpen}
+            onOpenChange={setGroupAssignPeriodsDialogOpen}
+            group={selectedGroupForConfig}
+            initialPeriods={(groupsConfig[selectedGroupForConfig.id] || {}).periods || []}
+            onSave={handleSaveGroupPeriods}
+            saving={savingGroupPeriods}
+          />
+        )}
+
+        {/* Group Matching Dialog */}
+        {selectedGroupForConfig && (
+          <GroupAssignMatchingDialog
+            open={groupAssignMatchingDialogOpen}
+            onOpenChange={setGroupAssignMatchingDialogOpen}
+            group={selectedGroupForConfig}
+            initialConfig={(groupsConfig[selectedGroupForConfig.id] || {}).matching || {}}
+            onSave={handleSaveGroupMatching}
+            onDelete={handleDeleteGroupMatching}
+            saving={savingGroupMatching}
+          />
+        )}
+
+        {/* Group Assign EPG Profile Dialog */}
+        <Dialog open={groupAssignEpgProfileDialogOpen} onOpenChange={setGroupAssignEpgProfileDialogOpen}>
+          <DialogContent className="sm:max-w-[450px]">
+            <DialogHeader>
+              <DialogTitle>Assign EPG Scheduled Profile to Group</DialogTitle>
+              <DialogDescription>
+                {selectedGroupForConfig
+                  ? `Assign an EPG scheduled profile to group "${selectedGroupForConfig.name}". When an EPG scheduled check fires, channels in this group will use this profile instead of their automation period profile.`
+                  : ''}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label>EPG Scheduled Profile</Label>
+                <Select
+                  value={groupEpgProfileId}
+                  onValueChange={(v) => setGroupEpgProfileId(v === 'none' ? '' : v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a profile (or clear to remove)" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">— Remove EPG profile assignment —</SelectItem>
+                    {profiles.map((profile) => (
+                      <SelectItem key={profile.id} value={profile.id}>
+                        {profile.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Select a profile to use for EPG scheduled stream checks, or choose the empty option to remove the current assignment.
+                </p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setGroupAssignEpgProfileDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={handleSaveGroupEpgProfile} disabled={savingGroupEpgProfile}>
+                {savingGroupEpgProfile && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Save
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* Regex Pattern Dialog */}
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
@@ -4220,134 +3722,5 @@ export default function ChannelConfiguration() {
         />
       </div>
     </TooltipProvider >
-  )
-}
-
-// Match Results List Component
-function MatchResultsList({ results, loading, onLoadMore, maxHeight = "max-h-[60vh]" }) {
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 text-sm text-muted-foreground animate-in fade-in duration-200">
-        <Loader2 className="h-4 w-4 animate-spin" />
-        Testing pattern...
-      </div>
-    )
-  }
-
-  if (!results) return null
-
-  return (
-    <div className="space-y-2 animate-in fade-in slide-in-from-top-2 duration-300">
-      <div className="border rounded-md p-3 bg-muted/50 transition-all">
-        {results.valid ? (
-          <>
-            <div className="flex items-center gap-2 text-sm font-medium text-green-600 mb-2 animate-in fade-in duration-200">
-              <CheckCircle className="h-4 w-4" />
-              Valid pattern - {results.total_matches || results.matches?.length || 0} matches found
-            </div>
-            {results.matches && results.matches.length > 0 && (
-              <div className={`space-y-1 ${maxHeight} overflow-y-auto pr-1`}>
-                {results.matches.map((match, idx) => (
-                  <div
-                    key={idx}
-                    className="p-2 border-b last:border-0 rounded-sm hover:bg-muted/50 text-sm animate-in fade-in slide-in-from-left-1 duration-200"
-                    style={{ animationDelay: `${Math.min(idx * 20, 300)}ms` }}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium truncate text-xs sm:text-sm" title={match.stream_name}>
-                          {match.stream_name}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
-                          {match.m3u_account_name && (
-                            <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-5 font-normal text-muted-foreground border-muted-foreground/30">
-                              {match.m3u_account_name}
-                            </Badge>
-                          )}
-                          <Badge
-                            variant={match.source === 'tvg_id' ? 'default' : 'secondary'}
-                            className={`text-[10px] px-1.5 py-0 h-5 font-medium uppercase ${match.source === 'tvg_id' ? 'bg-blue-600 hover:bg-blue-700' : ''}`}
-                          >
-                            {match.source === 'tvg_id' ? 'TVG-ID' : 'REGEX'}
-                          </Badge>
-                          {match.source === 'regex' && match.matched_pattern && (
-                            <span className="text-[10px] text-muted-foreground font-mono truncate max-w-[120px] bg-background/50 px-1 rounded border border-border/50" title={match.matched_pattern}>
-                              /{match.matched_pattern}/
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {results.has_more && (
-              <div className="pt-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="w-full text-primary hover:bg-primary/10 h-8 text-xs font-medium"
-                  onClick={onLoadMore}
-                  disabled={loading}
-                >
-                  {loading ? (
-                    <>
-                      <Loader2 className="h-3 w-3 mr-2 animate-spin" />
-                      Loading matches...
-                    </>
-                  ) : (
-                    <>
-                      Load More Matches (Showing {results.matches.length})
-                    </>
-                  )}
-                </Button>
-              </div>
-            )}
-
-            {!results.has_more && results.total_matches > results.matches.length && (
-              <div className="text-center py-2 text-xs text-muted-foreground italic">
-                End of results ({results.matches.length} matches shown)
-              </div>
-            )}
-          </>
-        ) : (
-          <div className="text-sm text-destructive">
-            {results.error || 'Invalid pattern'}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// Preview Dialog Component
-function MatchPreviewDialog({ open, onOpenChange, title, results, loading, onLoadMore }) {
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[700px] max-h-[85vh] flex flex-col">
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>
-            Preview stream matching results based on current configuration.
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="flex-1 overflow-hidden py-2">
-          <MatchResultsList
-            results={results}
-            loading={loading}
-            onLoadMore={onLoadMore}
-          />
-        </div>
-
-        <DialogFooter className="mt-auto">
-          <Button onClick={() => onOpenChange(false)}>
-            Close
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   )
 }

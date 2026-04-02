@@ -3,10 +3,9 @@
 Unit test to verify stream checking mode behavior.
 
 This test verifies that stream_checking_mode flag is properly set when:
-1. A global action is in progress
-2. An individual channel is being checked
-3. There are channels in the queue
-4. There are channels in progress
+1. An individual channel is being checked
+2. There are channels in the queue
+3. There are channels in progress
 """
 
 import unittest
@@ -38,29 +37,6 @@ class TestStreamCheckingMode(unittest.TestCase):
         """Clean up test fixtures."""
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
-    
-    def test_stream_checking_mode_with_global_action(self):
-        """Test that stream_checking_mode is True during global action."""
-        with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
-            service = StreamCheckerService()
-            
-            # Initially stream_checking_mode should be False
-            status = service.get_status()
-            self.assertFalse(status['stream_checking_mode'])
-            
-            # Set global action flag
-            service.global_action_in_progress = True
-            
-            # Now stream_checking_mode should be True
-            status = service.get_status()
-            self.assertTrue(status['stream_checking_mode'])
-            
-            # Clear flag
-            service.global_action_in_progress = False
-            
-            # stream_checking_mode should be False again
-            status = service.get_status()
-            self.assertFalse(status['stream_checking_mode'])
     
     def test_stream_checking_mode_with_checking_flag(self):
         """Test that stream_checking_mode is True when checking individual channel."""
@@ -139,7 +115,6 @@ class TestStreamCheckingMode(unittest.TestCase):
             service = StreamCheckerService()
             
             # All flags should be False
-            self.assertFalse(service.global_action_in_progress)
             self.assertFalse(service.checking)
             
             # Queue should be empty

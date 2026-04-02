@@ -47,7 +47,6 @@ class TestAutomationStreamCheckingMode(unittest.TestCase):
             mock_stream_checker = Mock()
             mock_status = {
                 'stream_checking_mode': True,
-                'global_action_in_progress': False,
                 'checking': False,
                 'queue': {'queue_size': 1}  # One channel in queue
             }
@@ -79,7 +78,6 @@ class TestAutomationStreamCheckingMode(unittest.TestCase):
             mock_stream_checker = Mock()
             mock_status = {
                 'stream_checking_mode': False,
-                'global_action_in_progress': False,
                 'checking': False,
                 'queue': {'queue_size': 0}
             }
@@ -112,7 +110,6 @@ class TestAutomationStreamCheckingMode(unittest.TestCase):
             mock_stream_checker = Mock()
             mock_status = {
                 'stream_checking_mode': True,
-                'global_action_in_progress': True,  # Global action active
                 'checking': False,
                 'queue': {'queue_size': 0}
             }

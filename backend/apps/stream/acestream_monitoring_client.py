@@ -115,28 +115,28 @@ class AceStreamMonitoringClient:
         return None
 
     def start_session(self, payload: Dict[str, Any]) -> Any:
-        return self._request("POST", "/ace/monitor/legacy/start", json=payload)
+        return self._request("POST", "/api/v1/ace/monitor/legacy/start", json=payload)
 
     def list_sessions(self) -> Dict[str, Any]:
-        data = self._request("GET", "/ace/monitor/legacy", params={"include_recent_status": "false"})
+        data = self._request("GET", "/api/v1/ace/monitor/legacy", params={"include_recent_status": "false"})
         return data if isinstance(data, dict) else {"items": []}
 
     def get_session(self, monitor_id: str) -> Dict[str, Any]:
-        data = self._request("GET", f"/ace/monitor/legacy/{monitor_id}", params={"include_recent_status": "false"})
+        data = self._request("GET", f"/api/v1/ace/monitor/legacy/{monitor_id}", params={"include_recent_status": "false"})
         return data if isinstance(data, dict) else {}
 
     def stop_session(self, monitor_id: str) -> Any:
-        return self._request("DELETE", f"/ace/monitor/legacy/{monitor_id}")
+        return self._request("DELETE", f"/api/v1/ace/monitor/legacy/{monitor_id}")
 
     def delete_entry(self, monitor_id: str) -> Any:
-        return self._request("DELETE", f"/ace/monitor/legacy/{monitor_id}/entry")
+        return self._request("DELETE", f"/api/v1/ace/monitor/legacy/{monitor_id}/entry")
 
     def parse_m3u(self, m3u_content: str) -> Any:
-        return self._request("POST", "/ace/monitor/legacy/parse-m3u", json={"m3u_content": m3u_content})
+        return self._request("POST", "/api/v1/ace/monitor/legacy/parse-m3u", json={"m3u_content": m3u_content})
 
     def list_started_streams(self) -> Any:
         response = requests.get(
-            f"{self.base_url}/streams",
+            f"{self.base_url}/api/v1/streams",
             headers=self._headers(),
             params={"status": "started"},
             timeout=self.timeout_s,

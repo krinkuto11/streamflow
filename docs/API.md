@@ -2,7 +2,15 @@
 
 Base URL: `http://<host>:<port>/api`
 
+Versioned aliases are available for selected endpoints under `/api/v1`.
+
 All endpoints return JSON. Errors return `{ "error": "<message>" }` with an appropriate HTTP status code.
+
+API routes are protected by a lightweight in-memory rate limiter by default.
+Configure via environment variables:
+- `API_RATE_LIMIT_ENABLED` (default: `true`)
+- `API_RATE_LIMIT_MAX_REQUESTS` (default: `240`)
+- `API_RATE_LIMIT_WINDOW_SECONDS` (default: `60`)
 
 ---
 
@@ -11,6 +19,7 @@ All endpoints return JSON. Errors return `{ "error": "<message>" }` with an appr
 | Method | Path           | Description         |
 | ------ | -------------- | ------------------- |
 | GET    | `/api/health`  | Health check        |
+| GET    | `/api/v1/health` | Versioned health check |
 | GET    | `/api/version` | Application version |
 
 ---
@@ -20,8 +29,10 @@ All endpoints return JSON. Errors return `{ "error": "<message>" }` with an appr
 | Method | Path                                  | Description                                                   |
 | ------ | ------------------------------------- | ------------------------------------------------------------- |
 | GET    | `/api/channels`                       | List all channels with profile assignments                    |
+| GET    | `/api/v1/channels`                    | Versioned alias for channel listing                           |
 | GET    | `/api/channels/groups`                | List channel groups                                           |
 | GET    | `/api/channels/<id>/stats`            | Stream count, dead streams, resolution, bitrate for a channel |
+| GET    | `/api/v1/channels/<id>/stats`         | Versioned alias for channel stats                             |
 | GET    | `/api/channels/logos/<logo_id>`       | Logo metadata                                                 |
 | GET    | `/api/channels/logos/<logo_id>/cache` | Cached logo image                                             |
 | POST   | `/api/channels/<id>/match-settings`   | Update match settings (`match_by_tvg_id`)                     |
@@ -33,9 +44,13 @@ All endpoints return JSON. Errors return `{ "error": "<message>" }` with an appr
 | Method | Path                               | Description                                |
 | ------ | ---------------------------------- | ------------------------------------------ |
 | GET    | `/api/regex-patterns`              | All regex patterns                         |
+| GET    | `/api/v1/regex-patterns`           | Versioned alias for regex pattern listing  |
 | POST   | `/api/regex-patterns`              | Add or update a pattern for a channel      |
+| POST   | `/api/v1/regex-patterns`           | Versioned alias for adding/updating pattern |
 | DELETE | `/api/regex-patterns/<channel_id>` | Delete patterns for a channel              |
+| DELETE | `/api/v1/regex-patterns/<channel_id>` | Versioned alias for deleting channel patterns |
 | POST   | `/api/regex-patterns/bulk`         | Add the same patterns to multiple channels |
+| POST   | `/api/v1/regex-patterns/bulk`      | Versioned alias for bulk regex assignment  |
 
 ---
 

@@ -31,6 +31,7 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
     enforce_sync_interval_ms: 1000,
     timeout_ms: 30000,
     autoStart: true,
+    enable_loop_detection: false,
     enable_looping_detection: true,
     enable_logo_detection: true
   });
@@ -117,6 +118,7 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
         run_seconds: Number(formData.run_seconds),
         per_sample_timeout_s: Number(formData.per_sample_timeout_s),
         engine_container_id: formData.engine_container_id ? String(formData.engine_container_id).trim() : undefined,
+        enable_loop_detection: formData.enable_loop_detection,
       });
       return;
     }
@@ -401,6 +403,21 @@ function CreateSessionDialog({ open, onOpenChange, onCreateSession }) {
                         value={formData.engine_container_id}
                         onChange={(e) => handleChange('engine_container_id', e.target.value)}
                         className="h-8 text-sm"
+                      />
+                    </div>
+                    <div className="flex items-center justify-between col-span-2 border-t pt-4">
+                      <div className="space-y-0.5">
+                        <Label htmlFor="ace-loop-detection" className="text-sm">
+                          Enable Zero-Decode Loop Detection
+                        </Label>
+                        <p className="text-[11px] text-muted-foreground mr-4">
+                          Monitors packet metadata to detect if the stream is a looping VOD file. (Negligible CPU impact)
+                        </p>
+                      </div>
+                      <Switch
+                        id="ace-loop-detection"
+                        checked={formData.enable_loop_detection}
+                        onCheckedChange={(checked) => handleChange('enable_loop_detection', checked)}
                       />
                     </div>
                   </div>

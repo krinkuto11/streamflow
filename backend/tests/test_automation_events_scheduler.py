@@ -19,8 +19,8 @@ def test_calculate_upcoming_events():
     
     with tempfile.TemporaryDirectory() as tmpdir:
         # Override config paths
-        import apps.automation.automation_config_manager
-        import apps.automation.automation_events_scheduler
+        import apps.automation.automation_config_manager as automation_config_manager
+        import apps.automation.automation_events_scheduler as automation_events_scheduler
         
         original_config_dir = automation_config_manager.CONFIG_DIR
         original_config_file = automation_config_manager.AUTOMATION_CONFIG_FILE
@@ -93,8 +93,8 @@ def test_event_caching():
     print("Test: Event caching")
     
     with tempfile.TemporaryDirectory() as tmpdir:
-        import apps.automation.automation_config_manager
-        import apps.automation.automation_events_scheduler
+        import apps.automation.automation_config_manager as automation_config_manager
+        import apps.automation.automation_events_scheduler as automation_events_scheduler
         
         original_config_dir = automation_config_manager.CONFIG_DIR
         original_config_file = automation_config_manager.AUTOMATION_CONFIG_FILE
@@ -160,8 +160,8 @@ def test_multiple_periods():
     print("Test: Multiple periods")
     
     with tempfile.TemporaryDirectory() as tmpdir:
-        import apps.automation.automation_config_manager
-        import apps.automation.automation_events_scheduler
+        import apps.automation.automation_config_manager as automation_config_manager
+        import apps.automation.automation_events_scheduler as automation_events_scheduler
         
         original_config_dir = automation_config_manager.CONFIG_DIR
         original_config_file = automation_config_manager.AUTOMATION_CONFIG_FILE
@@ -175,7 +175,7 @@ def test_multiple_periods():
         try:
             from apps.automation.automation_config_manager import AutomationConfigManager
             from apps.automation.automation_events_scheduler import AutomationEventsScheduler
-            import apps.automation.automation_config_manager
+            import apps.automation.automation_config_manager as automation_config_manager
             
             # Reset the singleton to ensure it uses our test config
             automation_config_manager._automation_config_manager = None

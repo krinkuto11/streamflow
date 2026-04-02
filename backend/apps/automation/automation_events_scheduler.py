@@ -22,6 +22,11 @@ logger = setup_logging(__name__)
 CACHE_VALIDITY_SECONDS = 300  # 5 minutes
 CACHE_STALENESS_THRESHOLD_SECONDS = 3600  # 1 hour
 
+# Compatibility constants retained for legacy tests/tools that monkeypatch
+# scheduler cache paths. Cache persistence now uses database settings.
+CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
+EVENTS_CACHE_FILE = CONFIG_DIR / 'automation_events_cache.json'
+
 # Try to import croniter for cron expression support
 try:
     from croniter import croniter
@@ -129,7 +134,10 @@ class AutomationEventsScheduler:
         
         for period in all_periods:
             period_id = period.get('id')
-            period_name = period.get('name', 'Unknown')
+            period_name_raw = period.get('name', '')
+            period_name = str(period_name_raw).strip() if period_name_raw is not None else ''
+            if not period_name:
+                period_name = f"Period {period_id}"
             
             # Get channels assigned to this period (now returns dict of channel_id -> profile_id)
             channels = automation_config.get_period_channels(period_id)

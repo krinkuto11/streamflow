@@ -499,10 +499,21 @@ class StreamSessionManager:
         """
         # Check for existing active session for this channel
         if not allow_duplicate_channel and self.is_channel_in_active_session(channel_id):
-            # Find the existing session ID
+            # Find the existing session and update its EPG info if a new EPG event is provided
             for s in self.sessions.values():
                 if s.is_active and s.channel_id == channel_id:
                     logger.info(f"Using existing active session {s.session_id} for channel {channel_id}")
+                    if epg_event:
+                        s.epg_event_id = epg_event.get('id')
+                        s.epg_event_title = epg_event.get('title')
+                        s.epg_event_start = epg_event.get('start_time')
+                        s.epg_event_end = epg_event.get('end_time')
+                        s.epg_event_description = epg_event.get('description', '')
+                        self._save_sessions()
+                        logger.info(
+                            f"Updated EPG info on existing session {s.session_id}: "
+                            f"'{s.epg_event_title}'"
+                        )
                     return s.session_id
 
         # Get channel info from UDI

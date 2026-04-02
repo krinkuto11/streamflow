@@ -396,20 +396,23 @@ class SmartStreamScheduler:
                         return None
                 
                 def wrapped_check():
-                    """Wrapper that ensures semaphore is released."""
+                    """Wrapper that ensures semaphore is released and progress fires immediately."""
+                    result = None
                     try:
                         # Apply URL transformation if using M3U profile with search/replace patterns
                         stream_url = stream.get('url', '')
                         if self.account_limiter.udi_manager:
                             stream_url = self.account_limiter.udi_manager.apply_profile_url_transformation(stream)
-                            
-                        # Notify that this stream has acquired a slot and is starting
+
+                        # Notify that this stream has acquired a slot and is starting.
+                        # Lock protects stream_statuses which is shared across worker threads.
                         if start_callback:
                             try:
-                                start_callback(stream)
+                                with lock:
+                                    start_callback(stream)
                             except Exception as e:
                                 logger.error(f"Error in start_callback for stream {stream['id']}: {e}")
-                        
+
                         result = check_function(
                             stream_url=stream_url,
                             stream_id=stream['id'],
@@ -418,76 +421,86 @@ class SmartStreamScheduler:
                         )
                         return result
                     finally:
-                        # Always release the account slot when done
+                        # Release account slot immediately when stream finishes
                         self.account_limiter.release(account_id)
-                
+
+                        # Fire progress callback from the worker thread the instant the
+                        # stream completes — before the submission loop has finished
+                        # stagger-sleeping through remaining streams. This is what makes
+                        # the live grid update in real time for large stream counts.
+                        with lock:
+                            if result is not None:
+                                results.append(result)
+                            else:
+                                results.append({
+                                    'stream_id': stream['id'],
+                                    'stream_name': stream.get('name', 'Unknown'),
+                                    'stream_url': stream.get('url', ''),
+                                    'status': 'ERROR',
+                                    'resolution': '0x0',
+                                    'bitrate_kbps': 0,
+                                    'fps': 0,
+                                    'video_codec': 'N/A',
+                                    'audio_codec': 'N/A'
+                                })
+                            nonlocal completed_count
+                            completed_count += 1
+                            current_completed = completed_count
+
+                        logger.debug(
+                            f"Completed {current_completed}/{total_streams}: "
+                            f"Stream {stream['id']} - {stream.get('name', 'Unknown')}"
+                        )
+
+                        if progress_callback and result is not None:
+                            try:
+                                progress_callback(current_completed, total_streams, result)
+                            except Exception as e:
+                                logger.error(f"Error in progress_callback for stream {stream['id']}: {e}")
+
                 # Submit to executor
                 future = executor.submit(wrapped_check)
                 return future
-            
-            # Submit all streams with stagger delay
+
+            # Submit all streams with stagger delay — runs concurrently with
+            # wrapped_check completions since progress now fires from worker threads
             for stream in streams:
+                if abort_event and abort_event.is_set():
+                    logger.info("Abort requested, stopping stream submission")
+                    break
+
                 if stagger_delay > 0 and futures:
                     time.sleep(stagger_delay)
-                
+
                 future_or_result = submit_stream_check(stream)
                 if future_or_result is not None:
                     if isinstance(future_or_result, dict):
-                        # This is a cached result, not a future
+                        # Cached result — no future, handle inline
                         with lock:
                             results.append(future_or_result)
                             completed_count += 1
                         logger.debug(f"Using cached stats for stream {stream['id']}")
                     else:
-                        # This is a future for async check
                         futures[future_or_result] = stream
                         logger.debug(f"Submitted stream {stream['id']} for checking")
-            
-            # Process completed tasks as they finish (in completion order for better parallelism)
+
+            # Wait for all submitted futures to complete.
+            # Progress callbacks already fired from worker threads — this loop
+            # only needs to catch exceptions from futures that errored.
             from concurrent.futures import as_completed
             for future in as_completed(futures):
                 if abort_event and abort_event.is_set():
-                    logger.info("Abort requested, breaking parallel check loop")
+                    logger.info("Abort requested, breaking completion wait loop")
                     break
-                    
+
                 stream = futures[future]
                 try:
-                    # Wait for completion
-                    result = future.result()
-                    
-                    with lock:
-                        results.append(result)
-                        completed_count += 1
-                    
-                    logger.debug(
-                        f"Completed {completed_count}/{total_streams}: "
-                        f"Stream {stream['id']} - {stream.get('name', 'Unknown')}"
-                    )
-                    
-                    # Call progress callback if provided
-                    if progress_callback:
-                        progress_callback(completed_count, total_streams, result)
-                
+                    future.result()  # re-raises any exception from wrapped_check
                 except Exception as e:
                     logger.error(
                         f"Error checking stream {stream['id']} ({stream.get('name', 'Unknown')}): {e}",
                         exc_info=True
                     )
-                    # Create a failed result entry
-                    with lock:
-                        results.append({
-                            'stream_id': stream['id'],
-                            'stream_name': stream.get('name', 'Unknown'),
-                            'stream_url': stream.get('url', ''),
-                            'status': 'ERROR',
-                            'error': str(e),
-                            'resolution': '0x0',
-                            'bitrate_kbps': 0,
-                            'fps': 0,
-                            'video_codec': 'N/A',
-                            'audio_codec': 'N/A'
-                        })
-                        completed_count += 1
         
         logger.info(f"Completed smart parallel check of {completed_count}/{total_streams} streams")
         return results

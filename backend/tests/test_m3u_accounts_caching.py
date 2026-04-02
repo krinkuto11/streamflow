@@ -161,7 +161,7 @@ class TestM3UAccountsCaching(unittest.TestCase):
         
         # Mock stream checker to avoid import issues
         mock_sc = MagicMock()
-        mock_sc.global_action_in_progress = False
+        mock_sc.get_status.return_value = {'stream_checking_mode': False}
         mock_stream_checker.return_value = mock_sc
         
         with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
@@ -202,7 +202,7 @@ class TestM3UAccountsCaching(unittest.TestCase):
         
         # Mock stream checker
         mock_sc = MagicMock()
-        mock_sc.global_action_in_progress = False
+        mock_sc.get_status.return_value = {'stream_checking_mode': False}
         mock_stream_checker.return_value = mock_sc
         
         with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):

@@ -3,9 +3,9 @@
 Integration tests for automation service auto-start via API endpoint.
 
 This module tests:
-- API endpoint auto-starts services when pipeline mode is updated
+- API endpoint auto-starts services when automation controls are enabled
 - Services start only when wizard is complete
-- Services don't start when pipeline is disabled
+- Services don't start when all automation controls are disabled
 """
 
 import unittest
@@ -90,7 +90,12 @@ class TestWizardAutostartAPI(unittest.TestCase):
         }))
         
         stream_checker_file.write_text(json.dumps({
-            "pipeline_mode": "disabled",
+            "automation_controls": {
+                "auto_m3u_updates": False,
+                "auto_stream_matching": False,
+                "auto_quality_checking": False,
+                "scheduled_global_action": False
+            },
             "enabled": True
         }))
     
@@ -102,11 +107,16 @@ class TestWizardAutostartAPI(unittest.TestCase):
                     # Setup complete wizard configuration
                     self._create_complete_wizard_config()
                     
-                    # Update stream checker config via API with a pipeline mode
+                    # Update stream checker config via API with enabled automation controls
                     response = self.app.put(
                         '/api/stream-checker/config',
                         data=json.dumps({
-                            'pipeline_mode': 'pipeline_1_5'
+                            'automation_controls': {
+                                'auto_m3u_updates': True,
+                                'auto_stream_matching': True,
+                                'auto_quality_checking': True,
+                                'scheduled_global_action': False,
+                            }
                         }),
                         content_type='application/json'
                     )
@@ -148,7 +158,12 @@ class TestWizardAutostartAPI(unittest.TestCase):
                     response = self.app.put(
                         '/api/stream-checker/config',
                         data=json.dumps({
-                            'pipeline_mode': 'pipeline_1_5'
+                            'automation_controls': {
+                                'auto_m3u_updates': True,
+                                'auto_stream_matching': True,
+                                'auto_quality_checking': True,
+                                'scheduled_global_action': False,
+                            }
                         }),
                         content_type='application/json'
                     )
@@ -162,19 +177,24 @@ class TestWizardAutostartAPI(unittest.TestCase):
                     self.assertFalse(service.running, "Stream checker service should not be running")
                     self.assertFalse(manager.running, "Automation service should not be running")
     
-    def test_endpoint_doesnt_start_when_pipeline_disabled(self):
-        """Test that API endpoint doesn't auto-start when pipeline is disabled."""
+    def test_endpoint_doesnt_start_when_all_automation_disabled(self):
+        """Test that API endpoint doesn't auto-start when all automation controls are disabled."""
         with patch('web_api.CONFIG_DIR', Path(self.temp_dir)):
             with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
                 with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
                     # Setup complete wizard configuration
                     self._create_complete_wizard_config()
                     
-                    # Update stream checker config via API with disabled pipeline
+                    # Update stream checker config via API with all automation disabled
                     response = self.app.put(
                         '/api/stream-checker/config',
                         data=json.dumps({
-                            'pipeline_mode': 'disabled'
+                            'automation_controls': {
+                                'auto_m3u_updates': False,
+                                'auto_stream_matching': False,
+                                'auto_quality_checking': False,
+                                'scheduled_global_action': False,
+                            }
                         }),
                         content_type='application/json'
                     )
@@ -188,19 +208,24 @@ class TestWizardAutostartAPI(unittest.TestCase):
                     self.assertFalse(service.running, "Stream checker service should not be running")
                     self.assertFalse(manager.running, "Automation service should not be running")
     
-    def test_endpoint_stops_services_when_switching_to_disabled(self):
-        """Test that API endpoint stops services when switching to disabled pipeline."""
+    def test_endpoint_stops_services_when_switching_to_all_automation_disabled(self):
+        """Test that API endpoint stops services when all automation controls are disabled."""
         with patch('web_api.CONFIG_DIR', Path(self.temp_dir)):
             with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
                 with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
                     # Setup complete wizard configuration
                     self._create_complete_wizard_config()
                     
-                    # First, start services with an active pipeline
+                    # First, start services with active automation controls
                     response = self.app.put(
                         '/api/stream-checker/config',
                         data=json.dumps({
-                            'pipeline_mode': 'pipeline_1_5'
+                            'automation_controls': {
+                                'auto_m3u_updates': True,
+                                'auto_stream_matching': True,
+                                'auto_quality_checking': True,
+                                'scheduled_global_action': False,
+                            }
                         }),
                         content_type='application/json'
                     )
@@ -212,11 +237,16 @@ class TestWizardAutostartAPI(unittest.TestCase):
                     self.assertTrue(service.running, "Stream checker service should be running")
                     self.assertTrue(manager.running, "Automation service should be running")
                     
-                    # Now switch to disabled pipeline
+                    # Now disable all automation controls
                     response = self.app.put(
                         '/api/stream-checker/config',
                         data=json.dumps({
-                            'pipeline_mode': 'disabled'
+                            'automation_controls': {
+                                'auto_m3u_updates': False,
+                                'auto_stream_matching': False,
+                                'auto_quality_checking': False,
+                                'scheduled_global_action': False,
+                            }
                         }),
                         content_type='application/json'
                     )

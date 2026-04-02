@@ -80,7 +80,6 @@ def test_config_structure():
     config_file = Path(test_config_dir) / 'stream_checker_config_structure.json'
     config = {
         'enabled': True,
-        'pipeline_mode': 'pipeline_1_5',
         'dead_stream_handling': {
             'enabled': False,
             'min_resolution_width': 1280,

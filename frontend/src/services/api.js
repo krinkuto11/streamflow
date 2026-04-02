@@ -1,3 +1,4 @@
+
 import axios from 'axios';
 
 // Create axios instance with default config
@@ -61,6 +62,13 @@ export const automationAPI = {
   assignChannel: (channelId, profileId) => api.post('/automation/assign/channel', { channel_id: channelId, profile_id: profileId }),
   assignChannels: (channelIds, profileId) => api.post('/automation/assign/channels', { channel_ids: channelIds, profile_id: profileId }),
   assignGroup: (groupId, profileId) => api.post('/automation/assign/group', { group_id: groupId, profile_id: profileId }),
+  getGroupAssignments: () => api.get('/automation/assign/group'),
+
+  // EPG Scheduled Profile Assignments
+  assignEpgChannel: (channelId, profileId) => api.post('/automation/assign/epg-profile/channel', { channel_id: channelId, profile_id: profileId }),
+  assignEpgChannels: (channelIds, profileId) => api.post('/automation/assign/epg-profile/channels', { channel_ids: channelIds, profile_id: profileId }),
+  assignEpgGroup: (groupId, profileId) => api.post('/automation/assign/epg-profile/group', { group_id: groupId, profile_id: profileId }),
+  getGroupEpgAssignments: () => api.get('/automation/assign/epg-profile/group'),
 
   // Automation Periods
   getPeriods: () => api.get('/automation/periods'),
@@ -138,6 +146,7 @@ export const regexAPI = {
   massEdit: (data) => api.post('/regex-patterns/mass-edit', data),
   updateMatchSettings: (channelId, settings) => api.post(`/channels/${channelId}/match-settings`, settings),
   testMatchLive: (data) => api.post('/test-match-live', data),
+  bulkMatchCounts: (data) => api.post('/regex-match-counts', data),
   updateBulkMatchSettings: (data) => api.post('/regex-patterns/bulk-settings', data),
 };
 
@@ -214,7 +223,7 @@ export const dispatcharrAPI = {
   getConfig: () => api.get('/dispatcharr/config'),
   updateConfig: (config) => api.put('/dispatcharr/config', config),
   testConnection: (config) => api.post('/dispatcharr/test-connection', config),
-  initializeUDI: () => api.post('/dispatcharr/initialize-udi'),
+  initializeUDI: () => api.post('/dispatcharr/initialize-udi', {}, { timeout: 120000 }),
   getInitializationStatus: () => api.get('/dispatcharr/initialization-status'),
 };
 
@@ -247,4 +256,8 @@ export const schedulingAPI = {
 
 export const versionAPI = {
   getVersion: () => api.get('/version'),
+};
+
+export const environmentAPI = {
+  getEnvironment: () => api.get('/environment'),
 };

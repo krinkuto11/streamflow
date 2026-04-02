@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button.jsx'
 import { ThemeToggle } from '@/components/ThemeToggle.jsx'
-import { versionAPI } from '@/services/api.js'
+import { versionAPI, environmentAPI } from '@/services/api.js'
 import {
   Tooltip,
   TooltipContent,
@@ -39,10 +39,10 @@ const menuItems = [
 export function Sidebar({ isCollapsed, setIsCollapsed }) {
   const [isOpen, setIsOpen] = useState(false)
   const [version, setVersion] = useState(null)
+  const [publicIp, setPublicIp] = useState(null)
   const location = useLocation()
 
   useEffect(() => {
-    // Fetch version on mount
     const fetchVersion = async () => {
       try {
         const response = await versionAPI.getVersion()
@@ -53,6 +53,18 @@ export function Sidebar({ isCollapsed, setIsCollapsed }) {
       }
     }
     fetchVersion()
+  }, [])
+
+  useEffect(() => {
+    const fetchEnvironment = async () => {
+      try {
+        const response = await environmentAPI.getEnvironment()
+        setPublicIp(response.data.public_ip)
+      } catch (error) {
+        console.error('Failed to fetch environment:', error)
+      }
+    }
+    fetchEnvironment()
   }, [])
 
   return (
@@ -174,6 +186,16 @@ export function Sidebar({ isCollapsed, setIsCollapsed }) {
               <ThemeToggle />
             </div>
           </div>
+          {!isCollapsed && publicIp && (
+            <div className="px-2 space-y-1">
+              <span className="text-xs text-muted-foreground font-medium">Public IP</span>
+              <div className="rounded-md border border-border bg-background px-2 py-1.5">
+                <span className="text-xs font-mono text-foreground block text-center">
+                  {publicIp}
+                </span>
+              </div>
+            </div>
+          )}
           {version && (
             <div className={cn(
               "pt-2 text-[10px] text-muted-foreground text-center font-mono opacity-60",

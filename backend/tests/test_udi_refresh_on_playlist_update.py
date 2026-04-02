@@ -1,149 +1,140 @@
 #!/usr/bin/env python3
-"""
-Test that verifies UDI cache is refreshed after playlist updates.
+"""Tests for decoupled UDI refresh behavior in automation."""
 
-This test ensures that when playlists are refreshed, both the streams and channels
-in the UDI cache are updated to reflect changes made in Dispatcharr.
-"""
+from unittest.mock import Mock
 
-import unittest
-import sys
-import os
-import tempfile
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock, call
-
-# Set up CONFIG_DIR before importing modules
-os.environ['CONFIG_DIR'] = tempfile.mkdtemp()
-
-# Add backend directory to path
-backend_dir = Path(__file__).parent.parent
-sys.path.insert(0, str(backend_dir))
+from apps.automation.automated_stream_manager import AutomatedStreamManager
 
 
-class TestUDIRefreshOnPlaylistUpdate(unittest.TestCase):
-    """Test that UDI cache is refreshed after playlist updates."""
-    
-    @patch('automated_stream_manager.get_udi_manager')
-    @patch('automated_stream_manager.refresh_m3u_playlists')
-    @patch('automated_stream_manager.get_streams')
-    @patch('automated_stream_manager.get_m3u_accounts')
-    def test_udi_refresh_called_after_playlist_update(
-        self, 
-        mock_get_m3u_accounts,
-        mock_get_streams,
-        mock_refresh_m3u,
-        mock_get_udi
-    ):
-        """Test that UDI streams and channels are refreshed after playlist update."""
-        from apps.automation.automated_stream_manager import AutomatedStreamManager
-        
-        # Setup mocks
-        mock_udi = Mock()
-        mock_udi.get_streams.return_value = []
-        mock_udi.get_channels.return_value = []
-        mock_udi.refresh_streams.return_value = True
-        mock_udi.refresh_channels.return_value = True
-        mock_get_udi.return_value = mock_udi
-        
-        # Mock M3U accounts - return empty list to trigger fallback path
-        mock_get_m3u_accounts.return_value = []
-        
-        # Mock get_streams to return empty lists for before/after comparison
-        mock_get_streams.return_value = []
-        
-        # Mock refresh_m3u_playlists to succeed
-        mock_refresh_m3u.return_value = Mock(status_code=200)
-        
-        # Create manager and call refresh_playlists
-        manager = AutomatedStreamManager()
-        result = manager.refresh_playlists(force=True)
-        
-        # Verify the result
-        self.assertTrue(result, "refresh_playlists should return True")
-        
-        # Verify that refresh_m3u_playlists was called
-        mock_refresh_m3u.assert_called_once()
-        
-        # Verify that UDI refresh methods were called
-        mock_udi.refresh_streams.assert_called_once()
-        mock_udi.refresh_channels.assert_called_once()
-        
-        # Verify the order: refresh_m3u_playlists should be called before UDI refresh
-        # This ensures we refresh the cache after the API call
-        call_order = []
-        for call in [
-            ('refresh_m3u', mock_refresh_m3u.call_args_list),
-            ('refresh_streams', mock_udi.refresh_streams.call_args_list),
-            ('refresh_channels', mock_udi.refresh_channels.call_args_list)
-        ]:
-            if call[1]:
-                call_order.append(call[0])
-        
-        self.assertEqual(call_order, ['refresh_m3u', 'refresh_streams', 'refresh_channels'],
-                        "UDI refresh should happen after M3U refresh")
-    
-    @patch('automated_stream_manager.get_udi_manager')
-    @patch('automated_stream_manager.refresh_m3u_playlists')
-    @patch('automated_stream_manager.get_m3u_accounts')
-    def test_udi_refresh_with_stream_changes(
-        self, 
-        mock_get_m3u_accounts,
-        mock_refresh_m3u,
-        mock_get_udi
-    ):
-        """Test that UDI refresh is called even when stream changes occur."""
-        from apps.automation.automated_stream_manager import AutomatedStreamManager
-        
-        # Setup mocks
-        mock_udi = Mock()
-        mock_udi.refresh_streams.return_value = True
-        mock_udi.refresh_channels.return_value = True
-        
-        # Mock get_streams to return different data before and after
-        streams_before = [
-            {'id': 1, 'name': 'Stream 1'},
-            {'id': 2, 'name': 'Stream 2'}
-        ]
-        streams_after = [
-            {'id': 1, 'name': 'Stream 1'},
-            {'id': 3, 'name': 'Stream 3'}  # Stream 2 removed, Stream 3 added
-        ]
-        
-        call_count = [0]
-        def get_streams_side_effect(log_result=True):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return streams_before
-            return streams_after
-        
-        mock_udi.get_streams.side_effect = get_streams_side_effect
-        mock_udi.get_channels.return_value = []
-        mock_get_udi.return_value = mock_udi
-        
-        # Mock M3U accounts
-        mock_get_m3u_accounts.return_value = [
-            {'id': 1, 'name': 'Test Account', 'is_active': True}
-        ]
-        
-        # Mock refresh_m3u_playlists
-        mock_refresh_m3u.return_value = Mock(status_code=200)
-        
-        # Create manager with changelog enabled and call refresh_playlists
-        manager = AutomatedStreamManager()
-        manager.config['enabled_features']['changelog_tracking'] = True
-        result = manager.refresh_playlists(force=True)
-        
-        # Verify the result
-        self.assertTrue(result, "refresh_playlists should succeed")
-        
-        # Verify UDI refresh was called after M3U refresh
-        mock_udi.refresh_streams.assert_called_once()
-        mock_udi.refresh_channels.assert_called_once()
-        
-        # Verify refresh_m3u_playlists was called
-        mock_refresh_m3u.assert_called_once()
+def _build_manager_for_cycle(monkeypatch, *, m3u_enabled: bool) -> AutomatedStreamManager:
+    manager = AutomatedStreamManager.__new__(AutomatedStreamManager)
+    manager.period_last_run = {}
+    manager.last_playlist_update = None
+    manager._m3u_accounts_cache = None
+    manager.config = {"enabled_features": {"changelog_tracking": False}}
+    manager.changelog = Mock()
+    manager._save_state = Mock()
+    manager.validate_and_remove_non_matching_streams = Mock(return_value={"details": []})
+    manager.discover_and_assign_streams = Mock(
+        return_value={"assignment_details": [], "assigned_stream_ids": {}}
+    )
+
+    profile = {
+        "id": "profile-1",
+        "name": "Profile 1",
+        "m3u_update": {"enabled": m3u_enabled, "playlists": []},
+        "stream_matching": {"enabled": False},
+        "stream_checking": {"enabled": False},
+    }
+    effective_config = {
+        "periods": [
+            {
+                "id": "period-1",
+                "name": "Period 1",
+                "schedule": {"type": "interval", "value": 60},
+                "profile_id": "profile-1",
+                "profile": profile,
+            }
+        ],
+        "profile": profile,
+    }
+
+    mock_automation_config = Mock()
+    mock_automation_config.get_global_settings.return_value = {"regular_automation_enabled": True}
+    mock_automation_config.get_effective_configuration.return_value = effective_config
+    mock_automation_config.get_profile.return_value = profile
+    monkeypatch.setattr(
+        "apps.automation.automation_config_manager.get_automation_config_manager",
+        lambda: mock_automation_config,
+    )
+
+    mock_stream_checker = Mock()
+    mock_stream_checker.get_status.return_value = {"stream_checking_mode": False}
+    mock_stream_checker.check_channels_synchronously.return_value = {}
+    monkeypatch.setattr(
+        "apps.stream.stream_checker_service.get_stream_checker_service",
+        lambda: mock_stream_checker,
+    )
+
+    return manager
 
 
-if __name__ == '__main__':
-    unittest.main()
+def test_refresh_playlists_does_not_refresh_udi(monkeypatch):
+    import apps.automation.automated_stream_manager as asm
+
+    manager = AutomatedStreamManager.__new__(AutomatedStreamManager)
+    manager.config = {
+        "enabled_features": {
+            "auto_playlist_update": True,
+            "changelog_tracking": True,
+        },
+        "enabled_m3u_accounts": [],
+    }
+    manager._m3u_accounts_cache = None
+    manager.dead_streams_tracker = None
+    manager.changelog = Mock()
+    manager.last_playlist_update = None
+
+    mock_refresh_m3u = Mock(return_value=Mock(status_code=200))
+    mock_get_udi = Mock(return_value=Mock())
+
+    monkeypatch.setattr(asm, "get_m3u_accounts", Mock(return_value=[]))
+    monkeypatch.setattr(asm, "get_streams", Mock(return_value=[]))
+    monkeypatch.setattr(asm, "refresh_m3u_playlists", mock_refresh_m3u)
+    monkeypatch.setattr(asm, "get_udi_manager", mock_get_udi)
+
+    mock_sched_service = Mock()
+    monkeypatch.setattr(
+        "apps.automation.scheduling_service.get_scheduling_service",
+        lambda: mock_sched_service,
+    )
+
+    success, _accounts = manager.refresh_playlists(force=True)
+
+    assert success is True
+    mock_refresh_m3u.assert_called_once()
+    mock_get_udi.assert_not_called()
+
+
+def test_automation_cycle_refreshes_udi_without_m3u_refresh(monkeypatch):
+    import apps.automation.automated_stream_manager as asm
+
+    manager = _build_manager_for_cycle(monkeypatch, m3u_enabled=False)
+    manager.refresh_playlists = Mock(return_value=(True, []))
+
+    mock_udi = Mock()
+    mock_udi.get_channels.return_value = [{"id": 101, "name": "Channel 101", "streams": []}]
+    monkeypatch.setattr(asm, "get_udi_manager", Mock(return_value=mock_udi))
+    monkeypatch.setattr(asm, "get_m3u_accounts", Mock(return_value=[]))
+    monkeypatch.setattr(asm.time, "sleep", Mock())
+
+    manager.run_automation_cycle(forced=True, forced_period_id="period-1")
+
+    manager.refresh_playlists.assert_not_called()
+    mock_udi.refresh_m3u_accounts.assert_called_once()
+    mock_udi.refresh_streams.assert_called_once()
+    mock_udi.refresh_channels.assert_called_once()
+    mock_udi.refresh_channel_groups.assert_called_once()
+    mock_udi.refresh_channel_profiles.assert_called_once()
+
+
+def test_automation_cycle_refreshes_udi_once_with_m3u_refresh(monkeypatch):
+    import apps.automation.automated_stream_manager as asm
+
+    manager = _build_manager_for_cycle(monkeypatch, m3u_enabled=True)
+    manager.refresh_playlists = Mock(return_value=(True, [{"id": 1, "name": "Account 1"}]))
+
+    mock_udi = Mock()
+    mock_udi.get_channels.return_value = [{"id": 101, "name": "Channel 101", "streams": []}]
+    monkeypatch.setattr(asm, "get_udi_manager", Mock(return_value=mock_udi))
+    monkeypatch.setattr(asm, "get_m3u_accounts", Mock(return_value=[]))
+    monkeypatch.setattr(asm.time, "sleep", Mock())
+
+    manager.run_automation_cycle(forced=True, forced_period_id="period-1")
+
+    manager.refresh_playlists.assert_called_once()
+    mock_udi.refresh_m3u_accounts.assert_called_once()
+    mock_udi.refresh_streams.assert_called_once()
+    mock_udi.refresh_channels.assert_called_once()
+    mock_udi.refresh_channel_groups.assert_called_once()
+    mock_udi.refresh_channel_profiles.assert_called_once()

@@ -71,6 +71,8 @@ jobs:
         
         # Create version file for backend
         echo "$VERSION" > backend/version.txt
+        mkdir -p backend/apps/api
+        echo "$VERSION" > backend/apps/api/version.txt
         
         # Create version file for frontend build
         mkdir -p frontend/public

@@ -193,6 +193,7 @@ def convert_to_new_format(
                     "enabled": enabled_features.get('auto_quality_reordering', True),
                     "stream_limit": 0,
                     "allow_revive": False,
+                    "remove_dead_streams": True,
                     "grace_period": False,
                     "check_all_streams": False,
                     "m3u_priority": m3u_priority,

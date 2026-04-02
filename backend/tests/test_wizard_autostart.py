@@ -3,9 +3,9 @@
 Unit tests for automation service auto-start after wizard completion.
 
 This module tests:
-- Services auto-start when pipeline mode is selected in wizard
+- Services auto-start when automation controls are enabled in wizard
 - Services don't start when wizard is incomplete
-- Services don't start when pipeline mode is 'disabled'
+- Services don't start when all automation controls are disabled
 """
 
 import unittest
@@ -60,12 +60,17 @@ class TestWizardAutostart(unittest.TestCase):
         }))
         
         stream_checker_file.write_text(json.dumps({
-            "pipeline_mode": "pipeline_1_5",
+            "automation_controls": {
+                "auto_m3u_updates": False,
+                "auto_stream_matching": False,
+                "auto_quality_checking": False,
+                "scheduled_global_action": False
+            },
             "enabled": True
         }))
     
-    def test_services_start_when_pipeline_selected_and_wizard_complete(self):
-        """Test that services auto-start when pipeline is selected and wizard is complete."""
+    def test_services_start_when_automation_enabled_and_wizard_complete(self):
+        """Test that services auto-start when automation is enabled and wizard is complete."""
         with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
             with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
                 # Setup complete wizard configuration
@@ -79,10 +84,15 @@ class TestWizardAutostart(unittest.TestCase):
                 self.assertFalse(manager.running)
                 self.assertFalse(service.running)
                 
-                # Simulate the wizard updating config with a pipeline mode
+                # Simulate the wizard updating config with enabled automation controls
                 # This should trigger auto-start
                 new_config = {
-                    'pipeline_mode': 'pipeline_1_5'
+                    'automation_controls': {
+                        'auto_m3u_updates': True,
+                        'auto_stream_matching': True,
+                        'auto_quality_checking': True,
+                        'scheduled_global_action': False,
+                    }
                 }
                 service.update_config(new_config)
                 
@@ -119,20 +129,27 @@ class TestWizardAutostart(unittest.TestCase):
                 # Even if we update config, they shouldn't auto-start
                 # because wizard is incomplete
     
-    def test_services_dont_start_when_pipeline_disabled(self):
-        """Test that services don't auto-start when pipeline mode is 'disabled'."""
+    def test_services_dont_start_when_all_automation_disabled(self):
+        """Test that services don't auto-start when all automation controls are disabled."""
         with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
             with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
                 # Setup complete wizard configuration
                 self._create_complete_wizard_config()
                 
-                # Create service with disabled pipeline
+                # Create service with all automation disabled
                 service = StreamCheckerService()
-                service.update_config({'pipeline_mode': 'disabled'})
+                service.update_config({
+                    'automation_controls': {
+                        'auto_m3u_updates': False,
+                        'auto_stream_matching': False,
+                        'auto_quality_checking': False,
+                        'scheduled_global_action': False,
+                    }
+                })
                 
                 # Verify service is not running (and shouldn't be started)
                 self.assertFalse(service.running)
-                self.assertEqual(service.config.config.get('pipeline_mode'), 'disabled')
+                self.assertFalse(service.config.get('automation_controls.auto_quality_checking', True))
     
     def test_wizard_complete_check_requires_patterns(self):
         """Test that wizard completion requires regex patterns."""

@@ -15,9 +15,8 @@ CORS(app)
 
 # Simulate different states
 state = {
-    'mode': 'idle',  # idle, checking, global_action, queue
+    'mode': 'idle',  # idle, checking, queue
     'checking': False,
-    'global_action_in_progress': False,
     'queue_size': 0,
     'in_progress': 0,
     'current_channel': None
@@ -29,7 +28,6 @@ def get_status():
     
     # Calculate stream_checking_mode
     stream_checking_mode = (
-        state['global_action_in_progress'] or
         state['checking'] or
         state['queue_size'] > 0 or
         state['in_progress'] > 0
@@ -38,7 +36,6 @@ def get_status():
     return jsonify({
         'running': True,
         'checking': state['checking'],
-        'global_action_in_progress': state['global_action_in_progress'],
         'stream_checking_mode': stream_checking_mode,
         'enabled': True,
         'queue': {
@@ -66,7 +63,12 @@ def get_status():
         } if state['checking'] or state['in_progress'] > 0 else None,
         'last_global_check': '2025-12-04T10:00:00',
         'config': {
-            'pipeline_mode': 'pipeline_1_5',
+            'automation_controls': {
+                'auto_m3u_updates': True,
+                'auto_stream_matching': True,
+                'auto_quality_checking': True,
+                'scheduled_global_action': False,
+            },
             'check_interval': 300,
             'global_check_schedule': {
                 'enabled': True,
@@ -106,35 +108,24 @@ def set_mode(mode):
     """Set the current testing mode."""
     if mode == 'idle':
         state['checking'] = False
-        state['global_action_in_progress'] = False
         state['queue_size'] = 0
         state['in_progress'] = 0
         state['current_channel'] = None
         state['mode'] = 'idle'
     elif mode == 'checking':
         state['checking'] = True
-        state['global_action_in_progress'] = False
         state['queue_size'] = 0
         state['in_progress'] = 1
         state['current_channel'] = 1
         state['mode'] = 'checking'
-    elif mode == 'global_action':
-        state['checking'] = False
-        state['global_action_in_progress'] = True
-        state['queue_size'] = 10
-        state['in_progress'] = 0
-        state['current_channel'] = None
-        state['mode'] = 'global_action'
     elif mode == 'queue':
         state['checking'] = False
-        state['global_action_in_progress'] = False
         state['queue_size'] = 5
         state['in_progress'] = 0
         state['current_channel'] = None
         state['mode'] = 'queue'
     
     stream_checking_mode_value = (
-        state['global_action_in_progress'] or 
         state['checking'] or 
         state['queue_size'] > 0 or 
         state['in_progress'] > 0
@@ -161,13 +152,11 @@ API Endpoints:
 Available modes:
   idle          - No checking active (buttons enabled)
   checking      - Individual channel check (buttons disabled)
-  global_action - Global action in progress (buttons disabled)
   queue         - Channels in queue (buttons disabled)
 
 Test the modes with curl:
   curl -X POST http://localhost:5000/api/set-mode/idle
   curl -X POST http://localhost:5000/api/set-mode/checking
-  curl -X POST http://localhost:5000/api/set-mode/global_action
   curl -X POST http://localhost:5000/api/set-mode/queue
 
 Open your browser to the frontend and observe how buttons are disabled

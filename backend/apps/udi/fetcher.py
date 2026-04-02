@@ -8,6 +8,7 @@ import os
 import sys
 import time
 import json
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 import requests
 from pathlib import Path
@@ -31,6 +32,41 @@ if env_path.exists():
 _token_validation_cache: Dict[str, float] = {}
 # Default TTL for token validation cache (in seconds)
 TOKEN_VALIDATION_TTL = int(os.getenv("TOKEN_VALIDATION_TTL", "60"))
+
+
+@dataclass
+class FetchResult:
+    """Result of a paginated fetch operation.
+
+    Attributes:
+        items:          All records collected across all pages.
+        expected_count: Total record count reported by the API on the first
+                        page (the ``count`` field in a DRF paginated response).
+                        ``None`` when the endpoint is not paginated or when the
+                        count field is absent — callers must treat ``None`` as
+                        "unknown" rather than zero.
+    """
+    items: List[Dict[str, Any]] = field(default_factory=list)
+    expected_count: Optional[int] = None
+
+    # ------------------------------------------------------------------ #
+    # Convenience helpers so callers that only need the list can write
+    #   result = fetcher.fetch_channels()
+    #   for ch in result:  ...          (iteration)
+    #   n = len(result)                  (length)
+    # without breaking existing code that treats the return value as a list.
+    # ------------------------------------------------------------------ #
+    def __iter__(self):
+        return iter(self.items)
+
+    def __len__(self):
+        return len(self.items)
+
+    def __bool__(self):
+        return bool(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
 
 
 def _get_base_url() -> Optional[str]:
@@ -251,6 +287,53 @@ class UDIFetcher:
         except Exception:
             return False
     
+    def fetch_entity_counts(self) -> Dict[str, Optional[int]]:
+        """Fetch lightweight entity counts from Dispatcharr without pulling full objects.
+
+        Uses the ``/ids/`` action endpoints exposed by ChannelViewSet and
+        StreamViewSet — each returns only a flat list of IDs, making this
+        much cheaper than a full paginated fetch while still giving an
+        authoritative total from Dispatcharr's database.
+
+        Designed to be called *before* a full refresh so manager.py can
+        compare post-fetch counts against a known-good oracle, and also
+        *after* a refresh to verify completeness independently of the
+        pagination envelope.
+
+        Returns:
+            Dict with keys ``'channels'`` and ``'streams'``, each mapped to
+            an integer count or ``None`` if the endpoint was unreachable.
+        """
+        if not self.base_url:
+            logger.warning("fetch_entity_counts: base_url not set")
+            return {'channels': None, 'streams': None}
+
+        counts: Dict[str, Optional[int]] = {'channels': None, 'streams': None}
+
+        # Channels /ids/ — ChannelViewSet.get_ids() returns a flat list of IDs
+        try:
+            channel_ids = self._fetch_url(f"{self.base_url}/api/channels/channels/ids/")
+            if isinstance(channel_ids, list):
+                counts['channels'] = len(channel_ids)
+                logger.info(f"fetch_entity_counts: {counts['channels']} channels (from /ids/)")
+            else:
+                logger.warning("fetch_entity_counts: unexpected response from channels/ids/")
+        except Exception as e:
+            logger.warning(f"fetch_entity_counts: failed to fetch channel IDs: {e}")
+
+        # Streams /ids/ — StreamViewSet.get_ids() returns a flat list of IDs
+        try:
+            stream_ids = self._fetch_url(f"{self.base_url}/api/channels/streams/ids/")
+            if isinstance(stream_ids, list):
+                counts['streams'] = len(stream_ids)
+                logger.info(f"fetch_entity_counts: {counts['streams']} streams (from /ids/)")
+            else:
+                logger.warning("fetch_entity_counts: unexpected response from streams/ids/")
+        except Exception as e:
+            logger.warning(f"fetch_entity_counts: failed to fetch stream IDs: {e}")
+
+        return counts
+
     def _fetch_url(self, url: str) -> Optional[Any]:
         """Fetch data from a URL with authentication and retry logic.
         
@@ -282,48 +365,72 @@ class UDIFetcher:
             logger.error(f"Error fetching {url}: {e}")
             return None
     
-    def _fetch_paginated(self, base_url: str, page_size: int = 100) -> List[Dict[str, Any]]:
+    def _fetch_paginated(self, base_url: str, page_size: int = 100) -> FetchResult:
         """Fetch paginated data from an API endpoint.
-        
+
+        Captures the ``count`` field from the first-page response so callers
+        can compare expected vs. received totals for integrity checking.
+
         Args:
-            base_url: The base URL for the endpoint
-            page_size: Number of items per page
-            
+            base_url:  The base URL for the endpoint (no query string).
+            page_size: Number of items per page.
+
         Returns:
-            List of all items from all pages
+            FetchResult with all collected items and the expected_count
+            reported by the API on the first page (None if not present).
         """
         all_items: List[Dict[str, Any]] = []
-        url = f"{base_url}?page_size={page_size}"
-        
+        expected_count: Optional[int] = None
+        first_page = True
+        # Include page=1 explicitly so ChannelPagination does not short-circuit
+        # into bare-list mode (it disables pagination when no 'page' param is
+        # present, which drops the DRF count/results envelope).
+        url = f"{base_url}?page_size={page_size}&page=1"
+
         while url:
             response = self._fetch_url(url)
             if not response:
                 break
-            
+
             if isinstance(response, dict) and 'results' in response:
+                # Capture total count from the first page only
+                if first_page:
+                    raw_count = response.get('count')
+                    if raw_count is not None:
+                        try:
+                            expected_count = int(raw_count)
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                f"Unexpected 'count' value in paginated response: {raw_count!r}"
+                            )
+                    first_page = False
+
                 all_items.extend(response.get('results', []))
                 url = response.get('next')
             else:
                 if isinstance(response, list):
                     all_items.extend(response)
                 break
-        
-        return all_items
+
+        return FetchResult(items=all_items, expected_count=expected_count)
     
-    def fetch_channels(self) -> List[Dict[str, Any]]:
+    def fetch_channels(self) -> FetchResult:
         """Fetch all channels from Dispatcharr.
         
         Returns:
-            List of channel dictionaries
+            FetchResult with channel dictionaries and expected count.
         """
         if not self.base_url:
             logger.error("DISPATCHARR_BASE_URL not set")
-            return []
+            return FetchResult()
         
         url = f"{self.base_url}/api/channels/channels/"
-        channels = self._fetch_paginated(url)
-        logger.debug(f"Fetched {len(channels)} channels")
-        return channels
+        result = self._fetch_paginated(url)
+        logger.info(
+            f"Fetched {len(result)} channels"
+            + (f" (expected {result.expected_count})" if result.expected_count is not None else "")
+        )
+        return result
     
     def fetch_channel_by_id(self, channel_id: int) -> Optional[Dict[str, Any]]:
         """Fetch a specific channel by ID.
@@ -347,7 +454,7 @@ class UDIFetcher:
             channel_id: The channel ID
             
         Returns:
-            List of stream dictionaries
+            List of stream dictionaries for the channel
         """
         if not self.base_url:
             return []
@@ -356,20 +463,23 @@ class UDIFetcher:
         streams = self._fetch_url(url)
         return streams if isinstance(streams, list) else []
     
-    def fetch_streams(self) -> List[Dict[str, Any]]:
+    def fetch_streams(self) -> FetchResult:
         """Fetch all streams from Dispatcharr.
         
         Returns:
-            List of stream dictionaries
+            FetchResult with stream dictionaries and expected count.
         """
         if not self.base_url:
             logger.error("DISPATCHARR_BASE_URL not set")
-            return []
+            return FetchResult()
         
         url = f"{self.base_url}/api/channels/streams/"
-        streams = self._fetch_paginated(url)
-        logger.debug(f"Fetched {len(streams)} streams")
-        return streams
+        result = self._fetch_paginated(url)
+        logger.info(
+            f"Fetched {len(result)} streams"
+            + (f" (expected {result.expected_count})" if result.expected_count is not None else "")
+        )
+        return result
     
     def fetch_stream_by_id(self, stream_id: int) -> Optional[Dict[str, Any]]:
         """Fetch a specific stream by ID.
@@ -388,9 +498,12 @@ class UDIFetcher:
     
     def fetch_channel_groups(self) -> List[Dict[str, Any]]:
         """Fetch all channel groups from Dispatcharr.
+
+        Channel groups use a non-paginated endpoint, so a plain list is
+        returned rather than a FetchResult.
         
         Returns:
-            List of channel group dictionaries
+            List of channel group dictionaries.
         """
         if not self.base_url:
             logger.error("DISPATCHARR_BASE_URL not set")
@@ -403,20 +516,23 @@ class UDIFetcher:
             return groups
         return []
     
-    def fetch_logos(self) -> List[Dict[str, Any]]:
+    def fetch_logos(self) -> FetchResult:
         """Fetch all logos from Dispatcharr.
         
         Returns:
-            List of logo dictionaries
+            FetchResult with logo dictionaries and expected count.
         """
         if not self.base_url:
             logger.error("DISPATCHARR_BASE_URL not set")
-            return []
+            return FetchResult()
         
         url = f"{self.base_url}/api/channels/logos/"
-        logos = self._fetch_paginated(url)
-        logger.debug(f"Fetched {len(logos)} logos")
-        return logos
+        result = self._fetch_paginated(url)
+        logger.debug(
+            f"Fetched {len(result)} logos"
+            + (f" (expected {result.expected_count})" if result.expected_count is not None else "")
+        )
+        return result
     
     def fetch_logo_by_id(self, logo_id: int) -> Optional[Dict[str, Any]]:
         """Fetch a specific logo by ID.
@@ -435,9 +551,12 @@ class UDIFetcher:
     
     def fetch_m3u_accounts(self) -> List[Dict[str, Any]]:
         """Fetch all M3U accounts from Dispatcharr.
+
+        M3U accounts use a non-paginated endpoint, so a plain list is
+        returned rather than a FetchResult.
         
         Returns:
-            List of M3U account dictionaries
+            List of M3U account dictionaries.
         """
         if not self.base_url:
             logger.error("DISPATCHARR_BASE_URL not set")

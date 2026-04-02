@@ -63,10 +63,12 @@ export default function Scheduling() {
   const [ruleRegexPattern, setRuleRegexPattern] = useState('')
   const [ruleMinutesBefore, setRuleMinutesBefore] = useState(5)
   const [ruleScheduleType, setRuleScheduleType] = useState('check')  // 'check' or 'monitoring'
+  const [ruleEnableLoopDetection, setRuleEnableLoopDetection] = useState(false)
   const [ruleEnableLoopingDetection, setRuleEnableLoopingDetection] = useState(true)
   const [ruleEnableLogoDetection, setRuleEnableLogoDetection] = useState(true)
   
   // Single Event AceStream Config
+  const [enableLoopDetection, setEnableLoopDetection] = useState(false)
   const [sessionType, setSessionType] = useState('standard')
   const [intervalS, setIntervalS] = useState(1.0)
   const [runSeconds, setRunSeconds] = useState(0)
@@ -209,6 +211,7 @@ export default function Scheduling() {
         run_seconds: runSeconds,
         per_sample_timeout_s: perSampleTimeoutS,
         engine_container_id: engineContainerId,
+        enable_loop_detection: enableLoopDetection,
       }
 
       await schedulingAPI.createEvent(eventData)
@@ -230,6 +233,7 @@ export default function Scheduling() {
       setRunSeconds(0)
       setPerSampleTimeoutS(1.0)
       setEngineContainerId('')
+      setEnableLoopDetection(false)
       await loadData()
     } catch (err) {
       console.error('Failed to create event:', err)
@@ -322,7 +326,14 @@ export default function Scheduling() {
 
       setRegexMatches(response.data.programs || [])
 
-      if (response.data.matches === 0) {
+      // SCH-002: backend signals the channel has no TVG-ID configured
+      if (response.data.no_tvg_id) {
+        toast({
+          title: "No TVG-ID Configured",
+          description: "This channel has no TVG-ID set. EPG matching requires a TVG-ID — open the channel in Dispatcharr and click \"Use EPG TVG-ID\" to populate it.",
+          variant: "destructive"
+        })
+      } else if (response.data.matches === 0) {
         toast({
           title: "No Matches",
           description: "The regex pattern didn't match any programs in the EPG (tested on first available channel)",
@@ -376,6 +387,7 @@ export default function Scheduling() {
         run_seconds: ruleRunSeconds,
         per_sample_timeout_s: rulePerSampleTimeoutS,
         engine_container_id: ruleEngineContainerId,
+        enable_loop_detection: ruleEnableLoopDetection,
         enable_looping_detection: ruleEnableLoopingDetection,
         enable_logo_detection: ruleEnableLogoDetection
       }
@@ -409,6 +421,7 @@ export default function Scheduling() {
       setRuleRunSeconds(0)
       setRulePerSampleTimeoutS(1.0)
       setRuleEngineContainerId('')
+      setRuleEnableLoopDetection(false)
       setRuleEnableLoopingDetection(true)
       setRuleEnableLogoDetection(true)
       setRegexMatches([])
@@ -457,6 +470,7 @@ export default function Scheduling() {
     setRuleRunSeconds(rule.run_seconds || 0)
     setRulePerSampleTimeoutS(rule.per_sample_timeout_s || 1.0)
     setRuleEngineContainerId(rule.engine_container_id || '')
+    setRuleEnableLoopDetection(rule.enable_loop_detection || false)
     setRuleEnableLoopingDetection(rule.enable_looping_detection !== false)
     setRuleEnableLogoDetection(rule.enable_logo_detection !== false)
 
@@ -930,6 +944,21 @@ export default function Scheduling() {
                             onChange={(e) => setEngineContainerId(e.target.value)}
                           />
                         </div>
+                        <div className="flex items-center justify-between col-span-2 border-t pt-2">
+                          <div className="space-y-0.5">
+                            <Label htmlFor="ace-loop-detection" className="text-sm">
+                              Enable Zero-Decode Loop Detection
+                            </Label>
+                            <p className="text-[11px] text-muted-foreground mr-4">
+                              Monitors packet metadata to detect if the stream is a looping VOD file. (Negligible CPU impact)
+                            </p>
+                          </div>
+                          <Switch
+                            id="ace-loop-detection"
+                            checked={enableLoopDetection}
+                            onCheckedChange={setEnableLoopDetection}
+                          />
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1305,6 +1334,7 @@ export default function Scheduling() {
                   setRuleSelectedChannels([])
                   setRuleRegexPattern('')
                   setRuleMinutesBefore(5)
+                  setRuleEnableLoopDetection(false)
                   setRuleEnableLoopingDetection(true)
                   setRuleEnableLogoDetection(true)
                   setRegexMatches([])
@@ -1324,6 +1354,7 @@ export default function Scheduling() {
                     setRuleRunSeconds(0)
                     setRulePerSampleTimeoutS(1.0)
                     setRuleEngineContainerId('')
+                    setRuleEnableLoopDetection(false)
                     setRuleEnableLoopingDetection(true)
                     setRuleEnableLogoDetection(true)
                     setRegexMatches([])
@@ -1719,6 +1750,21 @@ export default function Scheduling() {
                                     onChange={(e) => setRuleEngineContainerId(e.target.value)}
                                   />
                                 </div>
+                                <div className="flex items-center justify-between col-span-2 border-t pt-2">
+                                  <div className="space-y-0.5">
+                                    <Label htmlFor="rule-ace-loop" className="text-sm">
+                                      Enable Zero-Decode Loop Detection
+                                    </Label>
+                                    <p className="text-[11px] text-muted-foreground mr-4">
+                                      Monitors packet metadata to detect if the stream is a looping VOD file. (Negligible CPU impact)
+                                    </p>
+                                  </div>
+                                  <Switch
+                                    id="rule-ace-loop"
+                                    checked={ruleEnableLoopDetection}
+                                    onCheckedChange={setRuleEnableLoopDetection}
+                                  />
+                                </div>
                               </div>
                             )}
                           </div>
@@ -1742,6 +1788,7 @@ export default function Scheduling() {
                       setRuleRunSeconds(0)
                       setRulePerSampleTimeoutS(1.0)
                       setRuleEngineContainerId('')
+                      setRuleEnableLoopDetection(false)
                       setRuleEnableLoopingDetection(true)
                       setRuleEnableLogoDetection(true)
                       setRegexMatches([])

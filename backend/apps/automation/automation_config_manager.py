@@ -178,8 +178,10 @@ class AutomationConfigManager:
         from apps.database.models import AutomationProfile
         from apps.database.connection import get_session
         if not profile_id: return None
-        try: pid = int(profile_id)
-        except: return None
+        try:
+            pid = int(profile_id)
+        except (TypeError, ValueError):
+            return None
         session = get_session()
         try:
             p = session.query(AutomationProfile).filter(AutomationProfile.id == pid).first()
@@ -206,8 +208,9 @@ class AutomationConfigManager:
             session.add(p)
             session.commit()
             return str(p.id)
-        except:
+        except Exception as e:
             session.rollback()
+            logger.error("Failed to create automation profile: %s", e)
             return None
         finally:
             session.close()
@@ -215,8 +218,10 @@ class AutomationConfigManager:
     def update_profile(self, profile_id: str, profile_data: Dict) -> bool:
         from apps.database.models import AutomationProfile
         from apps.database.connection import get_session
-        try: pid = int(profile_id)
-        except: return False
+        try:
+            pid = int(profile_id)
+        except (TypeError, ValueError):
+            return False
         session = get_session()
         try:
             p = session.query(AutomationProfile).filter(AutomationProfile.id == pid).first()
@@ -231,30 +236,102 @@ class AutomationConfigManager:
             p.extra_settings = current_extra
             session.commit()
             return True
-        except:
+        except Exception as e:
             session.rollback()
+            logger.error("Failed to update automation profile %s: %s", profile_id, e)
             return False
         finally:
             session.close()
 
+    def _remove_profile_from_period_map(self, setting_key: str, profile_id_str: str) -> None:
+        """Remove all period→profile entries that reference *profile_id_str* from a nested assignment map.
+
+        The map structure is ``{entity_id: {period_id: profile_id}}``.  Entries whose inner dict becomes
+        empty after removal are also pruned from the outer dict.
+        """
+        assignments = self._get_config_dict(setting_key, {})
+        if not isinstance(assignments, dict):
+            return
+        changed = False
+        for entity_id, period_map in list(assignments.items()):
+            if not isinstance(period_map, dict):
+                continue
+            for period_id in list(period_map.keys()):
+                if period_map[period_id] == profile_id_str:
+                    del period_map[period_id]
+                    changed = True
+            if not period_map:
+                del assignments[entity_id]
+        if changed:
+            self._set_config_dict(setting_key, assignments)
+
     def delete_profile(self, profile_id: str) -> bool:
         from apps.database.models import AutomationProfile
         from apps.database.connection import get_session
-        try: pid = int(profile_id)
-        except: return False
+        try:
+            pid = int(profile_id)
+        except (TypeError, ValueError):
+            return False
         session = get_session()
         try:
             p = session.query(AutomationProfile).filter(AutomationProfile.id == pid).first()
             if not p: return False
             session.delete(p)
             session.commit()
-            assignments = self._get_config_dict("channel_period_assignments", {})
-            for c in list(assignments.keys()):
-                if assignments[c] == str(pid): del assignments[c]
-            self._set_config_dict("channel_period_assignments", assignments)
+            pid_str = str(pid)
+
+            # Remove from channel-level profile assignments
+            channel_assignments = self._get_config_dict("channel_assignments", {})
+            if isinstance(channel_assignments, dict):
+                changed = False
+                for cid in list(channel_assignments.keys()):
+                    if channel_assignments[cid] == pid_str:
+                        del channel_assignments[cid]
+                        changed = True
+                if changed:
+                    self._set_config_dict("channel_assignments", channel_assignments)
+
+            # Remove from group-level profile assignments
+            group_assignments = self._get_config_dict("group_assignments", {})
+            if isinstance(group_assignments, dict):
+                changed = False
+                for gid in list(group_assignments.keys()):
+                    if group_assignments[gid] == pid_str:
+                        del group_assignments[gid]
+                        changed = True
+                if changed:
+                    self._set_config_dict("group_assignments", group_assignments)
+
+            # Remove from channel-level EPG scheduled profile assignments
+            channel_epg = self._get_config_dict("channel_epg_scheduled_assignments", {})
+            if isinstance(channel_epg, dict):
+                changed = False
+                for cid in list(channel_epg.keys()):
+                    if channel_epg[cid] == pid_str:
+                        del channel_epg[cid]
+                        changed = True
+                if changed:
+                    self._set_config_dict("channel_epg_scheduled_assignments", channel_epg)
+
+            # Remove from group-level EPG scheduled profile assignments
+            group_epg = self._get_config_dict("group_epg_scheduled_assignments", {})
+            if isinstance(group_epg, dict):
+                changed = False
+                for gid in list(group_epg.keys()):
+                    if group_epg[gid] == pid_str:
+                        del group_epg[gid]
+                        changed = True
+                if changed:
+                    self._set_config_dict("group_epg_scheduled_assignments", group_epg)
+
+            # Remove deleted profile from period assignment maps (channel and group)
+            self._remove_profile_from_period_map("channel_period_assignments", pid_str)
+            self._remove_profile_from_period_map("group_period_assignments", pid_str)
+
             return True
-        except:
+        except Exception as e:
             session.rollback()
+            logger.error("Failed to delete automation profile %s: %s", profile_id, e)
             return False
         finally:
             session.close()
@@ -295,6 +372,11 @@ class AutomationConfigManager:
     def get_group_assignment(self, group_id: int) -> Optional[str]:
         return self._get_config_dict("group_assignments", {}).get(str(group_id))
 
+    def get_all_group_assignments(self) -> Dict[str, str]:
+        """Return all group→automation-profile assignments as {group_id_str: profile_id_str}."""
+        result = self._get_config_dict("group_assignments", {})
+        return result if isinstance(result, dict) else {}
+
     def get_effective_profile_id(self, channel_id: int, group_id: Optional[int] = None) -> Optional[str]:
         cid = str(channel_id)
         chan = self._get_config_dict("channel_assignments", {})
@@ -306,6 +388,69 @@ class AutomationConfigManager:
 
     def get_effective_profile(self, channel_id: int, group_id: Optional[int] = None) -> Optional[Dict]:
         pid = self.get_effective_profile_id(channel_id, group_id)
+        return self.get_profile(pid) if pid else None
+
+    # --- EPG Scheduled Profile Assignments ---
+
+    def assign_epg_scheduled_profile_to_channel(self, channel_id: int, profile_id: Optional[str]) -> bool:
+        assignments = self._get_config_dict("channel_epg_scheduled_assignments", {})
+        cid = str(channel_id)
+        if profile_id is None:
+            if cid in assignments:
+                del assignments[cid]
+        else:
+            assignments[cid] = str(profile_id)
+        return self._set_config_dict("channel_epg_scheduled_assignments", assignments)
+
+    def assign_epg_scheduled_profile_to_channels(self, channel_ids: List[int], profile_id: Optional[str]) -> bool:
+        assignments = self._get_config_dict("channel_epg_scheduled_assignments", {})
+        changed = False
+        for cid_raw in channel_ids:
+            cid = str(cid_raw)
+            if profile_id is None:
+                if cid in assignments:
+                    del assignments[cid]
+                    changed = True
+            else:
+                if assignments.get(cid) != str(profile_id):
+                    assignments[cid] = str(profile_id)
+                    changed = True
+        if changed:
+            return self._set_config_dict("channel_epg_scheduled_assignments", assignments)
+        return True
+
+    def assign_epg_scheduled_profile_to_group(self, group_id: int, profile_id: Optional[str]) -> bool:
+        assignments = self._get_config_dict("group_epg_scheduled_assignments", {})
+        gid = str(group_id)
+        if profile_id is None:
+            if gid in assignments:
+                del assignments[gid]
+        else:
+            assignments[gid] = str(profile_id)
+        return self._set_config_dict("group_epg_scheduled_assignments", assignments)
+
+    def get_all_group_epg_scheduled_assignments(self) -> Dict[str, str]:
+        """Return all group→EPG-profile assignments as {group_id_str: profile_id_str}."""
+        result = self._get_config_dict("group_epg_scheduled_assignments", {})
+        return result if isinstance(result, dict) else {}
+
+    def get_channel_epg_scheduled_assignment(self, channel_id: int) -> Optional[str]:
+        return self._get_config_dict("channel_epg_scheduled_assignments", {}).get(str(channel_id))
+
+    def get_group_epg_scheduled_assignment(self, group_id: int) -> Optional[str]:
+        return self._get_config_dict("group_epg_scheduled_assignments", {}).get(str(group_id))
+
+    def get_effective_epg_scheduled_profile_id(self, channel_id: int, group_id: Optional[int] = None) -> Optional[str]:
+        cid = str(channel_id)
+        chan = self._get_config_dict("channel_epg_scheduled_assignments", {})
+        if cid in chan: return chan[cid]
+        if group_id is not None:
+            grp = self._get_config_dict("group_epg_scheduled_assignments", {})
+            if str(group_id) in grp: return grp[str(group_id)]
+        return None
+
+    def get_effective_epg_scheduled_profile(self, channel_id: int, group_id: Optional[int] = None) -> Optional[Dict]:
+        pid = self.get_effective_epg_scheduled_profile_id(channel_id, group_id)
         return self.get_profile(pid) if pid else None
 
     # --- Automation Periods Management ---
@@ -350,11 +495,15 @@ class AutomationConfigManager:
     def get_period(self, period_id: str) -> Optional[Dict]:
         from apps.database.models import AutomationPeriod
         from apps.database.connection import get_session
-        try: pid = int(period_id)
-        except: return None
+        try:
+            pid = int(period_id)
+        except (TypeError, ValueError):
+            return None
         session = get_session()
-        try: return self._period_to_dict(session.query(AutomationPeriod).get(pid))
-        finally: session.close()
+        try:
+            return self._period_to_dict(session.query(AutomationPeriod).get(pid))
+        finally:
+            session.close()
 
     def create_period(self, period_data: Dict) -> Optional[str]:
         from apps.database.models import AutomationPeriod
@@ -377,14 +526,20 @@ class AutomationConfigManager:
             session.add(p)
             session.commit()
             return str(p.id)
-        except: session.rollback(); return None
-        finally: session.close()
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to create automation period: %s", e)
+            return None
+        finally:
+            session.close()
 
     def update_period(self, period_id: str, period_data: Dict) -> bool:
         from apps.database.models import AutomationPeriod
         from apps.database.connection import get_session
-        try: pid = int(period_id)
-        except: return False
+        try:
+            pid = int(period_id)
+        except (TypeError, ValueError):
+            return False
         session = get_session()
         try:
             p = session.query(AutomationPeriod).get(pid)
@@ -406,23 +561,67 @@ class AutomationConfigManager:
             elif "cron_schedule" in period_data:
                 p.cron_schedule = str(period_data["cron_schedule"])
 
-            session.commit(); return True
-        except: session.rollback(); return False
-        finally: session.close()
+            session.commit()
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to update automation period %s: %s", period_id, e)
+            return False
+        finally:
+            session.close()
 
     def delete_period(self, period_id: str) -> bool:
         from apps.database.models import AutomationPeriod
         from apps.database.connection import get_session
-        try: pid = int(period_id)
-        except: return False
+        try:
+            pid = int(period_id)
+        except (TypeError, ValueError):
+            return False
         session = get_session()
         try:
             p = session.query(AutomationPeriod).get(pid)
             if not p: return False
             session.delete(p)
-            session.commit(); return True
-        except: session.rollback(); return False
-        finally: session.close()
+            session.commit()
+
+            # Remove orphaned references to deleted period from assignment maps.
+            pid_str = str(period_id)
+            changed = False
+
+            channel_assignments = self._get_config_dict("channel_period_assignments", {})
+            if isinstance(channel_assignments, dict):
+                for cid, period_map in list(channel_assignments.items()):
+                    if not isinstance(period_map, dict):
+                        continue
+                    if pid_str in period_map:
+                        del period_map[pid_str]
+                        if not period_map:
+                            del channel_assignments[cid]
+                        changed = True
+                if changed:
+                    self._set_config_dict("channel_period_assignments", channel_assignments)
+
+            group_assignments = self._get_config_dict("group_period_assignments", {})
+            group_changed = False
+            if isinstance(group_assignments, dict):
+                for gid, period_map in list(group_assignments.items()):
+                    if not isinstance(period_map, dict):
+                        continue
+                    if pid_str in period_map:
+                        del period_map[pid_str]
+                        if not period_map:
+                            del group_assignments[gid]
+                        group_changed = True
+                if group_changed:
+                    self._set_config_dict("group_period_assignments", group_assignments)
+
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error("Failed to delete automation period %s: %s", period_id, e)
+            return False
+        finally:
+            session.close()
 
     def assign_period_to_channels(self, period_id: str, channel_ids: List[int], profile_id: str, replace: bool = False) -> bool:
         assignments = self._get_config_dict("channel_period_assignments", {})
@@ -468,6 +667,94 @@ class AutomationConfigManager:
             return {}
         return channel_assignments
 
+    def get_effective_channel_periods(self, channel_id: int, group_id: int = None) -> Dict[str, str]:
+        """Return the combined period assignments for a channel, merging group-level and channel-level assignments.
+
+        Group-level assignments are used as the base; channel-specific assignments override them.
+        """
+        effective: Dict[str, str] = {}
+        if group_id is not None:
+            effective.update(self.get_group_periods(group_id))
+        effective.update(self.get_channel_periods(channel_id))
+        return effective
+
+    def get_effective_period_channel_profiles(self, period_id: str) -> Dict[int, str]:
+        """Return effective channel -> profile assignments for a period.
+
+        Group-level assignments are used as the base and channel-level assignments override them.
+        """
+        pid = str(period_id)
+        effective_assignments: Dict[int, str] = {}
+
+        # Base assignments from group-level period/profile mappings.
+        group_assignments = self._get_config_dict("group_period_assignments", {})
+        groups_with_period: Dict[int, str] = {}
+        for gid_raw, period_map in group_assignments.items():
+            if not isinstance(period_map, dict) or pid not in period_map:
+                continue
+            try:
+                gid = int(gid_raw)
+            except (TypeError, ValueError):
+                continue
+            profile_id = period_map.get(pid)
+            if profile_id:
+                groups_with_period[gid] = str(profile_id)
+
+        valid_channel_ids: Optional[set] = None
+        try:
+            from apps.udi import get_udi_manager
+            udi = get_udi_manager()
+            udi_channels = udi.get_channels() or []
+            # When UDI has no loaded channel inventory (for example in isolated
+            # tests or before initialization), do not filter explicit assignments.
+            if udi_channels:
+                valid_channel_ids = {
+                    int(ch.get('id'))
+                    for ch in udi_channels
+                    if isinstance(ch, dict) and ch.get('id') is not None
+                }
+            else:
+                valid_channel_ids = None
+        except Exception:
+            valid_channel_ids = None
+
+        if groups_with_period:
+            try:
+                for gid, profile_id in groups_with_period.items():
+                    channels = udi.get_channels_by_group(gid) or []
+                    for channel in channels:
+                        channel_id_raw = channel.get('id')
+                        try:
+                            channel_id = int(channel_id_raw)
+                        except (TypeError, ValueError):
+                            continue
+                        if valid_channel_ids is not None and channel_id not in valid_channel_ids:
+                            continue
+                        effective_assignments[channel_id] = profile_id
+            except Exception as e:
+                logger.warning(
+                    "Failed to resolve group period assignments for period %s via UDI: %s",
+                    pid,
+                    e,
+                )
+
+        # Channel-level assignments override group-level assignments.
+        channel_assignments = self._get_config_dict("channel_period_assignments", {})
+        for cid_raw, period_map in channel_assignments.items():
+            if not isinstance(period_map, dict) or pid not in period_map:
+                continue
+            try:
+                channel_id = int(cid_raw)
+            except (TypeError, ValueError):
+                continue
+            if valid_channel_ids is not None and channel_id not in valid_channel_ids:
+                continue
+            profile_id = period_map.get(pid)
+            if profile_id:
+                effective_assignments[channel_id] = str(profile_id)
+
+        return effective_assignments
+
     def get_period_channels(self, period_id: str) -> List[int]:
         assignments = self._get_config_dict("channel_period_assignments", {})
         pid = str(period_id)
@@ -484,9 +771,8 @@ class AutomationConfigManager:
 
     def is_period_active_now(self, period_id: str) -> bool: return True
 
-    def get_active_periods_for_channel(self, channel_id: int) -> List[Dict]:
-        assignments = self._get_config_dict("channel_period_assignments", {})
-        pid_profile = assignments.get(str(channel_id), {})
+    def get_active_periods_for_channel(self, channel_id: int, group_id: Optional[int] = None) -> List[Dict]:
+        pid_profile = self.get_effective_channel_periods(channel_id, group_id)
         res = []
         for pid, profile_id in pid_profile.items():
             period = self.get_period(pid)
@@ -498,7 +784,7 @@ class AutomationConfigManager:
         return res
 
     def get_effective_configuration(self, channel_id: int, group_id: Optional[int] = None) -> Optional[Dict]:
-        active_periods = self.get_active_periods_for_channel(channel_id)
+        active_periods = self.get_active_periods_for_channel(channel_id, group_id)
         if active_periods:
             if len(active_periods) > 1: active_periods.sort(key=lambda p: (-int(p.get('priority', 0)), p.get('id', '')))
             period = active_periods[0]

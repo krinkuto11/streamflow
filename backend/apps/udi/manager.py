@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Set, Tuple
 
 from apps.udi.storage import UDIStorage
-from apps.udi.fetcher import UDIFetcher, _get_auth_headers
+from apps.udi.fetcher import UDIFetcher, FetchResult, _get_auth_headers
 from apps.udi.cache import UDICache
 
 from apps.core.logging_config import setup_logging
@@ -42,6 +42,56 @@ logger = setup_logging(__name__)
 
 # Constants for channel status
 CHANNEL_STATE_ACTIVE = 'active'
+
+# Minimum fraction of expected records that must be received before a fetch is
+# considered potentially truncated.  0.9 means "warn if we received less than
+# 90 % of what Dispatcharr told us to expect."  None / 0 disables the check.
+UDI_INTEGRITY_THRESHOLD = 0.9
+
+
+def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
+    """Evaluate whether a FetchResult looks complete.
+
+    Logs a warning when the received count falls below the expected count by
+    more than UDI_INTEGRITY_THRESHOLD.  Returns True when the result appears
+    complete (or when expected_count is unknown).
+
+    Args:
+        entity:  Human-readable name used in log messages (e.g. "streams").
+        result:  The FetchResult to evaluate.
+
+    Returns:
+        True if integrity check passes or cannot be determined, False if the
+        result is detectably incomplete.
+    """
+    if result.expected_count is None:
+        # Endpoint did not report a total — cannot check.
+        return True
+
+    received = len(result)
+    expected = result.expected_count
+
+    if expected == 0:
+        # Dispatcharr says zero records exist — that is valid.
+        return True
+
+    ratio = received / expected
+    if ratio < UDI_INTEGRITY_THRESHOLD:
+        logger.warning(
+            f"UDI integrity check FAILED for {entity}: "
+            f"received {received} of {expected} expected records "
+            f"({ratio * 100:.1f}% — threshold {UDI_INTEGRITY_THRESHOLD * 100:.0f}%)"
+        )
+        return False
+
+    if received != expected:
+        # Within threshold but not an exact match — log at debug level only.
+        logger.debug(
+            f"UDI integrity minor variance for {entity}: "
+            f"received {received}, expected {expected}"
+        )
+
+    return True
 
 
 class UDIManager:
@@ -87,11 +137,15 @@ class UDIManager:
         
         # Initialization progress tracking
         self._init_progress = {
-            'status': 'idle', # idle, in_progress, completed, failed
+            'status': 'idle',       # idle, in_progress, completed, failed
             'percentage': 0,
             'message': '',
             'current_step': '',
-            'total_steps': 7 # channels, streams, groups, logos, m3u_accounts, profiles, profile_channels
+            'total_steps': 7,       # channels, streams, groups, logos, m3u_accounts, profiles, profile_channels
+            # entity_counts is populated after each full refresh_all() run.
+            # Each entry: { 'received': int, 'expected': int | None }
+            # 'expected' is None when the Dispatcharr endpoint did not report a total.
+            'entity_counts': {},
         }
         
         # Proxy status cache for real-time stream viewer information
@@ -222,18 +276,28 @@ class UDIManager:
         """Get the current initialization progress.
         
         Returns:
-            Dictionary with status, percentage, and message
+            Dictionary with status, percentage, message, and entity_counts.
         """
         return self._init_progress.copy()
     
-    def _update_init_progress(self, status: str = None, percentage: int = None, message: str = None, current_step: str = None):
+    def _update_init_progress(
+        self,
+        status: str = None,
+        percentage: int = None,
+        message: str = None,
+        current_step: str = None,
+        entity_counts: Dict[str, Any] = None,
+    ):
         """Update the initialization progress.
         
         Args:
-            status: New status (idle, in_progress, completed, failed)
-            percentage: Progress percentage (0-100)
-            message: Progress message
-            current_step: Name of the current step
+            status:        New status (idle, in_progress, completed, failed)
+            percentage:    Progress percentage (0-100)
+            message:       Progress message
+            current_step:  Name of the current step
+            entity_counts: Dict of entity -> {received, expected} counts from
+                           the most recent full refresh.  Merged into the
+                           existing dict so partial updates are safe.
         """
         if status:
             self._init_progress['status'] = status
@@ -243,6 +307,8 @@ class UDIManager:
             self._init_progress['message'] = message
         if current_step:
             self._init_progress['current_step'] = current_step
+        if entity_counts is not None:
+            self._init_progress['entity_counts'].update(entity_counts)
             
         logger.debug(f"UDI Init Progress: {self._init_progress['percentage']}% - {self._init_progress['message']}")
 
@@ -542,30 +608,52 @@ class UDIManager:
             return False
         
         try:
+            # Pre-fetch step: get authoritative counts from lightweight /ids/
+            # endpoints before pulling full objects.  These counts serve as the
+            # integrity oracle when the pagination envelope does not include a
+            # 'count' field (e.g. ChannelPagination in older Dispatcharr builds).
+            self._update_init_progress(percentage=2, message='Fetching entity counts...', current_step='pre_count')
+            pre_counts = self.fetcher.fetch_entity_counts()
+            logger.info(
+                f"UDI pre-fetch oracle: channels={pre_counts.get('channels')}, "
+                f"streams={pre_counts.get('streams')} (from Dispatcharr /ids/ endpoints)"
+            )
+
             # Step 1: Channels
             self._update_init_progress(percentage=5, message='Fetching channels...', current_step='channels')
-            channels = self.fetcher.fetch_channels()
-            
+            channels_result = self.fetcher.fetch_channels()
+            # If pagination envelope omitted 'count', fall back to the /ids/ oracle
+            if channels_result.expected_count is None and pre_counts.get('channels') is not None:
+                channels_result.expected_count = pre_counts['channels']
+                logger.info(f"UDI integrity: using /ids/ oracle for channels — expected {channels_result.expected_count}")
+            channels_ok = _check_fetch_integrity('channels', channels_result)
+
             # Step 2: Streams
             self._update_init_progress(percentage=20, message='Fetching streams...', current_step='streams')
-            streams = self.fetcher.fetch_streams()
-            
-            # Step 3: Channel Groups
+            streams_result = self.fetcher.fetch_streams()
+            # If pagination envelope omitted 'count', fall back to the /ids/ oracle
+            if streams_result.expected_count is None and pre_counts.get('streams') is not None:
+                streams_result.expected_count = pre_counts['streams']
+                logger.info(f"UDI integrity: using /ids/ oracle for streams — expected {streams_result.expected_count}")
+            streams_ok = _check_fetch_integrity('streams', streams_result)
+
+            # Step 3: Channel Groups (non-paginated — no integrity check)
             self._update_init_progress(percentage=40, message='Fetching groups...', current_step='groups')
             channel_groups = self.fetcher.fetch_channel_groups()
-            
+
             # Step 4: Logos
             self._update_init_progress(percentage=50, message='Fetching logos...', current_step='logos')
-            logos = self.fetcher.fetch_logos()
-            
-            # Step 5: M3U Accounts
+            logos_result = self.fetcher.fetch_logos()
+            _check_fetch_integrity('logos', logos_result)
+
+            # Step 5: M3U Accounts (non-paginated — no integrity check)
             self._update_init_progress(percentage=60, message='Fetching M3U accounts...', current_step='m3u_accounts')
             m3u_accounts = self.fetcher.fetch_m3u_accounts()
-            
-            # Step 6: Channel Profiles
+
+            # Step 6: Channel Profiles (non-paginated — no integrity check)
             self._update_init_progress(percentage=70, message='Fetching profiles...', current_step='profiles')
             channel_profiles = self.fetcher.fetch_channel_profiles()
-            
+
             # Step 7: Profile Channels
             profile_ids = [p.get('id') for p in channel_profiles if p.get('id')]
             if profile_ids:
@@ -579,14 +667,38 @@ class UDIManager:
                 profile_channels = self.fetcher.fetch_profile_channels(profile_ids, progress_callback=profile_progress)
             else:
                 profile_channels = {}
-            
+
+            # Build entity_counts for the progress dict — used by the frontend
+            # stats panel and the future unstable-state check.
+            # 'expected' reflects the best oracle available: pagination envelope
+            # count if present, otherwise the pre-fetch /ids/ count.
+            entity_counts = {
+                'channels': {
+                    'received': len(channels_result),
+                    'expected': channels_result.expected_count,
+                },
+                'streams': {
+                    'received': len(streams_result),
+                    'expected': streams_result.expected_count,
+                },
+                'logos': {
+                    'received': len(logos_result),
+                    'expected': logos_result.expected_count,
+                },
+                'm3u_accounts': {
+                    'received': len(m3u_accounts),
+                    'expected': None,  # non-paginated, no oracle available
+                },
+            }
+
             self._update_init_progress(percentage=90, message='Building indexes and saving...', current_step='finalize')
             
             with self._lock:
-                self._channels_cache = channels
-                self._streams_cache = streams
+                # Unpack .items from FetchResult objects for cache storage
+                self._channels_cache = channels_result.items
+                self._streams_cache = streams_result.items
                 self._channel_groups_cache = channel_groups
-                self._logos_cache = logos
+                self._logos_cache = logos_result.items
                 self._m3u_accounts_cache = m3u_accounts
                 self._channel_profiles_cache = channel_profiles
                 self._profile_channels_cache = profile_channels
@@ -627,7 +739,23 @@ class UDIManager:
                 f"{len(self._channel_groups_cache)} groups, {len(self._m3u_accounts_cache)} M3U accounts, "
                 f"{len(self._channel_profiles_cache)} profiles"
             )
-            self._update_init_progress(status='completed', percentage=100, message='Initialization complete', current_step='done')
+
+            # Surface integrity warnings in the progress status if any check failed.
+            # Phase 3 (unstable state) will act on these; for now we log and expose.
+            integrity_ok = channels_ok and streams_ok
+            completion_message = (
+                'Initialization complete'
+                if integrity_ok
+                else 'Initialization complete (integrity warnings — check logs)'
+            )
+
+            self._update_init_progress(
+                status='completed',
+                percentage=100,
+                message=completion_message,
+                current_step='done',
+                entity_counts=entity_counts,
+            )
             return True
             
         except Exception as e:
@@ -649,10 +777,11 @@ class UDIManager:
         
         logger.info("Refreshing channels...")
         try:
-            channels = self.fetcher.fetch_channels()
-            self._channels_cache = channels
-            self._channels_by_id = {ch.get('id'): ch for ch in channels if ch.get('id') is not None}
-            self.storage.save_channels(channels)
+            result = self.fetcher.fetch_channels()
+            # FetchResult supports len() and iteration — assign .items to cache
+            self._channels_cache = result.items
+            self._channels_by_id = {ch.get('id'): ch for ch in result.items if ch.get('id') is not None}
+            self.storage.save_channels(result.items)
             self.cache.mark_refreshed('channels')
             return True
         except Exception as e:
@@ -710,12 +839,12 @@ class UDIManager:
         """
         logger.info("Refreshing streams...")
         try:
-            streams = self.fetcher.fetch_streams()
-            self._streams_cache = streams
-            self._streams_by_id = {st.get('id'): st for st in streams if st.get('id') is not None}
-            self._streams_by_url = {st.get('url'): st for st in streams if st.get('url')}
+            result = self.fetcher.fetch_streams()
+            self._streams_cache = result.items
+            self._streams_by_id = {st.get('id'): st for st in result.items if st.get('id') is not None}
+            self._streams_by_url = {st.get('url'): st for st in result.items if st.get('url')}
             self._valid_stream_ids = set(self._streams_by_id.keys())
-            self.storage.save_streams(streams)
+            self.storage.save_streams(result.items)
             self.cache.mark_refreshed('streams')
             return True
         except Exception as e:

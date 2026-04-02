@@ -1,10 +1,13 @@
+
 import logging
 from typing import List, Dict, Optional, Any, Set, Tuple
+from contextlib import contextmanager
 from sqlalchemy import asc, desc
 from sqlalchemy.orm import Session
 from datetime import datetime
 
 from apps.database.connection import get_session
+from apps.database.repositories import ChannelStreamRepository
 from apps.database.models import (
     Channel, Stream, ChannelGroup, Logo, 
     M3UAccount, M3UAccountProfile,
@@ -39,127 +42,106 @@ class DatabaseManager:
     
     def __init__(self, session_factory=None):
         self.session_factory = session_factory or get_session
+        self.channel_stream_repository = ChannelStreamRepository()
 
     def _get_session(self) -> Session:
         return self.session_factory()
+
+    @contextmanager
+    def session_scope(self):
+        """Provide a transactional scope around operations."""
+        session = self._get_session()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     # === Channels ===
 
     def get_channels(self, as_dict: bool = True) -> List[Any]:
         """Get all channels."""
-        session = self._get_session()
-        try:
-            channels = session.query(Channel).all()
-            if as_dict:
-                # We need to load streams relationship too, to match UDI dict structure
-                result = []
-                for ch in channels:
-                    d = _model_to_dict(ch)
-                    # Add stream IDs list
-                    d['streams'] = [st.id for st in ch.streams]
-                    result.append(d)
-                return result
-            return channels
-        finally:
-            session.close()
+        with self.session_scope() as session:
+            return self.channel_stream_repository.get_channels(session, as_dict=as_dict)
 
     def get_channel_by_id(self, channel_id: int, as_dict: bool = True) -> Optional[Any]:
         """Get a channel by ID."""
-        session = self._get_session()
-        try:
-            ch = session.query(Channel).filter(Channel.id == channel_id).first()
-            if ch and as_dict:
-                d = _model_to_dict(ch)
-                d['streams'] = [st.id for st in ch.streams]
-                return d
-            return ch
-        finally:
-            session.close()
+        with self.session_scope() as session:
+            return self.channel_stream_repository.get_channel_by_id(session, channel_id, as_dict=as_dict)
 
     def update_channel(self, channel_id: int, data: Dict[str, Any]) -> bool:
         """Update or insert a channel."""
-        session = self._get_session()
         try:
-            ch = session.query(Channel).filter(Channel.id == channel_id).first()
-            is_new = False
-            if not ch:
-                ch = Channel(id=channel_id)
-                session.add(ch)
-                is_new = True
+            with self.session_scope() as session:
+                ch = session.query(Channel).filter(Channel.id == channel_id).first()
+                is_new = False
+                if not ch:
+                    ch = Channel(id=channel_id)
+                    session.add(ch)
+                    is_new = True
 
-            # Update fields
-            for k, v in data.items():
-                if k != 'streams' and hasattr(ch, k):
-                    if k in ['updated_at', 'last_seen'] and isinstance(v, str):
-                        try: v = datetime.fromisoformat(v)
-                        except: pass
-                    setattr(ch, k, v)
+                # Update fields
+                for k, v in data.items():
+                    if k != 'streams' and hasattr(ch, k):
+                        if k in ['updated_at', 'last_seen'] and isinstance(v, str):
+                            try:
+                                v = datetime.fromisoformat(v)
+                            except Exception:
+                                pass
+                        setattr(ch, k, v)
 
-            # Update stream relationships if present in dict style `streams: [id1, id2]`
-            if 'streams' in data:
-                stream_ids = data['streams']
-                streams = session.query(Stream).filter(Stream.id.in_(stream_ids)).all()
-                ch.streams = streams
+                # Update stream relationships if present in dict style `streams: [id1, id2]`
+                if 'streams' in data:
+                    stream_ids = data['streams']
+                    streams = session.query(Stream).filter(Stream.id.in_(stream_ids)).all()
+                    ch.streams = streams
 
-            session.commit()
             logger.debug(f"{'Created' if is_new else 'Updated'} channel {channel_id}")
             return True
         except Exception as e:
-            session.rollback()
             logger.error(f"Error updating channel {channel_id}: {e}")
             return False
-        finally:
-            session.close()
 
     # === Streams ===
 
     def get_streams(self, as_dict: bool = True) -> List[Any]:
         """Get all streams."""
-        session = self._get_session()
-        try:
-            streams = session.query(Stream).all()
-            if as_dict:
-                return [_model_to_dict(st) for st in streams]
-            return streams
-        finally:
-            session.close()
+        with self.session_scope() as session:
+            return self.channel_stream_repository.get_streams(session, as_dict=as_dict)
 
     def get_stream_by_id(self, stream_id: int, as_dict: bool = True) -> Optional[Any]:
         """Get a stream by ID."""
-        session = self._get_session()
-        try:
-            st = session.query(Stream).filter(Stream.id == stream_id).first()
-            return _model_to_dict(st) if st and as_dict else st
-        finally:
-            session.close()
+        with self.session_scope() as session:
+            return self.channel_stream_repository.get_stream_by_id(session, stream_id, as_dict=as_dict)
 
     def update_stream(self, stream_id: int, data: Dict[str, Any]) -> bool:
         """Update or insert a stream."""
-        session = self._get_session()
         try:
-            st = session.query(Stream).filter(Stream.id == stream_id).first()
-            is_new = False
-            if not st:
-                st = Stream(id=stream_id)
-                session.add(st)
-                is_new = True
+            with self.session_scope() as session:
+                st = session.query(Stream).filter(Stream.id == stream_id).first()
+                is_new = False
+                if not st:
+                    st = Stream(id=stream_id)
+                    session.add(st)
+                    is_new = True
 
-            for k, v in data.items():
-                if hasattr(st, k):
-                    if k in ['updated_at', 'last_seen', 'stats_updated_at'] and isinstance(v, str):
-                        try: v = datetime.fromisoformat(v)
-                        except: pass
-                    setattr(st, k, v)
+                for k, v in data.items():
+                    if hasattr(st, k):
+                        if k in ['updated_at', 'last_seen', 'stats_updated_at'] and isinstance(v, str):
+                            try:
+                                v = datetime.fromisoformat(v)
+                            except Exception:
+                                pass
+                        setattr(st, k, v)
 
-            session.commit()
             logger.debug(f"{'Created' if is_new else 'Updated'} stream {stream_id}")
             return True
         except Exception as e:
-            session.rollback()
             logger.error(f"Error updating stream {stream_id}: {e}")
             return False
-        finally:
-            session.close()
 
     # === Channel Groups ===
 
@@ -565,7 +547,14 @@ class DatabaseManager:
         session = self._get_session()
         try:
             if not merge:
-                # Wipe all existing configs
+                # Wipe all existing configs and their patterns.
+                # Must delete ChannelRegexPattern rows explicitly first because
+                # SQLAlchemy's bulk query.delete() bypasses ORM-level cascade,
+                # and SQLite does not enforce foreign key CASCADE by default
+                # (requires PRAGMA foreign_keys = ON per connection).
+                # Deleting patterns first prevents orphaned rows that survive
+                # the config wipe and cause duplicates on the next import.
+                session.query(ChannelRegexPattern).delete()
                 session.query(ChannelRegexConfig).delete()
                 session.flush()
 

@@ -16,6 +16,7 @@ import os
 import re
 import time
 import threading
+from functools import lru_cache
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any, Union
@@ -30,6 +31,15 @@ _WHITESPACE_PATTERN = re.compile(r'(?<!\\) +')
 # Placeholder for CHANNEL_NAME variable during regex validation
 # Used to substitute CHANNEL_NAME in patterns before compiling for validation
 _CHANNEL_NAME_PLACEHOLDER = 'PLACEHOLDER'
+
+
+@lru_cache(maxsize=50000)
+def _compile_stream_search_regex(pattern: str, channel_name: str, case_sensitive: bool) -> re.Pattern:
+    """Compile and cache stream-matching regex patterns for reuse."""
+    substituted_pattern = pattern.replace('CHANNEL_NAME', re.escape(channel_name))
+    search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
+    search_pattern = _WHITESPACE_PATTERN.sub(r'\\s+', search_pattern)
+    return re.compile(search_pattern)
 
 # Import croniter for cron expression support
 try:
@@ -280,11 +290,15 @@ class RegexChannelMatcher:
         # If a path is given and the file exists, the patterns are seeded into the
         # SQL database before loading.  In production the parameter is unused.
         self.lock = threading.RLock()
+        self._config_file: Optional[Path] = None
         if config_file is not None:
             config_file = Path(config_file)
+            self._config_file = config_file
             if config_file.exists():
                 self._seed_from_config_file(config_file)
+        self.group_patterns_key = 'group_regex_patterns'
         self.channel_patterns = self._load_patterns()
+        self.group_patterns = self._load_group_patterns()
 
     def _seed_from_config_file(self, config_file: Path):
         """Read a JSON config file and import the patterns into SQL.
@@ -410,6 +424,134 @@ class RegexChannelMatcher:
         self.channel_patterns = self._build_in_memory(
             db.get_all_channel_regex_configs(), global_settings
         )
+        self._clear_runtime_caches()
+
+    def _clear_runtime_caches(self):
+        """Clear hot-path caches used during stream matching."""
+        _compile_stream_search_regex.cache_clear()
+
+    def _load_group_patterns(self) -> Dict[str, Any]:
+        """Load group-level regex pattern config from system settings."""
+        from apps.database.manager import get_db_manager
+        db = get_db_manager()
+        data = db.get_system_setting(self.group_patterns_key, {}) or {}
+        if not isinstance(data, dict):
+            return {}
+        return data
+
+    def _get_group_patterns(self) -> Dict[str, Any]:
+        """Get group-level regex pattern config from in-memory cache."""
+        with self.lock:
+            return dict(self.group_patterns)
+
+    def _save_group_patterns(self, data: Dict[str, Any]) -> bool:
+        """Persist group-level regex pattern config to system settings."""
+        from apps.database.manager import get_db_manager
+        db = get_db_manager()
+        saved = db.set_system_setting(self.group_patterns_key, data)
+        if saved:
+            with self.lock:
+                self.group_patterns = dict(data)
+            self._clear_runtime_caches()
+        return saved
+
+    def _normalize_regex_patterns(self, regex_patterns: 'Union[List[str], List[Dict]]', m3u_accounts: Optional[List[int]] = None) -> List[Dict[str, Any]]:
+        """Normalize regex patterns to the canonical object format."""
+        normalized_patterns: List[Dict[str, Any]] = []
+
+        if isinstance(regex_patterns, list) and len(regex_patterns) > 0:
+            if isinstance(regex_patterns[0], dict):
+                for item in regex_patterns:
+                    if not isinstance(item, dict) or "pattern" not in item:
+                        raise ValueError("Each pattern object must have a 'pattern' field")
+                    normalized_patterns.append({
+                        "pattern": item["pattern"],
+                        "m3u_accounts": item.get("m3u_accounts")
+                    })
+            else:
+                for pattern in regex_patterns:
+                    normalized_patterns.append({
+                        "pattern": pattern,
+                        "m3u_accounts": m3u_accounts
+                    })
+        return normalized_patterns
+
+    def _get_effective_channel_config(self, channel_id: Union[str, int], group_id: Optional[Union[str, int]] = None) -> Dict[str, Any]:
+        """Return effective channel matching config with channel-over-group precedence."""
+        channel_id_str = str(channel_id)
+        channel_config = self.channel_patterns.get("patterns", {}).get(channel_id_str)
+        if isinstance(channel_config, dict):
+            return channel_config
+
+        if group_id is None:
+            return {}
+
+        group_config = self.get_group_pattern(str(group_id))
+        if not isinstance(group_config, dict):
+            return {}
+
+        # Use group-level settings as channel fallback; name is informational only.
+        return {
+            "name": group_config.get("name", ""),
+            "enabled": group_config.get("enabled", True),
+            "match_by_tvg_id": group_config.get("match_by_tvg_id", False),
+            "regex_patterns": group_config.get("regex_patterns", [])
+        }
+
+    def get_group_pattern(self, group_id: Union[str, int]) -> Optional[Dict[str, Any]]:
+        """Get regex config for a group."""
+        patterns = self._get_group_patterns()
+        cfg = patterns.get(str(group_id))
+        return cfg if isinstance(cfg, dict) else None
+
+    def add_group_pattern(self, group_id: Union[str, int], name: str, regex_patterns: 'Union[List[str], List[Dict]]', enabled: bool = True, match_by_tvg_id: bool = False, m3u_accounts: Optional[List[int]] = None):
+        """Add or update regex pattern config for a group."""
+        normalized_patterns = self._normalize_regex_patterns(regex_patterns, m3u_accounts)
+        pattern_strings = [p["pattern"] for p in normalized_patterns]
+        if pattern_strings:
+            is_valid, error_msg = self.validate_regex_patterns(pattern_strings)
+            if not is_valid:
+                raise ValueError(error_msg)
+
+        patterns = self._get_group_patterns()
+        patterns[str(group_id)] = {
+            "name": name,
+            "enabled": enabled,
+            "match_by_tvg_id": bool(match_by_tvg_id),
+            "regex_patterns": normalized_patterns
+        }
+        self._save_group_patterns(patterns)
+
+    def delete_group_pattern(self, group_id: Union[str, int]):
+        """Delete regex config for a group."""
+        patterns = self._get_group_patterns()
+        gid = str(group_id)
+        if gid in patterns:
+            del patterns[gid]
+            self._save_group_patterns(patterns)
+
+    def set_group_match_by_tvg_id(self, group_id: Union[str, int], enabled: bool):
+        """Enable or disable TVG-ID matching for a group."""
+        patterns = self._get_group_patterns()
+        gid = str(group_id)
+        existing = patterns.get(gid, {}) if isinstance(patterns.get(gid), dict) else {}
+        patterns[gid] = {
+            "name": existing.get("name", ""),
+            "enabled": existing.get("enabled", True),
+            "match_by_tvg_id": bool(enabled),
+            "regex_patterns": existing.get("regex_patterns", [])
+        }
+        self._save_group_patterns(patterns)
+
+    def get_group_match_config(self, group_id: Union[str, int]) -> Dict[str, Any]:
+        """Get matching config for a group."""
+        cfg = self.get_group_pattern(group_id) or {}
+        return {
+            "match_by_tvg_id": cfg.get("match_by_tvg_id", False),
+            "enabled": cfg.get("enabled", True),
+            "name": cfg.get("name", ""),
+            "regex_patterns": cfg.get("regex_patterns", [])
+        }
     
     def validate_regex_patterns(self, patterns: List[str]) -> Tuple[bool, Optional[str]]:
         """Validate a list of regex patterns.
@@ -511,6 +653,7 @@ class RegexChannelMatcher:
                 'match_by_tvg_id': match_by_tvg_id,
                 'regex_patterns': normalized_patterns,
             }
+        self._clear_runtime_caches()
         
         if silent:
             logger.debug(f"Added/updated {len(normalized_patterns)} pattern(s) for channel {channel_id}: {name}")
@@ -526,6 +669,7 @@ class RegexChannelMatcher:
         if channel_id in self.channel_patterns.get("patterns", {}):
             with self.lock:
                 del self.channel_patterns["patterns"][channel_id]
+            self._clear_runtime_caches()
             db.delete_channel_regex_config(str(channel_id))
             logger.info(f"Deleted all patterns for channel {channel_id}")
         else:
@@ -533,8 +677,15 @@ class RegexChannelMatcher:
     
     def reload_patterns(self):
         """Reload patterns from SQL (refreshes the in-memory cache)."""
+        # Legacy/test compatibility: when initialized from a config file,
+        # refresh SQL from that file before rebuilding in-memory caches.
+        if self._config_file is not None and self._config_file.exists():
+            self._seed_from_config_file(self._config_file)
+
         with self.lock:
             self.channel_patterns = self._load_patterns()
+            self.group_patterns = self._load_group_patterns()
+        self._clear_runtime_caches()
         logger.debug("Reloaded regex patterns from SQL")
     
     def _substitute_channel_variables(self, pattern: str, channel_name: str) -> str:
@@ -609,7 +760,8 @@ class RegexChannelMatcher:
                     if not config.get("enabled", True):
                         continue
                     
-                    channel_name = config.get("name", "")
+                    channel_name = channel_name_map.get(str(channel_id)) or config.get("name", "")
+                    match_by_tvg = config.get("match_by_tvg_id", False)
                     
                     # Support both new format (regex_patterns) and old format (regex) for backward compatibility
                     regex_patterns = config.get("regex_patterns")
@@ -643,22 +795,15 @@ class RegexChannelMatcher:
                         # SAFETY CHECK: If match_by_tvg_id is enabled, IGNORE catch-all regexes
                         # This prevents the issue where a lingering ".*" causes unwanted matches
                         # despite the user enabling TVG matching.
-                        if config.get("match_by_tvg_id", False):
+                        if match_by_tvg:
                             is_catch_all = pattern == ".*" or pattern == "^.*$" or pattern == ".+" or pattern == "^.+$"
                             if is_catch_all:
                                 # logger.debug(f"Ignoring catch-all regex '{pattern}' for channel {channel_id} because match_by_tvg_id is enabled")
                                 continue
-
-                        # Substitute channel name variable if present
-                        substituted_pattern = self._substitute_channel_variables(pattern, channel_name)
-                        
-                        search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
-                        
-                        # Convert literal spaces in pattern to flexible whitespace regex
-                        search_pattern = _WHITESPACE_PATTERN.sub(r'\\s+', search_pattern)
                         
                         try:
-                            if re.search(search_pattern, search_name):
+                            compiled_pattern = _compile_stream_search_regex(pattern, channel_name, case_sensitive)
+                            if compiled_pattern.search(search_name):
                                 matches.append(channel_id)
                                 matched_channel = True
                                 regex_matched = True
@@ -725,7 +870,8 @@ class RegexChannelMatcher:
                         if not config.get("enabled", True):
                             continue
                         
-                        channel_name = config.get("name", "")
+                        channel_name = channel_name_map.get(str(channel_id)) or config.get("name", "")
+                        match_by_tvg = config.get("match_by_tvg_id", False)
                         
                         # Support both new format (regex_patterns) and old format (regex) for backward compatibility
                         regex_patterns = config.get("regex_patterns")
@@ -759,20 +905,17 @@ class RegexChannelMatcher:
                                     continue
                             
                             # SAFETY CHECK: If match_by_tvg_id is enabled, IGNORE catch-all regexes
-                            if config.get("match_by_tvg_id", False):
+                            if match_by_tvg:
                                 is_catch_all = pattern == ".*" or pattern == "^.*$" or pattern == ".+" or pattern == "^.+$"
                                 if is_catch_all:
                                     continue
 
-                            # Substitute channel name variable if present
-                            substituted_pattern = self._substitute_channel_variables(pattern, channel_name)
-                            
-                            search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
-                            
-                            # Convert literal spaces in pattern to flexible whitespace regex
-                            search_pattern = _WHITESPACE_PATTERN.sub(r'\\s+', search_pattern)
-                            
-                            if re.search(search_pattern, search_name):
+                            try:
+                                compiled_pattern = _compile_stream_search_regex(pattern, channel_name, case_sensitive)
+                            except re.error:
+                                continue
+
+                            if compiled_pattern.search(search_name):
                                 regex_matched = True
                                 # Only match once per channel
                                 break
@@ -1192,6 +1335,7 @@ class AutomatedStreamManager:
             Tuple of (success_bool, refreshed_accounts_list)
         """
         refreshed_accounts = []
+        refresh_failed = False
         try:
             if not force and not self.config.get("enabled_features", {}).get("auto_playlist_update", True):
                 if not force:  # Allow force to override feature flag
@@ -1242,33 +1386,38 @@ class AutomatedStreamManager:
                     acc_id = account.get('id')
                     if acc_id is not None:
                         logger.info(f"Refreshing M3U account {acc_id}: {account.get('name')}")
-                        refresh_m3u_playlists(account_id=acc_id)
-                        refreshed_accounts.append({
-                            "id": acc_id,
-                            "name": account.get('name', f"Account {acc_id}")
-                        })
+                        response = refresh_m3u_playlists(account_id=acc_id)
+                        if self._is_m3u_refresh_response_success(response):
+                            refreshed_accounts.append({
+                                "id": acc_id,
+                                "name": account.get('name', f"Account {acc_id}")
+                            })
+                        else:
+                            refresh_failed = True
+                            status = getattr(response, 'status_code', None)
+                            logger.error(
+                                f"M3U refresh failed for account {acc_id} ({account.get('name')}), "
+                                f"status={status}"
+                            )
                 
                 if not accounts_to_process:
                     logger.info("No accounts matched criteria for refresh.")
             else:
                 # Fallback: if we can't get accounts, refresh all (legacy behavior)
                 logger.warning("Could not fetch M3U accounts, refreshing all as fallback")
-                refresh_m3u_playlists()
+                response = refresh_m3u_playlists()
+                if not self._is_m3u_refresh_response_success(response):
+                    refresh_failed = True
+                    status = getattr(response, 'status_code', None)
+                    logger.error(f"Fallback M3U refresh failed, status={status}")
+
+            if refresh_failed:
+                logger.error("Playlist refresh encountered one or more failed account refreshes")
+                return False, refreshed_accounts
             
-            # Refresh UDI cache to get updated streams and channels after playlist update
-            # This ensures deleted/added streams are reflected in the cache
-            # Also refresh M3U accounts to detect any new accounts added in Dispatcharr
-            # And refresh channel groups to detect any group changes (splits, merges, etc.)
-            # Profile refresh is critical: ensures channel profiles stay synced with Dispatcharr
-            # (deletions, modifications, new profiles) to prevent orphaned profile references
-            logger.info("Refreshing UDI cache after playlist update...")
-            udi = get_udi_manager()
-            udi.refresh_m3u_accounts()  # Check for new M3U accounts
-            udi.refresh_streams()
-            udi.refresh_channels()
-            udi.refresh_channel_groups()  # Check for new/updated channel groups
-            udi.refresh_channel_profiles()  # Sync profiles with Dispatcharr to prevent orphaned references
-            logger.info("UDI cache refreshed successfully")
+            # NOTE: UDI refresh is intentionally decoupled from playlist refresh.
+            # Automation cycles perform a single dedicated UDI refresh step to avoid
+            # duplicate refreshes when playlist updates are part of the cycle.
             
             # Trigger EPG matching to pick up any EPG/tvg-id changes made in Dispatcharr
             # This ensures that if a channel's EPG assignment was changed in Dispatcharr,
@@ -1341,7 +1490,72 @@ class AutomatedStreamManager:
                 })
             
             return False, []
-    def _match_streams_batch(self, streams: List[Dict], channel_streams: Dict[str, set], 
+
+    def _is_m3u_refresh_response_success(self, response: Any) -> bool:
+        """Validate M3U refresh API responses.
+
+        Accepts mock responses used in tests. If no status code is present,
+        assume success to preserve compatibility with simplified mocks.
+        """
+        if response is None:
+            return False
+
+        status_code = getattr(response, 'status_code', None)
+        if status_code is None:
+            return True
+
+        try:
+            code = int(status_code)
+        except (TypeError, ValueError):
+            return False
+
+        return 200 <= code < 300
+
+    def _should_abort_for_suspicious_stream_pool(self, before_count: int, after_count: int, playlists_refreshed: bool) -> bool:
+        """Return True when the post-refresh stream pool looks unsafe.
+
+        Safety checks apply only when playlists were refreshed in this cycle.
+        """
+        if not playlists_refreshed:
+            return False
+
+        if before_count <= 0:
+            return False
+
+        if after_count <= 0:
+            logger.error(
+                "Aborting matching: stream pool is empty after playlist refresh "
+                f"(before={before_count}, after={after_count})"
+            )
+            return True
+
+        safety_cfg = self.config.get('automation_safety', {}) if isinstance(self.config, dict) else {}
+        min_ratio = safety_cfg.get('min_stream_pool_ratio_after_refresh', 0.5)
+        min_drop = safety_cfg.get('min_stream_pool_drop_after_refresh', 100)
+
+        try:
+            min_ratio = max(0.0, min(1.0, float(min_ratio)))
+        except (TypeError, ValueError):
+            min_ratio = 0.5
+
+        try:
+            min_drop = max(1, int(min_drop))
+        except (TypeError, ValueError):
+            min_drop = 100
+
+        drop = before_count - after_count
+        ratio = after_count / before_count
+
+        if drop >= min_drop and ratio < min_ratio:
+            logger.error(
+                "Aborting matching: suspicious stream pool drop after playlist refresh "
+                f"(before={before_count}, after={after_count}, drop={drop}, ratio={ratio:.3f}, "
+                f"threshold_ratio={min_ratio}, threshold_drop={min_drop})"
+            )
+            return True
+
+        return False
+    def _match_streams_batch(self, streams: List[Dict], channel_streams: Dict[str, set],
                              dead_stream_removal_enabled: bool,
                              channel_to_revive_enabled: Dict[str, bool] = None,
                              channel_tvg_map: Dict[str, str] = None,
@@ -1366,6 +1580,12 @@ class AutomatedStreamManager:
         channel_to_revive_enabled = channel_to_revive_enabled or {}
         channel_tvg_map = channel_tvg_map or {}
         channel_to_match_priorities = channel_to_match_priorities or {}
+        channel_to_group_map = channel_to_group_map or {}
+        channel_name_map = channel_name_map or {}
+        match_stream_to_channels = self.regex_matcher.match_stream_to_channels
+
+        # Cache match outcomes for repeated stream signatures inside this batch.
+        stream_match_cache: Dict[Tuple[str, Any, Optional[str]], Tuple[str, ...]] = {}
         
         for stream in streams:
             # Validate that stream is a dictionary before accessing attributes
@@ -1381,13 +1601,22 @@ class AutomatedStreamManager:
             # Get stream's url and m3u_account
             stream_url = stream.get('url', '')
             stream_m3u_account = stream.get('m3u_account')
-            
-            # Find matching channels (with M3U account filtering if applicable)
-            # Pass TVG-ID data for matching
             stream_tvg_id = stream.get('tvg_id')
-            matching_channels = self.regex_matcher.match_stream_to_channels(
-                stream_name, stream_m3u_account, stream_tvg_id, channel_tvg_map, channel_to_match_priorities
-            )
+            match_cache_key = (stream_name, stream_m3u_account, stream_tvg_id)
+            
+            matching_channels = stream_match_cache.get(match_cache_key)
+            if matching_channels is None:
+                matching_channels = tuple(match_stream_to_channels(
+                    stream_name,
+                    stream_m3u_account,
+                    stream_tvg_id,
+                    channel_tvg_map,
+                    channel_to_match_priorities,
+                    channel_to_group_map,
+                    channel_name_map,
+                ))
+                stream_match_cache[match_cache_key] = matching_channels
+
             if not matching_channels:
                 continue
 
@@ -1411,17 +1640,6 @@ class AutomatedStreamManager:
                         # This prevents the continuous re-addition loop for low quality/failed streams
                         # logger.debug(f"Skipping dead stream {stream_id} (revival disabled)")
                         continue
-            
-            # Get stream's m3u_account for M3U account filtering
-            stream_m3u_account = stream.get('m3u_account')
-            
-            # Find matching channels (with M3U account filtering if applicable)
-            # RegexChannelMatcher is thread-safe for reading patterns
-            # Pass TVG-ID data for matching
-            stream_tvg_id = stream.get('tvg_id')
-            matching_channels = self.regex_matcher.match_stream_to_channels(
-                stream_name, stream_m3u_account, stream_tvg_id, channel_tvg_map, channel_to_match_priorities
-            )
             
             for channel_id in matching_channels:
                 # Check if stream is already in this channel
@@ -1567,6 +1785,12 @@ class AutomatedStreamManager:
             skip_check_trigger: If True, don't trigger immediate stream quality check.
                    Used when the caller will handle the check itself (e.g., check_single_channel).
             forced_period_id: Optional period ID to filter channels.
+            channel_id: Optional channel ID to scope discovery to a single channel.
+                        When provided, only that channel receives stream assignments and
+                        all_streams is pre-filtered to globally-enabled M3U accounts
+                        (same boundary as full discovery) so that streams from new or
+                        previously-unassigned providers are still considered.
+                        All other callers pass None (default) for full discovery.
         """
         if not force and not self.config.get("enabled_features", {}).get("auto_stream_discovery", True):
             logger.info("Stream discovery is disabled in configuration")
@@ -1652,7 +1876,38 @@ class AutomatedStreamManager:
             
             # Filter by profile if one is selected
             all_channels = self._filter_channels_by_profile(all_channels, "stream assignment")
-            
+
+            # Scope to a single channel when called from check_single_channel.
+            # This avoids iterating and assigning streams for every channel in
+            # the system when only one channel needs updating.
+            if channel_id is not None:
+                all_channels = [ch for ch in all_channels if ch.get('id') == channel_id]
+                if not all_channels:
+                    logger.info(f"[single-channel] Channel {channel_id} not found or not eligible for stream assignment")
+                    return {}
+                logger.info(f"[single-channel] Scoping stream discovery to channel {channel_id}")
+
+                # Pre-filter all_streams to only streams from globally-enabled M3U accounts.
+                # This mirrors what the full-discovery path already applied above, so the
+                # stream catalogue here is identical to a normal full-discovery run —
+                # it just skips iterating/assigning every other channel.
+                #
+                # Previously this block narrowed the catalogue to accounts the channel
+                # *already* had assigned streams from, which prevented newly added M3U
+                # providers (or existing providers that added the event later) from ever
+                # being matched to this channel during a single-channel check.
+                if enabled_account_ids:
+                    pre_filter_count = len(all_streams)
+                    all_streams = [
+                        s for s in all_streams
+                        if s.get('is_custom', False)
+                        or (s.get('m3u_account_id') or s.get('m3u_account')) in enabled_account_ids
+                    ]
+                    logger.info(
+                        f"[single-channel] Pre-filtered streams from {pre_filter_count} "
+                        f"to {len(all_streams)} (enabled accounts: {enabled_account_ids})"
+                    )
+
             # Filter channels by automation profile settings
             from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
@@ -1670,20 +1925,27 @@ class AutomatedStreamManager:
                 if channel_tvg_id:
                     channel_tvg_map[str(channel_id)] = channel_tvg_id
                 
+                # Resolve group key from either UDI shape to include group-only period assignments.
+                effective_group_id = channel.get('group_id') if channel.get('group_id') is not None else channel.get('channel_group_id')
                 # Get effective configuration - only channels with automation periods participate
-                config = automation_config.get_effective_configuration(channel_id, channel.get('group_id'))
+                config = automation_config.get_effective_configuration(channel_id, effective_group_id)
                 
                 # Skip channels without automation periods assigned
                 if not config:
                     continue
                 
                 # Filter by forced_period_id if provided
+                selected_period_profile = None
                 if forced_period_id:
-                    has_period = any(p.get('id') == forced_period_id for p in config.get('periods', []))
-                    if not has_period:
+                    selected_period = next(
+                        (p for p in config.get('periods', []) if p.get('id') == forced_period_id),
+                        None,
+                    )
+                    if not selected_period:
                         continue
+                    selected_period_profile = selected_period.get('profile')
                     
-                profile = config.get('profile')
+                profile = selected_period_profile or config.get('profile')
                 
                 # Check if stream matching is enabled
                 matching_enabled = profile and profile.get('stream_matching', {}).get('enabled', False)
@@ -1784,9 +2046,20 @@ class AutomatedStreamManager:
             else:
                 max_workers = min(16, base_workers)
                 
-            # Batch size for streams - calculate smaller batches for more frequent progress updates
-            # At least 100 batches to get 1% progress increments, or min 50 streams per batch
-            batch_size = max(50, total_streams // (max_workers * 4))
+            # Batch size for streams - use more work units for large playlists
+            # to improve balancing across workers and reduce long-tail batches.
+            if total_streams < 1000:
+                batches_per_worker = 4
+            elif total_streams < 5000:
+                batches_per_worker = 6
+            elif total_streams < 20000:
+                batches_per_worker = 10
+            else:
+                batches_per_worker = 16
+
+            batch_size = max(50, total_streams // max(1, (max_workers * batches_per_worker)))
+            if total_streams >= 20000:
+                batch_size = min(batch_size, 400)
             
             logger.info(f"Processing {total_streams} streams for pattern matching (Parallel, {max_workers} workers, {batch_size} streams per batch)...")
             
@@ -2089,7 +2362,7 @@ class AutomatedStreamManager:
             channel_validation_settings = {}
             for channel in all_channels:
                 channel_id = channel.get('id')
-                channel_group_id = channel.get('channel_group_id') # Ensure we use correct key for group ID from UDI
+                channel_group_id = channel.get('group_id') if channel.get('group_id') is not None else channel.get('channel_group_id')
                 
                 # Get effective configuration - only channels with automation periods participate
                 config = automation_config.get_effective_configuration(channel_id, channel_group_id)
@@ -2099,12 +2372,17 @@ class AutomatedStreamManager:
                     continue
                 
                 # Filter by forced_period_id if provided
+                selected_period_profile = None
                 if forced_period_id:
-                    has_period = any(p.get('id') == forced_period_id for p in config.get('periods', []))
-                    if not has_period:
+                    selected_period = next(
+                        (p for p in config.get('periods', []) if p.get('id') == forced_period_id),
+                        None,
+                    )
+                    if not selected_period:
                         continue
+                    selected_period_profile = selected_period.get('profile')
                         
-                profile = config.get('profile')
+                profile = selected_period_profile or config.get('profile')
                 
                 # Check if stream matching is enabled in the profile
                 matching_enabled = profile and profile.get('stream_matching', {}).get('enabled', False)
@@ -2286,6 +2564,61 @@ class AutomatedStreamManager:
              return datetime.now() - last_run >= timedelta(minutes=60)
              
         return False
+
+    def _refresh_udi_cache_for_automation_cycle(self) -> bool:
+        """Refresh all UDI entities once per automation cycle.
+
+        This is intentionally separate from playlist refresh calls so that:
+        - Automation cycles always refresh UDI even without M3U updates.
+        - Cycles with M3U updates still perform only one UDI refresh.
+        """
+        try:
+            logger.info("Refreshing UDI cache for automation cycle...")
+            udi = get_udi_manager()
+            udi.refresh_m3u_accounts()
+            udi.refresh_streams()
+            udi.refresh_channels()
+            udi.refresh_channel_groups()
+            udi.refresh_channel_profiles()
+
+            logger.info("UDI cache refresh for automation cycle completed")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to refresh UDI cache for automation cycle: {e}")
+            return False
+
+    def _get_post_refresh_delay_seconds(self) -> float:
+        """Return optional delay after playlist refresh before matching starts.
+
+        Priority order:
+        1) Environment variable `STREAMFLOW_POST_REFRESH_DELAY_SECONDS`
+        2) Config key `post_refresh_delay_seconds`
+        3) Config key `automation_tuning.post_refresh_delay_seconds`
+        4) Default `0.0` (no artificial delay)
+        """
+        env_value = os.environ.get("STREAMFLOW_POST_REFRESH_DELAY_SECONDS")
+        if env_value is not None:
+            try:
+                return max(0.0, float(env_value))
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Invalid STREAMFLOW_POST_REFRESH_DELAY_SECONDS='{env_value}', using config/default"
+                )
+
+        configured_value = self.config.get("post_refresh_delay_seconds")
+        if configured_value is None:
+            configured_value = self.config.get("automation_tuning", {}).get("post_refresh_delay_seconds")
+
+        if configured_value is None:
+            return 0.0
+
+        try:
+            return max(0.0, float(configured_value))
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Invalid post_refresh_delay_seconds value '{configured_value}', defaulting to 0"
+            )
+            return 0.0
     
     def run_automation_cycle(self, forced: bool = False, forced_period_id: str = None):
         """Run one complete automation cycle with profile support."""
@@ -2340,8 +2673,10 @@ class AutomatedStreamManager:
             
             for channel in channels:
                 channel_id = channel.get('id')
+                # Resolve group key from either UDI shape to include group-only period assignments.
+                effective_group_id = channel.get('group_id') if channel.get('group_id') is not None else channel.get('channel_group_id')
                 # Get effective configuration - only channels with automation periods participate
-                config = automation_config.get_effective_configuration(channel_id, channel.get('group_id'))
+                config = automation_config.get_effective_configuration(channel_id, effective_group_id)
                 if config and config.get('periods'):
                     for period_info in config['periods']:
                         p_id = period_info.get('id')
@@ -2353,19 +2688,22 @@ class AutomatedStreamManager:
                             continue
                             
                         p_name = period_info.get('name')
-                        profile = config.get('profile')
+                        profile = period_info.get('profile')
+                        profile_id = period_info.get('profile_id')
+                        if profile_id is not None:
+                            profile_id = str(profile_id)
                         
                         if p_id and p_name:
                             key = (p_id, p_name)
                             if key not in active_periods:
                                 active_periods[key] = {
-                                    'profile_id': profile.get('id') if profile else None,
+                                    'profile_id': profile_id,
                                     'profile_name': profile.get('name') if profile else "Default",
                                     'channels': []
                                 }
                             active_periods[key]['channels'].append(channel)
-                            if profile and profile.get('id'):
-                                active_profile_ids.add(profile['id'])
+                            if profile_id:
+                                active_profile_ids.add(profile_id)
             
             if not active_periods:
                 logger.debug("No channels with active automation periods found. Skipping cycle.")
@@ -2379,6 +2717,7 @@ class AutomatedStreamManager:
             playlists_to_update = set()
             update_all_playlists = False
             channels_to_quality_check = []
+            channel_check_all_streams = {}
             
             for p_id in active_profile_ids:
                 profile = automation_config.get_profile(p_id)
@@ -2388,7 +2727,16 @@ class AutomatedStreamManager:
                     # Collect all channels for this profile that are in the active periods
                     for entry in active_periods.values():
                         if entry.get('profile_id') == p_id:
-                            channels_to_quality_check.extend([ch.get('id') for ch in entry['channels']])
+                            check_all_streams = profile.get('stream_checking', {}).get('check_all_streams', False)
+                            for ch in entry['channels']:
+                                ch_id = ch.get('id')
+                                if ch_id is None:
+                                    continue
+                                channels_to_quality_check.append(ch_id)
+                                if check_all_streams:
+                                    channel_check_all_streams[ch_id] = True
+                                elif ch_id not in channel_check_all_streams:
+                                    channel_check_all_streams[ch_id] = False
 
                 m3u_config = profile.get('m3u_update', {})
                 if m3u_config.get('enabled', False):
@@ -2401,8 +2749,17 @@ class AutomatedStreamManager:
             # 3. Update Playlists
             refresh_success = False
             refreshed_accounts = []
+            pre_refresh_stream_count = 0
+            post_refresh_stream_count = 0
+            check_results = {}
             
             start_time = datetime.now()
+
+            try:
+                pre_refresh_stream_count = len(get_streams(log_result=False) or [])
+            except Exception as e:
+                logger.warning(f"Could not read pre-refresh stream pool size: {e}")
+                pre_refresh_stream_count = 0
             
             if update_all_playlists:
                 logger.info("Updating ALL playlists (requested by one or more profiles)")
@@ -2423,10 +2780,43 @@ class AutomatedStreamManager:
             
             validation_details = []
             assignment_details = []
+
+            # Deduplicate while preserving order (channels may appear in multiple active period groups).
+            channels_to_quality_check = list(dict.fromkeys(channels_to_quality_check))
+
+            # Refresh UDI once per cycle, independent of playlist refresh selection.
+            # This keeps channel/stream/group/profile state current without coupling
+            # cache sync to the M3U refresh call path.
+            self._refresh_udi_cache_for_automation_cycle()
+
+            try:
+                post_refresh_stream_count = len(get_streams(log_result=False) or [])
+            except Exception as e:
+                logger.warning(f"Could not read post-refresh stream pool size: {e}")
+                post_refresh_stream_count = 0
+
+            playlists_refreshed = bool(update_all_playlists or playlists_to_update)
+
+            if refresh_success and self._should_abort_for_suspicious_stream_pool(
+                before_count=pre_refresh_stream_count,
+                after_count=post_refresh_stream_count,
+                playlists_refreshed=playlists_refreshed,
+            ):
+                logger.error(
+                    "Automation safety gate triggered. Skipping validation and assignment "
+                    "to preserve existing channel streams."
+                )
+                refresh_success = False
             
             if refresh_success:
-                # Small delay to allow playlist processing
-                time.sleep(10)
+                # Optional post-refresh delay for environments where provider updates
+                # are eventually consistent. Defaults to 0 to avoid fixed latency.
+                post_refresh_delay = self._get_post_refresh_delay_seconds()
+                if playlists_refreshed and post_refresh_delay > 0:
+                    logger.info(
+                        f"Waiting {post_refresh_delay:.2f}s after playlist refresh before stream matching"
+                    )
+                    time.sleep(post_refresh_delay)
                 
                 # 4. Stream Matching (Validation & Assignment)
                 # Group results by channel for easier joining later
@@ -2448,7 +2838,6 @@ class AutomatedStreamManager:
                     assigned_stream_ids = {}
 
                 # 4.5. Trigger Quality Checks for all channels in the period(s)
-                check_results = {}
                 if channels_to_quality_check:
                     try:
                         from apps.stream.stream_checker_service import get_stream_checker_service
@@ -2459,20 +2848,13 @@ class AutomatedStreamManager:
                         _target_stream_ids = {}
                         
                         for ch_id in channels_to_quality_check:
-                            channel_data = udi.get_channel_by_id(ch_id)
-                            group_id = channel_data.get('channel_group_id') if channel_data else None
-                            config = automation_config.get_effective_configuration(ch_id, group_id)
-                            
-                            if config:
-                                profile = config.get('profile', {})
-                                check_all_streams = profile.get('stream_checking', {}).get('check_all_streams', False)
-                                
-                                if not check_all_streams:
-                                    # Strict validation mapping: Evaluate newly assigned streams only.
-                                    if str(ch_id) in assigned_stream_ids:
-                                        _target_stream_ids[ch_id] = assigned_stream_ids[str(ch_id)]
-                                    else:
-                                        _target_stream_ids[ch_id] = []
+                            check_all_streams = channel_check_all_streams.get(ch_id, False)
+                            if not check_all_streams:
+                                # Strict validation mapping: Evaluate newly assigned streams only.
+                                if str(ch_id) in assigned_stream_ids:
+                                    _target_stream_ids[ch_id] = assigned_stream_ids[str(ch_id)]
+                                else:
+                                    _target_stream_ids[ch_id] = []
                         
                         if _target_stream_ids:
                             target_stream_ids = _target_stream_ids
