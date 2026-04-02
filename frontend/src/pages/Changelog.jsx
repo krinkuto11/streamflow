@@ -132,9 +132,6 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                     {item.stats.stream_details.some(s => s.score !== undefined && s.score !== null) && (
                       <TableHead>Score</TableHead>
                     )}
-                    {item.stats.stream_details.some(s => s.loop_probe_ran) && (
-                      <TableHead>Loop</TableHead>
-                    )}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -163,23 +160,6 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                         <TableCell>{streamDetail.video_codec || 'N/A'}</TableCell>
                         {item.stats.stream_details.some(s => s.score !== undefined && s.score !== null) && (
                           <TableCell>{streamDetail.score !== undefined && streamDetail.score !== null ? streamDetail.score.toFixed(2) : 'N/A'}</TableCell>
-                        )}
-                        {item.stats.stream_details.some(s => s.loop_probe_ran) && (
-                          <TableCell>
-                            {streamDetail.loop_probe_ran ? (
-                              streamDetail.loop_detected === true ? (
-                                <span className="text-amber-500 font-medium text-xs">
-                                  ⚠ {streamDetail.loop_duration_secs ? `${streamDetail.loop_duration_secs.toFixed(1)}s` : 'Loop'}
-                                </span>
-                              ) : streamDetail.loop_detected === false ? (
-                                <span className="text-muted-foreground text-xs">✓</span>
-                              ) : (
-                                <span className="text-muted-foreground text-xs">—</span>
-                              )
-                            ) : (
-                              <span className="text-muted-foreground text-xs">—</span>
-                            )}
-                          </TableCell>
                         )}
                       </TableRow>
                     ))}
@@ -365,9 +345,6 @@ function StepContent({ step }) {
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Bitrate</TableHead>
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Codec</TableHead>
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Score</TableHead>
-                      {details.checked_streams.some(s => s.loop_probe_ran) && (
-                        <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Loop</TableHead>
-                      )}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -399,23 +376,6 @@ function StepContent({ step }) {
                         <TableCell className="py-1 text-right font-mono text-xs">
                           {s.score !== undefined && s.score !== null ? s.score.toFixed(2) : '-'}
                         </TableCell>
-                        {details.checked_streams.some(s => s.loop_probe_ran) && (
-                          <TableCell className="py-1 text-right">
-                            {s.loop_probe_ran ? (
-                              s.loop_detected === true ? (
-                                <span className="text-amber-500 font-medium text-xs">
-                                  ⚠ {s.loop_duration_secs ? `${s.loop_duration_secs.toFixed(1)}s` : 'Loop'}
-                                </span>
-                              ) : s.loop_detected === false ? (
-                                <span className="text-muted-foreground text-xs">✓</span>
-                              ) : (
-                                <span className="text-muted-foreground text-xs">—</span>
-                              )
-                            ) : (
-                              <span className="text-muted-foreground text-xs">—</span>
-                            )}
-                          </TableCell>
-                        )}
                       </TableRow>
                     ))}
                   </TableBody>

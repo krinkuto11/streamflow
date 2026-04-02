@@ -381,7 +381,6 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     """Check if a stream should be considered dead based on its statistics.
     
     A stream is dead if:
-    - It exited early on all attempts without completing the probe window (Reason: 'unstable')
     - Resolution is '0x0' or contains 0 in width or height (Reason: 'offline')
     - Bitrate is 0 or None (Reason: 'offline')
     - Falls below configured minimum thresholds (Reason: 'low_quality')
@@ -396,29 +395,8 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
         
     Returns:
         Tuple of (bool, str): (is_dead, reason)
-        Reasons: 'unstable' (exited early), 'offline' (truly dead),
-                 'low_quality' (below thresholds), 'none' (not dead)
+        Reasons: 'offline' (truly dead), 'low_quality' (below thresholds), 'none' (not dead)
     """
-    # ── Early-exit / instability check ───────────────────────────────────────
-    # A stream that never completed the probe window on any attempt is
-    # unreliable regardless of the quality data it returned.  The partial
-    # metrics (bitrate, resolution) are not representative of sustained
-    # delivery and should not be scored.
-    #
-    # elapsed_time and ffmpeg_duration are set by analyze_stream() and flow
-    # through the analyzed dict.  If they are absent (e.g. cached streams or
-    # legacy callers) the check is skipped safely.
-    EARLY_EXIT_THRESHOLD = 0.8
-    elapsed  = stream_data.get('elapsed_time')
-    expected = stream_data.get('ffmpeg_duration')
-    if (
-        elapsed is not None
-        and expected is not None
-        and expected > 0
-        and elapsed < expected * EARLY_EXIT_THRESHOLD
-    ):
-        return True, 'unstable'
-
     # Extract normalized stats
     stats = extract_stream_stats(stream_data)
     

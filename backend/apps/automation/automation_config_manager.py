@@ -756,69 +756,16 @@ class AutomationConfigManager:
         return effective_assignments
 
     def get_period_channels(self, period_id: str) -> List[int]:
-        return sorted(self.get_effective_period_channel_profiles(period_id).keys())
-
-    # --- Group Period Assignments ---
-
-    def assign_period_to_groups(self, period_id: str, group_ids: List[int], profile_id: str, replace: bool = False) -> bool:
-        """Assign an automation period with a profile to one or more groups."""
-        assignments = self._get_config_dict("group_period_assignments", {})
+        assignments = self._get_config_dict("channel_period_assignments", {})
         pid = str(period_id)
-        changed = False
-
-        for gid_raw in group_ids:
-            gid = str(gid_raw)
-            if replace or gid not in assignments or not isinstance(assignments[gid], dict):
-                assignments[gid] = {}
-            if assignments[gid].get(pid) != str(profile_id):
-                assignments[gid][pid] = str(profile_id)
-                changed = True
-
-        if changed:
-            return self._set_config_dict("group_period_assignments", assignments)
-        return True
-
-    def remove_period_from_groups(self, period_id: str, group_ids: List[int]) -> bool:
-        """Remove an automation period from one or more groups."""
-        assignments = self._get_config_dict("group_period_assignments", {})
-        pid = str(period_id)
-        changed = False
-
-        for gid_raw in group_ids:
-            gid = str(gid_raw)
-            group_assignments = assignments.get(gid)
-            if not isinstance(group_assignments, dict):
-                continue
-            if pid in group_assignments:
-                del group_assignments[pid]
-                if not group_assignments:
-                    del assignments[gid]
-                changed = True
-
-        if changed:
-            return self._set_config_dict("group_period_assignments", assignments)
-        return True
-
-    def get_group_periods(self, group_id: int) -> Dict[str, str]:
-        """Return a mapping of {period_id: profile_id} for a group."""
-        assignments = self._get_config_dict("group_period_assignments", {})
-        group_assignments = assignments.get(str(group_id), {})
-        if not isinstance(group_assignments, dict):
-            return {}
-        return group_assignments
-
-    def get_period_groups(self, period_id: str) -> List[int]:
-        """Return the list of group IDs that have this period assigned."""
-        assignments = self._get_config_dict("group_period_assignments", {})
-        pid = str(period_id)
-        groups: List[int] = []
-        for gid, period_map in assignments.items():
+        channels: List[int] = []
+        for cid, period_map in assignments.items():
             if isinstance(period_map, dict) and pid in period_map:
                 try:
-                    groups.append(int(gid))
+                    channels.append(int(cid))
                 except (TypeError, ValueError):
                     continue
-        return groups
+        return channels
 
     # --- Outer scheduler helpers ---
 

@@ -1193,16 +1193,16 @@ export default function ChannelConfiguration() {
         }]
       } else if (mode === 'global') {
         // Full channel configuration test
-        requestData.match_by_tvg_id = effectivePatternConfig.match_by_tvg_id || false
+        requestData.match_by_tvg_id = channelPatternConfig.match_by_tvg_id || false
 
         // Reconstruct regex patterns from stored config
         let regexPatterns = []
-        if (effectivePatternConfig.regex_patterns) {
-          regexPatterns = effectivePatternConfig.regex_patterns
-        } else if (effectivePatternConfig.regex) {
-          regexPatterns = effectivePatternConfig.regex.map(p => ({
+        if (channelPatternConfig.regex_patterns) {
+          regexPatterns = channelPatternConfig.regex_patterns
+        } else if (channelPatternConfig.regex) {
+          regexPatterns = channelPatternConfig.regex.map(p => ({
             pattern: p,
-            m3u_accounts: effectivePatternConfig.m3u_accounts
+            m3u_accounts: channelPatternConfig.m3u_accounts
           }))
         }
 
@@ -1247,7 +1247,7 @@ export default function ChannelConfiguration() {
         setTestingPattern(false)
       }
     }
-  }, [newPattern, editingChannelId, channels, selectedM3uAccounts, toast, patterns, profiles, testResults, groupsConfig])
+  }, [newPattern, editingChannelId, channels, selectedM3uAccounts, toast, patterns, profiles, testResults])
 
   const handlePreviewMatch = useCallback((channelId, mode) => {
     setTestResults(null)
@@ -2105,10 +2105,9 @@ export default function ChannelConfiguration() {
         </div>
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-3">
+          <TabsList className="grid w-full grid-cols-2">
             <TabsTrigger value="regex">Regex Configuration</TabsTrigger>
             <TabsTrigger value="ordering">Channel Order</TabsTrigger>
-            <TabsTrigger value="groups">Group Configuration</TabsTrigger>
           </TabsList>
 
           <TabsContent value="regex" className="space-y-6">

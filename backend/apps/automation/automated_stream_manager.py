@@ -703,11 +703,9 @@ class RegexChannelMatcher:
         escaped_channel_name = re.escape(channel_name)
         return pattern.replace('CHANNEL_NAME', escaped_channel_name)
     
-    def match_stream_to_channels(self, stream_name: str, stream_m3u_account: Optional[int] = None,
+    def match_stream_to_channels(self, stream_name: str, stream_m3u_account: Optional[int] = None, 
                                stream_tvg_id: Optional[str] = None, channel_tvg_ids: Optional[Dict[str, str]] = None,
-                               channel_match_priorities: Optional[Dict[str, List[str]]] = None,
-                               channel_to_group_map: Optional[Dict[str, Any]] = None,
-                               channel_name_map: Optional[Dict[str, str]] = None) -> List[str]:
+                               channel_match_priorities: Optional[Dict[str, List[str]]] = None) -> List[str]:
         """
         Match a stream name and optionally TVG-ID to channels using regex patterns and TVG-ID matching.
         
@@ -726,20 +724,10 @@ class RegexChannelMatcher:
         
         search_name = stream_name if case_sensitive else stream_name.lower()
         
-        channel_to_group_map = channel_to_group_map or {}
-        channel_name_map = channel_name_map or {}
-
-        # Iterate all target channels when available so group-only configs are considered.
-        explicit_channel_ids = set(self.channel_patterns.get("patterns", {}).keys())
-        if channel_tvg_ids:
-            explicit_channel_ids.update(str(cid) for cid in channel_tvg_ids.keys())
-        if channel_to_group_map:
-            explicit_channel_ids.update(str(cid) for cid in channel_to_group_map.keys())
-
-        for channel_id in explicit_channel_ids:
-            group_id = channel_to_group_map.get(str(channel_id))
-            config = self._get_effective_channel_config(channel_id, group_id)
-            if not isinstance(config, dict) or not config:
+        # Read operations on dicts are thread-safe in Python
+        # Removing the lock here prevents deadlocks and lock contention during parallel matching
+        for channel_id, config in self.channel_patterns.get("patterns", {}).items():
+            if not isinstance(config, dict):
                 continue
             
             # Determine priority order
@@ -831,9 +819,7 @@ class RegexChannelMatcher:
     
     def match_stream_to_channels_with_priority(self, stream_name: str, stream_m3u_account: Optional[int] = None,
                                              stream_tvg_id: Optional[str] = None, channel_tvg_ids: Optional[Dict[str, str]] = None,
-                                             channel_match_priorities: Optional[Dict[str, List[str]]] = None,
-                                             channel_to_group_map: Optional[Dict[str, Any]] = None,
-                                             channel_name_map: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+                                             channel_match_priorities: Optional[Dict[str, List[str]]] = None) -> List[Dict[str, Any]]:
         """Match a stream name and optionally TVG-ID to channels using regex patterns with priority.
         
         Args:
@@ -851,20 +837,9 @@ class RegexChannelMatcher:
         
         search_name = stream_name if case_sensitive else stream_name.lower()
         
-        channel_to_group_map = channel_to_group_map or {}
-        channel_name_map = channel_name_map or {}
-
         with self.lock:
-            explicit_channel_ids = set(self.channel_patterns.get("patterns", {}).keys())
-            if channel_tvg_ids:
-                explicit_channel_ids.update(str(cid) for cid in channel_tvg_ids.keys())
-            if channel_to_group_map:
-                explicit_channel_ids.update(str(cid) for cid in channel_to_group_map.keys())
-
-            for channel_id in explicit_channel_ids:
-                group_id = channel_to_group_map.get(str(channel_id))
-                config = self._get_effective_channel_config(channel_id, group_id)
-                if not isinstance(config, dict) or not config:
+            for channel_id, config in self.channel_patterns.get("patterns", {}).items():
+                if not isinstance(config, dict):
                     continue
                 
                 matched = False
@@ -984,19 +959,20 @@ class RegexChannelMatcher:
         db.update_channel_regex_tvg_id(str(channel_id), enabled)
         return True
 
-    def get_match_by_tvg_id(self, channel_id: Union[str, int], group_id: Optional[Union[str, int]] = None) -> bool:
+    def get_match_by_tvg_id(self, channel_id: Union[str, int]) -> bool:
         """Check if matching by TVG-ID is enabled for a channel."""
         with self.lock:
-            effective = self._get_effective_channel_config(channel_id, group_id)
-            if isinstance(effective, dict):
-                return effective.get("match_by_tvg_id", False)
+            patterns = self.channel_patterns.get("patterns", {})
+            channel_config = patterns.get(str(channel_id), {})
+            if isinstance(channel_config, dict):
+                return channel_config.get("match_by_tvg_id", False)
             return False
     
     def get_patterns(self) -> Dict:
         """Get current patterns configuration (in-memory snapshot)."""
         return self.channel_patterns
     
-    def has_regex_patterns(self, channel_id: str, group_id: Optional[Union[str, int]] = None) -> bool:
+    def has_regex_patterns(self, channel_id: str) -> bool:
         """Check if a channel has regex patterns configured and enabled.
         
         A channel is considered to have regex patterns if:
@@ -1010,7 +986,7 @@ class RegexChannelMatcher:
         Returns:
             True if the channel has at least one enabled regex pattern, False otherwise
         """
-        channel_config = self._get_effective_channel_config(channel_id, group_id)
+        channel_config = self.channel_patterns.get("patterns", {}).get(str(channel_id))
         if not channel_config:
             return False
         
@@ -1026,7 +1002,7 @@ class RegexChannelMatcher:
         
         return isinstance(regex_patterns, list) and len(regex_patterns) > 0
     
-    def get_channel_regex_filter(self, channel_id: str, default: str = ".*", group_id: Optional[Union[str, int]] = None) -> Optional[str]:
+    def get_channel_regex_filter(self, channel_id: str, default: str = ".*") -> Optional[str]:
         """Get the combined regex filter for a channel for stream name matching.
         
         Combines all enabled regex patterns for the channel into a single OR pattern.
@@ -1039,7 +1015,7 @@ class RegexChannelMatcher:
         Returns:
             Combined regex pattern string (e.g., '(pattern1|pattern2|pattern3)')
         """
-        channel_config = self._get_effective_channel_config(channel_id, group_id)
+        channel_config = self.channel_patterns.get("patterns", {}).get(str(channel_id))
         if not channel_config:
             return default
         
@@ -1080,7 +1056,7 @@ class RegexChannelMatcher:
         combined = '|'.join(f'(?:{p})' for p in pattern_strings)
         return f'({combined})'
 
-    def get_channel_match_config(self, channel_id: str, group_id: Optional[Union[str, int]] = None) -> Dict[str, Any]:
+    def get_channel_match_config(self, channel_id: str) -> Dict[str, Any]:
         """Get the matching configuration for a channel.
         
         Args:
@@ -1089,7 +1065,7 @@ class RegexChannelMatcher:
         Returns:
             Dictionary with matching configuration (match_by_tvg_id, enabled, etc.)
         """
-        channel_config = self._get_effective_channel_config(channel_id, group_id) or {}
+        channel_config = self.channel_patterns.get("patterns", {}).get(str(channel_id), {})
         return {
             "match_by_tvg_id": channel_config.get("match_by_tvg_id", False),
             "enabled": channel_config.get("enabled", True),
@@ -1583,9 +1559,7 @@ class AutomatedStreamManager:
                              dead_stream_removal_enabled: bool,
                              channel_to_revive_enabled: Dict[str, bool] = None,
                              channel_tvg_map: Dict[str, str] = None,
-                             channel_to_match_priorities: Dict[str, List[str]] = None,
-                             channel_to_group_map: Dict[str, Any] = None,
-                             channel_name_map: Dict[str, str] = None) -> Tuple[Dict[str, List[str]], Dict[str, List[Dict]]]:
+                             channel_to_match_priorities: Dict[str, List[str]] = None) -> Tuple[Dict[str, List[str]], Dict[str, List[Dict]]]:
         """
         Process a batch of streams for regex matching.
         This method is designed to be run in a separate thread.
@@ -1712,17 +1686,6 @@ class AutomatedStreamManager:
         # Use the full channel TVG-ID map passed in from the impl, which covers ALL channels.
         # A batch-scoped map causes false negatives for cross-batch TVG lookups (Bug 2 fix).
         channel_tvg_map = full_channel_tvg_map if full_channel_tvg_map is not None else {}
-        channel_to_group_map = {}
-        channel_name_map = {}
-        for ch in channels:
-            if not isinstance(ch, dict) or ch.get('id') is None:
-                continue
-            cid = str(ch.get('id'))
-            channel_name_map[cid] = ch.get('name', '')
-            gid = ch.get('group_id') if ch.get('group_id') is not None else ch.get('channel_group_id')
-            if gid is not None:
-                channel_to_group_map[cid] = gid
-
         if not channel_tvg_map:
             # Defensive fallback: build from the batch if no global map was provided
             for ch in channels:
@@ -1738,8 +1701,7 @@ class AutomatedStreamManager:
                 continue
             
             # Skip channels without matching criteria (no regex AND no TVG-ID matching)
-            group_id = channel.get('group_id') if channel.get('group_id') is not None else channel.get('channel_group_id')
-            if not self.regex_matcher.has_regex_patterns(str(channel_id), group_id) and not self.regex_matcher.get_match_by_tvg_id(str(channel_id), group_id):
+            if not self.regex_matcher.has_regex_patterns(str(channel_id)) and not self.regex_matcher.get_match_by_tvg_id(str(channel_id)):
                 continue
             
             results["channels_checked"] += 1
@@ -1777,13 +1739,7 @@ class AutomatedStreamManager:
                 # Check if stream still matches this channel
                 stream_tvg_id = full_stream.get('tvg_id')
                 matching_channels = self.regex_matcher.match_stream_to_channels(
-                    stream_name,
-                    stream_m3u_account,
-                    stream_tvg_id,
-                    channel_tvg_map,
-                    None,
-                    channel_to_group_map,
-                    channel_name_map,
+                    stream_name, stream_m3u_account, stream_tvg_id, channel_tvg_map
                 )
                 
                 if str(channel_id) in matching_channels:
@@ -1809,18 +1765,18 @@ class AutomatedStreamManager:
                 
         return results
 
-    def discover_and_assign_streams(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None) -> Dict[str, int]:
+    def discover_and_assign_streams(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False) -> Dict[str, int]:
         """Wrapper for stream discovery to ensure single execution."""
         if not self._lock.acquire(blocking=False):
             logger.warning("Stream discovery already active - skipping concurrent request")
             return {}
         
         try:
-            return self._discover_and_assign_streams_impl(force, skip_check_trigger, forced_period_id, skip_changelog, channel_id)
+            return self._discover_and_assign_streams_impl(force, skip_check_trigger, forced_period_id, skip_changelog)
         finally:
             self._lock.release()
 
-    def _discover_and_assign_streams_impl(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None) -> Dict[str, int]:
+    def _discover_and_assign_streams_impl(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False) -> Dict[str, int]:
         """Discover new streams and assign them to channels based on regex patterns.
         
         Args:
@@ -1959,21 +1915,15 @@ class AutomatedStreamManager:
             channel_to_revive_enabled = {}
             channel_tvg_map = {}
             channel_to_match_priorities = {}
-            channel_to_group_map = {}
-            channel_name_map = {}
             
             
             for channel in all_channels:
                 if not isinstance(channel, dict) or 'id' not in channel:
                     continue
                 channel_id = channel['id']
-                channel_name_map[str(channel_id)] = channel.get('name', f'Channel {channel_id}')
                 channel_tvg_id = channel.get('tvg_id')
                 if channel_tvg_id:
                     channel_tvg_map[str(channel_id)] = channel_tvg_id
-                group_id = channel.get('group_id') if channel.get('group_id') is not None else channel.get('channel_group_id')
-                if group_id is not None:
-                    channel_to_group_map[str(channel_id)] = group_id
                 
                 # Resolve group key from either UDI shape to include group-only period assignments.
                 effective_group_id = channel.get('group_id') if channel.get('group_id') is not None else channel.get('channel_group_id')
@@ -2127,7 +2077,7 @@ class AutomatedStreamManager:
                 future_to_batch = {
                     executor.submit(self._match_streams_batch, batch, channel_streams, 
                                    dead_stream_removal_enabled,
-                                   channel_to_revive_enabled, channel_tvg_map, channel_to_match_priorities, channel_to_group_map, channel_name_map): batch 
+                                   channel_to_revive_enabled, channel_tvg_map, channel_to_match_priorities): batch 
                     for batch in batches
                 }
                 
@@ -2323,7 +2273,7 @@ class AutomatedStreamManager:
                 "error": str(e)
             }
     
-    def validate_and_remove_non_matching_streams(self, force: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None) -> Dict[str, Any]:
+    def validate_and_remove_non_matching_streams(self, force: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False) -> Dict[str, Any]:
         """
         Validate existing streams in channels against regex patterns.
         Remove streams that no longer match their channel's patterns.
@@ -2384,11 +2334,11 @@ class AutomatedStreamManager:
             }
             
         try:
-            return self._validate_and_remove_non_matching_streams_impl(force, forced_period_id, skip_changelog, channel_id)
+            return self._validate_and_remove_non_matching_streams_impl(force, forced_period_id, skip_changelog)
         finally:
             self._lock.release()
 
-    def _validate_and_remove_non_matching_streams_impl(self, force: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None) -> Dict[str, Any]:
+    def _validate_and_remove_non_matching_streams_impl(self, force: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False) -> Dict[str, Any]:
         """Core implementation of stream validation."""
         log_function_call(logger, "validate_and_remove_non_matching_streams")
         try:
@@ -2403,20 +2353,7 @@ class AutomatedStreamManager:
             
             # Filter by profile if one is selected
             all_channels = self._filter_channels_by_profile(all_channels, "stream validation")
-
-            # Scope to a single channel when called from check_single_channel.
-            if channel_id is not None:
-                all_channels = [ch for ch in all_channels if ch.get('id') == channel_id]
-                if not all_channels:
-                    logger.info(f"[single-channel] Channel {channel_id} not found or not eligible for stream validation")
-                    return {
-                        "channels_checked": 0,
-                        "streams_removed": 0,
-                        "channels_modified": 0,
-                        "details": []
-                    }
-                logger.info(f"[single-channel] Scoping stream validation to channel {channel_id}")
-
+            
             # Filter channels with matching enabled using Automation Profiles
             from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
