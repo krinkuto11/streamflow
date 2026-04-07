@@ -3256,7 +3256,7 @@ class AutomatedStreamManager:
             # Only fires when the cycle actually completed matching/checking work.
             # Skipped on early returns (disabled, no active periods, safety gate abort)
             # and when UDI is not yet fully initialised (e.g. concurrent with startup).
-            if locals().get('_cycle_did_work') and get_udi_manager().is_initialized():
+            if locals().get('_cycle_did_work') and get_udi_manager().is_network_ready():
                 def _background_cycle_udi_sync():
                     try:
                         _udi = get_udi_manager()
@@ -3329,6 +3329,17 @@ class AutomatedStreamManager:
         logger.info("Automation background loop started")
         while self.automation_running:
             try:
+                # Do not run automation cycles before the startup network UDI refresh
+                # completes. is_initialized() alone is True from SQL storage load
+                # (potentially empty — zero streams, zero M3U accounts).
+                if not get_udi_manager().is_network_ready():
+                    logger.debug(
+                        "Automation loop waiting — UDI network refresh not yet complete"
+                    )
+                    self.automation_wake_event.wait(timeout=10)
+                    self.automation_wake_event.clear()
+                    continue
+
                 # Run automation cycle
                 # Pass forced period info to cycle
                 forced = self.force_next_run
