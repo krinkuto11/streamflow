@@ -3656,28 +3656,28 @@ class StreamCheckerService:
 
             # Background UDI sync — pull all writes from this check back into cache.
             # Runs in a daemon thread so it does not block the response to the caller.
-            # The next invocation of check_single_channel or run_automation_cycle will
-            # benefit from this refreshed cache state.
-            def _background_udi_sync(ch_id: int, ch_name: str):
-                try:
-                    _udi = get_udi_manager()
-                    _udi.refresh_streams()
-                    _udi.refresh_channel_by_id(ch_id)
-                    logger.debug(
-                        f"Background UDI sync completed for {ch_name} "
-                        f"(channel {ch_id})"
-                    )
-                except Exception as _e:
-                    logger.warning(
-                        f"Background UDI sync failed for {ch_name}: {_e}"
-                    )
+            # Guarded on is_initialized() to avoid firing during or before startup init.
+            if udi.is_initialized():
+                def _background_udi_sync(ch_id: int, ch_name: str):
+                    try:
+                        _udi = get_udi_manager()
+                        _udi.refresh_streams()
+                        _udi.refresh_channel_by_id(ch_id)
+                        logger.debug(
+                            f"Background UDI sync completed for {ch_name} "
+                            f"(channel {ch_id})"
+                        )
+                    except Exception as _e:
+                        logger.warning(
+                            f"Background UDI sync failed for {ch_name}: {_e}"
+                        )
 
-            threading.Thread(
-                target=_background_udi_sync,
-                args=(channel_id, channel_name),
-                daemon=True,
-                name=f"udi-sync-ch{channel_id}",
-            ).start()
+                threading.Thread(
+                    target=_background_udi_sync,
+                    args=(channel_id, channel_name),
+                    daemon=True,
+                    name=f"udi-sync-ch{channel_id}",
+                ).start()
 
             return {
                 'success': True,
