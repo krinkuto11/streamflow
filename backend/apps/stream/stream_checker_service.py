@@ -332,6 +332,12 @@ class StreamCheckerService:
         This respects automation_controls and queues channels only when
         automatic quality checking is enabled.
         """
+        # Do not queue channels before the startup network UDI refresh completes.
+        # is_initialized() alone is True from SQL storage load (potentially empty cache).
+        if not get_udi_manager().is_network_ready():
+            logger.debug("Skipping channel queueing — UDI network refresh not yet complete")
+            return
+
         # Check if auto quality checking is enabled (considers both pipeline mode and individual controls)
         if not self.config.is_auto_quality_checking_enabled():
             logger.info("Skipping channel queueing - automatic quality checking is disabled")
@@ -363,6 +369,12 @@ class StreamCheckerService:
         self._cancel_queueing = False
         try:
             udi = get_udi_manager()
+
+            # Do not queue channels before the startup network UDI refresh completes.
+            if not udi.is_network_ready():
+                logger.debug("Skipping global channel queue — UDI network refresh not yet complete")
+                return
+
             channels = udi.get_channels()
             
             if channels:
@@ -3656,8 +3668,9 @@ class StreamCheckerService:
 
             # Background UDI sync — pull all writes from this check back into cache.
             # Runs in a daemon thread so it does not block the response to the caller.
-            # Guarded on is_initialized() to avoid firing during or before startup init.
-            if udi.is_initialized():
+            # Guarded on is_network_ready() to avoid firing before startup network
+            # refresh completes (is_initialized() alone is True from SQL storage load).
+            if udi.is_network_ready():
                 def _background_udi_sync(ch_id: int, ch_name: str):
                     try:
                         _udi = get_udi_manager()
