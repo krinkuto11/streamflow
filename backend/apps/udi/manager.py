@@ -115,6 +115,7 @@ class UDIManager:
         self.cache = UDICache()
         
         self._initialized = False
+        self._network_ready = False  # True only after a successful refresh_all() from Dispatcharr network
         self._lock = threading.Lock()
         self._refresh_thread = None
         self._refresh_running = False
@@ -319,6 +320,22 @@ class UDIManager:
             True if initialized, False otherwise
         """
         return self._initialized
+
+    def is_network_ready(self) -> bool:
+        """Check if the UDI Manager has completed a successful live refresh from Dispatcharr.
+
+        Distinct from is_initialized() which returns True even when data was loaded
+        from SQL storage at startup (potentially stale — zero streams, zero M3U accounts).
+
+        Background workers, scheduled event processors, automation loops, and queue
+        workers must use this guard before operating against the stream pool to avoid
+        acting on empty or stale startup cache state.
+
+        Returns:
+            True only after refresh_all() completed successfully from the Dispatcharr
+            network. False during startup before the network refresh finishes.
+        """
+        return self._network_ready
     
     def get_channels(self) -> List[Dict[str, Any]]:
         """Get all channels.
@@ -756,6 +773,9 @@ class UDIManager:
                 current_step='done',
                 entity_counts=entity_counts,
             )
+            # Mark network as ready — distinguishes a live Dispatcharr fetch from
+            # a load from SQL storage at startup (which may have stale/empty data).
+            self._network_ready = True
             return True
             
         except Exception as e:
