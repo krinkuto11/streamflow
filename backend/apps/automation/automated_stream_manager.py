@@ -3247,31 +3247,33 @@ class AutomatedStreamManager:
                 self._save_state()
             
             logger.info("Automation cycle completed")
-            
+            _cycle_did_work = True
+
         finally:
             self._m3u_accounts_cache = None
 
             # Background UDI sync — pull all writes from this cycle back into cache.
-            # Runs in a daemon thread so it does not block the next scheduled wakeup.
-            # The next automation cycle or single-channel check will benefit from
-            # this refreshed cache state without having paid for it during the cycle.
-            def _background_cycle_udi_sync():
-                try:
-                    _udi = get_udi_manager()
-                    _udi.refresh_m3u_accounts()
-                    _udi.refresh_streams()
-                    _udi.refresh_channels()
-                    _udi.refresh_channel_groups()
-                    _udi.refresh_channel_profiles()
-                    logger.debug("Background UDI sync completed after automation cycle")
-                except Exception as _e:
-                    logger.warning(f"Background UDI sync failed after automation cycle: {_e}")
+            # Only fires when the cycle actually completed matching/checking work.
+            # Skipped on early returns (disabled, no active periods, safety gate abort)
+            # and when UDI is not yet fully initialised (e.g. concurrent with startup).
+            if locals().get('_cycle_did_work') and get_udi_manager().is_initialized():
+                def _background_cycle_udi_sync():
+                    try:
+                        _udi = get_udi_manager()
+                        _udi.refresh_m3u_accounts()
+                        _udi.refresh_streams()
+                        _udi.refresh_channels()
+                        _udi.refresh_channel_groups()
+                        _udi.refresh_channel_profiles()
+                        logger.debug("Background UDI sync completed after automation cycle")
+                    except Exception as _e:
+                        logger.warning(f"Background UDI sync failed after automation cycle: {_e}")
 
-            threading.Thread(
-                target=_background_cycle_udi_sync,
-                daemon=True,
-                name="udi-sync-post-cycle",
-            ).start()
+                threading.Thread(
+                    target=_background_cycle_udi_sync,
+                    daemon=True,
+                    name="udi-sync-post-cycle",
+                ).start()
 
     def _filter_channels_by_profile(self, channels: List[Dict], operation: str = "") -> List[Dict]:
         """
