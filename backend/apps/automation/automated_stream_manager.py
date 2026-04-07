@@ -2013,6 +2013,56 @@ class AutomatedStreamManager:
                 if profile and profile.get('stream_checking', {}).get('allow_revive', False):
                     channel_to_revive_enabled[str(channel_id)] = True
 
+            # Collect channels excluded from matching but eligible for quality checking.
+            #
+            # These are channels whose profile has stream_matching.enabled = False but
+            # stream_checking.enabled = True — "checking-only" profiles. Without this
+            # collection they would silently drop out of the cycle because
+            # mark_channels_updated() below only fires for channels that received new
+            # stream assignments through the matching pass.
+            #
+            # We collect them here (before all_channels is replaced) so we can mark
+            # them for the checker after the matching pass completes. They are NOT
+            # added to the matching pass — that would be incorrect.
+            checking_only_channel_ids = []
+            for _ch in all_channels:
+                _ch_id = _ch.get('id')
+                if _ch_id in matching_enabled_channel_ids:
+                    continue  # already handled by matching path
+
+                # Resolve effective profile for this channel (respects forced_period_id)
+                _group_id = (
+                    _ch.get('group_id')
+                    if _ch.get('group_id') is not None
+                    else _ch.get('channel_group_id')
+                )
+                _config = automation_config.get_effective_configuration(_ch_id, _group_id)
+                if not _config:
+                    continue
+
+                # Honour forced_period_id — only include channels that belong to that period
+                if forced_period_id:
+                    _periods = _config.get('periods', [])
+                    _selected = next(
+                        (p for p in _periods if p.get('id') == forced_period_id),
+                        None,
+                    )
+                    if not _selected:
+                        continue
+                    _period_profile = _selected.get('profile')
+                else:
+                    _period_profile = _config.get('profile')
+
+                if _period_profile and _period_profile.get('stream_checking', {}).get('enabled', False):
+                    checking_only_channel_ids.append(_ch_id)
+
+            if checking_only_channel_ids:
+                logger.info(
+                    f"Found {len(checking_only_channel_ids)} checking-only channel(s) "
+                    "(matching disabled, checking enabled) — will queue for checker "
+                    "after matching pass."
+                )
+
             # Filter channels to only those with matching enabled
             filtered_channels = [ch for ch in all_channels if ch.get('id') in matching_enabled_channel_ids]
             
@@ -2306,6 +2356,45 @@ class AutomatedStreamManager:
                             logger.debug(f"Stream checker not available or error marking channels: {sc_error}")
                 except Exception as mark_error:
                     logger.debug(f"Could not mark channels for stream checking after discovery: {mark_error}")
+            
+            # Mark checking-only channels for quality checking.
+            #
+            # These channels had stream_matching.enabled = False so they were excluded
+            # from the matching pass and never received a mark_channels_updated() call.
+            # Without this block they are silently skipped by the checker every cycle.
+            # The existing get_and_clear_channels_needing_check() already filters by
+            # stream_checking.enabled so no duplicate guard is needed here.
+            if checking_only_channel_ids:
+                try:
+                    from apps.stream.stream_checker_service import get_stream_checker_service
+                    _co_checker = get_stream_checker_service()
+                    _co_stream_counts = {}
+                    for _co_id in checking_only_channel_ids:
+                        _co_ch = udi.get_channel_by_id(_co_id)
+                        if _co_ch:
+                            _co_streams = _co_ch.get('streams', [])
+                            _co_stream_counts[_co_id] = (
+                                len(_co_streams) if isinstance(_co_streams, list) else 0
+                            )
+                    _co_checker.update_tracker.mark_channels_updated(
+                        checking_only_channel_ids,
+                        stream_counts=_co_stream_counts,
+                    )
+                    logger.info(
+                        f"Marked {len(checking_only_channel_ids)} checking-only "
+                        "channel(s) for quality checking"
+                    )
+                    if not skip_check_trigger:
+                        _co_checker.trigger_check_updated_channels()
+                    else:
+                        logger.debug(
+                            "Skipping check trigger for checking-only channels "
+                            "(will be handled by caller)"
+                        )
+                except Exception as _co_err:
+                    logger.debug(
+                        f"Could not mark checking-only channels for quality checking: {_co_err}"
+                    )
             
             return {
                 "assignment_count": assignment_count,
