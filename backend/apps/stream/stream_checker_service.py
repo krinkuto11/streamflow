@@ -94,6 +94,57 @@ from apps.stream.stream_checker_components import (
     StreamCheckerProgress,
 )
 
+def _wait_for_udi_stream_count_stabilise(
+    udi,
+    pre_count: int,
+    timeout: int = 60,
+    poll_interval: int = 5,
+) -> bool:
+    """Poll UDI stream count after triggering a Dispatcharr playlist refresh.
+
+    Dispatcharr processes M3U playlists asynchronously. The refresh API call
+    returns as soon as the job is *enqueued*, not when it completes. Immediately
+    syncing the UDI cache after the call often returns pre-refresh data.
+
+    This helper polls the UDI stream count until it changes from pre_count
+    (indicating Dispatcharr has finished processing) or until timeout elapses.
+    It reuses the same poll-and-confirm pattern used in the startup sequence.
+
+    Args:
+        udi: Initialised UDI manager instance.
+        pre_count: Stream count captured before refresh_m3u_playlists() was called.
+        timeout: Maximum seconds to wait before giving up (default 60).
+        poll_interval: Seconds between each poll attempt (default 5).
+
+    Returns:
+        True  — stream count changed; refresh appears to have taken effect.
+        False — timed out with no change; downstream steps proceed on
+                potentially stale data (logged as a warning).
+    """
+    elapsed = 0
+    while elapsed < timeout:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        try:
+            current_count = len(udi.get_streams() or [])
+            if current_count != pre_count:
+                logger.info(
+                    f"UDI stream count changed after playlist refresh: "
+                    f"{pre_count} → {current_count} ({elapsed}s elapsed)"
+                )
+                return True
+        except Exception as _e:
+            logger.warning(
+                f"Error polling UDI stream count during post-refresh wait: {_e}"
+            )
+    logger.warning(
+        f"UDI stream count unchanged after {timeout}s (still {pre_count} streams). "
+        "Proceeding with potentially stale data. "
+        "Consider setting post_refresh_delay_seconds in config if this recurs."
+    )
+    return False
+
+
 class StreamCheckerService:
     """Main service for managing stream checking operations."""
     
@@ -3223,10 +3274,16 @@ class StreamCheckerService:
                     'channel_name': channel_name,
                 }
 
-            matching_enabled = profile.get('stream_matching', {}).get('enabled', False)
-            checking_enabled = profile.get('stream_checking', {}).get('enabled', False)
+            m3u_update_enabled = profile.get('m3u_update', {}).get('enabled', False)
+            matching_enabled   = profile.get('stream_matching', {}).get('enabled', False)
+            checking_enabled   = profile.get('stream_checking', {}).get('enabled', False)
 
-            logger.info(f"Channel {channel_name} settings: matching={matching_enabled}, checking={checking_enabled}")
+            logger.info(
+                f"Channel {channel_name} profile flags: "
+                f"m3u_update={m3u_update_enabled}, "
+                f"matching={matching_enabled}, "
+                f"checking={checking_enabled}"
+            )
 
             # Signal to the frontend that this is a single channel check so the
             # stale batch progress card from the previous automation run is suppressed.
@@ -3279,25 +3336,71 @@ class StreamCheckerService:
                             account_ids.add(m3u_account)
                             logger.info(f"Found M3U account {m3u_account} from dead stream {dead_info.get('stream_name', 'Unknown')}")
             
-            # Step 2: Refresh playlists for those accounts
-            if account_ids:
-                logger.info(f"Step 2/6: Refreshing playlists for {len(account_ids)} M3U account(s)...")
+            # Step 2a: Provider fetch — only if m3u_update is enabled in the profile.
+            #
+            # IMPORTANT DISTINCTION:
+            #   m3u_update.enabled = True  → tell Dispatcharr to re-pull from the M3U
+            #                                 provider URL (two-hop: StreamFlow → Dispatcharr
+            #                                 → provider). The UDI sync in Step 2b then reads
+            #                                 the result of that provider fetch.
+            #   m3u_update.enabled = False → no provider fetch is triggered. Step 2b still
+            #                                 syncs the UDI cache from whatever Dispatcharr
+            #                                 currently has, so matching/checking see the most
+            #                                 recent known state without causing any provider churn.
+            #
+            # Dispatcharr processes M3U refreshes asynchronously. After triggering the
+            # refresh we poll the UDI stream count until it changes (confirming Dispatcharr
+            # has finished processing) before proceeding to Step 2b.
+            if m3u_update_enabled and account_ids:
+                logger.info(
+                    f"Step 2a/6: Refreshing playlists for {len(account_ids)} M3U account(s) "
+                    f"(m3u_update enabled in profile)..."
+                )
+                # Capture stream count before triggering refresh so we can detect completion.
+                pre_refresh_stream_count = len(udi.get_streams() or [])
+
                 # Import here to allow better test mocking
                 from apps.core.api_utils import refresh_m3u_playlists
                 for account_id in account_ids:
                     logger.info(f"Refreshing M3U account {account_id}")
                     refresh_m3u_playlists(account_id=account_id)
-                
-                # Refresh UDI cache to get updated streams
-                # Also refresh M3U accounts to detect any new accounts
-                # And refresh channel groups to detect any group changes
-                udi.refresh_m3u_accounts()  # Check for new M3U accounts
+
+                logger.info(
+                    "✓ Playlist refresh triggered — waiting for Dispatcharr to process..."
+                )
+                _wait_for_udi_stream_count_stabilise(
+                    udi, pre_refresh_stream_count, timeout=60
+                )
+            elif m3u_update_enabled and not account_ids:
+                logger.info(
+                    "Step 2a/6: m3u_update enabled but no M3U accounts found for this "
+                    "channel — skipping provider fetch."
+                )
+            else:
+                logger.info(
+                    "Step 2a/6: Skipping provider fetch (m3u_update disabled in profile). "
+                    "Subsequent steps will use the current UDI cache state."
+                )
+
+            # Step 2b: UDI cache sync — runs whenever a subsequent step will use the data.
+            #
+            # This is always a one-hop read (StreamFlow → Dispatcharr) and does NOT
+            # cause Dispatcharr to contact any provider. It ensures matching and checking
+            # operate on the freshest Dispatcharr state available, even when the provider
+            # fetch was skipped.
+            if matching_enabled or checking_enabled:
+                logger.debug(
+                    "Step 2b/6: Syncing UDI cache from Dispatcharr current state..."
+                )
+                udi.refresh_m3u_accounts()
                 udi.refresh_streams()
                 udi.refresh_channels()
-                udi.refresh_channel_groups()  # Check for new/updated channel groups
-                logger.info("✓ Playlists refreshed and UDI cache updated")
+                udi.refresh_channel_groups()
+                logger.info("✓ UDI cache synced")
             else:
-                logger.info("Step 2/6: No M3U accounts found for this channel, skipping playlist refresh")
+                logger.info(
+                    "Step 2b/6: Skipping UDI sync (matching and checking both disabled)."
+                )
             
             # Step 3: Clear dead streams for this channel to give them a second chance
             logger.info(f"Step 3/6: Clearing dead streams for channel {channel_name} to give them a second chance...")
