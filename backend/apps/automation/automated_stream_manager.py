@@ -2718,11 +2718,17 @@ class AutomatedStreamManager:
         return False
 
     def _refresh_udi_cache_for_automation_cycle(self) -> bool:
-        """Refresh all UDI entities once per automation cycle.
+        """Refresh all UDI entities after an automation cycle completes.
 
-        This is intentionally separate from playlist refresh calls so that:
-        - Automation cycles always refresh UDI even without M3U updates.
-        - Cycles with M3U updates still perform only one UDI refresh.
+        Called in a background daemon thread from the finally block of
+        run_automation_cycle(). Pulls all writes made during the cycle
+        (stream assignments, quality scores, stream ordering) back into
+        the local cache so the next cycle or single-channel check starts
+        from an accurate baseline.
+
+        This is intentionally post-cycle rather than pre-cycle so that
+        the cycle itself operates entirely on the existing cache state —
+        fast and deterministic regardless of UDI sync timing.
         """
         try:
             logger.info("Refreshing UDI cache for automation cycle...")
@@ -2907,12 +2913,18 @@ class AutomatedStreamManager:
             
             start_time = datetime.now()
 
-            try:
-                pre_refresh_stream_count = len(get_streams(log_result=False) or [])
-            except Exception as e:
-                logger.warning(f"Could not read pre-refresh stream pool size: {e}")
-                pre_refresh_stream_count = 0
-            
+            # Determine whether a provider playlist refresh will occur this cycle.
+            # Pre/post stream counts and the safety gate are only meaningful when
+            # playlists are actually refreshed — skip all three when they are not.
+            playlists_refreshed = bool(update_all_playlists or playlists_to_update)
+
+            if playlists_refreshed:
+                try:
+                    pre_refresh_stream_count = len(get_streams(log_result=False) or [])
+                except Exception as e:
+                    logger.warning(f"Could not read pre-refresh stream pool size: {e}")
+                    pre_refresh_stream_count = 0
+
             if update_all_playlists:
                 logger.info("Updating ALL playlists (requested by one or more profiles)")
                 refresh_success, refreshed_accounts = self.refresh_playlists(account_id=None, skip_changelog=True)
@@ -2926,39 +2938,46 @@ class AutomatedStreamManager:
                     if accs:
                         refreshed_accounts.extend(accs)
             else:
-                logger.info("No playlists to update based on active profile settings.")
+                logger.info(
+                    "No playlists to update based on active profile settings. "
+                    "Cycle will operate on current UDI cache."
+                )
                 self.last_playlist_update = datetime.now()
                 refresh_success = True
-            
+
             validation_details = []
             assignment_details = []
 
             # Deduplicate while preserving order (channels may appear in multiple active period groups).
             channels_to_quality_check = list(dict.fromkeys(channels_to_quality_check))
 
-            # Refresh UDI once per cycle, independent of playlist refresh selection.
-            # This keeps channel/stream/group/profile state current without coupling
-            # cache sync to the M3U refresh call path.
-            self._refresh_udi_cache_for_automation_cycle()
+            # NOTE: No mid-cycle UDI refresh occurs here.
+            #
+            # The UDI cache is the contract for all reads during this cycle. When
+            # m3u_update.enabled = True the provider fetch above updated Dispatcharr's
+            # own data; the poll helper confirmed completion before returning. When
+            # m3u_update.enabled = False the existing cache is used as-is. All writes
+            # (assignments, scores, ordering) go to Dispatcharr in real time. A background
+            # UDI sync fires in the finally block after the cycle completes to pull those
+            # writes back into the cache for the next run.
 
-            try:
-                post_refresh_stream_count = len(get_streams(log_result=False) or [])
-            except Exception as e:
-                logger.warning(f"Could not read post-refresh stream pool size: {e}")
-                post_refresh_stream_count = 0
+            if playlists_refreshed:
+                try:
+                    post_refresh_stream_count = len(get_streams(log_result=False) or [])
+                except Exception as e:
+                    logger.warning(f"Could not read post-refresh stream pool size: {e}")
+                    post_refresh_stream_count = 0
 
-            playlists_refreshed = bool(update_all_playlists or playlists_to_update)
-
-            if refresh_success and self._should_abort_for_suspicious_stream_pool(
-                before_count=pre_refresh_stream_count,
-                after_count=post_refresh_stream_count,
-                playlists_refreshed=playlists_refreshed,
-            ):
-                logger.error(
-                    "Automation safety gate triggered. Skipping validation and assignment "
-                    "to preserve existing channel streams."
-                )
-                refresh_success = False
+                if refresh_success and self._should_abort_for_suspicious_stream_pool(
+                    before_count=pre_refresh_stream_count,
+                    after_count=post_refresh_stream_count,
+                    playlists_refreshed=playlists_refreshed,
+                ):
+                    logger.error(
+                        "Automation safety gate triggered. Skipping validation and assignment "
+                        "to preserve existing channel streams."
+                    )
+                    refresh_success = False
             
             if refresh_success:
                 # Optional post-refresh delay for environments where provider updates
@@ -3231,6 +3250,28 @@ class AutomatedStreamManager:
             
         finally:
             self._m3u_accounts_cache = None
+
+            # Background UDI sync — pull all writes from this cycle back into cache.
+            # Runs in a daemon thread so it does not block the next scheduled wakeup.
+            # The next automation cycle or single-channel check will benefit from
+            # this refreshed cache state without having paid for it during the cycle.
+            def _background_cycle_udi_sync():
+                try:
+                    _udi = get_udi_manager()
+                    _udi.refresh_m3u_accounts()
+                    _udi.refresh_streams()
+                    _udi.refresh_channels()
+                    _udi.refresh_channel_groups()
+                    _udi.refresh_channel_profiles()
+                    logger.debug("Background UDI sync completed after automation cycle")
+                except Exception as _e:
+                    logger.warning(f"Background UDI sync failed after automation cycle: {_e}")
+
+            threading.Thread(
+                target=_background_cycle_udi_sync,
+                daemon=True,
+                name="udi-sync-post-cycle",
+            ).start()
 
     def _filter_channels_by_profile(self, channels: List[Dict], operation: str = "") -> List[Dict]:
         """
