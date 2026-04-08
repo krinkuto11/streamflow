@@ -3296,6 +3296,7 @@ class StreamCheckerService:
                 f"matching={matching_enabled}, "
                 f"checking={checking_enabled}"
             )
+            logger.info(f"UDI cache {udi.get_cache_age_description()}")
 
             # Signal to the frontend that this is a single channel check so the
             # stale batch progress card from the previous automation run is suppressed.
@@ -3379,8 +3380,18 @@ class StreamCheckerService:
                 logger.info(
                     "✓ Playlist refresh triggered — waiting for Dispatcharr to process..."
                 )
+                # Calibrate poll timeout to 115% of the last known refresh_all()
+                # duration, with a floor of 60s. In environments where providers
+                # don't change stream counts on refresh, this still times out but
+                # at least waits long enough for a real count-changing refresh.
+                _known_duration = udi.get_last_refresh_duration()
+                _poll_timeout = max(60, int(_known_duration * 1.15)) if _known_duration > 0 else 60
+                logger.debug(
+                    f"Post-refresh poll timeout: {_poll_timeout}s "
+                    f"(115% of last refresh duration {_known_duration:.0f}s, floor 60s)"
+                )
                 _wait_for_udi_stream_count_stabilise(
-                    udi, pre_refresh_stream_count, timeout=60
+                    udi, pre_refresh_stream_count, timeout=_poll_timeout
                 )
 
                 # Sync UDI cache from Dispatcharr's now-updated stream pool.
