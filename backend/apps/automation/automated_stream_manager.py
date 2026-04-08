@@ -1368,11 +1368,6 @@ class AutomatedStreamManager:
             
             logger.info("Starting M3U playlist refresh...")
             
-            # Get streams before refresh
-            from apps.core.api_utils import get_streams
-            streams_before = get_streams(log_result=False) if self.config.get("enabled_features", {}).get("changelog_tracking", True) else []
-            before_stream_ids = {s.get('id'): s.get('name', '') for s in streams_before if isinstance(s, dict) and s.get('id')}
-            
             # Get all M3U accounts
             all_accounts = get_m3u_accounts()
             self._m3u_accounts_cache = all_accounts
@@ -1439,10 +1434,11 @@ class AutomatedStreamManager:
                 logger.error("Playlist refresh encountered one or more failed account refreshes")
                 return False, refreshed_accounts
             
-            # NOTE: UDI refresh is intentionally decoupled from playlist refresh.
-            # Automation cycles perform a single dedicated UDI refresh step to avoid
-            # duplicate refreshes when playlist updates are part of the cycle.
-            
+            # NOTE: UDI refresh, changelog write, and dead stream cleanup are
+            # intentionally NOT performed here. run_automation_cycle() owns all
+            # three after refresh_playlists() returns, using a UDI sync to ensure
+            # accurate data. Doing them here would use a stale pre-fetch cache.
+
             # Trigger EPG matching to pick up any EPG/tvg-id changes made in Dispatcharr
             # This ensures that if a channel's EPG assignment was changed in Dispatcharr,
             # the new program data will be available in StreamFlow
@@ -1456,50 +1452,14 @@ class AutomatedStreamManager:
             except Exception as e:
                 logger.error(f"Error triggering rule matching after playlist update: {e}")
                 # Continue even if EPG refresh fails
-            
-            # Get streams after refresh - log this one since it shows the final result
-            streams_after = get_streams(log_result=True) if self.config.get("enabled_features", {}).get("changelog_tracking", True) else []
-            after_stream_ids = {s.get('id'): s.get('name', '') for s in streams_after if isinstance(s, dict) and s.get('id')}
-            
+
             self.last_playlist_update = datetime.now()
-            
-            # Calculate differences
-            added_stream_ids = set(after_stream_ids.keys()) - set(before_stream_ids.keys())
-            removed_stream_ids = set(before_stream_ids.keys()) - set(after_stream_ids.keys())
-            
-            added_streams = [{"id": sid, "name": after_stream_ids[sid]} for sid in added_stream_ids]
-            removed_streams = [{"id": sid, "name": before_stream_ids[sid]} for sid in removed_stream_ids]
-            
-            
-            if not skip_changelog and self.config.get("enabled_features", {}).get("changelog_tracking", True):
-                self.changelog.add_entry("playlist_refresh", {
-                    "success": True,
-                    "timestamp": self.last_playlist_update.isoformat(),
-                    "total_streams": len(after_stream_ids),
-                    "added_streams": added_streams[:50],  # Limit to first 50 for changelog size
-                    "removed_streams": removed_streams[:50],  # Limit to first 50 for changelog size
-                    "added_count": len(added_streams),
-                    "removed_count": len(removed_streams)
-                })
-            
-            logger.info(f"M3U playlist refresh completed successfully. Added: {len(added_streams)}, Removed: {len(removed_streams)}")
-            
-            # Clean up dead streams that are no longer in the playlist
-            if self.dead_streams_tracker:
-                try:
-                    current_stream_urls = {s.get('url', '') for s in streams_after if isinstance(s, dict) and s.get('url')}
-                    # Remove empty URLs from the set
-                    current_stream_urls.discard('')
-                    cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls)
-                    if cleaned_count > 0:
-                        logger.info(f"Dead streams cleanup: removed {cleaned_count} stream(s) no longer in playlist")
-                except Exception as cleanup_error:
-                    logger.error(f"Error during dead streams cleanup: {cleanup_error}")
-            
+            logger.info("M3U playlist refresh completed successfully")
+
             # Note: Channel marking for stream quality checking is handled in discover_and_assign_streams()
             # after streams are actually assigned to specific channels. This prevents marking all channels
             # when we only know that *some* streams changed in the playlist, not which channels are affected.
-            
+
             return True, refreshed_accounts
             
         except Exception as e:
@@ -2925,6 +2885,23 @@ class AutomatedStreamManager:
                     logger.warning(f"Could not read pre-refresh stream pool size: {e}")
                     pre_refresh_stream_count = 0
 
+                # Capture stream list before provider fetch for changelog delta.
+                # Must be done here (in run_automation_cycle) not inside refresh_playlists()
+                # because refresh_playlists() no longer owns the changelog write.
+                changelog_tracking_pre = self.config.get("enabled_features", {}).get("changelog_tracking", True)
+                try:
+                    streams_before = get_streams(log_result=False) if changelog_tracking_pre else []
+                    before_stream_ids = {
+                        s.get('id'): s.get('name', '')
+                        for s in streams_before
+                        if isinstance(s, dict) and s.get('id')
+                    }
+                except Exception as _sb_err:
+                    logger.warning(f"Could not capture pre-refresh stream list: {_sb_err}")
+                    before_stream_ids = {}
+            else:
+                before_stream_ids = {}
+
             if update_all_playlists:
                 logger.info("Updating ALL playlists (requested by one or more profiles)")
                 refresh_success, refreshed_accounts = self.refresh_playlists(account_id=None, skip_changelog=True)
@@ -2951,17 +2928,88 @@ class AutomatedStreamManager:
             # Deduplicate while preserving order (channels may appear in multiple active period groups).
             channels_to_quality_check = list(dict.fromkeys(channels_to_quality_check))
 
-            # NOTE: No mid-cycle UDI refresh occurs here.
+            # When playlists were refreshed, sync the UDI cache from Dispatcharr's
+            # now-updated stream pool before running validation, assignment, or the
+            # safety gate. Without this sync:
+            #   - matching reads stale stream IDs → Invalid pk errors on write
+            #   - changelog delta is always zero (streams_after == streams_before)
+            #   - dead stream cleanup uses wrong URLs
+            #   - safety gate compares two reads of the same stale cache
             #
-            # The UDI cache is the contract for all reads during this cycle. When
-            # m3u_update.enabled = True the provider fetch above updated Dispatcharr's
-            # own data; the poll helper confirmed completion before returning. When
-            # m3u_update.enabled = False the existing cache is used as-is. All writes
-            # (assignments, scores, ordering) go to Dispatcharr in real time. A background
-            # UDI sync fires in the finally block after the cycle completes to pull those
-            # writes back into the cache for the next run.
+            # When no playlists were refreshed (m3u_update=False across all active
+            # profiles), the existing cache is used as-is. The background UDI sync
+            # in the finally block handles cache accuracy for the next cycle.
+            if playlists_refreshed and refresh_success:
+                logger.info(
+                    "Syncing UDI cache after provider refresh — "
+                    "matching and safety gate will use current stream IDs..."
+                )
+                try:
+                    _sync_udi = get_udi_manager()
+                    _sync_udi.refresh_streams()
+                    _sync_udi.refresh_channels()
+                    logger.info("✓ UDI cache synced after provider refresh")
+                except Exception as _sync_err:
+                    logger.warning(
+                        f"UDI sync after provider refresh failed: {_sync_err} — "
+                        "proceeding with potentially stale cache"
+                    )
 
-            if playlists_refreshed:
+                # Capture streams_after from the now-current cache for changelog and cleanup
+                changelog_tracking = self.config.get("enabled_features", {}).get("changelog_tracking", True)
+                try:
+                    streams_after = get_streams(log_result=True) if changelog_tracking else []
+                    after_stream_ids = {
+                        s.get('id'): s.get('name', '')
+                        for s in streams_after
+                        if isinstance(s, dict) and s.get('id')
+                    }
+                except Exception as _sa_err:
+                    logger.warning(f"Could not capture post-refresh stream list: {_sa_err}")
+                    streams_after = []
+                    after_stream_ids = {}
+
+                # Changelog entry with accurate delta
+                if changelog_tracking:
+                    try:
+                        added_stream_ids = set(after_stream_ids.keys()) - set(before_stream_ids.keys())
+                        removed_stream_ids = set(before_stream_ids.keys()) - set(after_stream_ids.keys())
+                        added_streams = [{"id": sid, "name": after_stream_ids[sid]} for sid in added_stream_ids]
+                        removed_streams = [{"id": sid, "name": before_stream_ids.get(sid, '')} for sid in removed_stream_ids]
+                        self.changelog.add_entry("playlist_refresh", {
+                            "success": True,
+                            "timestamp": self.last_playlist_update.isoformat(),
+                            "total_streams": len(after_stream_ids),
+                            "added_streams": added_streams[:50],
+                            "removed_streams": removed_streams[:50],
+                            "added_count": len(added_streams),
+                            "removed_count": len(removed_streams),
+                        })
+                        logger.info(
+                            f"Playlist changelog: {len(added_streams)} added, "
+                            f"{len(removed_streams)} removed"
+                        )
+                    except Exception as _cl_err:
+                        logger.warning(f"Could not write playlist changelog entry: {_cl_err}")
+
+                # Dead stream cleanup using accurate current URLs
+                if self.dead_streams_tracker and streams_after:
+                    try:
+                        current_stream_urls = {
+                            s.get('url', '') for s in streams_after
+                            if isinstance(s, dict) and s.get('url')
+                        }
+                        current_stream_urls.discard('')
+                        cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls)
+                        if cleaned_count > 0:
+                            logger.info(
+                                f"Dead streams cleanup: removed {cleaned_count} "
+                                "stream(s) no longer in playlist"
+                            )
+                    except Exception as _ds_err:
+                        logger.warning(f"Dead stream cleanup failed: {_ds_err}")
+
+                # Safety gate — now reads the updated cache, making it meaningful
                 try:
                     post_refresh_stream_count = len(get_streams(log_result=False) or [])
                 except Exception as e:
