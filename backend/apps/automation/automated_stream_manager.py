@@ -2830,6 +2830,7 @@ class AutomatedStreamManager:
             
             channels_with_periods = sum(len(p['channels']) for p in active_periods.values())
             logger.info(f"Processing {channels_with_periods} channel assignments across {len(active_periods)} active period(s)")
+            logger.info(f"UDI cache {udi.get_cache_age_description()}")
             
             # Determine playlists to update
             playlists_to_update = set()
