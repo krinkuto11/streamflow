@@ -3382,6 +3382,20 @@ class StreamCheckerService:
                 _wait_for_udi_stream_count_stabilise(
                     udi, pre_refresh_stream_count, timeout=60
                 )
+
+                # Sync UDI cache from Dispatcharr's now-updated stream pool.
+                #
+                # The provider fetch above caused Dispatcharr to update its internal
+                # stream database — potentially replacing stream IDs if the provider
+                # rotated them. The UDI cache is now stale relative to Dispatcharr.
+                # Syncing here ensures Steps 3-6 operate on current stream IDs,
+                # preventing Invalid pk errors when matching writes assignments back.
+                logger.info(
+                    "Step 2a/6: Syncing UDI cache after provider refresh..."
+                )
+                udi.refresh_streams()
+                udi.refresh_channels()
+                logger.info("✓ UDI cache synced — Steps 3-6 will use current stream IDs")
             elif m3u_update_enabled and not account_ids:
                 logger.info(
                     "Step 2a/6: m3u_update enabled but no M3U accounts found for this "
@@ -3393,16 +3407,16 @@ class StreamCheckerService:
                     "Subsequent steps will use the current UDI cache state."
                 )
 
-            # NOTE: No mid-pipeline UDI sync occurs here.
+            # NOTE: No mid-pipeline UDI sync occurs here except when m3u_update=True.
             #
-            # The UDI cache is the contract for all reads during this check. Whatever
-            # state the cache held at the start of this invocation is what all steps
-            # operate against. This makes the pipeline fast and deterministic.
-            #
-            # When m3u_update.enabled = True (Step 2a above), the provider fetch
-            # completed and the cache was confirmed current before reaching this point.
-            # When m3u_update.enabled = False, the existing cache is used as-is —
+            # The UDI cache is the contract for all reads during this check. When
+            # m3u_update.enabled = False, the existing cache is used as-is —
             # reflecting the last completed cycle, provider refresh, or startup init.
+            #
+            # When m3u_update.enabled = True, Step 2a fired a provider fetch that
+            # caused Dispatcharr to update its stream database. The UDI cache was
+            # synced immediately after the poll helper confirmed completion (above),
+            # so all subsequent steps see current stream IDs.
             #
             # All writes (assignments, quality scores, stream ordering) go to Dispatcharr
             # in real time during Steps 4-6. A background UDI sync fires after this
