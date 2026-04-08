@@ -116,6 +116,8 @@ class UDIManager:
         
         self._initialized = False
         self._network_ready = False  # True only after a successful refresh_all() from Dispatcharr network
+        self._last_refresh_duration_seconds: float = 0.0  # Duration of last successful refresh_all()
+        self._last_refresh_time: Optional[datetime] = None  # Wall-clock time of last successful refresh_all()
         self._lock = threading.Lock()
         self._refresh_thread = None
         self._refresh_running = False
@@ -336,7 +338,45 @@ class UDIManager:
             network. False during startup before the network refresh finishes.
         """
         return self._network_ready
-    
+
+    def get_last_refresh_duration(self) -> float:
+        """Return seconds taken by the last successful refresh_all().
+
+        Used to calibrate the post-provider-fetch poll timeout in
+        _wait_for_udi_stream_count_stabilise(). Returns 0.0 if refresh_all()
+        has never completed successfully (e.g. before startup init finishes).
+        """
+        return self._last_refresh_duration_seconds
+
+    def get_cache_age_description(self) -> str:
+        """Return a human-readable description of UDI cache age and last sync time.
+
+        Format: 'last synced Xm Ys ago (HH:MM:SS) — N streams'
+        Returns 'not yet synced from network' if refresh_all() has never completed.
+        Used for diagnostic log lines at the start of automation cycles and
+        single-channel health checks.
+        """
+        if self._last_refresh_time is None:
+            return "not yet synced from network"
+
+        now = datetime.now()
+        elapsed = int((now - self._last_refresh_time).total_seconds())
+        hours = elapsed // 3600
+        minutes = (elapsed % 3600) // 60
+        seconds = elapsed % 60
+
+        if hours > 0:
+            age_str = f"{hours}h {minutes}m ago"
+        elif minutes > 0:
+            age_str = f"{minutes}m {seconds}s ago"
+        else:
+            age_str = f"{seconds}s ago"
+
+        time_str = self._last_refresh_time.strftime("%H:%M:%S")
+        stream_count = len(self._streams_cache)
+
+        return f"last synced {age_str} ({time_str}) — {stream_count:,} streams"
+
     def get_channels(self) -> List[Dict[str, Any]]:
         """Get all channels.
         
@@ -625,6 +665,8 @@ class UDIManager:
             return False
         
         try:
+            _refresh_start = datetime.now()
+
             # Pre-fetch step: get authoritative counts from lightweight /ids/
             # endpoints before pulling full objects.  These counts serve as the
             # integrity oracle when the pagination envelope does not include a
@@ -773,6 +815,11 @@ class UDIManager:
                 current_step='done',
                 entity_counts=entity_counts,
             )
+            # Record duration and completion time for poll timeout calibration
+            # and cache age visibility. In-memory only — resets on restart.
+            _refresh_end = datetime.now()
+            self._last_refresh_duration_seconds = (_refresh_end - _refresh_start).total_seconds()
+            self._last_refresh_time = _refresh_end
             # Mark network as ready — distinguishes a live Dispatcharr fetch from
             # a load from SQL storage at startup (which may have stale/empty data).
             self._network_ready = True
