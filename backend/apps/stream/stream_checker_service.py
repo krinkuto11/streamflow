@@ -94,6 +94,57 @@ from apps.stream.stream_checker_components import (
     StreamCheckerProgress,
 )
 
+def _wait_for_udi_stream_count_stabilise(
+    udi,
+    pre_count: int,
+    timeout: int = 60,
+    poll_interval: int = 5,
+) -> bool:
+    """Poll UDI stream count after triggering a Dispatcharr playlist refresh.
+
+    Dispatcharr processes M3U playlists asynchronously. The refresh API call
+    returns as soon as the job is *enqueued*, not when it completes. Immediately
+    syncing the UDI cache after the call often returns pre-refresh data.
+
+    This helper polls the UDI stream count until it changes from pre_count
+    (indicating Dispatcharr has finished processing) or until timeout elapses.
+    It reuses the same poll-and-confirm pattern used in the startup sequence.
+
+    Args:
+        udi: Initialised UDI manager instance.
+        pre_count: Stream count captured before refresh_m3u_playlists() was called.
+        timeout: Maximum seconds to wait before giving up (default 60).
+        poll_interval: Seconds between each poll attempt (default 5).
+
+    Returns:
+        True  — stream count changed; refresh appears to have taken effect.
+        False — timed out with no change; downstream steps proceed on
+                potentially stale data (logged as a warning).
+    """
+    elapsed = 0
+    while elapsed < timeout:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        try:
+            current_count = len(udi.get_streams() or [])
+            if current_count != pre_count:
+                logger.info(
+                    f"UDI stream count changed after playlist refresh: "
+                    f"{pre_count} → {current_count} ({elapsed}s elapsed)"
+                )
+                return True
+        except Exception as _e:
+            logger.warning(
+                f"Error polling UDI stream count during post-refresh wait: {_e}"
+            )
+    logger.warning(
+        f"UDI stream count unchanged after {timeout}s (still {pre_count} streams). "
+        "Proceeding with potentially stale data. "
+        "Consider setting post_refresh_delay_seconds in config if this recurs."
+    )
+    return False
+
+
 class StreamCheckerService:
     """Main service for managing stream checking operations."""
     
@@ -281,6 +332,12 @@ class StreamCheckerService:
         This respects automation_controls and queues channels only when
         automatic quality checking is enabled.
         """
+        # Do not queue channels before the startup network UDI refresh completes.
+        # is_initialized() alone is True from SQL storage load (potentially empty cache).
+        if not get_udi_manager().is_network_ready():
+            logger.debug("Skipping channel queueing — UDI network refresh not yet complete")
+            return
+
         # Check if auto quality checking is enabled (considers both pipeline mode and individual controls)
         if not self.config.is_auto_quality_checking_enabled():
             logger.info("Skipping channel queueing - automatic quality checking is disabled")
@@ -312,6 +369,12 @@ class StreamCheckerService:
         self._cancel_queueing = False
         try:
             udi = get_udi_manager()
+
+            # Do not queue channels before the startup network UDI refresh completes.
+            if not udi.is_network_ready():
+                logger.debug("Skipping global channel queue — UDI network refresh not yet complete")
+                return
+
             channels = udi.get_channels()
             
             if channels:
@@ -3223,10 +3286,16 @@ class StreamCheckerService:
                     'channel_name': channel_name,
                 }
 
-            matching_enabled = profile.get('stream_matching', {}).get('enabled', False)
-            checking_enabled = profile.get('stream_checking', {}).get('enabled', False)
+            m3u_update_enabled = profile.get('m3u_update', {}).get('enabled', False)
+            matching_enabled   = profile.get('stream_matching', {}).get('enabled', False)
+            checking_enabled   = profile.get('stream_checking', {}).get('enabled', False)
 
-            logger.info(f"Channel {channel_name} settings: matching={matching_enabled}, checking={checking_enabled}")
+            logger.info(
+                f"Channel {channel_name} profile flags: "
+                f"m3u_update={m3u_update_enabled}, "
+                f"matching={matching_enabled}, "
+                f"checking={checking_enabled}"
+            )
 
             # Signal to the frontend that this is a single channel check so the
             # stale batch progress card from the previous automation run is suppressed.
@@ -3279,25 +3348,79 @@ class StreamCheckerService:
                             account_ids.add(m3u_account)
                             logger.info(f"Found M3U account {m3u_account} from dead stream {dead_info.get('stream_name', 'Unknown')}")
             
-            # Step 2: Refresh playlists for those accounts
-            if account_ids:
-                logger.info(f"Step 2/6: Refreshing playlists for {len(account_ids)} M3U account(s)...")
+            # Step 2a: Provider fetch — only if m3u_update is enabled in the profile.
+            #
+            # IMPORTANT DISTINCTION:
+            #   m3u_update.enabled = True  → tell Dispatcharr to re-pull from the M3U
+            #                                 provider URL (two-hop: StreamFlow → Dispatcharr
+            #                                 → provider). The cache is confirmed current
+            #                                 before proceeding to subsequent steps.
+            #   m3u_update.enabled = False → no provider fetch is triggered. All steps
+            #                                 operate on the existing cache as-is, which
+            #                                 reflects the last completed cycle or refresh.
+            #
+            # Dispatcharr processes M3U refreshes asynchronously. After triggering the
+            # refresh we poll the UDI stream count until it changes (confirming Dispatcharr
+            # has finished processing) before proceeding.
+            if m3u_update_enabled and account_ids:
+                logger.info(
+                    f"Step 2a/6: Refreshing playlists for {len(account_ids)} M3U account(s) "
+                    f"(m3u_update enabled in profile)..."
+                )
+                # Capture stream count before triggering refresh so we can detect completion.
+                pre_refresh_stream_count = len(udi.get_streams() or [])
+
                 # Import here to allow better test mocking
                 from apps.core.api_utils import refresh_m3u_playlists
                 for account_id in account_ids:
                     logger.info(f"Refreshing M3U account {account_id}")
                     refresh_m3u_playlists(account_id=account_id)
-                
-                # Refresh UDI cache to get updated streams
-                # Also refresh M3U accounts to detect any new accounts
-                # And refresh channel groups to detect any group changes
-                udi.refresh_m3u_accounts()  # Check for new M3U accounts
+
+                logger.info(
+                    "✓ Playlist refresh triggered — waiting for Dispatcharr to process..."
+                )
+                _wait_for_udi_stream_count_stabilise(
+                    udi, pre_refresh_stream_count, timeout=60
+                )
+
+                # Sync UDI cache from Dispatcharr's now-updated stream pool.
+                #
+                # The provider fetch above caused Dispatcharr to update its internal
+                # stream database — potentially replacing stream IDs if the provider
+                # rotated them. The UDI cache is now stale relative to Dispatcharr.
+                # Syncing here ensures Steps 3-6 operate on current stream IDs,
+                # preventing Invalid pk errors when matching writes assignments back.
+                logger.info(
+                    "Step 2a/6: Syncing UDI cache after provider refresh..."
+                )
                 udi.refresh_streams()
                 udi.refresh_channels()
-                udi.refresh_channel_groups()  # Check for new/updated channel groups
-                logger.info("✓ Playlists refreshed and UDI cache updated")
+                logger.info("✓ UDI cache synced — Steps 3-6 will use current stream IDs")
+            elif m3u_update_enabled and not account_ids:
+                logger.info(
+                    "Step 2a/6: m3u_update enabled but no M3U accounts found for this "
+                    "channel — skipping provider fetch."
+                )
             else:
-                logger.info("Step 2/6: No M3U accounts found for this channel, skipping playlist refresh")
+                logger.info(
+                    "Step 2a/6: Skipping provider fetch (m3u_update disabled in profile). "
+                    "Subsequent steps will use the current UDI cache state."
+                )
+
+            # NOTE: No mid-pipeline UDI sync occurs here except when m3u_update=True.
+            #
+            # The UDI cache is the contract for all reads during this check. When
+            # m3u_update.enabled = False, the existing cache is used as-is —
+            # reflecting the last completed cycle, provider refresh, or startup init.
+            #
+            # When m3u_update.enabled = True, Step 2a fired a provider fetch that
+            # caused Dispatcharr to update its stream database. The UDI cache was
+            # synced immediately after the poll helper confirmed completion (above),
+            # so all subsequent steps see current stream IDs.
+            #
+            # All writes (assignments, quality scores, stream ordering) go to Dispatcharr
+            # in real time during Steps 4-6. A background UDI sync fires after this
+            # function returns to pull those writes back into the cache for the next run.
             
             # Step 3: Clear dead streams for this channel to give them a second chance
             logger.info(f"Step 3/6: Clearing dead streams for channel {channel_name} to give them a second chance...")
@@ -3366,13 +3489,12 @@ class StreamCheckerService:
             else:
                 logger.info(f"Step 5/6: Skipping stream matching (matching is disabled for this channel)")
             
-            # Refresh UDI cache again to ensure the check in Step 6 sees the newly assigned streams
-            # This is critical because discover_and_assign_streams updates the DB but UDI cache might be stale
+            # After matching writes new assignments to Dispatcharr, refresh only this
+            # channel's cache entry so Step 6 sees the updated stream list.
+            # This is a targeted single-channel read — not a full stream pool fetch.
             if matching_enabled:
-                logger.debug("Refreshing UDI cache for streams and channel to reflect new assignments...")
-                udi.refresh_streams()
                 udi.refresh_channel_by_id(channel_id)
-                logger.info(f"✓ UDI cache refreshed with latest stream assignments")
+                logger.debug("✓ Channel cache entry updated with latest stream assignments")
             
             # Step 6: Mark channel for force check and perform the check (if checking is enabled)
             dead_count = 0
@@ -3404,11 +3526,13 @@ class StreamCheckerService:
                 logger.info(f"Step 6/6: Skipping stream checking (checking is disabled for this channel)")
                 analyzed_lookup = {}
             
-            # Gather statistics after check using centralized utility.
-            # Refresh UDI cache first so stream_stats reflect the post-probe
-            # database state — loop fields written by _update_stream_stats
-            # won't be visible otherwise.
-            udi.refresh_streams()
+            # Gather statistics after check using cached channel data.
+            #
+            # fetch_channel_streams reads from the UDI in-memory cache — no network call.
+            # For streams that were probed in this run, analyzed_lookup carries authoritative
+            # scores and loop results (written to Dispatcharr during Step 6 and held in
+            # memory). The background UDI sync that fires after this function returns will
+            # pull those written values back into the cache for the next invocation.
             streams = fetch_channel_streams(channel_id)
             total_streams = len(streams)
             
@@ -3555,6 +3679,32 @@ class StreamCheckerService:
 
             # Clear progress so the frontend stops showing the single channel check UI
             self.progress.clear()
+
+            # Background UDI sync — pull all writes from this check back into cache.
+            # Runs in a daemon thread so it does not block the response to the caller.
+            # Guarded on is_network_ready() to avoid firing before startup network
+            # refresh completes (is_initialized() alone is True from SQL storage load).
+            if udi.is_network_ready():
+                def _background_udi_sync(ch_id: int, ch_name: str):
+                    try:
+                        _udi = get_udi_manager()
+                        _udi.refresh_streams()
+                        _udi.refresh_channel_by_id(ch_id)
+                        logger.debug(
+                            f"Background UDI sync completed for {ch_name} "
+                            f"(channel {ch_id})"
+                        )
+                    except Exception as _e:
+                        logger.warning(
+                            f"Background UDI sync failed for {ch_name}: {_e}"
+                        )
+
+                threading.Thread(
+                    target=_background_udi_sync,
+                    args=(channel_id, channel_name),
+                    daemon=True,
+                    name=f"udi-sync-ch{channel_id}",
+                ).start()
 
             return {
                 'success': True,

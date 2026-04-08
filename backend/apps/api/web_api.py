@@ -425,6 +425,7 @@ def scheduled_event_processor():
         get_wake_event=lambda: scheduled_event_processor_wake,
         get_scheduling_service=get_scheduling_service,
         get_stream_checker_service=get_stream_checker_service,
+        get_udi_manager=get_udi_manager,
         logger=logger,
         check_interval=30,
     )

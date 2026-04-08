@@ -10,6 +10,7 @@ def scheduled_event_processor_loop(
     get_wake_event: Callable[[], Any],
     get_scheduling_service: Callable[[], Any],
     get_stream_checker_service: Callable[[], Any],
+    get_udi_manager: Callable[[], Any],
     logger: Any,
     check_interval: int = 30,
 ):
@@ -25,6 +26,14 @@ def scheduled_event_processor_loop(
             else:
                 wake_event.wait(timeout=check_interval)
                 wake_event.clear()
+
+            # Do not process scheduled events before the startup network UDI refresh
+            # completes. Firing against an empty/stale cache produces no-op checks.
+            if not get_udi_manager().is_network_ready():
+                logger.debug(
+                    "Scheduled event processor waiting — UDI network refresh not yet complete"
+                )
+                continue
 
             service = get_scheduling_service()
             stream_checker = get_stream_checker_service()
