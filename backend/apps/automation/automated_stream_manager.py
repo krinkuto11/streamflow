@@ -2783,6 +2783,10 @@ class AutomatedStreamManager:
         logger.debug("Starting automation cycle...")
         
         try:
+            # Mark automation as busy so the scheduled UDI refresh worker
+            # skips its slot rather than replacing the cache mid-pipeline.
+            get_udi_manager().set_automation_busy()
+
             # 2. Determine which playlists to update and group channels by period
             udi = get_udi_manager()
             channels = udi.get_channels()
@@ -3300,6 +3304,10 @@ class AutomatedStreamManager:
 
         finally:
             self._m3u_accounts_cache = None
+
+            # Clear automation busy flag before starting background sync so the
+            # scheduled UDI refresh worker can proceed on its next slot if due.
+            get_udi_manager().clear_automation_busy()
 
             # Background UDI sync — pull all writes from this cycle back into cache.
             # Only fires when the cycle actually completed matching/checking work.
