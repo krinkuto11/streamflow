@@ -3182,13 +3182,16 @@ class StreamCheckerService:
         """
         import time as time_module
         start_time = time_module.time()
-        
+
+        # Mark automation as busy before entering try/finally so the flag
+        # is guaranteed to be cleared on every exit path including early returns.
+        get_udi_manager().set_automation_busy()
+
         try:
             logger.info(f"Starting single channel check for channel {channel_id}")
-            
+
             # Get channel info from UDI
             udi = get_udi_manager()
-            channel = udi.get_channel_by_id(channel_id)
             if not channel:
                 error_msg = f"Channel {channel_id} not found"
                 logger.error(error_msg)
@@ -3723,11 +3726,20 @@ class StreamCheckerService:
                 'channel_name': channel_name,
                 'stats': check_stats
             }
-            
+
         except Exception as e:
             logger.error(f"Error checking single channel {channel_id}: {e}", exc_info=True)
             self.progress.clear()
             return {'success': False, 'error': str(e)}
+
+        finally:
+            # Guarantee the busy flag is cleared on every exit path —
+            # normal completion, early returns (no channel, no profile,
+            # monitoring session, limits), and exceptions.
+            try:
+                get_udi_manager().clear_automation_busy()
+            except Exception:
+                pass
     
     def clear_queue(self):
         """Clear the checking queue."""
