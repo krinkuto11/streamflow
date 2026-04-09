@@ -886,6 +886,10 @@ class UDIManager:
             _refresh_end = datetime.now()
             self._last_refresh_duration_seconds = (_refresh_end - _refresh_start).total_seconds()
             self._last_refresh_time = _refresh_end
+            # Seed the scheduled UDI refresh last-run timestamp so the first
+            # scheduled slot waits the full interval from startup rather than
+            # firing immediately (startup refresh counts as the first run).
+            self._udi_refresh_last_run = _refresh_end
             # Mark network as ready — distinguishes a live Dispatcharr fetch from
             # a load from SQL storage at startup (which may have stale/empty data).
             self._network_ready = True
