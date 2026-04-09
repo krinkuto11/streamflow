@@ -3192,6 +3192,7 @@ class StreamCheckerService:
 
             # Get channel info from UDI
             udi = get_udi_manager()
+            channel = udi.get_channel_by_id(channel_id)
             if not channel:
                 error_msg = f"Channel {channel_id} not found"
                 logger.error(error_msg)
