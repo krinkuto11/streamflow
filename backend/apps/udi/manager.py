@@ -118,6 +118,17 @@ class UDIManager:
         self._network_ready = False  # True only after a successful refresh_all() from Dispatcharr network
         self._last_refresh_duration_seconds: float = 0.0  # Duration of last successful refresh_all()
         self._last_refresh_time: Optional[datetime] = None  # Wall-clock time of last successful refresh_all()
+
+        # Automation busy flag — set while a cycle or single-channel check is running.
+        # The scheduled UDI refresh worker checks this before firing to avoid
+        # replacing the cache mid-pipeline. Cleared before any background sync fires.
+        self._automation_busy: bool = False
+        self._automation_busy_lock = threading.Lock()
+
+        # Last run timestamp for the scheduled UDI refresh worker.
+        # In-memory only — resets on restart, which is correct behaviour.
+        self._udi_refresh_last_run: Optional[datetime] = None
+
         self._lock = threading.Lock()
         self._refresh_thread = None
         self._refresh_running = False
@@ -376,6 +387,55 @@ class UDIManager:
         stream_count = len(self._streams_cache)
 
         return f"last synced {age_str} ({time_str}) — {stream_count:,} streams"
+
+    def set_automation_busy(self) -> None:
+        """Mark automation as busy — a cycle or single-channel check is running.
+
+        The scheduled UDI refresh worker checks this flag before firing.
+        If set, the worker skips the current slot and waits for the next
+        scheduled time rather than replacing the cache mid-pipeline.
+
+        Must be called at the start of run_automation_cycle() and
+        check_single_channel(). Clear with clear_automation_busy() before
+        any post-completion background sync fires.
+        """
+        with self._automation_busy_lock:
+            self._automation_busy = True
+
+    def clear_automation_busy(self) -> None:
+        """Clear the automation busy flag.
+
+        Call at the natural completion point of run_automation_cycle() and
+        check_single_channel() — before starting any background UDI sync
+        thread, so the sync does not hold the busy flag.
+        """
+        with self._automation_busy_lock:
+            self._automation_busy = False
+
+    def is_automation_busy(self) -> bool:
+        """Return True if a cycle or single-channel check is currently running.
+
+        Used by the scheduled UDI refresh worker to determine whether to
+        skip the current slot. Does not block — caller decides what to do.
+        """
+        with self._automation_busy_lock:
+            return self._automation_busy
+
+    def get_udi_refresh_last_run(self) -> Optional[datetime]:
+        """Return the timestamp of the last scheduled UDI refresh run.
+
+        In-memory only — resets to None on restart. Used by the UDI refresh
+        worker to determine if the schedule is due.
+        """
+        return self._udi_refresh_last_run
+
+    def set_udi_refresh_last_run(self, ts: Optional[datetime] = None) -> None:
+        """Record that the scheduled UDI refresh just ran.
+
+        Args:
+            ts: Timestamp to record. Defaults to datetime.now().
+        """
+        self._udi_refresh_last_run = ts if ts is not None else datetime.now()
 
     def get_channels(self) -> List[Dict[str, Any]]:
         """Get all channels.
@@ -665,6 +725,12 @@ class UDIManager:
             return False
         
         try:
+            # Set automation busy for the duration of this full refresh.
+            # Prevents the scheduled UDI refresh worker from firing a concurrent
+            # refresh_all() that would race with this one on the cache.
+            # Also prevents check_single_channel and run_automation_cycle from
+            # starting while a full cache rebuild is in progress.
+            self.set_automation_busy()
             _refresh_start = datetime.now()
 
             # Pre-fetch step: get authoritative counts from lightweight /ids/
@@ -829,6 +895,9 @@ class UDIManager:
             logger.error(f"Error refreshing UDI data: {e}")
             self._update_init_progress(status='failed', message=f'Refresh failed: {str(e)}')
             return False
+
+        finally:
+            self.clear_automation_busy()
     
     def refresh_channels(self) -> bool:
         """Refresh only channels data.
