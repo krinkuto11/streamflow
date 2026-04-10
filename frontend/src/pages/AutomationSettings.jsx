@@ -17,7 +17,7 @@ export default function AutomationSettings() {
   const [streamCheckerConfig, setStreamCheckerConfig] = useState(null)
   const [dispatcharrConfig, setDispatcharrConfig] = useState(null)
   const [sessionConfig, setSessionConfig] = useState({ review_duration: 60 })
-  const [schedulingConfig, setSchedulingConfig] = useState({ epg_refresh_interval_minutes: 60 })
+  const [schedulingConfig, setSchedulingConfig] = useState({ epg_schedule: { type: 'interval', value: 60 }, udi_refresh_schedule: null, enabled: true })
   const [orchestratorConfig, setOrchestratorConfig] = useState({ host: '', port: 8000, has_api_key: false, api_key: '' })
   const [testingConnection, setTestingConnection] = useState(false)
   const [connectionTestResult, setConnectionTestResult] = useState(null)
@@ -148,12 +148,6 @@ export default function AutomationSettings() {
     }))
   }
 
-  const handleSchedulingConfigChange = (field, value) => {
-    setSchedulingConfig(prev => ({
-      ...prev,
-      [field]: value
-    }))
-  }
 
   const handleOrchestratorConfigChange = (field, value) => {
     setOrchestratorConfig(prev => ({
@@ -241,24 +235,64 @@ export default function AutomationSettings() {
             <CardHeader>
               <CardTitle>Event Scheduling</CardTitle>
               <CardDescription>
-                Configure how often to refresh EPG data from Dispatcharr
+                Configure how often to refresh EPG and UDI data from Dispatcharr
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="refresh-interval">EPG Refresh Interval (minutes)</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="refresh-interval"
-                    type="number"
-                    min="1"
-                    max="1440"
-                    className="max-w-[120px]"
-                    value={schedulingConfig?.epg_refresh_interval_minutes || 60}
-                    onChange={(e) => handleSchedulingConfigChange('epg_refresh_interval_minutes', parseInt(e.target.value))}
-                  />
-                  <span className="text-sm text-muted-foreground">minutes</span>
+            <CardContent>
+              <div className="grid grid-cols-2 gap-8">
+                {/* EPG Refresh — left column */}
+                <div className="space-y-2">
+                  <Label htmlFor="refresh-interval">EPG Refresh Interval (minutes)</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="refresh-interval"
+                      type="number"
+                      min="1"
+                      max="1440"
+                      className="max-w-[120px]"
+                      value={schedulingConfig?.epg_schedule?.value || 60}
+                      onChange={(e) => setSchedulingConfig(prev => ({
+                        ...prev,
+                        epg_schedule: { type: 'interval', value: parseInt(e.target.value) || 60 }
+                      }))}
+                    />
+                    <span className="text-sm text-muted-foreground">minutes</span>
+                  </div>
                 </div>
+
+                {/* UDI Cache Refresh — right column */}
+                <div className="space-y-2">
+                  <Label htmlFor="udi-refresh-interval">UDI Refresh Interval (minutes)</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="udi-refresh-interval"
+                      type="number"
+                      min="0"
+                      max="720"
+                      step="15"
+                      className="max-w-[120px]"
+                      value={schedulingConfig?.udi_refresh_schedule?.value || 0}
+                      onChange={(e) => {
+                        const raw = parseInt(e.target.value) || 0
+                        const snapped = Math.floor(Math.min(Math.max(raw, 0), 720) / 15) * 15
+                        setSchedulingConfig(prev => ({
+                          ...prev,
+                          udi_refresh_schedule: snapped === 0 ? null : { type: 'interval', value: snapped }
+                        }))
+                      }}
+                    />
+                    <span className="text-sm text-muted-foreground">minutes</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    A zero interval disables automatic UDI cache refresh
+                  </p>
+                </div>
+              </div>
+              <div className="flex justify-end pt-4">
+                <Button onClick={handleSave} disabled={saving}>
+                  {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Save Settings
+                </Button>
               </div>
             </CardContent>
           </Card>

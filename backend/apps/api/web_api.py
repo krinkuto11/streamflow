@@ -32,6 +32,7 @@ from apps.automation.scheduling_service import get_scheduling_service
 from apps.background.scheduling_workers import (
     epg_refresh_processor_loop,
     scheduled_event_processor_loop,
+    udi_refresh_processor_loop,
 )
 from apps.stream.udp_proxy import UDPProxyManager
 
@@ -152,16 +153,22 @@ from apps.api.scheduling_handlers import (
     get_scheduled_event_processor_status_response,
     get_scheduled_events_response,
     get_scheduling_config_response,
+    get_udi_refresh_processor_status_response,
+    get_udi_refresh_schedule_response,
     import_auto_create_rules_response,
     process_due_scheduled_events_response,
     start_epg_refresh_processor_api_response,
     start_scheduled_event_processor_api_response,
+    start_udi_refresh_processor_api_response,
     stop_epg_refresh_processor_api_response,
     stop_scheduled_event_processor_api_response,
+    stop_udi_refresh_processor_api_response,
     test_auto_create_rule_response,
     trigger_epg_refresh_response,
+    trigger_udi_refresh_response,
     update_auto_create_rule_response,
     update_scheduling_config_response,
+    update_udi_refresh_schedule_response,
 )
 from apps.api.acestream_handlers import (
     check_acestream_orchestrator_ready_response,
@@ -358,6 +365,9 @@ scheduled_event_processor_wake = None  # threading.Event to wake up the processo
 epg_refresh_thread = None
 epg_refresh_running = False
 epg_refresh_wake = None  # threading.Event to wake up the refresh early
+udi_refresh_thread = None
+udi_refresh_running = False
+udi_refresh_wake = None  # threading.Event to wake up the UDI refresh early
 
 
 def _set_epg_refresh_running(value: bool):
@@ -425,7 +435,6 @@ def scheduled_event_processor():
         get_wake_event=lambda: scheduled_event_processor_wake,
         get_scheduling_service=get_scheduling_service,
         get_stream_checker_service=get_stream_checker_service,
-        get_udi_manager=get_udi_manager,
         logger=logger,
         check_interval=30,
     )
@@ -542,6 +551,66 @@ def stop_epg_refresh_processor():
         return False
     
     logger.info("EPG refresh processor stopped")
+    return True
+
+
+def udi_refresh_processor():
+    """Background thread for scheduled UDI cache refreshes.
+
+    Fires refresh_all() on the UDI manager according to the schedule stored
+    in scheduling config (udi_refresh_schedule). Skips if automation is busy.
+    """
+    return udi_refresh_processor_loop(
+        is_running=lambda: udi_refresh_running,
+        get_wake_event=lambda: udi_refresh_wake,
+        get_scheduling_service=get_scheduling_service,
+        get_udi_manager=get_udi_manager,
+        logger=logger,
+        check_interval=60,
+    )
+
+
+def start_udi_refresh_processor():
+    """Start the background thread for scheduled UDI cache refreshes."""
+    global udi_refresh_thread, udi_refresh_running, udi_refresh_wake
+
+    if udi_refresh_thread is not None and udi_refresh_thread.is_alive():
+        logger.warning("UDI refresh processor is already running")
+        return False
+
+    udi_refresh_wake = threading.Event()
+    udi_refresh_running = True
+    udi_refresh_thread = threading.Thread(
+        target=udi_refresh_processor,
+        name="UDIRefreshProcessor",
+        daemon=True,
+    )
+    udi_refresh_thread.start()
+    logger.info("UDI refresh processor started")
+    return True
+
+
+def stop_udi_refresh_processor():
+    """Stop the background thread for scheduled UDI cache refreshes."""
+    global udi_refresh_thread, udi_refresh_running, udi_refresh_wake
+
+    if udi_refresh_thread is None or not udi_refresh_thread.is_alive():
+        logger.warning("UDI refresh processor is not running")
+        return False
+
+    logger.info("Stopping UDI refresh processor...")
+    udi_refresh_running = False
+
+    if udi_refresh_wake:
+        udi_refresh_wake.set()
+
+    udi_refresh_thread.join(timeout=THREAD_SHUTDOWN_TIMEOUT_SECONDS)
+
+    if udi_refresh_thread.is_alive():
+        logger.warning("UDI refresh processor thread did not stop gracefully")
+        return False
+
+    logger.info("UDI refresh processor stopped")
     return True
 
 
@@ -1424,7 +1493,63 @@ def trigger_epg_refresh():
         epg_refresh_thread=epg_refresh_thread,
     )
 
-# ==================== Automation Service API ====================
+
+@app.route('/api/scheduling/udi-refresh/status', methods=['GET'])
+@log_function_call
+def get_udi_refresh_processor_status():
+    """Get the status of the UDI refresh processor background thread."""
+    return get_udi_refresh_processor_status_response(
+        udi_refresh_thread=udi_refresh_thread,
+        udi_refresh_running=udi_refresh_running,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/start', methods=['POST'])
+@log_function_call
+def start_udi_refresh_processor_api():
+    """Start the UDI refresh processor background thread."""
+    return start_udi_refresh_processor_api_response(
+        start_udi_refresh_processor=start_udi_refresh_processor,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/stop', methods=['POST'])
+@log_function_call
+def stop_udi_refresh_processor_api():
+    """Stop the UDI refresh processor background thread."""
+    return stop_udi_refresh_processor_api_response(
+        stop_udi_refresh_processor=stop_udi_refresh_processor,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/trigger', methods=['POST'])
+@log_function_call
+def trigger_udi_refresh():
+    """Manually trigger an immediate UDI cache refresh."""
+    return trigger_udi_refresh_response(
+        udi_refresh_wake=udi_refresh_wake,
+        udi_refresh_running=udi_refresh_running,
+        udi_refresh_thread=udi_refresh_thread,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/schedule', methods=['GET'])
+@log_function_call
+def get_udi_refresh_schedule():
+    """Get the UDI refresh schedule configuration."""
+    return get_udi_refresh_schedule_response(
+        get_scheduling_service=get_scheduling_service,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/schedule', methods=['PUT'])
+@log_function_call
+def update_udi_refresh_schedule():
+    """Set or clear the UDI refresh schedule."""
+    return update_udi_refresh_schedule_response(
+        payload=request.get_json(silent=True),
+        get_scheduling_service=get_scheduling_service,
+    )
 
 @app.route('/api/automation/status', methods=['GET'])
 @log_function_call
@@ -2476,6 +2601,15 @@ if __name__ == '__main__':
                 logger.info("EPG refresh processor auto-started")
         except Exception as e:
             logger.error(f"Failed to auto-start EPG refresh processor: {e}")
+
+        try:
+            if not check_wizard_complete():
+                logger.info("UDI refresh processor will not start - setup wizard has not been completed")
+            else:
+                start_udi_refresh_processor()
+                logger.info("UDI refresh processor auto-started")
+        except Exception as e:
+            logger.error(f"Failed to auto-start UDI refresh processor: {e}")
         
         try:
             monitoring_service = get_monitoring_service()

@@ -96,9 +96,15 @@ class SchedulingService:
         return self._regex_matcher
 
     def _load_config(self) -> Dict[str, Any]:
-        """Load scheduling configuration from SQL."""
+        """Load scheduling configuration from SQL.
+
+        Migrates legacy epg_refresh_interval_minutes integer to the unified
+        schedule structure {type, value} on first load. Transparent to users —
+        same behaviour, no data loss, cron option unlocked going forward.
+        """
         default_config = {
-            'epg_refresh_interval_minutes': 60,
+            'epg_schedule': {'type': 'interval', 'value': 60},
+            'udi_refresh_schedule': None,
             'enabled': True
         }
         from apps.database.connection import get_session
@@ -107,9 +113,35 @@ class SchedulingService:
         try:
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'scheduling_config').first()
             if setting and setting.value:
-                return setting.value
+                config = dict(setting.value)
+                needs_save = False
+
+                # One-time migration: convert legacy integer key to schedule object
+                if 'epg_refresh_interval_minutes' in config and 'epg_schedule' not in config:
+                    legacy_minutes = config.pop('epg_refresh_interval_minutes', 60)
+                    config['epg_schedule'] = {'type': 'interval', 'value': int(legacy_minutes)}
+                    logger.info(
+                        f"Migrated EPG schedule: epg_refresh_interval_minutes={legacy_minutes} "
+                        f"→ epg_schedule={{type: interval, value: {legacy_minutes}}}"
+                    )
+                    needs_save = True
+
+                # Ensure udi_refresh_schedule key exists in older configs
+                if 'udi_refresh_schedule' not in config:
+                    config['udi_refresh_schedule'] = None
+                    needs_save = True
+
+                # Persist only when something actually changed
+                if needs_save:
+                    from sqlalchemy.orm.attributes import flag_modified
+                    setting.value = config
+                    flag_modified(setting, "value")
+                    session.commit()
+
+                return config
         except Exception as e:
             logger.error(f"Error loading scheduling config: {e}")
+            session.rollback()
         finally:
             session.close()
         return default_config
@@ -252,6 +284,40 @@ class SchedulingService:
             self._config.update(config)
             return self._save_config()
 
+    def get_epg_schedule(self) -> dict:
+        """Return the EPG refresh schedule as a {type, value} dict.
+
+        Falls back to a 60-minute interval if the config still carries the
+        legacy epg_refresh_interval_minutes key (belt-and-suspenders).
+        """
+        schedule = self._config.get('epg_schedule')
+        if schedule and isinstance(schedule, dict):
+            return schedule
+        # Legacy fallback
+        legacy_mins = self._config.get('epg_refresh_interval_minutes', 60)
+        return {'type': 'interval', 'value': int(legacy_mins)}
+
+    def get_udi_refresh_schedule(self):
+        """Return the UDI refresh schedule or None if not configured.
+
+        None means the UDI refresh worker is dormant — no scheduled refreshes.
+        """
+        return self._config.get('udi_refresh_schedule')
+
+    def update_udi_refresh_schedule(self, schedule) -> bool:
+        """Set or clear the UDI refresh schedule.
+
+        Args:
+            schedule: Dict {type, value} for interval or cron, or None to
+                      clear (worker goes dormant).
+
+        Returns:
+            True if saved successfully.
+        """
+        with self._lock:
+            self._config['udi_refresh_schedule'] = schedule
+            return self._save_config()
+
     def _get_base_url(self) -> Optional[str]:
         config = get_dispatcharr_config()
         return config.get_base_url()
@@ -289,7 +355,7 @@ class SchedulingService:
             cached_data = self._epg_cache.get(tvg_id)
             if not force_refresh and cached_data:
                 cache_age = datetime.now() - cached_data['time']
-                refresh_interval = timedelta(minutes=self._config.get('epg_refresh_interval_minutes', 60))
+                refresh_interval = timedelta(minutes=self.get_epg_schedule().get('value', 60))
                 if cache_age < refresh_interval:
                     return cached_data['programs'].copy()
 
