@@ -2890,16 +2890,29 @@ class StreamCheckerService:
 
     def _generate_stream_sort_key(self, stream_data: Dict, priority_m3u_ids: List[int] = None, priority_mode: str = 'absolute') -> Tuple:
         """Generate a lexicographical sort key for a stream based on priority tiers.
-        
+
         The sort key is a tuple used for ascending sort (lower is better).
-        
-        (AccountRank, ResolutionTier, QualityScore)
-        
-        Tiers (for 'same_resolution' mode):
-        (ResolutionTier, AccountRank, QualityScore)
+
+        Priority modes and their sort order:
+
+          'absolute'        → (0, playlist_rank, res_tier, quality_score)  [listed accounts]
+                            → (1, res_tier, quality_score)                  [unlisted — neutral fallback]
+
+          'same_resolution' → (res_tier, 0, playlist_rank, quality_score)  [listed accounts]
+                            → (res_tier, 1, quality_score)                  [unlisted — neutral fallback]
+
+          'equal'           → (res_tier, quality_score)                     [all streams, no account influence]
+
+          'quality'         → (quality_score,)                              [pure composite score, no bucketing]
+
+        The two-bucket approach (listed=0 / unlisted=1) for absolute and same_resolution modes
+        ensures streams from accounts NOT in the priority list are treated as neutral rather than
+        being penalised with an arbitrary worst-case rank. If all listed-account streams are dead
+        or filtered, the channel gracefully falls back to the best unlisted stream by quality.
         """
-        # 1. Account Rank (0 = highest)
-        account_rank = 100
+        # Resolve whether this stream's account is in the priority list
+        is_listed = False
+        playlist_rank = None
         stream_id = stream_data.get('stream_id')
         if priority_m3u_ids and stream_id:
             udi = get_udi_manager()
@@ -2907,22 +2920,39 @@ class StreamCheckerService:
             if stream:
                 m3u_id = stream.get('m3u_account')
                 if m3u_id in priority_m3u_ids:
-                    account_rank = priority_m3u_ids.index(m3u_id)
-        
-        # 2. Resolution Tier (0 = highest)
+                    is_listed = True
+                    playlist_rank = priority_m3u_ids.index(m3u_id)
+
+        # Resolution tier: 0=4K, 1=1080p, 2=720p, 3=576p, 4=low, 5=unknown
         res_tier = self._get_resolution_tier(stream_data.get('resolution'))
-        
-        
-        # 4. Quality Score (lower is better, so negate the 0-1 scale)
+
+        # Quality score: negated so lower tuple value = better stream
         quality_score = -stream_data.get('score', 0.0)
-        
-        if priority_mode == 'same_resolution':
-            return (res_tier, account_rank, quality_score)
+
+        if priority_mode == 'quality':
+            # Pure composite score — no resolution bucketing, no account influence.
+            return (quality_score,)
+
         elif priority_mode == 'equal':
-            # In 'equal' mode, resolution and quality matter, but not M3U account priority
+            # Resolution first, then quality. Playlist priority ignored entirely.
             return (res_tier, quality_score)
-        else: # 'absolute' mode
-            return (account_rank, res_tier, quality_score)
+
+        elif priority_mode == 'same_resolution':
+            # Resolution leads. Within the same resolution tier, listed accounts
+            # sort before unlisted (bucket 0 vs 1). Quality is the final tiebreaker.
+            if is_listed:
+                return (res_tier, 0, playlist_rank, quality_score)
+            else:
+                return (res_tier, 1, quality_score)
+
+        else:
+            # 'absolute' mode (default): playlist priority leads.
+            # Listed accounts always sort before unlisted regardless of quality.
+            # Unlisted accounts fall back gracefully sorted by res + quality.
+            if is_listed:
+                return (0, playlist_rank, res_tier, quality_score)
+            else:
+                return (1, res_tier, quality_score)
     
     def get_status(self) -> Dict:
         """Get current service status."""
