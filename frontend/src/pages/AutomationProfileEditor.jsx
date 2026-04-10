@@ -538,9 +538,10 @@ export default function AutomationProfileEditor() {
                                                 >
                                                     <SelectTrigger><SelectValue /></SelectTrigger>
                                                     <SelectContent>
-                                                        <SelectItem value="absolute">Absolute (Priority &gt; Quality)</SelectItem>
-                                                        <SelectItem value="same_resolution">Same Resolution (Quality &gt; Priority)</SelectItem>
-                                                        <SelectItem value="equal">Equal (Fallback Only)</SelectItem>
+                                                        <SelectItem value="absolute">Playlist Priority → Resolution → Score</SelectItem>
+                                                        <SelectItem value="same_resolution">Resolution → Playlist Priority → Score</SelectItem>
+                                                        <SelectItem value="equal">Resolution → Score</SelectItem>
+                                                        <SelectItem value="quality">Score Only</SelectItem>
                                                     </SelectContent>
                                                 </Select>
                                             </div>
@@ -562,7 +563,7 @@ export default function AutomationProfileEditor() {
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === 0 || profile.stream_checking.m3u_priority_mode === 'equal'}
+                                                                            disabled={idx === 0 || profile.stream_checking.m3u_priority_mode === 'equal' || profile.stream_checking.m3u_priority_mode === 'quality'}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]
@@ -577,7 +578,7 @@ export default function AutomationProfileEditor() {
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === sortedIds.length - 1 || profile.stream_checking.m3u_priority_mode === 'equal'}
+                                                                            disabled={idx === sortedIds.length - 1 || profile.stream_checking.m3u_priority_mode === 'equal' || profile.stream_checking.m3u_priority_mode === 'quality'}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]
