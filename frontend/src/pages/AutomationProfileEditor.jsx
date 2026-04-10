@@ -563,7 +563,7 @@ export default function AutomationProfileEditor() {
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === 0 || profile.stream_checking.m3u_priority_mode === 'equal' || profile.stream_checking.m3u_priority_mode === 'quality'}
+                                                                            disabled={idx === 0}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]
@@ -578,7 +578,7 @@ export default function AutomationProfileEditor() {
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === sortedIds.length - 1 || profile.stream_checking.m3u_priority_mode === 'equal' || profile.stream_checking.m3u_priority_mode === 'quality'}
+                                                                            disabled={idx === sortedIds.length - 1}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]
