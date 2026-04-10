@@ -288,6 +288,12 @@ export default function AutomationSettings() {
                   </p>
                 </div>
               </div>
+              <div className="flex justify-end pt-4">
+                <Button onClick={handleSave} disabled={saving}>
+                  {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Save Settings
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
