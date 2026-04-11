@@ -1127,16 +1127,12 @@ class AutomatedStreamManager:
         # This is cleared after each cycle completes
         self._m3u_accounts_cache = None
         
-        # Cache for dead stream removal setting to avoid repeated file I/O
-        self._dead_stream_removal_enabled_cache = None
-        
         # Background thread management
         self.automation_thread = None
         self.automation_running = False
         self.automation_wake_event = threading.Event()
         self.force_next_run = False
         self.forced_period_id = None
-        self._dead_stream_removal_cache_time = None
         
         # Lock to prevent concurrent execution of heavy batch processes
         self._lock = threading.Lock()
@@ -1299,33 +1295,22 @@ class AutomatedStreamManager:
     
     def _is_dead_stream_removal_enabled(self) -> bool:
         """Check if dead stream removal is enabled in stream checker config.
-        
-        Uses a 60-second cache to avoid repeated DB queries.
-        
+
+        Reads directly from the database on every call. The cache that previously
+        guarded this read has been removed — the method is called at most once per
+        automation cycle (not in a tight loop), so the DB round-trip is negligible.
+        Removing the 60-second TTL cache eliminates a stale-value window during
+        which a user's toggle change was silently ignored.
+
         Returns:
             True if dead stream removal is enabled, False otherwise
         """
-        import time
-        current_time = time.time()
-        
-        # Check if cache is still valid (60 seconds)
-        if (self._dead_stream_removal_cache_time is not None and 
-            current_time - self._dead_stream_removal_cache_time < 60 and
-            self._dead_stream_removal_enabled_cache is not None):
-            return self._dead_stream_removal_enabled_cache
-        
         try:
             from apps.database.manager import get_db_manager
             config = get_db_manager().get_system_setting('stream_checker_config', {})
             if config:
-                enabled = config.get('dead_stream_handling', {}).get('enabled', True)
-            else:
-                enabled = True
-            
-            # Update cache
-            self._dead_stream_removal_enabled_cache = enabled
-            self._dead_stream_removal_cache_time = current_time
-            return enabled
+                return config.get('dead_stream_handling', {}).get('enabled', True)
+            return True
         except Exception as e:
             logger.error(f"Error reading stream checker config from DB: {e}")
             return True
@@ -1769,18 +1754,27 @@ class AutomatedStreamManager:
                 
         return results
 
-    def discover_and_assign_streams(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None) -> Dict[str, int]:
-        """Wrapper for stream discovery to ensure single execution."""
+    def discover_and_assign_streams(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None, allow_dead_streams: Optional[bool] = None) -> Dict[str, int]:
+        """Wrapper for stream discovery to ensure single execution.
+
+        Args:
+            allow_dead_streams: When provided, overrides the global dead_stream_handling
+                config for this call. Used by check_single_channel to pass the
+                profile-resolved flag so the matching step respects the same policy
+                as the checking step (Bug 3 fix). When None (default), falls back to
+                _is_dead_stream_removal_enabled() so the global automation path is
+                unaffected.
+        """
         if not self._lock.acquire(blocking=False):
             logger.warning("Stream discovery already active - skipping concurrent request")
             return {}
         
         try:
-            return self._discover_and_assign_streams_impl(force, skip_check_trigger, forced_period_id, skip_changelog, channel_id)
+            return self._discover_and_assign_streams_impl(force, skip_check_trigger, forced_period_id, skip_changelog, channel_id, allow_dead_streams=allow_dead_streams)
         finally:
             self._lock.release()
 
-    def _discover_and_assign_streams_impl(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None) -> Dict[str, int]:
+    def _discover_and_assign_streams_impl(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None, allow_dead_streams: Optional[bool] = None) -> Dict[str, int]:
         """Discover new streams and assign them to channels based on regex patterns.
         
         Args:
@@ -1795,6 +1789,9 @@ class AutomatedStreamManager:
                         (same boundary as full discovery) so that streams from new or
                         previously-unassigned providers are still considered.
                         All other callers pass None (default) for full discovery.
+            allow_dead_streams: When provided by the caller (e.g. check_single_channel),
+                        overrides the global dead_stream_handling config for this run.
+                        When None, falls back to _is_dead_stream_removal_enabled().
         """
         if not force and not self.config.get("enabled_features", {}).get("auto_stream_discovery", True):
             logger.info("Stream discovery is disabled in configuration")
@@ -2123,8 +2120,14 @@ class AutomatedStreamManager:
             
             logger.info(f"Processing {total_streams} streams for pattern matching (Parallel, {max_workers} workers, {batch_size} streams per batch)...")
             
-            # Get dead stream removal config once
-            dead_stream_removal_enabled = self._is_dead_stream_removal_enabled()
+            # Resolve dead stream removal setting.
+            # When the caller provides allow_dead_streams explicitly (e.g. check_single_channel
+            # passing the profile-resolved value), honour it directly.
+            # Otherwise fall back to the global StreamCheckConfig setting.
+            if allow_dead_streams is not None:
+                dead_stream_removal_enabled = not allow_dead_streams
+            else:
+                dead_stream_removal_enabled = self._is_dead_stream_removal_enabled()
             
             # Create batches
             batches = [all_streams[i:i + batch_size] for i in range(0, total_streams, batch_size)]
@@ -2177,8 +2180,8 @@ class AutomatedStreamManager:
             # Prepare detailed changelog data
             detailed_assignments = []
             
-            # Get dead stream removal config once for this discovery run
-            dead_stream_removal_enabled = self._is_dead_stream_removal_enabled()
+            # dead_stream_removal_enabled was already resolved above; reuse it here.
+            # (allow_dead_streams caller override is already reflected in the variable.)
             
             # Assign streams to channels
             for channel_id, stream_ids in assignments.items():
@@ -2783,10 +2786,6 @@ class AutomatedStreamManager:
         logger.debug("Starting automation cycle...")
         
         try:
-            # Mark automation as busy so the scheduled UDI refresh worker
-            # skips its slot rather than replacing the cache mid-pipeline.
-            get_udi_manager().set_automation_busy()
-
             # 2. Determine which playlists to update and group channels by period
             udi = get_udi_manager()
             channels = udi.get_channels()
@@ -3304,10 +3303,6 @@ class AutomatedStreamManager:
 
         finally:
             self._m3u_accounts_cache = None
-
-            # Clear automation busy flag before starting background sync so the
-            # scheduled UDI refresh worker can proceed on its next slot if due.
-            get_udi_manager().clear_automation_busy()
 
             # Background UDI sync — pull all writes from this cycle back into cache.
             # Only fires when the cycle actually completed matching/checking work.
