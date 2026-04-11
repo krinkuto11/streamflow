@@ -991,9 +991,11 @@ class StreamCheckerService:
         logger.info(f"Checking channel {channel_id} (parallel mode)")
         logger.info(f"=" * 80)
         
-        # Get dead stream removal configuration early (used later in finally block)
-        dead_stream_removal_enabled = self.config.get('dead_stream_handling', {}).get('enabled', True)
-        
+        # dead_stream_removal_enabled is resolved below from the profile (Bug 2 fix).
+        # Initialise to True (removal enabled) as a safe default; the profile override
+        # applied during profile resolution is the sole authority.
+        dead_stream_removal_enabled = True
+
         # Get effective profile for this channel
         stream_limit = 0
         allow_revive = True
@@ -1120,12 +1122,9 @@ class StreamCheckerService:
             
             # Check if this is a force check (bypasses 2-hour immunity)
             force_check = self.update_tracker.should_force_check(channel_id)
-            
-            # Global Action / Force Check overrides profile settings
-            if force_check:
-                if not allow_revive:
-                    logger.info(f"Force check enabled for channel {channel_name}: Overriding Profile 'allow_revive' to True")
-                    allow_revive = True
+            # NOTE: force_check controls immunity bypass ONLY (all streams are re-analyzed).
+            # It no longer overrides allow_revive — the profile flag is the sole authority
+            # for whether a previously-dead stream can be promoted back to active (Bug 5 fix).
             
             # Get list of already checked streams to avoid re-analyzing
             checked_stream_info = self.update_tracker.updates.get('channels', {}).get(str(channel_id), {})
@@ -1789,9 +1788,11 @@ class StreamCheckerService:
         logger.info(f"Checking channel {channel_id} (sequential mode)")
         logger.info(f"=" * 80)
         
-        # Get dead stream removal configuration early (used later in finally block)
-        dead_stream_removal_enabled = self.config.get('dead_stream_handling', {}).get('enabled', True)
-        
+        # dead_stream_removal_enabled is resolved below from the profile (Bug 2 fix).
+        # Initialise to True (removal enabled) as a safe default; the profile override
+        # applied during profile resolution is the sole authority.
+        dead_stream_removal_enabled = True
+
         # Get effective profile for this channel
         stream_limit = 0
         allow_revive = True
@@ -1914,12 +1915,9 @@ class StreamCheckerService:
             
             # Check if this is a force check (bypasses 2-hour immunity)
             force_check = self.update_tracker.should_force_check(channel_id)
-            
-            # Global Action / Force Check overrides profile settings
-            if force_check:
-                if not allow_revive:
-                    logger.info(f"Force check enabled for channel {channel_name}: Overriding Profile 'allow_revive' to True")
-                    allow_revive = True
+            # NOTE: force_check controls immunity bypass ONLY (all streams are re-analyzed).
+            # It no longer overrides allow_revive — the profile flag is the sole authority
+            # for whether a previously-dead stream can be promoted back to active (Bug 5 fix).
             
             # Get list of already checked streams to avoid re-analyzing
             checked_stream_info = self.update_tracker.updates.get('channels', {}).get(str(channel_id), {})
@@ -2890,29 +2888,16 @@ class StreamCheckerService:
 
     def _generate_stream_sort_key(self, stream_data: Dict, priority_m3u_ids: List[int] = None, priority_mode: str = 'absolute') -> Tuple:
         """Generate a lexicographical sort key for a stream based on priority tiers.
-
+        
         The sort key is a tuple used for ascending sort (lower is better).
-
-        Priority modes and their sort order:
-
-          'absolute'        → (0, playlist_rank, res_tier, quality_score)  [listed accounts]
-                            → (1, res_tier, quality_score)                  [unlisted — neutral fallback]
-
-          'same_resolution' → (res_tier, 0, playlist_rank, quality_score)  [listed accounts]
-                            → (res_tier, 1, quality_score)                  [unlisted — neutral fallback]
-
-          'equal'           → (res_tier, quality_score)                     [all streams, no account influence]
-
-          'quality'         → (quality_score,)                              [pure composite score, no bucketing]
-
-        The two-bucket approach (listed=0 / unlisted=1) for absolute and same_resolution modes
-        ensures streams from accounts NOT in the priority list are treated as neutral rather than
-        being penalised with an arbitrary worst-case rank. If all listed-account streams are dead
-        or filtered, the channel gracefully falls back to the best unlisted stream by quality.
+        
+        (AccountRank, ResolutionTier, QualityScore)
+        
+        Tiers (for 'same_resolution' mode):
+        (ResolutionTier, AccountRank, QualityScore)
         """
-        # Resolve whether this stream's account is in the priority list
-        is_listed = False
-        playlist_rank = None
+        # 1. Account Rank (0 = highest)
+        account_rank = 100
         stream_id = stream_data.get('stream_id')
         if priority_m3u_ids and stream_id:
             udi = get_udi_manager()
@@ -2920,39 +2905,22 @@ class StreamCheckerService:
             if stream:
                 m3u_id = stream.get('m3u_account')
                 if m3u_id in priority_m3u_ids:
-                    is_listed = True
-                    playlist_rank = priority_m3u_ids.index(m3u_id)
-
-        # Resolution tier: 0=4K, 1=1080p, 2=720p, 3=576p, 4=low, 5=unknown
+                    account_rank = priority_m3u_ids.index(m3u_id)
+        
+        # 2. Resolution Tier (0 = highest)
         res_tier = self._get_resolution_tier(stream_data.get('resolution'))
-
-        # Quality score: negated so lower tuple value = better stream
+        
+        
+        # 4. Quality Score (lower is better, so negate the 0-1 scale)
         quality_score = -stream_data.get('score', 0.0)
-
-        if priority_mode == 'quality':
-            # Pure composite score — no resolution bucketing, no account influence.
-            return (quality_score,)
-
+        
+        if priority_mode == 'same_resolution':
+            return (res_tier, account_rank, quality_score)
         elif priority_mode == 'equal':
-            # Resolution first, then quality. Playlist priority ignored entirely.
+            # In 'equal' mode, resolution and quality matter, but not M3U account priority
             return (res_tier, quality_score)
-
-        elif priority_mode == 'same_resolution':
-            # Resolution leads. Within the same resolution tier, listed accounts
-            # sort before unlisted (bucket 0 vs 1). Quality is the final tiebreaker.
-            if is_listed:
-                return (res_tier, 0, playlist_rank, quality_score)
-            else:
-                return (res_tier, 1, quality_score)
-
-        else:
-            # 'absolute' mode (default): playlist priority leads.
-            # Listed accounts always sort before unlisted regardless of quality.
-            # Unlisted accounts fall back gracefully sorted by res + quality.
-            if is_listed:
-                return (0, playlist_rank, res_tier, quality_score)
-            else:
-                return (1, res_tier, quality_score)
+        else: # 'absolute' mode
+            return (account_rank, res_tier, quality_score)
     
     def get_status(self) -> Dict:
         """Get current service status."""
@@ -3212,14 +3180,10 @@ class StreamCheckerService:
         """
         import time as time_module
         start_time = time_module.time()
-
-        # Mark automation as busy before entering try/finally so the flag
-        # is guaranteed to be cleared on every exit path including early returns.
-        get_udi_manager().set_automation_busy()
-
+        
         try:
             logger.info(f"Starting single channel check for channel {channel_id}")
-
+            
             # Get channel info from UDI
             udi = get_udi_manager()
             channel = udi.get_channel_by_id(channel_id)
@@ -3467,33 +3431,39 @@ class StreamCheckerService:
             # in real time during Steps 4-6. A background UDI sync fires after this
             # function returns to pull those writes back into the cache for the next run.
             
-            # Step 3: Clear dead streams for this channel to give them a second chance
-            logger.info(f"Step 3/6: Clearing dead streams for channel {channel_name} to give them a second chance...")
+            # Step 3: Remove stale dead-stream tracker entries whose URLs no longer exist
+            # in the current playlist. This handles the URL-rotation case where a
+            # provider assigns new stream IDs/URLs to the same logical streams after a
+            # refresh — old dead-URL entries would otherwise block those streams from
+            # ever being re-matched or re-checked.
+            #
+            # Dead status for URLs that ARE still present is intentionally preserved
+            # so that allow_revive and remove_dead_streams toggles operate correctly
+            # in Step 6 (_check_channel). Clearing all dead state here (the previous
+            # behaviour) made both profile flags permanently ineffective on this path.
+            logger.info(f"Step 3/6: Cleaning stale dead stream tracker entries for channel {channel_name}...")
             try:
-                # First, check how many dead streams exist for this channel
-                dead_streams_for_channel = self.dead_streams_tracker.get_dead_streams_for_channel(channel_id)
-                initial_dead_count = len(dead_streams_for_channel)
-                
-                if initial_dead_count > 0:
-                    logger.info(f"Found {initial_dead_count} dead stream(s) for channel {channel_id} before clearing")
-                
-                # Clear all dead streams that belong to this channel by channel_id
-                # This handles cases where playlist refresh creates new streams with different URLs
-                cleared_count = self.dead_streams_tracker.remove_dead_streams_by_channel_id(channel_id)
-                
-                if cleared_count > 0:
-                    logger.info(f"✓ Cleared {cleared_count} dead stream(s) from tracker - they will be given a second chance")
-                    
-                    # Verify the streams were actually cleared
-                    remaining_dead = self.dead_streams_tracker.get_dead_streams_for_channel(channel_id)
-                    if len(remaining_dead) > 0:
-                        logger.warning(f"⚠ {len(remaining_dead)} dead stream(s) still remain after clearing - this may indicate an issue")
-                    else:
-                        logger.info("✓ Verified: All dead streams successfully removed from tracker")
+                # Build the set of stream URLs currently visible in the UDI cache.
+                # After Step 2a this reflects the post-refresh state; when m3u_update
+                # is disabled it reflects the last known cache state — either way it
+                # is the correct boundary for stale-URL detection.
+                _ch_streams_for_step3 = udi.get_channel_streams(channel_id) or []
+                current_stream_urls_step3 = {
+                    s.get('url', '') for s in _ch_streams_for_step3
+                    if isinstance(s, dict) and s.get('url')
+                }
+                current_stream_urls_step3.discard('')
+
+                cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls_step3)
+                if cleaned_count > 0:
+                    logger.info(
+                        f"✓ Removed {cleaned_count} stale dead stream URL(s) no longer in playlist — "
+                        f"dead status for remaining URLs preserved for profile toggle evaluation"
+                    )
                 else:
-                    logger.info("✓ No dead streams to clear for this channel")
+                    logger.debug("Step 3/6: No stale dead stream URLs to clean")
             except Exception as e:
-                logger.error(f"✗ Failed to clear dead streams: {e}", exc_info=True)
+                logger.error(f"✗ Failed to clean stale dead streams: {e}", exc_info=True)
             
             # Step 4: Validate existing streams against regex patterns (if matching is enabled)
             if matching_enabled:
@@ -3514,7 +3484,21 @@ class StreamCheckerService:
                 logger.info(f"Step 4/6: Skipping stream validation (matching is disabled for this channel)")
             
             # Step 5: Re-match and assign streams for this specific channel (if matching is enabled)
-            # With dead streams cleared, previously dead streams can now be re-added
+            # With stale dead-stream URLs cleaned, streams with new URLs can be re-matched.
+            #
+            # Resolve dead_stream_removal_enabled from the profile so the matching step
+            # respects the same policy as the checking step (Bug 3 fix). Previously,
+            # discover_and_assign_streams derived this from the global StreamCheckConfig
+            # which could disagree with the per-profile remove_dead_streams setting.
+            _profile_sc = profile.get('stream_checking', {}) if profile else {}
+            _profile_remove = _profile_sc.get('remove_dead_streams')
+            if isinstance(_profile_remove, bool):
+                _step5_dead_stream_removal_enabled = _profile_remove
+            else:
+                # No per-profile override: fall back to global config default (True)
+                _step5_dead_stream_removal_enabled = True
+            _step5_allow_dead_streams = not _step5_dead_stream_removal_enabled
+
             if matching_enabled:
                 logger.info(f"Step 5/6: Re-matching streams for channel {channel_name}...")
                 try:
@@ -3522,9 +3506,16 @@ class StreamCheckerService:
                     from apps.automation.automated_stream_manager import AutomatedStreamManager
                     automation_manager = AutomatedStreamManager()
                     
-                    # Run discovery scoped to this channel only
-                    # Skip automatic check trigger since we'll perform the check explicitly in Step 6
-                    assignments = automation_manager.discover_and_assign_streams(force=True, skip_check_trigger=True, channel_id=channel_id)
+                    # Run discovery scoped to this channel only.
+                    # Pass allow_dead_streams so the matching step honours the same
+                    # dead-stream policy as the checking step (Bug 3 fix).
+                    # Skip automatic check trigger since we'll perform the check explicitly in Step 6.
+                    assignments = automation_manager.discover_and_assign_streams(
+                        force=True,
+                        skip_check_trigger=True,
+                        channel_id=channel_id,
+                        allow_dead_streams=_step5_allow_dead_streams,
+                    )
                     if assignments:
                         logger.info(f"✓ Stream matching completed")
                     else:
@@ -3757,20 +3748,11 @@ class StreamCheckerService:
                 'channel_name': channel_name,
                 'stats': check_stats
             }
-
+            
         except Exception as e:
             logger.error(f"Error checking single channel {channel_id}: {e}", exc_info=True)
             self.progress.clear()
             return {'success': False, 'error': str(e)}
-
-        finally:
-            # Guarantee the busy flag is cleared on every exit path —
-            # normal completion, early returns (no channel, no profile,
-            # monitoring session, limits), and exceptions.
-            try:
-                get_udi_manager().clear_automation_busy()
-            except Exception:
-                pass
     
     def clear_queue(self):
         """Clear the checking queue."""
