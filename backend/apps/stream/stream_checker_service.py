@@ -3533,6 +3533,17 @@ class StreamCheckerService:
                 logger.debug("✓ Channel cache entry updated with latest stream assignments")
             
             # Step 6: Mark channel for force check and perform the check (if checking is enabled)
+            #
+            # Resolve the profile ID to pass to _check_channel. When check_single_channel
+            # was called without a forced_profile_id (e.g. EPG-triggered checks via
+            # execute_scheduled_check), the correct profile was resolved above into
+            # `profile` but forced_profile_id is still None. Without passing the resolved
+            # ID here, _check_channel re-resolves the profile independently and falls
+            # back to the active automation period — ignoring the EPG profile entirely.
+            # This caused profile flags like loop_check_enabled, grace_period, allow_revive,
+            # and scoring_weights to be read from the wrong profile on EPG-triggered runs.
+            _effective_profile_id = forced_profile_id or (profile.get('id') if profile else None)
+
             dead_count = 0
             if checking_enabled:
                 logger.info(f"Step 6/6: Force checking all streams for channel {channel_name}...")
@@ -3541,7 +3552,7 @@ class StreamCheckerService:
                 # Perform the check (this will now bypass immunity and check all streams)
                 # Returns dict with dead_streams_count and revived_streams_count
                 # Skip batch changelog since this is a single channel check
-                check_result = self._check_channel(channel_id, skip_batch_changelog=True, forced_profile_id=forced_profile_id)
+                check_result = self._check_channel(channel_id, skip_batch_changelog=True, forced_profile_id=_effective_profile_id)
                 if not check_result or not isinstance(check_result, dict):
                     # This should not happen with updated methods, but provide safe fallback
                     logger.warning(f"_check_channel did not return expected result dict, using defaults")
