@@ -1118,20 +1118,22 @@ class SchedulingService:
         return channel_programs
 
     def fetch_channel_programs_from_api(self, tvg_id: str, force_refresh: bool = False) -> List[Dict[str, Any]]:
-        """Fetch programs for a specific TVG ID from the Dispatcharr API."""
+        """Fetch programs for a specific TVG ID from the Dispatcharr API.
+
+        Authentication is handled transparently by fetch_data_from_url via
+        the api_utils token machinery — no manual header construction needed.
+        """
         config = get_dispatcharr_config()
-        base_url = config.get('base_url', '')
-        token = config.get('token', '')
+        base_url = config.get_base_url()
 
         if not base_url:
             logger.warning("No Dispatcharr base URL configured")
             return []
 
         url = f"{base_url}/api/epg/programs/?tvg_id={tvg_id}"
-        headers = {'Authorization': f'Token {token}'} if token else {}
 
         try:
-            data = fetch_data_from_url(url, headers=headers)
+            data = fetch_data_from_url(url)
             if isinstance(data, list):
                 return data
             return []
