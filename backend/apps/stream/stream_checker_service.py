@@ -438,6 +438,54 @@ class StreamCheckerService:
         except Exception as e:
             logger.error(f"Failed to queue all channels: {e}")
     
+    def _resolve_dead_stream_config(self, channel_id: Optional[int]) -> Dict[str, Any]:
+        """Resolve the dead-stream threshold config dict for a channel.
+
+        Extracts profile min_resolution/min_bitrate/min_fps into the dict
+        format expected by utils_is_stream_dead(). Returns the global
+        dead_stream_handling config as fallback when no profile is found.
+
+        Used by the early-exit display path so it can call utils_is_stream_dead
+        directly and inspect the reason ('low_quality') without re-entering
+        _is_stream_dead (which also writes to the tracker).
+        """
+        dead_stream_config = self.config.get('dead_stream_handling', {})
+        if channel_id is None:
+            return dead_stream_config
+
+        try:
+            from apps.automation.automation_config_manager import get_automation_config_manager
+            automation_config = get_automation_config_manager()
+            udi = get_udi_manager()
+            channel = udi.get_channel_by_id(channel_id)
+            group_id = channel.get('channel_group_id') if channel else None
+            config = automation_config.get_effective_configuration(channel_id, group_id)
+            profile = config.get('profile') if config else None
+            if profile:
+                stream_checking = profile.get('stream_checking', {})
+                if stream_checking.get('enabled', False):
+                    profile_config: Dict[str, Any] = {}
+                    min_res = stream_checking.get('min_resolution', '0x0')
+                    if min_res in ('2160p', '4k'):
+                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 3840, 2160
+                    elif min_res == '1080p':
+                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 1920, 1080
+                    elif min_res == '720p':
+                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 1280, 720
+                    elif min_res == '480p':
+                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 854, 480
+                    elif min_res == '360p':
+                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 640, 360
+                    if 'min_bitrate' in stream_checking:
+                        profile_config['min_bitrate_kbps'] = stream_checking['min_bitrate']
+                    if 'min_fps' in stream_checking:
+                        profile_config['min_fps'] = stream_checking['min_fps']
+                    return profile_config
+        except Exception as e:
+            logger.debug(f"Could not resolve dead stream config for channel {channel_id}: {e}")
+
+        return dead_stream_config
+
     def _is_stream_dead(self, stream_data: Dict[str, Any], channel_id: Optional[int] = None) -> bool:
         """
         Check if a stream should be considered dead based on profile or global settings.
@@ -1216,7 +1264,20 @@ class StreamCheckerService:
                                 'status': 'cached'
                             }
                             
-                            temp_score = self._calculate_stream_score(cached_for_score, priority_m3u_ids, priority_mode, scoring_weights)
+                            # Apply profile quality thresholds to cached display scores.
+                            # A stream below threshold shows low_quality rather than a
+                            # misleading real score — no ffmpeg probe ran but stored stats
+                            # are enough to know it violates the profile floor.
+                            _cached_is_dead, _cached_reason = utils_is_stream_dead(
+                                cached_for_score,
+                                self._resolve_dead_stream_config(channel_id)
+                            )
+                            if _cached_is_dead and _cached_reason == 'low_quality':
+                                temp_score = 0.0
+                                cached_stream_status = 'low_quality'
+                            else:
+                                temp_score = self._calculate_stream_score(cached_for_score, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
+                                cached_stream_status = 'cached'
 
                             stat = {
                                 'stream_id': s.get('id'),
@@ -1226,7 +1287,8 @@ class StreamCheckerService:
                                 'video_codec': formatted_stats['video_codec'],
                                 'bitrate': formatted_stats['bitrate'],
                                 'm3u_account': self._get_m3u_account_name(s.get('id'), udi) if hasattr(self, '_get_m3u_account_name') else 'N/A',
-                                'score': temp_score
+                                'score': temp_score,
+                                'status': cached_stream_status,
                             }
                             cached_stats.append(stat)
 
@@ -1299,7 +1361,7 @@ class StreamCheckerService:
                 stream_id = result.get('stream_id')
                 
                 # Calculate temp score for UI display
-                temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights)
+                temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
                 
                 # Update stream status based on result
                 is_dead = self._is_stream_dead(result, channel_id)
@@ -1436,7 +1498,7 @@ class StreamCheckerService:
                         dead_stream_ids.add(stream_id)
                     
                     # Calculate score using per-profile scoring weights
-                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
+                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
                     analyzed['score'] = score
                     analyzed['channel_id'] = channel_id
                     analyzed['channel_name'] = channel_name
@@ -1481,7 +1543,7 @@ class StreamCheckerService:
                         }
                         
                         # Calculate score using CURRENT profile weights
-                        score = self._calculate_stream_score(cached_analyzed, priority_m3u_ids, priority_mode, scoring_weights)
+                        score = self._calculate_stream_score(cached_analyzed, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
                         cached_analyzed['score'] = score
                         cached_analyzed_streams.append(cached_analyzed)
                     
@@ -2092,7 +2154,7 @@ class StreamCheckerService:
                     dead_stream_ids.add(stream['id'])
                 
                 # Calculate score
-                score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
+                score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
                 analyzed['score'] = score
                 analyzed_streams.append(analyzed)
                 
@@ -2178,7 +2240,7 @@ class StreamCheckerService:
                         dead_stream_ids.add(stream['id'])
                     
                     # Calculate score using stored stats and CURRENT profile weights
-                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
+                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
                     analyzed['score'] = score
                     analyzed_streams.append(analyzed)
                     logger.debug(f"Using cached data for stream {stream['id']}: {stream.get('name')} - Score: {score:.2f}")
@@ -2204,7 +2266,8 @@ class StreamCheckerService:
                         stream_startup_buffer=analysis_params.get('stream_startup_buffer', 10)
                     )
                     self._update_stream_stats(analyzed)
-                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode)
+                    # TODO: scoring_weights missing here — rare fallback path when UDI fetch fails; deferred fix
+                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, channel_id=channel_id)
                     analyzed['score'] = score
                     analyzed_streams.append(analyzed)
 
@@ -2723,7 +2786,7 @@ class StreamCheckerService:
             if penalised:
                 logger.info(f"[loop-probe] Score penalty applied to {penalised} looping stream(s)")
 
-    def _calculate_stream_score(self, stream_data: Dict, priority_m3u_ids: List[int] = None, priority_mode: str = 'absolute', scoring_weights: Dict = None) -> float:
+    def _calculate_stream_score(self, stream_data: Dict, priority_m3u_ids: List[int] = None, priority_mode: str = 'absolute', scoring_weights: Dict = None, channel_id: int = None) -> float:
         """Calculate a quality score for a stream based on analysis.
         
         Applies M3U account priority matching the order in the channel's Automation Profile.
@@ -2735,7 +2798,8 @@ class StreamCheckerService:
             scoring_weights: Optional per-profile scoring weights. Falls back to global config if not provided.
         """
         # Dead streams always get a score of 0
-        if self._is_stream_dead(stream_data):
+        # channel_id enables profile-aware threshold checks (min_bitrate, min_resolution, min_fps)
+        if self._is_stream_dead(stream_data, channel_id=channel_id):
             return 0.0
         
         # Use per-profile weights if provided, otherwise fall back to global config
