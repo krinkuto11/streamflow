@@ -394,7 +394,7 @@ export default function StreamChecker() {
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
                 ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, dead: 5 }
-                : { completed: 0, checking: 1, pending: 2, error: 3, dead: 3 }
+                : { completed: 0, checking: 1, pending: 2, error: 3, dead: 3, low_quality: 3 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -470,6 +470,11 @@ export default function StreamChecker() {
                                 {stream.status === 'dead' && <Badge variant="destructive" className="text-[10px]">Dead</Badge>}
                                 {stream.status === 'probing' && <Badge variant="outline" className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse">Probing</Badge>}
                                 {stream.status === 'loop_detected' && <Badge variant="outline" className="text-[10px] bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">⚠ {stream.loop_duration_secs ? `${stream.loop_duration_secs.toFixed(1)}s` : ''} Loop Found</Badge>}
+                                {stream.status === 'low_quality' && (
+                                  <Badge variant="outline" className="text-[10px] bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
+                                    Low Quality
+                                  </Badge>
+                                )}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right">
                                 {countdownCell}
