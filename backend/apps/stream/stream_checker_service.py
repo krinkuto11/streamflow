@@ -438,75 +438,74 @@ class StreamCheckerService:
         except Exception as e:
             logger.error(f"Failed to queue all channels: {e}")
     
-    def _resolve_dead_stream_config(self, channel_id: Optional[int]) -> Dict[str, Any]:
-        """Resolve the dead-stream threshold config dict for a channel.
+    def _build_threshold_config_from_profile(self, stream_checking: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a threshold config dict from an already-resolved stream_checking block.
 
-        Extracts profile min_resolution/min_bitrate/min_fps into the dict
-        format expected by utils_is_stream_dead(). Returns the global
-        dead_stream_handling config as fallback when no profile is found.
+        Called once per channel run so the per-stream _is_stream_dead() calls
+        don't have to re-resolve the profile from the database.  This also
+        ensures that a forced_profile_id (e.g. from the multi-period picker)
+        is honoured — previously _is_stream_dead() re-derived the profile from
+        the channel's period assignments, ignoring any explicit picker selection.
 
-        Used by the early-exit display path so it can call utils_is_stream_dead
-        directly and inspect the reason ('low_quality') without re-entering
-        _is_stream_dead (which also writes to the tracker).
+        Args:
+            stream_checking: The stream_checking sub-dict from the resolved profile.
+
+        Returns:
+            A config dict suitable for passing to utils_is_stream_dead() as the
+            second argument.  Only non-zero thresholds are included.
         """
-        dead_stream_config = self.config.get('dead_stream_handling', {})
-        if channel_id is None:
-            return dead_stream_config
+        config: Dict[str, Any] = {}
+        min_res = stream_checking.get('min_resolution', 'any')
+        if min_res in ('2160p', '4k'):
+            config['min_resolution_width'], config['min_resolution_height'] = 3840, 2160
+        elif min_res == '1080p':
+            config['min_resolution_width'], config['min_resolution_height'] = 1920, 1080
+        elif min_res == '720p':
+            config['min_resolution_width'], config['min_resolution_height'] = 1280, 720
+        elif min_res == '480p':
+            config['min_resolution_width'], config['min_resolution_height'] = 854, 480
+        elif min_res == '360p':
+            config['min_resolution_width'], config['min_resolution_height'] = 640, 360
 
-        try:
-            from apps.automation.automation_config_manager import get_automation_config_manager
-            automation_config = get_automation_config_manager()
-            udi = get_udi_manager()
-            channel = udi.get_channel_by_id(channel_id)
-            group_id = channel.get('channel_group_id') if channel else None
-            config = automation_config.get_effective_configuration(channel_id, group_id)
-            profile = config.get('profile') if config else None
-            if profile:
-                stream_checking = profile.get('stream_checking', {})
-                if stream_checking.get('enabled', False):
-                    profile_config: Dict[str, Any] = {}
-                    min_res = stream_checking.get('min_resolution', '0x0')
-                    if min_res in ('2160p', '4k'):
-                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 3840, 2160
-                    elif min_res == '1080p':
-                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 1920, 1080
-                    elif min_res == '720p':
-                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 1280, 720
-                    elif min_res == '480p':
-                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 854, 480
-                    elif min_res == '360p':
-                        profile_config['min_resolution_width'], profile_config['min_resolution_height'] = 640, 360
-                    if 'min_bitrate' in stream_checking:
-                        profile_config['min_bitrate_kbps'] = stream_checking['min_bitrate']
-                    if 'min_fps' in stream_checking:
-                        profile_config['min_fps'] = stream_checking['min_fps']
-                    return profile_config
-        except Exception as e:
-            logger.debug(f"Could not resolve dead stream config for channel {channel_id}: {e}")
+        min_bitrate = stream_checking.get('min_bitrate', 0)
+        if min_bitrate and min_bitrate > 0:
+            config['min_bitrate_kbps'] = min_bitrate
 
-        return dead_stream_config
+        min_fps = stream_checking.get('min_fps', 0)
+        if min_fps and min_fps > 0:
+            config['min_fps'] = min_fps
 
-    def _is_stream_dead(self, stream_data: Dict[str, Any], channel_id: Optional[int] = None) -> bool:
+        return config
+
+    def _is_stream_dead(self, stream_data: Dict[str, Any], channel_id: Optional[int] = None, threshold_config: Optional[Dict[str, Any]] = None) -> bool:
         """
         Check if a stream should be considered dead based on profile or global settings.
-        
-        This method uses categorization logic: 
+
+        This method uses categorization logic:
         - 'offline': truly dead (0x0 resolution, 0 bitrate)
         - 'low_quality': dead based on quality thresholds
-        
+
         Args:
             stream_data: Dictionary containing stream statistics
-            channel_id: Optional channel ID to look up profile-specific thresholds
-            
+            channel_id: Optional channel ID to look up profile-specific thresholds.
+                        Ignored when threshold_config is provided.
+            threshold_config: Pre-built threshold dict from _build_threshold_config_from_profile().
+                              When supplied, profile re-resolution is skipped entirely.
+                              This ensures forced_profile_id selections are honoured.
+
         Returns:
             bool: True if the stream is considered dead, False otherwise.
         """
         # Default configuration
         dead_stream_config = self.config.get('dead_stream_handling', {})
         profile_config = {}
-        
-        # Try to get profile-specific settings if channel_id provided
-        if channel_id is not None:
+
+        # Fast path: caller already resolved the profile and built the threshold dict.
+        # Skip the expensive per-stream profile re-resolution entirely.
+        if threshold_config is not None:
+            check_config = threshold_config
+        # Slow path: resolve profile from channel_id (legacy / external callers).
+        elif channel_id is not None:
             try:
                 from apps.automation.automation_config_manager import get_automation_config_manager
                 automation_config = get_automation_config_manager()
@@ -1057,16 +1056,19 @@ class StreamCheckerService:
         batch_enabled = batch_config.get('enabled', True)
         batch_size = batch_config.get('batch_size', 10)
         batch_stats_list = []
-        
+        # Initialised here; built from the resolved profile below so every
+        # _is_stream_dead() call uses the correct profile including forced_profile_id.
+        _threshold_config: Dict[str, Any] = {}
+
         try:
             from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
-            
+
             # Fetch channel data to get group_id (might be fetched already but just in case)
             udi = get_udi_manager()
             channel = udi.get_channel_by_id(channel_id)
             group_id = channel.get('channel_group_id') if channel else None
-            
+
             # If a profile was explicitly selected (via ProfilePickerDialog), use it
             # directly so all checking parameters (weights, limits, revive, loop detection)
             # reflect the user's intent rather than whichever period is currently active.
@@ -1102,7 +1104,13 @@ class StreamCheckerService:
                 )
                 # Clamp to valid range: -0.25 to 0.0
                 loop_penalty = max(-0.25, min(0.0, loop_penalty))
-                
+
+                # Build threshold config once from the resolved profile so every
+                # _is_stream_dead() call uses the correct profile — including
+                # when a forced_profile_id was selected via the picker.
+                _threshold_config = self._build_threshold_config_from_profile(profile_stream_checking)
+                logger.debug(f"Threshold config for channel {channel_id}: {_threshold_config}")
+
                 # Also check if checking is enabled at all for this profile
                 if not profile_stream_checking.get('enabled', False):
                     logger.info(f"Stream checking disabled by profile for channel {channel_id}")
@@ -1114,6 +1122,7 @@ class StreamCheckerService:
                     }
         except Exception as e:
             logger.warning(f"Failed to load profile settings for channel {channel_id}: {e}")
+            _threshold_config = {}
         
         try:
             # Get channel information from UDI
@@ -1264,20 +1273,7 @@ class StreamCheckerService:
                                 'status': 'cached'
                             }
                             
-                            # Apply profile quality thresholds to cached display scores.
-                            # A stream below threshold shows low_quality rather than a
-                            # misleading real score — no ffmpeg probe ran but stored stats
-                            # are enough to know it violates the profile floor.
-                            _cached_is_dead, _cached_reason = utils_is_stream_dead(
-                                cached_for_score,
-                                self._resolve_dead_stream_config(channel_id)
-                            )
-                            if _cached_is_dead and _cached_reason == 'low_quality':
-                                temp_score = 0.0
-                                cached_stream_status = 'low_quality'
-                            else:
-                                temp_score = self._calculate_stream_score(cached_for_score, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
-                                cached_stream_status = 'cached'
+                            temp_score = self._calculate_stream_score(cached_for_score, priority_m3u_ids, priority_mode, scoring_weights)
 
                             stat = {
                                 'stream_id': s.get('id'),
@@ -1287,8 +1283,7 @@ class StreamCheckerService:
                                 'video_codec': formatted_stats['video_codec'],
                                 'bitrate': formatted_stats['bitrate'],
                                 'm3u_account': self._get_m3u_account_name(s.get('id'), udi) if hasattr(self, '_get_m3u_account_name') else 'N/A',
-                                'score': temp_score,
-                                'status': cached_stream_status,
+                                'score': temp_score
                             }
                             cached_stats.append(stat)
 
@@ -1361,10 +1356,10 @@ class StreamCheckerService:
                 stream_id = result.get('stream_id')
                 
                 # Calculate temp score for UI display
-                temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
+                temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights)
                 
                 # Update stream status based on result
-                is_dead = self._is_stream_dead(result, channel_id)
+                is_dead = self._is_stream_dead(result, channel_id, threshold_config=_threshold_config)
                 
                 if stream_id in stream_statuses:
                     if result.get('status') == 'ERROR':
@@ -1470,8 +1465,9 @@ class StreamCheckerService:
                         # Fall back to individual updates if batching is disabled
                         self._update_stream_stats(analyzed)
                     
-                    # Check if stream is dead
-                    is_dead = self._is_stream_dead(analyzed, channel_id)
+                    # Check if stream is dead using pre-resolved threshold config
+                    # so forced_profile_id selections are honoured.
+                    is_dead = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                     stream_id = analyzed.get('stream_id')
                     stream_url = analyzed.get('stream_url', '')
                     stream_name = analyzed.get('stream_name', 'Unknown')
@@ -1498,7 +1494,7 @@ class StreamCheckerService:
                         dead_stream_ids.add(stream_id)
                     
                     # Calculate score using per-profile scoring weights
-                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
+                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
                     analyzed['score'] = score
                     analyzed['channel_id'] = channel_id
                     analyzed['channel_name'] = channel_name
@@ -1543,7 +1539,7 @@ class StreamCheckerService:
                         }
                         
                         # Calculate score using CURRENT profile weights
-                        score = self._calculate_stream_score(cached_analyzed, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
+                        score = self._calculate_stream_score(cached_analyzed, priority_m3u_ids, priority_mode, scoring_weights)
                         cached_analyzed['score'] = score
                         cached_analyzed_streams.append(cached_analyzed)
                     
@@ -1864,16 +1860,18 @@ class StreamCheckerService:
         priority_m3u_ids = []
         priority_mode = 'absolute'
         scoring_weights = None
-        
+        # Initialised here; built from the resolved profile below.
+        _threshold_config: Dict[str, Any] = {}
+
         try:
             from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
-            
+
             # Fetch channel data to get group_id (might be fetched already but just in case)
             udi = get_udi_manager()
             channel = udi.get_channel_by_id(channel_id)
             group_id = channel.get('channel_group_id') if channel else None
-            
+
             # If a profile was explicitly selected (via ProfilePickerDialog), use it
             # directly so all checking parameters (weights, limits, revive, loop detection)
             # reflect the user's intent rather than whichever period is currently active.
@@ -1909,7 +1907,11 @@ class StreamCheckerService:
                 )
                 # Clamp to valid range: -0.25 to 0.0
                 loop_penalty = max(-0.25, min(0.0, loop_penalty))
-                
+
+                # Build threshold config once from the resolved profile.
+                _threshold_config = self._build_threshold_config_from_profile(profile_stream_checking)
+                logger.debug(f"Threshold config for channel {channel_id}: {_threshold_config}")
+
                 # Also check if checking is enabled at all for this profile
                 if not profile_stream_checking.get('enabled', False):
                     logger.info(f"Stream checking disabled by profile for channel {channel_id}")
@@ -1921,6 +1923,7 @@ class StreamCheckerService:
                     }
         except Exception as e:
             logger.warning(f"Failed to load profile settings for channel {channel_id}: {e}")
+            _threshold_config = {}
         
         try:
             # Get channel information from UDI
@@ -2127,8 +2130,8 @@ class StreamCheckerService:
                 # Update stream stats on dispatcharr with ffmpeg-extracted data
                 self._update_stream_stats(analyzed)
                 
-                # Check if stream is dead (resolution=0 or bitrate=0)
-                is_dead = self._is_stream_dead(analyzed, channel_id)
+                # Check if stream is dead using pre-resolved threshold config
+                is_dead = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                 stream_url = stream.get('url', '')
                 stream_name = stream.get('name', 'Unknown')
                 was_dead = self.dead_streams_tracker.is_dead(stream_url)
@@ -2154,7 +2157,7 @@ class StreamCheckerService:
                     dead_stream_ids.add(stream['id'])
                 
                 # Calculate score
-                score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
+                score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
                 analyzed['score'] = score
                 analyzed_streams.append(analyzed)
                 
@@ -2210,10 +2213,10 @@ class StreamCheckerService:
                         'status': 'OK'  # Assume OK for previously checked streams
                     }
                     
-                    # Check if this cached stream is dead and handle state transitions
+                    # Check if this cached stream is dead using pre-resolved threshold config
                     stream_url = stream.get('url', '')
                     stream_name = stream.get('name', 'Unknown')
-                    is_dead = self._is_stream_dead(analyzed, channel_id)
+                    is_dead = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                     was_dead = self.dead_streams_tracker.is_dead(stream_url)
                     
                     # Handle dead/alive state transitions (same logic as newly-checked streams)
@@ -2240,7 +2243,7 @@ class StreamCheckerService:
                         dead_stream_ids.add(stream['id'])
                     
                     # Calculate score using stored stats and CURRENT profile weights
-                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights, channel_id=channel_id)
+                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
                     analyzed['score'] = score
                     analyzed_streams.append(analyzed)
                     logger.debug(f"Using cached data for stream {stream['id']}: {stream.get('name')} - Score: {score:.2f}")
@@ -2266,8 +2269,7 @@ class StreamCheckerService:
                         stream_startup_buffer=analysis_params.get('stream_startup_buffer', 10)
                     )
                     self._update_stream_stats(analyzed)
-                    # TODO: scoring_weights missing here — rare fallback path when UDI fetch fails; deferred fix
-                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, channel_id=channel_id)
+                    score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode)
                     analyzed['score'] = score
                     analyzed_streams.append(analyzed)
 
@@ -2786,7 +2788,7 @@ class StreamCheckerService:
             if penalised:
                 logger.info(f"[loop-probe] Score penalty applied to {penalised} looping stream(s)")
 
-    def _calculate_stream_score(self, stream_data: Dict, priority_m3u_ids: List[int] = None, priority_mode: str = 'absolute', scoring_weights: Dict = None, channel_id: int = None) -> float:
+    def _calculate_stream_score(self, stream_data: Dict, priority_m3u_ids: List[int] = None, priority_mode: str = 'absolute', scoring_weights: Dict = None) -> float:
         """Calculate a quality score for a stream based on analysis.
         
         Applies M3U account priority matching the order in the channel's Automation Profile.
@@ -2798,8 +2800,7 @@ class StreamCheckerService:
             scoring_weights: Optional per-profile scoring weights. Falls back to global config if not provided.
         """
         # Dead streams always get a score of 0
-        # channel_id enables profile-aware threshold checks (min_bitrate, min_resolution, min_fps)
-        if self._is_stream_dead(stream_data, channel_id=channel_id):
+        if self._is_stream_dead(stream_data):
             return 0.0
         
         # Use per-profile weights if provided, otherwise fall back to global config
