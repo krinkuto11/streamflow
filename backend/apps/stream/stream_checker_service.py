@@ -1356,7 +1356,7 @@ class StreamCheckerService:
                         stream_statuses[stream_id]['status'] = 'error'
                         stream_statuses[stream_id]['score'] = 0.0
                     elif is_dead:
-                        stream_statuses[stream_id]['status'] = 'dead'
+                        stream_statuses[stream_id]['status'] = _dead_reason if _dead_reason == 'low_quality' else 'dead'
                         stream_statuses[stream_id]['score'] = 0.0
                     else:
                         stream_statuses[stream_id]['status'] = 'completed'
@@ -2157,7 +2157,7 @@ class StreamCheckerService:
                         stream_statuses[stream['id']]['status'] = 'error'
                         stream_statuses[stream['id']]['score'] = 0.0
                     elif is_dead:
-                        stream_statuses[stream['id']]['status'] = 'dead'
+                        stream_statuses[stream['id']]['status'] = dead_reason if dead_reason == 'low_quality' else 'dead'
                         stream_statuses[stream['id']]['score'] = 0.0
                     else:
                         stream_statuses[stream['id']]['status'] = 'completed'
