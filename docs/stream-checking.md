@@ -47,7 +47,6 @@ Before scoring, streams can be discarded based on minimum thresholds (set in `st
 | `min_resolution` | Skip streams below this resolution                          |
 | `min_fps`        | Skip streams below this FPS                                 |
 | `min_bitrate`    | Skip streams below this bitrate (kbps)                      |
-| `require_hdr`    | `"hdr"` = HDR only, `"sdr"` = SDR only, `"any"` = no filter |
 
 ---
 
