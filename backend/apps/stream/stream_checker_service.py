@@ -477,7 +477,7 @@ class StreamCheckerService:
 
         return config
 
-    def _is_stream_dead(self, stream_data: Dict[str, Any], channel_id: Optional[int] = None, threshold_config: Optional[Dict[str, Any]] = None) -> bool:
+    def _is_stream_dead(self, stream_data: Dict[str, Any], channel_id: Optional[int] = None, threshold_config: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """
         Check if a stream should be considered dead based on profile or global settings.
 
@@ -494,7 +494,8 @@ class StreamCheckerService:
                               This ensures forced_profile_id selections are honoured.
 
         Returns:
-            bool: True if the stream is considered dead, False otherwise.
+            Tuple of (is_dead: bool, reason: str).
+            reason values: 'offline', 'low_quality', 'unstable', 'none'.
         """
         # Default configuration
         dead_stream_config = self.config.get('dead_stream_handling', {})
@@ -565,18 +566,7 @@ class StreamCheckerService:
         
         # Use centralized utility for the check
         is_dead, reason = utils_is_stream_dead(stream_data, check_config)
-        
-        if is_dead:
-            # Mark in dead streams tracker with categorization
-            stream_url = stream_data.get('url')
-            if stream_url:
-                stream_id = stream_data.get('id') or stream_data.get('stream_id')
-                stream_name = stream_data.get('name') or stream_data.get('stream_name', 'Unknown')
-                # Use passed channel_id if available, otherwise from stream_data
-                effective_channel_id = channel_id if channel_id is not None else stream_data.get('channel_id')
-                self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, effective_channel_id, reason=reason)
-        
-        return is_dead
+        return is_dead, reason
     
     def _calculate_channel_averages(self, analyzed_streams: List[Dict], dead_stream_ids: set) -> Dict[str, str]:
         """Calculate channel-level average statistics from analyzed streams.
@@ -1359,7 +1349,7 @@ class StreamCheckerService:
                 temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights)
                 
                 # Update stream status based on result
-                is_dead = self._is_stream_dead(result, channel_id, threshold_config=_threshold_config)
+                is_dead, _dead_reason = self._is_stream_dead(result, channel_id, threshold_config=_threshold_config)
                 
                 if stream_id in stream_statuses:
                     if result.get('status') == 'ERROR':
@@ -1467,16 +1457,16 @@ class StreamCheckerService:
                     
                     # Check if stream is dead using pre-resolved threshold config
                     # so forced_profile_id selections are honoured.
-                    is_dead = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
+                    is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                     stream_id = analyzed.get('stream_id')
                     stream_url = analyzed.get('stream_url', '')
                     stream_name = analyzed.get('stream_name', 'Unknown')
                     was_dead = self.dead_streams_tracker.is_dead(stream_url)
                     
                     if is_dead and not was_dead:
-                        if self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, channel_id):
+                        if self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, channel_id, reason=dead_reason):
                             dead_stream_ids.add(stream_id)
-                            logger.warning(f"Stream {stream_id} detected as DEAD: {stream_name}")
+                            logger.warning(f"Stream {stream_id} detected as DEAD: {stream_name} (reason={dead_reason})")
                         else:
                             logger.error(f"Failed to mark stream {stream_id} as dead in tracker")
                     elif not is_dead and was_dead:
@@ -2131,16 +2121,16 @@ class StreamCheckerService:
                 self._update_stream_stats(analyzed)
                 
                 # Check if stream is dead using pre-resolved threshold config
-                is_dead = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
+                is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                 stream_url = stream.get('url', '')
                 stream_name = stream.get('name', 'Unknown')
                 was_dead = self.dead_streams_tracker.is_dead(stream_url)
                 
                 if is_dead and not was_dead:
                     # Mark as dead in tracker
-                    if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id):
+                    if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id, reason=dead_reason):
                         dead_stream_ids.add(stream['id'])
-                        logger.warning(f"Stream {stream['id']} detected as DEAD: {stream_name}")
+                        logger.warning(f"Stream {stream['id']} detected as DEAD: {stream_name} (reason={dead_reason})")
                     else:
                         logger.error(f"Failed to mark stream {stream['id']} as DEAD, will not remove from channel")
                 elif not is_dead and was_dead:
@@ -2216,15 +2206,15 @@ class StreamCheckerService:
                     # Check if this cached stream is dead using pre-resolved threshold config
                     stream_url = stream.get('url', '')
                     stream_name = stream.get('name', 'Unknown')
-                    is_dead = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
+                    is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                     was_dead = self.dead_streams_tracker.is_dead(stream_url)
                     
                     # Handle dead/alive state transitions (same logic as newly-checked streams)
                     if is_dead and not was_dead:
                         # Newly detected as dead
-                        if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id):
+                        if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id, reason=dead_reason):
                             dead_stream_ids.add(stream['id'])
-                            logger.warning(f"Cached stream {stream['id']} detected as DEAD: {stream_name}")
+                            logger.warning(f"Cached stream {stream['id']} detected as DEAD: {stream_name} (reason={dead_reason})")
                         else:
                             logger.error(f"Failed to mark cached stream {stream['id']} as DEAD, will not remove from channel")
                     elif not is_dead and was_dead:
@@ -2800,7 +2790,8 @@ class StreamCheckerService:
             scoring_weights: Optional per-profile scoring weights. Falls back to global config if not provided.
         """
         # Dead streams always get a score of 0
-        if self._is_stream_dead(stream_data):
+        _dead, _ = self._is_stream_dead(stream_data)
+        if _dead:
             return 0.0
         
         # Use per-profile weights if provided, otherwise fall back to global config
