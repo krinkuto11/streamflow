@@ -123,14 +123,38 @@ class DeadStreamsTracker:
             return 0
     
     def cleanup_removed_streams(self, current_stream_urls: set) -> int:
+        """Remove tracker entries for streams no longer in the provider's playlist.
+
+        Only 'offline' and 'unstable' entries are eligible for cleanup.
+        'low_quality' streams are intentionally absent from the channel because
+        they were culled by the profile's quality thresholds — the URL still
+        exists in the M3U source.  Clearing their tracker entry would cause the
+        channel to appear empty on the next run: the checker removes them from
+        the channel, then cleanup_removed_streams clears the tracker, then the
+        next run sees no streams to check.
+        """
         removed_count = 0
+        skipped_low_quality = 0
         try:
             dead_streams = self.get_dead_streams()
             for url, stream_info in dead_streams.items():
                 if url not in current_stream_urls:
+                    reason = stream_info.get('reason', 'unknown')
+                    if reason == 'low_quality':
+                        # Stream was removed by the checker for failing quality
+                        # thresholds, not because the provider dropped it.
+                        # Keep the tracker entry so subsequent runs know to
+                        # continue excluding it without re-checking.
+                        skipped_low_quality += 1
+                        continue
                     self.db.remove_dead_stream(url)
                     removed_count += 1
                     logger.info(f"🗑️ Removed dead stream (no longer in playlist): {stream_info.get('stream_name', 'Unknown')} (URL: {url})")
+            if skipped_low_quality:
+                logger.debug(
+                    f"Skipped cleanup of {skipped_low_quality} low_quality stream(s) "
+                    f"— still present in M3U source, excluded from channel by quality threshold"
+                )
             return removed_count
         except Exception as e:
             logger.error(f"❌ Error cleaning up removed streams: {e}")
