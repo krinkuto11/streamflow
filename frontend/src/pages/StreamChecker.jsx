@@ -393,8 +393,8 @@ export default function StreamChecker() {
               // normal analysis phase floats completed streams to top by score.
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
-                ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, dead: 5 }
-                : { completed: 0, checking: 1, pending: 2, error: 3, dead: 3, low_quality: 3 }
+                ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, low_quality: 6, dead: 7 }
+                : { completed: 0, checking: 1, pending: 2, error: 3, low_quality: 4, dead: 5 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
