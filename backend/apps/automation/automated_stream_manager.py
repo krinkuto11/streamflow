@@ -1127,16 +1127,12 @@ class AutomatedStreamManager:
         # This is cleared after each cycle completes
         self._m3u_accounts_cache = None
         
-        # Cache for dead stream removal setting to avoid repeated file I/O
-        self._dead_stream_removal_enabled_cache = None
-        
         # Background thread management
         self.automation_thread = None
         self.automation_running = False
         self.automation_wake_event = threading.Event()
         self.force_next_run = False
         self.forced_period_id = None
-        self._dead_stream_removal_cache_time = None
         
         # Lock to prevent concurrent execution of heavy batch processes
         self._lock = threading.Lock()
@@ -1299,33 +1295,22 @@ class AutomatedStreamManager:
     
     def _is_dead_stream_removal_enabled(self) -> bool:
         """Check if dead stream removal is enabled in stream checker config.
-        
-        Uses a 60-second cache to avoid repeated DB queries.
-        
+
+        Reads directly from the database on every call. The cache that previously
+        guarded this read has been removed — the method is called at most once per
+        automation cycle (not in a tight loop), so the DB round-trip is negligible.
+        Removing the 60-second TTL cache eliminates a stale-value window during
+        which a user's toggle change was silently ignored.
+
         Returns:
             True if dead stream removal is enabled, False otherwise
         """
-        import time
-        current_time = time.time()
-        
-        # Check if cache is still valid (60 seconds)
-        if (self._dead_stream_removal_cache_time is not None and 
-            current_time - self._dead_stream_removal_cache_time < 60 and
-            self._dead_stream_removal_enabled_cache is not None):
-            return self._dead_stream_removal_enabled_cache
-        
         try:
             from apps.database.manager import get_db_manager
             config = get_db_manager().get_system_setting('stream_checker_config', {})
             if config:
-                enabled = config.get('dead_stream_handling', {}).get('enabled', True)
-            else:
-                enabled = True
-            
-            # Update cache
-            self._dead_stream_removal_enabled_cache = enabled
-            self._dead_stream_removal_cache_time = current_time
-            return enabled
+                return config.get('dead_stream_handling', {}).get('enabled', True)
+            return True
         except Exception as e:
             logger.error(f"Error reading stream checker config from DB: {e}")
             return True
@@ -1367,11 +1352,6 @@ class AutomatedStreamManager:
                     return False, []
             
             logger.info("Starting M3U playlist refresh...")
-            
-            # Get streams before refresh
-            from apps.core.api_utils import get_streams
-            streams_before = get_streams(log_result=False) if self.config.get("enabled_features", {}).get("changelog_tracking", True) else []
-            before_stream_ids = {s.get('id'): s.get('name', '') for s in streams_before if isinstance(s, dict) and s.get('id')}
             
             # Get all M3U accounts
             all_accounts = get_m3u_accounts()
@@ -1439,10 +1419,11 @@ class AutomatedStreamManager:
                 logger.error("Playlist refresh encountered one or more failed account refreshes")
                 return False, refreshed_accounts
             
-            # NOTE: UDI refresh is intentionally decoupled from playlist refresh.
-            # Automation cycles perform a single dedicated UDI refresh step to avoid
-            # duplicate refreshes when playlist updates are part of the cycle.
-            
+            # NOTE: UDI refresh, changelog write, and dead stream cleanup are
+            # intentionally NOT performed here. run_automation_cycle() owns all
+            # three after refresh_playlists() returns, using a UDI sync to ensure
+            # accurate data. Doing them here would use a stale pre-fetch cache.
+
             # Trigger EPG matching to pick up any EPG/tvg-id changes made in Dispatcharr
             # This ensures that if a channel's EPG assignment was changed in Dispatcharr,
             # the new program data will be available in StreamFlow
@@ -1456,50 +1437,14 @@ class AutomatedStreamManager:
             except Exception as e:
                 logger.error(f"Error triggering rule matching after playlist update: {e}")
                 # Continue even if EPG refresh fails
-            
-            # Get streams after refresh - log this one since it shows the final result
-            streams_after = get_streams(log_result=True) if self.config.get("enabled_features", {}).get("changelog_tracking", True) else []
-            after_stream_ids = {s.get('id'): s.get('name', '') for s in streams_after if isinstance(s, dict) and s.get('id')}
-            
+
             self.last_playlist_update = datetime.now()
-            
-            # Calculate differences
-            added_stream_ids = set(after_stream_ids.keys()) - set(before_stream_ids.keys())
-            removed_stream_ids = set(before_stream_ids.keys()) - set(after_stream_ids.keys())
-            
-            added_streams = [{"id": sid, "name": after_stream_ids[sid]} for sid in added_stream_ids]
-            removed_streams = [{"id": sid, "name": before_stream_ids[sid]} for sid in removed_stream_ids]
-            
-            
-            if not skip_changelog and self.config.get("enabled_features", {}).get("changelog_tracking", True):
-                self.changelog.add_entry("playlist_refresh", {
-                    "success": True,
-                    "timestamp": self.last_playlist_update.isoformat(),
-                    "total_streams": len(after_stream_ids),
-                    "added_streams": added_streams[:50],  # Limit to first 50 for changelog size
-                    "removed_streams": removed_streams[:50],  # Limit to first 50 for changelog size
-                    "added_count": len(added_streams),
-                    "removed_count": len(removed_streams)
-                })
-            
-            logger.info(f"M3U playlist refresh completed successfully. Added: {len(added_streams)}, Removed: {len(removed_streams)}")
-            
-            # Clean up dead streams that are no longer in the playlist
-            if self.dead_streams_tracker:
-                try:
-                    current_stream_urls = {s.get('url', '') for s in streams_after if isinstance(s, dict) and s.get('url')}
-                    # Remove empty URLs from the set
-                    current_stream_urls.discard('')
-                    cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls)
-                    if cleaned_count > 0:
-                        logger.info(f"Dead streams cleanup: removed {cleaned_count} stream(s) no longer in playlist")
-                except Exception as cleanup_error:
-                    logger.error(f"Error during dead streams cleanup: {cleanup_error}")
-            
+            logger.info("M3U playlist refresh completed successfully")
+
             # Note: Channel marking for stream quality checking is handled in discover_and_assign_streams()
             # after streams are actually assigned to specific channels. This prevents marking all channels
             # when we only know that *some* streams changed in the playlist, not which channels are affected.
-            
+
             return True, refreshed_accounts
             
         except Exception as e:
@@ -1809,18 +1754,27 @@ class AutomatedStreamManager:
                 
         return results
 
-    def discover_and_assign_streams(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None) -> Dict[str, int]:
-        """Wrapper for stream discovery to ensure single execution."""
+    def discover_and_assign_streams(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None, allow_dead_streams: Optional[bool] = None) -> Dict[str, int]:
+        """Wrapper for stream discovery to ensure single execution.
+
+        Args:
+            allow_dead_streams: When provided, overrides the global dead_stream_handling
+                config for this call. Used by check_single_channel to pass the
+                profile-resolved flag so the matching step respects the same policy
+                as the checking step (Bug 3 fix). When None (default), falls back to
+                _is_dead_stream_removal_enabled() so the global automation path is
+                unaffected.
+        """
         if not self._lock.acquire(blocking=False):
             logger.warning("Stream discovery already active - skipping concurrent request")
             return {}
         
         try:
-            return self._discover_and_assign_streams_impl(force, skip_check_trigger, forced_period_id, skip_changelog, channel_id)
+            return self._discover_and_assign_streams_impl(force, skip_check_trigger, forced_period_id, skip_changelog, channel_id, allow_dead_streams=allow_dead_streams)
         finally:
             self._lock.release()
 
-    def _discover_and_assign_streams_impl(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None) -> Dict[str, int]:
+    def _discover_and_assign_streams_impl(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None, allow_dead_streams: Optional[bool] = None) -> Dict[str, int]:
         """Discover new streams and assign them to channels based on regex patterns.
         
         Args:
@@ -1835,6 +1789,9 @@ class AutomatedStreamManager:
                         (same boundary as full discovery) so that streams from new or
                         previously-unassigned providers are still considered.
                         All other callers pass None (default) for full discovery.
+            allow_dead_streams: When provided by the caller (e.g. check_single_channel),
+                        overrides the global dead_stream_handling config for this run.
+                        When None, falls back to _is_dead_stream_removal_enabled().
         """
         if not force and not self.config.get("enabled_features", {}).get("auto_stream_discovery", True):
             logger.info("Stream discovery is disabled in configuration")
@@ -2013,6 +1970,56 @@ class AutomatedStreamManager:
                 if profile and profile.get('stream_checking', {}).get('allow_revive', False):
                     channel_to_revive_enabled[str(channel_id)] = True
 
+            # Collect channels excluded from matching but eligible for quality checking.
+            #
+            # These are channels whose profile has stream_matching.enabled = False but
+            # stream_checking.enabled = True — "checking-only" profiles. Without this
+            # collection they would silently drop out of the cycle because
+            # mark_channels_updated() below only fires for channels that received new
+            # stream assignments through the matching pass.
+            #
+            # We collect them here (before all_channels is replaced) so we can mark
+            # them for the checker after the matching pass completes. They are NOT
+            # added to the matching pass — that would be incorrect.
+            checking_only_channel_ids = []
+            for _ch in all_channels:
+                _ch_id = _ch.get('id')
+                if _ch_id in matching_enabled_channel_ids:
+                    continue  # already handled by matching path
+
+                # Resolve effective profile for this channel (respects forced_period_id)
+                _group_id = (
+                    _ch.get('group_id')
+                    if _ch.get('group_id') is not None
+                    else _ch.get('channel_group_id')
+                )
+                _config = automation_config.get_effective_configuration(_ch_id, _group_id)
+                if not _config:
+                    continue
+
+                # Honour forced_period_id — only include channels that belong to that period
+                if forced_period_id:
+                    _periods = _config.get('periods', [])
+                    _selected = next(
+                        (p for p in _periods if p.get('id') == forced_period_id),
+                        None,
+                    )
+                    if not _selected:
+                        continue
+                    _period_profile = _selected.get('profile')
+                else:
+                    _period_profile = _config.get('profile')
+
+                if _period_profile and _period_profile.get('stream_checking', {}).get('enabled', False):
+                    checking_only_channel_ids.append(_ch_id)
+
+            if checking_only_channel_ids:
+                logger.info(
+                    f"Found {len(checking_only_channel_ids)} checking-only channel(s) "
+                    "(matching disabled, checking enabled) — will queue for checker "
+                    "after matching pass."
+                )
+
             # Filter channels to only those with matching enabled
             filtered_channels = [ch for ch in all_channels if ch.get('id') in matching_enabled_channel_ids]
             
@@ -2113,8 +2120,14 @@ class AutomatedStreamManager:
             
             logger.info(f"Processing {total_streams} streams for pattern matching (Parallel, {max_workers} workers, {batch_size} streams per batch)...")
             
-            # Get dead stream removal config once
-            dead_stream_removal_enabled = self._is_dead_stream_removal_enabled()
+            # Resolve dead stream removal setting.
+            # When the caller provides allow_dead_streams explicitly (e.g. check_single_channel
+            # passing the profile-resolved value), honour it directly.
+            # Otherwise fall back to the global StreamCheckConfig setting.
+            if allow_dead_streams is not None:
+                dead_stream_removal_enabled = not allow_dead_streams
+            else:
+                dead_stream_removal_enabled = self._is_dead_stream_removal_enabled()
             
             # Create batches
             batches = [all_streams[i:i + batch_size] for i in range(0, total_streams, batch_size)]
@@ -2167,8 +2180,8 @@ class AutomatedStreamManager:
             # Prepare detailed changelog data
             detailed_assignments = []
             
-            # Get dead stream removal config once for this discovery run
-            dead_stream_removal_enabled = self._is_dead_stream_removal_enabled()
+            # dead_stream_removal_enabled was already resolved above; reuse it here.
+            # (allow_dead_streams caller override is already reflected in the variable.)
             
             # Assign streams to channels
             for channel_id, stream_ids in assignments.items():
@@ -2306,6 +2319,45 @@ class AutomatedStreamManager:
                             logger.debug(f"Stream checker not available or error marking channels: {sc_error}")
                 except Exception as mark_error:
                     logger.debug(f"Could not mark channels for stream checking after discovery: {mark_error}")
+            
+            # Mark checking-only channels for quality checking.
+            #
+            # These channels had stream_matching.enabled = False so they were excluded
+            # from the matching pass and never received a mark_channels_updated() call.
+            # Without this block they are silently skipped by the checker every cycle.
+            # The existing get_and_clear_channels_needing_check() already filters by
+            # stream_checking.enabled so no duplicate guard is needed here.
+            if checking_only_channel_ids:
+                try:
+                    from apps.stream.stream_checker_service import get_stream_checker_service
+                    _co_checker = get_stream_checker_service()
+                    _co_stream_counts = {}
+                    for _co_id in checking_only_channel_ids:
+                        _co_ch = udi.get_channel_by_id(_co_id)
+                        if _co_ch:
+                            _co_streams = _co_ch.get('streams', [])
+                            _co_stream_counts[_co_id] = (
+                                len(_co_streams) if isinstance(_co_streams, list) else 0
+                            )
+                    _co_checker.update_tracker.mark_channels_updated(
+                        checking_only_channel_ids,
+                        stream_counts=_co_stream_counts,
+                    )
+                    logger.info(
+                        f"Marked {len(checking_only_channel_ids)} checking-only "
+                        "channel(s) for quality checking"
+                    )
+                    if not skip_check_trigger:
+                        _co_checker.trigger_check_updated_channels()
+                    else:
+                        logger.debug(
+                            "Skipping check trigger for checking-only channels "
+                            "(will be handled by caller)"
+                        )
+                except Exception as _co_err:
+                    logger.debug(
+                        f"Could not mark checking-only channels for quality checking: {_co_err}"
+                    )
             
             return {
                 "assignment_count": assignment_count,
@@ -2629,11 +2681,17 @@ class AutomatedStreamManager:
         return False
 
     def _refresh_udi_cache_for_automation_cycle(self) -> bool:
-        """Refresh all UDI entities once per automation cycle.
+        """Refresh all UDI entities after an automation cycle completes.
 
-        This is intentionally separate from playlist refresh calls so that:
-        - Automation cycles always refresh UDI even without M3U updates.
-        - Cycles with M3U updates still perform only one UDI refresh.
+        Called in a background daemon thread from the finally block of
+        run_automation_cycle(). Pulls all writes made during the cycle
+        (stream assignments, quality scores, stream ordering) back into
+        the local cache so the next cycle or single-channel check starts
+        from an accurate baseline.
+
+        This is intentionally post-cycle rather than pre-cycle so that
+        the cycle itself operates entirely on the existing cache state —
+        fast and deterministic regardless of UDI sync timing.
         """
         try:
             logger.info("Refreshing UDI cache for automation cycle...")
@@ -2775,6 +2833,7 @@ class AutomatedStreamManager:
             
             channels_with_periods = sum(len(p['channels']) for p in active_periods.values())
             logger.info(f"Processing {channels_with_periods} channel assignments across {len(active_periods)} active period(s)")
+            logger.info(f"UDI cache {udi.get_cache_age_description()}")
             
             # Determine playlists to update
             playlists_to_update = set()
@@ -2818,12 +2877,35 @@ class AutomatedStreamManager:
             
             start_time = datetime.now()
 
-            try:
-                pre_refresh_stream_count = len(get_streams(log_result=False) or [])
-            except Exception as e:
-                logger.warning(f"Could not read pre-refresh stream pool size: {e}")
-                pre_refresh_stream_count = 0
-            
+            # Determine whether a provider playlist refresh will occur this cycle.
+            # Pre/post stream counts and the safety gate are only meaningful when
+            # playlists are actually refreshed — skip all three when they are not.
+            playlists_refreshed = bool(update_all_playlists or playlists_to_update)
+
+            if playlists_refreshed:
+                try:
+                    pre_refresh_stream_count = len(get_streams(log_result=False) or [])
+                except Exception as e:
+                    logger.warning(f"Could not read pre-refresh stream pool size: {e}")
+                    pre_refresh_stream_count = 0
+
+                # Capture stream list before provider fetch for changelog delta.
+                # Must be done here (in run_automation_cycle) not inside refresh_playlists()
+                # because refresh_playlists() no longer owns the changelog write.
+                changelog_tracking_pre = self.config.get("enabled_features", {}).get("changelog_tracking", True)
+                try:
+                    streams_before = get_streams(log_result=False) if changelog_tracking_pre else []
+                    before_stream_ids = {
+                        s.get('id'): s.get('name', '')
+                        for s in streams_before
+                        if isinstance(s, dict) and s.get('id')
+                    }
+                except Exception as _sb_err:
+                    logger.warning(f"Could not capture pre-refresh stream list: {_sb_err}")
+                    before_stream_ids = {}
+            else:
+                before_stream_ids = {}
+
             if update_all_playlists:
                 logger.info("Updating ALL playlists (requested by one or more profiles)")
                 refresh_success, refreshed_accounts = self.refresh_playlists(account_id=None, skip_changelog=True)
@@ -2837,39 +2919,117 @@ class AutomatedStreamManager:
                     if accs:
                         refreshed_accounts.extend(accs)
             else:
-                logger.info("No playlists to update based on active profile settings.")
+                logger.info(
+                    "No playlists to update based on active profile settings. "
+                    "Cycle will operate on current UDI cache."
+                )
                 self.last_playlist_update = datetime.now()
                 refresh_success = True
-            
+
             validation_details = []
             assignment_details = []
 
             # Deduplicate while preserving order (channels may appear in multiple active period groups).
             channels_to_quality_check = list(dict.fromkeys(channels_to_quality_check))
 
-            # Refresh UDI once per cycle, independent of playlist refresh selection.
-            # This keeps channel/stream/group/profile state current without coupling
-            # cache sync to the M3U refresh call path.
-            self._refresh_udi_cache_for_automation_cycle()
-
-            try:
-                post_refresh_stream_count = len(get_streams(log_result=False) or [])
-            except Exception as e:
-                logger.warning(f"Could not read post-refresh stream pool size: {e}")
-                post_refresh_stream_count = 0
-
-            playlists_refreshed = bool(update_all_playlists or playlists_to_update)
-
-            if refresh_success and self._should_abort_for_suspicious_stream_pool(
-                before_count=pre_refresh_stream_count,
-                after_count=post_refresh_stream_count,
-                playlists_refreshed=playlists_refreshed,
-            ):
-                logger.error(
-                    "Automation safety gate triggered. Skipping validation and assignment "
-                    "to preserve existing channel streams."
+            # When playlists were refreshed, sync the UDI cache from Dispatcharr's
+            # now-updated stream pool before running validation, assignment, or the
+            # safety gate. Without this sync:
+            #   - matching reads stale stream IDs → Invalid pk errors on write
+            #   - changelog delta is always zero (streams_after == streams_before)
+            #   - dead stream cleanup uses wrong URLs
+            #   - safety gate compares two reads of the same stale cache
+            #
+            # When no playlists were refreshed (m3u_update=False across all active
+            # profiles), the existing cache is used as-is. The background UDI sync
+            # in the finally block handles cache accuracy for the next cycle.
+            if playlists_refreshed and refresh_success:
+                logger.info(
+                    "Syncing UDI cache after provider refresh — "
+                    "matching and safety gate will use current stream IDs..."
                 )
-                refresh_success = False
+                try:
+                    _sync_udi = get_udi_manager()
+                    _sync_udi.refresh_streams()
+                    _sync_udi.refresh_channels()
+                    logger.info("✓ UDI cache synced after provider refresh")
+                except Exception as _sync_err:
+                    logger.warning(
+                        f"UDI sync after provider refresh failed: {_sync_err} — "
+                        "proceeding with potentially stale cache"
+                    )
+
+                # Capture streams_after from the now-current cache for changelog and cleanup
+                changelog_tracking = self.config.get("enabled_features", {}).get("changelog_tracking", True)
+                try:
+                    streams_after = get_streams(log_result=True) if changelog_tracking else []
+                    after_stream_ids = {
+                        s.get('id'): s.get('name', '')
+                        for s in streams_after
+                        if isinstance(s, dict) and s.get('id')
+                    }
+                except Exception as _sa_err:
+                    logger.warning(f"Could not capture post-refresh stream list: {_sa_err}")
+                    streams_after = []
+                    after_stream_ids = {}
+
+                # Changelog entry with accurate delta
+                if changelog_tracking:
+                    try:
+                        added_stream_ids = set(after_stream_ids.keys()) - set(before_stream_ids.keys())
+                        removed_stream_ids = set(before_stream_ids.keys()) - set(after_stream_ids.keys())
+                        added_streams = [{"id": sid, "name": after_stream_ids[sid]} for sid in added_stream_ids]
+                        removed_streams = [{"id": sid, "name": before_stream_ids.get(sid, '')} for sid in removed_stream_ids]
+                        self.changelog.add_entry("playlist_refresh", {
+                            "success": True,
+                            "timestamp": self.last_playlist_update.isoformat(),
+                            "total_streams": len(after_stream_ids),
+                            "added_streams": added_streams[:50],
+                            "removed_streams": removed_streams[:50],
+                            "added_count": len(added_streams),
+                            "removed_count": len(removed_streams),
+                        })
+                        logger.info(
+                            f"Playlist changelog: {len(added_streams)} added, "
+                            f"{len(removed_streams)} removed"
+                        )
+                    except Exception as _cl_err:
+                        logger.warning(f"Could not write playlist changelog entry: {_cl_err}")
+
+                # Dead stream cleanup using accurate current URLs
+                if self.dead_streams_tracker and streams_after:
+                    try:
+                        current_stream_urls = {
+                            s.get('url', '') for s in streams_after
+                            if isinstance(s, dict) and s.get('url')
+                        }
+                        current_stream_urls.discard('')
+                        cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls)
+                        if cleaned_count > 0:
+                            logger.info(
+                                f"Dead streams cleanup: removed {cleaned_count} "
+                                "stream(s) no longer in playlist"
+                            )
+                    except Exception as _ds_err:
+                        logger.warning(f"Dead stream cleanup failed: {_ds_err}")
+
+                # Safety gate — now reads the updated cache, making it meaningful
+                try:
+                    post_refresh_stream_count = len(get_streams(log_result=False) or [])
+                except Exception as e:
+                    logger.warning(f"Could not read post-refresh stream pool size: {e}")
+                    post_refresh_stream_count = 0
+
+                if refresh_success and self._should_abort_for_suspicious_stream_pool(
+                    before_count=pre_refresh_stream_count,
+                    after_count=post_refresh_stream_count,
+                    playlists_refreshed=playlists_refreshed,
+                ):
+                    logger.error(
+                        "Automation safety gate triggered. Skipping validation and assignment "
+                        "to preserve existing channel streams."
+                    )
+                    refresh_success = False
             
             if refresh_success:
                 # Optional post-refresh delay for environments where provider updates
@@ -3139,9 +3299,33 @@ class AutomatedStreamManager:
                 self._save_state()
             
             logger.info("Automation cycle completed")
-            
+            _cycle_did_work = True
+
         finally:
             self._m3u_accounts_cache = None
+
+            # Background UDI sync — pull all writes from this cycle back into cache.
+            # Only fires when the cycle actually completed matching/checking work.
+            # Skipped on early returns (disabled, no active periods, safety gate abort)
+            # and when UDI is not yet fully initialised (e.g. concurrent with startup).
+            if locals().get('_cycle_did_work') and get_udi_manager().is_network_ready():
+                def _background_cycle_udi_sync():
+                    try:
+                        _udi = get_udi_manager()
+                        _udi.refresh_m3u_accounts()
+                        _udi.refresh_streams()
+                        _udi.refresh_channels()
+                        _udi.refresh_channel_groups()
+                        _udi.refresh_channel_profiles()
+                        logger.debug("Background UDI sync completed after automation cycle")
+                    except Exception as _e:
+                        logger.warning(f"Background UDI sync failed after automation cycle: {_e}")
+
+                threading.Thread(
+                    target=_background_cycle_udi_sync,
+                    daemon=True,
+                    name="udi-sync-post-cycle",
+                ).start()
 
     def _filter_channels_by_profile(self, channels: List[Dict], operation: str = "") -> List[Dict]:
         """
@@ -3197,6 +3381,17 @@ class AutomatedStreamManager:
         logger.info("Automation background loop started")
         while self.automation_running:
             try:
+                # Do not run automation cycles before the startup network UDI refresh
+                # completes. is_initialized() alone is True from SQL storage load
+                # (potentially empty — zero streams, zero M3U accounts).
+                if not get_udi_manager().is_network_ready():
+                    logger.debug(
+                        "Automation loop waiting — UDI network refresh not yet complete"
+                    )
+                    self.automation_wake_event.wait(timeout=10)
+                    self.automation_wake_event.clear()
+                    continue
+
                 # Run automation cycle
                 # Pass forced period info to cycle
                 forced = self.force_next_run

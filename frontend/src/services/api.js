@@ -1,4 +1,3 @@
-
 import axios from 'axios';
 
 // Create axios instance with default config
@@ -121,6 +120,16 @@ export const channelsAPI = {
   getChannelStats: (channelId) => api.get(`/channels/${channelId}/stats`),
   getLogo: (logoId) => api.get(`/channels/logos/${logoId}`),
   getLogoCached: (logoId) => `/api/channels/logos/${logoId}/cache`,
+
+  // Alias used by RegexTableRow logo loading
+  getChannelLogo: (logoId) => api.get(`/channels/logos/${logoId}`),
+
+  /**
+   * Resolve the currently active automation profile and EPG override for a channel.
+   * Uses the same resolution hierarchy the stream checker uses.
+   * Lazy — intended for on-demand tooltip fetches.
+   */
+  getChannelActiveProfile: (channelId) => api.get(`/channels/${channelId}/active-profile`),
 };
 
 export const channelOrderAPI = {
@@ -184,7 +193,10 @@ export const streamCheckerAPI = {
   getProgress: () => api.get('/stream-checker/progress'),
   checkChannel: (channelId) => api.post('/stream-checker/check-channel', { channel_id: channelId }),
   // Use longer timeout for single channel check as it can take time
-  checkSingleChannel: (channelId) => api.post('/stream-checker/check-single-channel', { channel_id: channelId }, { timeout: 120000 }),
+  checkSingleChannel: (channelId, profileId = null) => api.post('/stream-checker/check-single-channel', {
+    channel_id: channelId,
+    ...(profileId ? { profile_id: profileId } : {}),
+  }, { timeout: 120000 }),
   markUpdated: (data) => api.post('/stream-checker/mark-updated', data),
   queueAllChannels: () => api.post('/stream-checker/queue-all'),
   triggerGlobalAction: () => api.post('/stream-checker/global-action'),
@@ -198,8 +210,6 @@ export const deadStreamsAPI = {
   /**
    * Fetch dead streams with SQL-native pagination, sorting, and optional search.
    *
-   * @param {number} [page=1]         - Page number (1-based).
-   * @param {number} [per_page=20]    - Items per page.
    * @param {Object} [options]
    * @param {number} [options.page=1]
    * @param {number} [options.per_page=20]
@@ -271,4 +281,28 @@ export const versionAPI = {
 
 export const environmentAPI = {
   getEnvironment: () => api.get('/environment'),
+};
+
+// ── These are imported by ChannelConfiguration.jsx but not captured in repomix.
+// ── Definitions inferred from usage patterns in ChannelConfiguration.jsx.
+// ── DO NOT REMOVE — removing these causes build errors.
+
+export const channelSettingsAPI = {
+  getAllSettings: () => api.get('/channel-settings'),
+  getSettings: (channelId) => api.get(`/channel-settings/${channelId}`),
+  updateSettings: (channelId, settings) => api.post(`/channel-settings/${channelId}`, settings),
+};
+
+export const groupSettingsAPI = {
+  getAllSettings: () => api.get('/group-settings'),
+  getSettings: (groupId) => api.get(`/group-settings/${groupId}`),
+  updateSettings: (groupId, settings) => api.post(`/group-settings/${groupId}`, settings),
+  bulkDisableMatching: () => api.post('/group-settings/bulk-disable-matching'),
+  bulkDisableChecking: () => api.post('/group-settings/bulk-disable-checking'),
+};
+
+export const profileAPI = {
+  getConfig: () => api.get('/profile-config'),
+  getProfileChannels: (profileId, includeSnapshot = false) =>
+    api.get(`/channels/profiles/${profileId}`, { params: { include_snapshot: includeSnapshot } }),
 };

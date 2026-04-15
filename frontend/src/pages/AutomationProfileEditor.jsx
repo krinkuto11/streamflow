@@ -509,20 +509,6 @@ export default function AutomationProfileEditor() {
                                                             onChange={(e) => updateProfile('stream_checking.min_bitrate', parseInt(e.target.value) || 0)}
                                                         />
                                                     </div>
-                                                    <div className="space-y-2">
-                                                        <Label className="text-xs">Minimum HDR Format</Label>
-                                                        <Select
-                                                            value={profile.stream_checking.require_hdr || 'any'}
-                                                            onValueChange={(val) => updateProfile('stream_checking.require_hdr', val)}
-                                                        >
-                                                            <SelectTrigger><SelectValue /></SelectTrigger>
-                                                            <SelectContent>
-                                                                <SelectItem value="any">Any</SelectItem>
-                                                                <SelectItem value="hdr10">HDR10</SelectItem>
-                                                                <SelectItem value="hdr10+">HDR10+ Only</SelectItem>
-                                                            </SelectContent>
-                                                        </Select>
-                                                    </div>
                                                 </div>
                                             </div>
                                         </div>
@@ -538,9 +524,10 @@ export default function AutomationProfileEditor() {
                                                 >
                                                     <SelectTrigger><SelectValue /></SelectTrigger>
                                                     <SelectContent>
-                                                        <SelectItem value="absolute">Absolute (Priority &gt; Quality)</SelectItem>
-                                                        <SelectItem value="same_resolution">Same Resolution (Quality &gt; Priority)</SelectItem>
-                                                        <SelectItem value="equal">Equal (Fallback Only)</SelectItem>
+                                                        <SelectItem value="absolute">Playlist Priority → Resolution → Score</SelectItem>
+                                                        <SelectItem value="same_resolution">Resolution → Playlist Priority → Score</SelectItem>
+                                                        <SelectItem value="equal">Resolution → Score</SelectItem>
+                                                        <SelectItem value="quality">Score Only</SelectItem>
                                                     </SelectContent>
                                                 </Select>
                                             </div>
@@ -562,7 +549,7 @@ export default function AutomationProfileEditor() {
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === 0 || profile.stream_checking.m3u_priority_mode === 'equal'}
+                                                                            disabled={idx === 0}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]
@@ -577,7 +564,7 @@ export default function AutomationProfileEditor() {
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === sortedIds.length - 1 || profile.stream_checking.m3u_priority_mode === 'equal'}
+                                                                            disabled={idx === sortedIds.length - 1}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]

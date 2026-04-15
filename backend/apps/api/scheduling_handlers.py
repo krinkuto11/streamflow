@@ -470,3 +470,134 @@ def trigger_epg_refresh_response(*, epg_refresh_wake: Any, epg_refresh_running: 
     except Exception as exc:
         logger.error(f"Error triggering EPG refresh: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500
+
+
+# ── UDI Refresh Processor handlers ──────────────────────────────────────────
+# Mirror the EPG refresh handler pattern exactly.
+
+def get_udi_refresh_processor_status_response(*, udi_refresh_thread: Any, udi_refresh_running: bool):
+    """Handle retrieval of UDI refresh processor status."""
+    try:
+        thread_alive = (
+            udi_refresh_thread is not None
+            and hasattr(udi_refresh_thread, "is_alive")
+            and udi_refresh_thread.is_alive()
+        )
+        is_running = thread_alive and udi_refresh_running
+        return jsonify({"running": is_running, "thread_alive": thread_alive}), 200
+    except Exception as exc:
+        logger.error(f"Error getting UDI refresh processor status: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def start_udi_refresh_processor_api_response(*, start_udi_refresh_processor: Callable[[], Any]):
+    """Handle start request for UDI refresh processor."""
+    try:
+        success = start_udi_refresh_processor()
+        if success:
+            return jsonify({"message": "UDI refresh processor started"}), 200
+        return jsonify({"message": "UDI refresh processor is already running"}), 200
+    except Exception as exc:
+        logger.error(f"Error starting UDI refresh processor: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def stop_udi_refresh_processor_api_response(*, stop_udi_refresh_processor: Callable[[], Any]):
+    """Handle stop request for UDI refresh processor."""
+    try:
+        success = stop_udi_refresh_processor()
+        if success:
+            return jsonify({"message": "UDI refresh processor stopped"}), 200
+        return jsonify({"message": "UDI refresh processor is not running"}), 200
+    except Exception as exc:
+        logger.error(f"Error stopping UDI refresh processor: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def trigger_udi_refresh_response(*, udi_refresh_wake: Any, udi_refresh_running: bool, udi_refresh_thread: Any):
+    """Handle manual UDI refresh trigger request."""
+    try:
+        if (
+            udi_refresh_wake is not None
+            and hasattr(udi_refresh_wake, "set")
+            and udi_refresh_running
+            and udi_refresh_thread is not None
+            and hasattr(udi_refresh_thread, "is_alive")
+            and udi_refresh_thread.is_alive()
+        ):
+            udi_refresh_wake.set()
+            return jsonify({"message": "UDI refresh triggered"}), 200
+
+        return jsonify({"error": "UDI refresh processor is not running"}), 400
+    except Exception as exc:
+        logger.error(f"Error triggering UDI refresh: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def get_udi_refresh_schedule_response(*, get_scheduling_service: Callable[[], Any]):
+    """Handle retrieval of the UDI refresh schedule."""
+    try:
+        service = get_scheduling_service()
+        schedule = service.get_udi_refresh_schedule()
+        return jsonify({"udi_refresh_schedule": schedule}), 200
+    except Exception as exc:
+        logger.error(f"Error getting UDI refresh schedule: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def update_udi_refresh_schedule_response(*, payload: Any, get_scheduling_service: Callable[[], Any]):
+    """Handle update of the UDI refresh schedule.
+
+    Payload: {"schedule": {"type": "interval", "value": 120}}
+             {"schedule": {"type": "cron", "value": "45 4,6,8,10 * * *"}}
+             {"schedule": null}  — clears the schedule (worker goes dormant)
+    """
+    try:
+        data = payload or {}
+        schedule = data.get("schedule")  # None = clear schedule
+
+        if schedule is not None:
+            # Validate structure
+            stype = schedule.get("type")
+            svalue = schedule.get("value")
+            if stype not in ("interval", "cron"):
+                return error_response(
+                    "schedule.type must be 'interval' or 'cron'",
+                    status_code=400, code="validation_error"
+                )
+            if stype == "interval":
+                try:
+                    if int(svalue) < 1:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    return error_response(
+                        "schedule.value must be a positive integer (minutes) for interval type",
+                        status_code=400, code="validation_error"
+                    )
+            elif stype == "cron":
+                try:
+                    from croniter import croniter
+                    if not croniter.is_valid(str(svalue)):
+                        raise ValueError
+                except ImportError:
+                    return error_response(
+                        "croniter package not available — cron schedules are not supported",
+                        status_code=400, code="validation_error"
+                    )
+                except ValueError:
+                    return error_response(
+                        f"Invalid cron expression: {svalue!r}",
+                        status_code=400, code="validation_error"
+                    )
+
+        service = get_scheduling_service()
+        success = service.update_udi_refresh_schedule(schedule)
+        if success:
+            return jsonify({
+                "message": "UDI refresh schedule updated",
+                "udi_refresh_schedule": schedule,
+            }), 200
+        return error_response("Failed to save UDI refresh schedule", status_code=500, code="internal_error")
+    except Exception as exc:
+        logger.error(f"Error updating UDI refresh schedule: {exc}")
+        return error_response("Internal Server Error", status_code=500, code="internal_error")

@@ -1,4 +1,3 @@
-
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
@@ -26,6 +25,7 @@ import {
   BatchPeriodEditDialog,
 } from '@/components/channel-configuration/PeriodDialogs.jsx'
 import { MatchPreviewDialog, MatchResultsList } from '@/components/channel-configuration/MatchPreviewDialog.jsx'
+import { ProfilePickerDialog } from '@/components/channel-configuration/ProfilePickerDialog.jsx'
 import {
   DndContext,
 
@@ -47,7 +47,7 @@ const CHANNEL_STATS_PREFIX = 'streamflow_channel_stats_'
 const CHANNEL_LOGO_PREFIX = 'streamflow_channel_logo_'
 
 // Constants for grid layout
-const REGEX_TABLE_GRID_COLS = '50px 80px 80px 1fr 180px 120px 150px 140px'
+const REGEX_TABLE_GRID_COLS = '32px 60px 48px 2fr 3fr 100px 80px 140px'
 
 // Constants for stream checker priorities
 
@@ -402,6 +402,9 @@ export default function ChannelConfiguration() {
 
   const [loading, setLoading] = useState(true)
   const [checkingChannel, setCheckingChannel] = useState(null)
+  const [profilePickerOpen, setProfilePickerOpen] = useState(false)
+  const [profilePickerData, setProfilePickerData] = useState(null)
+  // profilePickerData shape: { channelId, channelName, periods }
   const [searchQuery, setSearchQuery] = useState('')
   const [dialogOpen, setDialogOpen] = useState(false)
   const [editingChannelId, setEditingChannelId] = useState(null)
@@ -507,6 +510,12 @@ export default function ChannelConfiguration() {
   // Update settings only mode (for playlist/priority changes without find & replace)
   const [updateOnlyMode, setUpdateOnlyMode] = useState(false)
 
+  // Active profile cache — keyed by channel ID; populated eagerly when paginatedChannels changes.
+  // Stays alive across page navigation so re-visiting a page doesn't re-fetch.
+  // Values: undefined = not yet fetched | null = in flight | { error } | { automation, epg_override }
+  const activeProfilesRef = useRef({})
+  const [activeProfiles, setActiveProfiles] = useState({})
+
   const sensors = useSensors(
     useSensor(PointerSensor),
     useSensor(KeyboardSensor, {
@@ -598,6 +607,38 @@ export default function ChannelConfiguration() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, currentPage, patterns, groupsConfig, channels])
 
+  // Eager active-profile fetch — fires when the visible page of channels changes on the
+  // Regex tab. Skips channels already in the cache (ref survives pagination navigation).
+  // Sets null (in-flight) immediately so the cell shows muted '—' while loading.
+  useEffect(() => {
+    if (activeTab !== 'regex' || channels.length === 0) return
+
+    const channelsToFetch = paginatedChannels.filter(
+      ch => !(String(ch.id) in activeProfilesRef.current)
+    )
+    if (channelsToFetch.length === 0) return
+
+    // Mark all as in-flight immediately so cells render the muted state
+    const inFlight = {}
+    channelsToFetch.forEach(ch => { inFlight[String(ch.id)] = null })
+    activeProfilesRef.current = { ...activeProfilesRef.current, ...inFlight }
+    setActiveProfiles(prev => ({ ...prev, ...inFlight }))
+
+    channelsToFetch.forEach(async (ch) => {
+      const key = String(ch.id)
+      try {
+        const res = await channelsAPI.getChannelActiveProfile(ch.id)
+        activeProfilesRef.current[key] = res.data
+      } catch {
+        activeProfilesRef.current[key] = { error: true }
+      }
+      // Update state with a fresh copy of the ref so React re-renders the affected row
+      setActiveProfiles({ ...activeProfilesRef.current })
+    })
+  // paginatedChannels is derived — list primitive deps to avoid stale closure
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, currentPage, channels])
+
   const loadData = async () => {
     try {
       setLoading(true)
@@ -663,6 +704,10 @@ export default function ChannelConfiguration() {
       setOrderedChannels(orderedList)
       setOriginalChannelOrder(orderedList)
       setHasOrderChanges(false)
+
+      // Clear active profile cache so fresh data is fetched for the new channel list
+      activeProfilesRef.current = {}
+      setActiveProfiles({})
     } catch (err) {
       console.error('Failed to load data:', err)
       toast({
@@ -675,17 +720,94 @@ export default function ChannelConfiguration() {
     }
   }
 
-  const handleCheckChannel = async (channelId) => {
+  /**
+   * Health check pre-flight + execution.
+   *
+   * Uses automation_periods_count already on the channel object
+   * (populated by ChannelService._enrich_channels server-side) to avoid
+   * unnecessary API calls for the 0-period and 1-period cases.
+   *
+   * Decision tree:
+   *   0 periods -> toast (no profile), stop
+   *   1 period  -> proceed directly (unambiguous)
+   *   >1 periods -> fetch enriched list, deduplicate by profile_id
+   *               -> all share one profile: proceed
+   *               -> different profiles: open ProfilePickerDialog
+   *
+   * @param {number} channelId
+   * @param {string|null} resolvedProfileId - set when called back from ProfilePickerDialog
+   */
+  const handleCheckChannel = async (channelId, resolvedProfileId = null) => {
+    // Pre-flight: profile resolution
+    if (!resolvedProfileId) {
+      const channel = channels.find(ch => ch.id === channelId)
+      const periodCount = Number(channel?.automation_periods_count ?? 0)
+
+      // Case 1: No periods assigned - hard block, actionable message
+      if (periodCount === 0) {
+        toast({
+          title: 'No Automation Profile',
+          description:
+            'This channel has no automation profile assigned. ' +
+            'Assign an automation period with a profile before running a health check.',
+          variant: 'destructive',
+        })
+        return
+      }
+
+      // Case 2: Exactly one period - unambiguous, proceed immediately
+      // (falls through to the actual check below)
+
+      // Case 3: Multiple periods - check for profile ambiguity
+      if (periodCount > 1) {
+        try {
+          setCheckingChannel(channelId) // Show spinner during fetch
+          const response = await automationAPI.getChannelPeriods(channelId)
+          const periods = response.data || []
+
+          // Deduplicate by profile_id - multiple periods may share one profile
+          const uniqueProfileIds = [...new Set(
+            periods.map(p => p.profile_id).filter(Boolean)
+          )]
+
+          if (uniqueProfileIds.length <= 1) {
+            // All periods resolve to the same profile - no ambiguity, proceed
+            setCheckingChannel(null)
+            // Falls through to actual check; backend resolves active period
+          } else {
+            // Genuine ambiguity - open picker for user to select
+            setCheckingChannel(null)
+            setProfilePickerData({
+              channelId,
+              channelName: channel?.name ?? `Channel ${channelId}`,
+              periods,
+            })
+            setProfilePickerOpen(true)
+            return // Picker's onSelect calls handleCheckChannel with resolvedProfileId
+          }
+        } catch (err) {
+          setCheckingChannel(null)
+          console.error('Error fetching channel periods for health check pre-flight:', err)
+          toast({
+            title: 'Error',
+            description: 'Could not load automation periods for this channel.',
+            variant: 'destructive',
+          })
+          return
+        }
+      }
+    }
+
+    // Actual check
     try {
       setCheckingChannel(channelId)
 
-      // Show starting notification
       toast({
         title: "Channel Check Started",
         description: "Checking channel streams... This may take a few minutes.",
       })
 
-      const response = await streamCheckerAPI.checkSingleChannel(channelId)
+      const response = await streamCheckerAPI.checkSingleChannel(channelId, resolvedProfileId)
 
       if (response.data.success) {
         const stats = response.data.stats
@@ -693,8 +815,17 @@ export default function ChannelConfiguration() {
           title: "Channel Check Complete",
           description: `Checked ${stats.total_streams} streams. Dead: ${stats.dead_streams}. Avg Resolution: ${stats.avg_resolution}, Avg Bitrate: ${stats.avg_bitrate}`,
         })
-        // Reload the channel data to show updated stats
         loadData()
+      } else if (response.data.error === 'no_profile') {
+        // Backend safety-net fired (e.g. periods exist but none active at execution time)
+        toast({
+          title: 'No Active Profile',
+          description:
+            response.data.message ||
+            'This channel has no active automation profile. ' +
+            'Check that your automation period schedule is currently active.',
+          variant: 'destructive',
+        })
       } else {
         toast({
           title: "Check Failed",
@@ -704,7 +835,19 @@ export default function ChannelConfiguration() {
       }
     } catch (err) {
       console.error('Error checking channel:', err)
-      // Check if it's a timeout error
+
+      // 400 with no_profile = backend guard fired, surface it cleanly
+      if (err.response?.status === 400 && err.response?.data?.error === 'no_profile') {
+        toast({
+          title: 'No Active Profile',
+          description:
+            err.response.data.message ||
+            'This channel has no active automation profile.',
+          variant: 'destructive',
+        })
+        return
+      }
+
       if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
         toast({
           title: "Check Taking Longer Than Expected",
@@ -2435,8 +2578,8 @@ export default function ChannelConfiguration() {
                   <Card>
                     <CardContent className="p-0">
                       <div className="border-b bg-muted/50">
-                        <div className={`gap-4 p-4 font-medium text-sm`} style={{ gridTemplateColumns: REGEX_TABLE_GRID_COLS, display: 'grid' }}>
-                          <div className="flex items-center justify-center">
+                        <div className={`gap-2 px-3 py-3 font-medium text-sm`} style={{ gridTemplateColumns: REGEX_TABLE_GRID_COLS, display: 'grid' }}>
+                          <div className="flex items-center">
                             <Checkbox
                               checked={filteredChannels.length > 0 && filteredChannels.every(ch => selectedChannels.has(ch.id))}
                               onCheckedChange={(checked) => {
@@ -2456,7 +2599,7 @@ export default function ChannelConfiguration() {
                           <div>Logo</div>
                           <div>Channel Name</div>
                           <div>Channel Group</div>
-                          <div>Nº of Periods</div>
+                          <div>Active Periods</div>
                           <div>Regex Patterns</div>
                           <div>Actions</div>
                         </div>
@@ -2465,7 +2608,7 @@ export default function ChannelConfiguration() {
                       {/* Table Rows */}
                       <div className="divide-y">
                         {paginatedChannels.map(channel => {
-                          const group = groups.find(g => g.id === channel.channel_group_id)
+                          const group = groups.find(g => String(g.id) === String(channel.channel_group_id))
 
 
                           return (
@@ -2492,6 +2635,7 @@ export default function ChannelConfiguration() {
                               onAssignEpgProfile={handleAssignEpgProfile}
                               matchCount={matchCounts[String(channel.id)]}
                               totalStreamCount={totalStreamCount}
+                              activeProfile={activeProfiles[String(channel.id)]}
                             />
                           )
                         })}
@@ -3713,6 +3857,20 @@ export default function ChannelConfiguration() {
           }}
         />
 
+        {profilePickerData && (
+          <ProfilePickerDialog
+            open={profilePickerOpen}
+            onOpenChange={(open) => {
+              setProfilePickerOpen(open)
+              if (!open) setProfilePickerData(null)
+            }}
+            channelName={profilePickerData.channelName}
+            periods={profilePickerData.periods}
+            onSelect={(profileId) =>
+              handleCheckChannel(profilePickerData.channelId, profileId)
+            }
+          />
+        )}
         <MatchPreviewDialog
           open={previewResultsOpen}
           onOpenChange={setPreviewResultsOpen}

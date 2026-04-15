@@ -115,6 +115,20 @@ class UDIManager:
         self.cache = UDICache()
         
         self._initialized = False
+        self._network_ready = False  # True only after a successful refresh_all() from Dispatcharr network
+        self._last_refresh_duration_seconds: float = 0.0  # Duration of last successful refresh_all()
+        self._last_refresh_time: Optional[datetime] = None  # Wall-clock time of last successful refresh_all()
+
+        # Automation busy flag — set while a cycle or single-channel check is running.
+        # The scheduled UDI refresh worker checks this before firing to avoid
+        # replacing the cache mid-pipeline. Cleared before any background sync fires.
+        self._automation_busy: bool = False
+        self._automation_busy_lock = threading.Lock()
+
+        # Last run timestamp for the scheduled UDI refresh worker.
+        # In-memory only — resets on restart, which is correct behaviour.
+        self._udi_refresh_last_run: Optional[datetime] = None
+
         self._lock = threading.Lock()
         self._refresh_thread = None
         self._refresh_running = False
@@ -319,15 +333,154 @@ class UDIManager:
             True if initialized, False otherwise
         """
         return self._initialized
-    
+
+    def is_network_ready(self) -> bool:
+        """Check if the UDI Manager has completed a successful live refresh from Dispatcharr.
+
+        Distinct from is_initialized() which returns True even when data was loaded
+        from SQL storage at startup (potentially stale — zero streams, zero M3U accounts).
+
+        Background workers, scheduled event processors, automation loops, and queue
+        workers must use this guard before operating against the stream pool to avoid
+        acting on empty or stale startup cache state.
+
+        Returns:
+            True only after refresh_all() completed successfully from the Dispatcharr
+            network. False during startup before the network refresh finishes.
+        """
+        return self._network_ready
+
+    def get_last_refresh_duration(self) -> float:
+        """Return seconds taken by the last successful refresh_all().
+
+        Used to calibrate the post-provider-fetch poll timeout in
+        _wait_for_udi_stream_count_stabilise(). Returns 0.0 if refresh_all()
+        has never completed successfully (e.g. before startup init finishes).
+        """
+        return self._last_refresh_duration_seconds
+
+    def get_cache_age_description(self) -> str:
+        """Return a human-readable description of UDI cache age and last sync time.
+
+        Format: 'last synced Xm Ys ago (HH:MM:SS) — N streams'
+        Returns 'not yet synced from network' if refresh_all() has never completed.
+        Used for diagnostic log lines at the start of automation cycles and
+        single-channel health checks.
+        """
+        if self._last_refresh_time is None:
+            return "not yet synced from network"
+
+        now = datetime.now()
+        elapsed = int((now - self._last_refresh_time).total_seconds())
+        hours = elapsed // 3600
+        minutes = (elapsed % 3600) // 60
+        seconds = elapsed % 60
+
+        if hours > 0:
+            age_str = f"{hours}h {minutes}m ago"
+        elif minutes > 0:
+            age_str = f"{minutes}m {seconds}s ago"
+        else:
+            age_str = f"{seconds}s ago"
+
+        time_str = self._last_refresh_time.strftime("%H:%M:%S")
+        stream_count = len(self._streams_cache)
+
+        return f"last synced {age_str} ({time_str}) — {stream_count:,} streams"
+
+    def set_automation_busy(self) -> None:
+        """Mark automation as busy — a cycle or single-channel check is running.
+
+        The scheduled UDI refresh worker checks this flag before firing.
+        If set, the worker skips the current slot and waits for the next
+        scheduled time rather than replacing the cache mid-pipeline.
+
+        Must be called at the start of run_automation_cycle() and
+        check_single_channel(). Clear with clear_automation_busy() before
+        any post-completion background sync fires.
+        """
+        with self._automation_busy_lock:
+            self._automation_busy = True
+
+    def clear_automation_busy(self) -> None:
+        """Clear the automation busy flag.
+
+        Call at the natural completion point of run_automation_cycle() and
+        check_single_channel() — before starting any background UDI sync
+        thread, so the sync does not hold the busy flag.
+        """
+        with self._automation_busy_lock:
+            self._automation_busy = False
+
+    def is_automation_busy(self) -> bool:
+        """Return True if a cycle or single-channel check is currently running.
+
+        Used by the scheduled UDI refresh worker to determine whether to
+        skip the current slot. Does not block — caller decides what to do.
+        """
+        with self._automation_busy_lock:
+            return self._automation_busy
+
+    def get_udi_refresh_last_run(self) -> Optional[datetime]:
+        """Return the timestamp of the last scheduled UDI refresh run.
+
+        In-memory only — resets to None on restart. Used by the UDI refresh
+        worker to determine if the schedule is due.
+        """
+        return self._udi_refresh_last_run
+
+    def set_udi_refresh_last_run(self, ts: Optional[datetime] = None) -> None:
+        """Record that the scheduled UDI refresh just ran.
+
+        Args:
+            ts: Timestamp to record. Defaults to datetime.now().
+        """
+        self._udi_refresh_last_run = ts if ts is not None else datetime.now()
+
     def get_channels(self) -> List[Dict[str, Any]]:
         """Get all channels.
-        
+
+        Deduplicates by channel ``id`` before returning so that accumulation
+        bugs in the write paths (e.g. ``refresh_channel_by_id`` append,
+        ``update_channel`` for-else append) never surface to callers.
+
+        Channels whose ``id`` key is missing or ``None`` are passed through
+        unchanged (preserving existing behaviour for malformed entries rather
+        than silently dropping them).  When duplicate IDs exist the last entry
+        in ``_channels_cache`` wins, which matches the behaviour of
+        ``_build_indexes`` (dict-comprehension last-write-wins).
+
         Returns:
-            List of channel dictionaries
+            Deduplicated list of channel dictionaries, insertion-order preserved
+            for channels with valid IDs.
         """
         self._ensure_initialized()
-        return self._channels_cache.copy()
+
+        seen: Dict[Any, int] = {}   # id -> index in result
+        result: List[Dict[str, Any]] = []
+
+        for ch in self._channels_cache:
+            cid = ch.get('id')
+            if cid is None:
+                # Malformed entry — append unconditionally, do not track in seen
+                result.append(ch)
+            elif cid in seen:
+                # Duplicate: overwrite in-place so last-write-wins without
+                # changing list length or position of earlier unique entries
+                result[seen[cid]] = ch
+            else:
+                seen[cid] = len(result)
+                result.append(ch)
+
+        if len(result) != len(self._channels_cache):
+            dupes = len(self._channels_cache) - len(result)
+            logger.warning(
+                f"get_channels: deduplicated {dupes} duplicate channel entr{'y' if dupes == 1 else 'ies'} "
+                f"from _channels_cache ({len(self._channels_cache)} → {len(result)}). "
+                "Run a full UDI refresh to resolve the root cause."
+            )
+
+        return result
     
     def get_channel_by_id(self, channel_id: int, fetch_if_missing: bool = True) -> Optional[Dict[str, Any]]:
         """Get a specific channel by ID.
@@ -608,6 +761,14 @@ class UDIManager:
             return False
         
         try:
+            # Set automation busy for the duration of this full refresh.
+            # Prevents the scheduled UDI refresh worker from firing a concurrent
+            # refresh_all() that would race with this one on the cache.
+            # Also prevents check_single_channel and run_automation_cycle from
+            # starting while a full cache rebuild is in progress.
+            self.set_automation_busy()
+            _refresh_start = datetime.now()
+
             # Pre-fetch step: get authoritative counts from lightweight /ids/
             # endpoints before pulling full objects.  These counts serve as the
             # integrity oracle when the pagination envelope does not include a
@@ -756,12 +917,27 @@ class UDIManager:
                 current_step='done',
                 entity_counts=entity_counts,
             )
+            # Record duration and completion time for poll timeout calibration
+            # and cache age visibility. In-memory only — resets on restart.
+            _refresh_end = datetime.now()
+            self._last_refresh_duration_seconds = (_refresh_end - _refresh_start).total_seconds()
+            self._last_refresh_time = _refresh_end
+            # Seed the scheduled UDI refresh last-run timestamp so the first
+            # scheduled slot waits the full interval from startup rather than
+            # firing immediately (startup refresh counts as the first run).
+            self._udi_refresh_last_run = _refresh_end
+            # Mark network as ready — distinguishes a live Dispatcharr fetch from
+            # a load from SQL storage at startup (which may have stale/empty data).
+            self._network_ready = True
             return True
             
         except Exception as e:
             logger.error(f"Error refreshing UDI data: {e}")
             self._update_init_progress(status='failed', message=f'Refresh failed: {str(e)}')
             return False
+
+        finally:
+            self.clear_automation_busy()
     
     def refresh_channels(self) -> bool:
         """Refresh only channels data.

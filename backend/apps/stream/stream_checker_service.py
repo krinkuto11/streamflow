@@ -94,6 +94,57 @@ from apps.stream.stream_checker_components import (
     StreamCheckerProgress,
 )
 
+def _wait_for_udi_stream_count_stabilise(
+    udi,
+    pre_count: int,
+    timeout: int = 60,
+    poll_interval: int = 5,
+) -> bool:
+    """Poll UDI stream count after triggering a Dispatcharr playlist refresh.
+
+    Dispatcharr processes M3U playlists asynchronously. The refresh API call
+    returns as soon as the job is *enqueued*, not when it completes. Immediately
+    syncing the UDI cache after the call often returns pre-refresh data.
+
+    This helper polls the UDI stream count until it changes from pre_count
+    (indicating Dispatcharr has finished processing) or until timeout elapses.
+    It reuses the same poll-and-confirm pattern used in the startup sequence.
+
+    Args:
+        udi: Initialised UDI manager instance.
+        pre_count: Stream count captured before refresh_m3u_playlists() was called.
+        timeout: Maximum seconds to wait before giving up (default 60).
+        poll_interval: Seconds between each poll attempt (default 5).
+
+    Returns:
+        True  — stream count changed; refresh appears to have taken effect.
+        False — timed out with no change; downstream steps proceed on
+                potentially stale data (logged as a warning).
+    """
+    elapsed = 0
+    while elapsed < timeout:
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+        try:
+            current_count = len(udi.get_streams() or [])
+            if current_count != pre_count:
+                logger.info(
+                    f"UDI stream count changed after playlist refresh: "
+                    f"{pre_count} → {current_count} ({elapsed}s elapsed)"
+                )
+                return True
+        except Exception as _e:
+            logger.warning(
+                f"Error polling UDI stream count during post-refresh wait: {_e}"
+            )
+    logger.warning(
+        f"UDI stream count unchanged after {timeout}s (still {pre_count} streams). "
+        "Proceeding with potentially stale data. "
+        "Consider setting post_refresh_delay_seconds in config if this recurs."
+    )
+    return False
+
+
 class StreamCheckerService:
     """Main service for managing stream checking operations."""
     
@@ -281,6 +332,12 @@ class StreamCheckerService:
         This respects automation_controls and queues channels only when
         automatic quality checking is enabled.
         """
+        # Do not queue channels before the startup network UDI refresh completes.
+        # is_initialized() alone is True from SQL storage load (potentially empty cache).
+        if not get_udi_manager().is_network_ready():
+            logger.debug("Skipping channel queueing — UDI network refresh not yet complete")
+            return
+
         # Check if auto quality checking is enabled (considers both pipeline mode and individual controls)
         if not self.config.is_auto_quality_checking_enabled():
             logger.info("Skipping channel queueing - automatic quality checking is disabled")
@@ -312,6 +369,12 @@ class StreamCheckerService:
         self._cancel_queueing = False
         try:
             udi = get_udi_manager()
+
+            # Do not queue channels before the startup network UDI refresh completes.
+            if not udi.is_network_ready():
+                logger.debug("Skipping global channel queue — UDI network refresh not yet complete")
+                return
+
             channels = udi.get_channels()
             
             if channels:
@@ -375,27 +438,75 @@ class StreamCheckerService:
         except Exception as e:
             logger.error(f"Failed to queue all channels: {e}")
     
-    def _is_stream_dead(self, stream_data: Dict[str, Any], channel_id: Optional[int] = None) -> bool:
+    def _build_threshold_config_from_profile(self, stream_checking: Dict[str, Any]) -> Dict[str, Any]:
+        """Build a threshold config dict from an already-resolved stream_checking block.
+
+        Called once per channel run so the per-stream _is_stream_dead() calls
+        don't have to re-resolve the profile from the database.  This also
+        ensures that a forced_profile_id (e.g. from the multi-period picker)
+        is honoured — previously _is_stream_dead() re-derived the profile from
+        the channel's period assignments, ignoring any explicit picker selection.
+
+        Args:
+            stream_checking: The stream_checking sub-dict from the resolved profile.
+
+        Returns:
+            A config dict suitable for passing to utils_is_stream_dead() as the
+            second argument.  Only non-zero thresholds are included.
+        """
+        config: Dict[str, Any] = {}
+        min_res = stream_checking.get('min_resolution', 'any')
+        if min_res in ('2160p', '4k'):
+            config['min_resolution_width'], config['min_resolution_height'] = 3840, 2160
+        elif min_res == '1080p':
+            config['min_resolution_width'], config['min_resolution_height'] = 1920, 1080
+        elif min_res == '720p':
+            config['min_resolution_width'], config['min_resolution_height'] = 1280, 720
+        elif min_res == '480p':
+            config['min_resolution_width'], config['min_resolution_height'] = 854, 480
+        elif min_res == '360p':
+            config['min_resolution_width'], config['min_resolution_height'] = 640, 360
+
+        min_bitrate = stream_checking.get('min_bitrate', 0)
+        if min_bitrate and min_bitrate > 0:
+            config['min_bitrate_kbps'] = min_bitrate
+
+        min_fps = stream_checking.get('min_fps', 0)
+        if min_fps and min_fps > 0:
+            config['min_fps'] = min_fps
+
+        return config
+
+    def _is_stream_dead(self, stream_data: Dict[str, Any], channel_id: Optional[int] = None, threshold_config: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """
         Check if a stream should be considered dead based on profile or global settings.
-        
-        This method uses categorization logic: 
+
+        This method uses categorization logic:
         - 'offline': truly dead (0x0 resolution, 0 bitrate)
         - 'low_quality': dead based on quality thresholds
-        
+
         Args:
             stream_data: Dictionary containing stream statistics
-            channel_id: Optional channel ID to look up profile-specific thresholds
-            
+            channel_id: Optional channel ID to look up profile-specific thresholds.
+                        Ignored when threshold_config is provided.
+            threshold_config: Pre-built threshold dict from _build_threshold_config_from_profile().
+                              When supplied, profile re-resolution is skipped entirely.
+                              This ensures forced_profile_id selections are honoured.
+
         Returns:
-            bool: True if the stream is considered dead, False otherwise.
+            Tuple of (is_dead: bool, reason: str).
+            reason values: 'offline', 'low_quality', 'unstable', 'none'.
         """
         # Default configuration
         dead_stream_config = self.config.get('dead_stream_handling', {})
         profile_config = {}
-        
-        # Try to get profile-specific settings if channel_id provided
-        if channel_id is not None:
+
+        # Fast path: caller already resolved the profile and built the threshold dict.
+        # Skip the expensive per-stream profile re-resolution entirely.
+        if threshold_config is not None:
+            check_config = threshold_config
+        # Slow path: resolve profile from channel_id (legacy / external callers).
+        elif channel_id is not None:
             try:
                 from apps.automation.automation_config_manager import get_automation_config_manager
                 automation_config = get_automation_config_manager()
@@ -455,18 +566,7 @@ class StreamCheckerService:
         
         # Use centralized utility for the check
         is_dead, reason = utils_is_stream_dead(stream_data, check_config)
-        
-        if is_dead:
-            # Mark in dead streams tracker with categorization
-            stream_url = stream_data.get('url')
-            if stream_url:
-                stream_id = stream_data.get('id') or stream_data.get('stream_id')
-                stream_name = stream_data.get('name') or stream_data.get('stream_name', 'Unknown')
-                # Use passed channel_id if available, otherwise from stream_data
-                effective_channel_id = channel_id if channel_id is not None else stream_data.get('channel_id')
-                self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, effective_channel_id, reason=reason)
-        
-        return is_dead
+        return is_dead, reason
     
     def _calculate_channel_averages(self, analyzed_streams: List[Dict], dead_stream_ids: set) -> Dict[str, str]:
         """Calculate channel-level average statistics from analyzed streams.
@@ -890,7 +990,7 @@ class StreamCheckerService:
 
     # Removed _refine_sorted_streams in favor of lexicographical Sort Keys.
     
-    def _check_channel(self, channel_id: int, skip_batch_changelog: bool = False):
+    def _check_channel(self, channel_id: int, skip_batch_changelog: bool = False, forced_profile_id: Optional[str] = None):
         """Check and reorder streams for a specific channel.
         
         Routes to either concurrent or sequential checking based on configuration.
@@ -902,11 +1002,11 @@ class StreamCheckerService:
         concurrent_enabled = self.config.get('concurrent_streams.enabled', True)
         
         if concurrent_enabled:
-            return self._check_channel_concurrent(channel_id, skip_batch_changelog=skip_batch_changelog)
+            return self._check_channel_concurrent(channel_id, skip_batch_changelog=skip_batch_changelog, forced_profile_id=forced_profile_id)
         else:
-            return self._check_channel_sequential(channel_id, skip_batch_changelog=skip_batch_changelog)
+            return self._check_channel_sequential(channel_id, skip_batch_changelog=skip_batch_changelog, forced_profile_id=forced_profile_id)
     
-    def _check_channel_concurrent(self, channel_id: int, skip_batch_changelog: bool = False, target_stream_ids: Optional[List[str]] = None):
+    def _check_channel_concurrent(self, channel_id: int, skip_batch_changelog: bool = False, target_stream_ids: Optional[List[str]] = None, forced_profile_id: Optional[str] = None):
         """Check and reorder streams for a specific channel using parallel thread pool.
         
         Args:
@@ -928,9 +1028,11 @@ class StreamCheckerService:
         logger.info(f"Checking channel {channel_id} (parallel mode)")
         logger.info(f"=" * 80)
         
-        # Get dead stream removal configuration early (used later in finally block)
-        dead_stream_removal_enabled = self.config.get('dead_stream_handling', {}).get('enabled', True)
-        
+        # dead_stream_removal_enabled is resolved below from the profile (Bug 2 fix).
+        # Initialise to True (removal enabled) as a safe default; the profile override
+        # applied during profile resolution is the sole authority.
+        dead_stream_removal_enabled = True
+
         # Get effective profile for this channel
         stream_limit = 0
         allow_revive = True
@@ -944,18 +1046,32 @@ class StreamCheckerService:
         batch_enabled = batch_config.get('enabled', True)
         batch_size = batch_config.get('batch_size', 10)
         batch_stats_list = []
-        
+        # Initialised here; built from the resolved profile below so every
+        # _is_stream_dead() call uses the correct profile including forced_profile_id.
+        _threshold_config: Dict[str, Any] = {}
+
         try:
             from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
-            
+
             # Fetch channel data to get group_id (might be fetched already but just in case)
             udi = get_udi_manager()
             channel = udi.get_channel_by_id(channel_id)
             group_id = channel.get('channel_group_id') if channel else None
-            
-            config = automation_config.get_effective_configuration(channel_id, group_id)
-            profile = config.get('profile') if config else None
+
+            # If a profile was explicitly selected (via ProfilePickerDialog), use it
+            # directly so all checking parameters (weights, limits, revive, loop detection)
+            # reflect the user's intent rather than whichever period is currently active.
+            if forced_profile_id:
+                profile = automation_config.get_profile(forced_profile_id)
+                if not profile:
+                    logger.warning(
+                        f"forced_profile_id={forced_profile_id!r} not found in _check_channel "
+                        f"— falling back to active period resolution"
+                    )
+            if not forced_profile_id or not profile:
+                config = automation_config.get_effective_configuration(channel_id, group_id)
+                profile = config.get('profile') if config else None
             if profile:
                 profile_stream_checking = profile.get('stream_checking', {})
                 stream_limit = profile_stream_checking.get('stream_limit', 0)
@@ -978,7 +1094,13 @@ class StreamCheckerService:
                 )
                 # Clamp to valid range: -0.25 to 0.0
                 loop_penalty = max(-0.25, min(0.0, loop_penalty))
-                
+
+                # Build threshold config once from the resolved profile so every
+                # _is_stream_dead() call uses the correct profile — including
+                # when a forced_profile_id was selected via the picker.
+                _threshold_config = self._build_threshold_config_from_profile(profile_stream_checking)
+                logger.debug(f"Threshold config for channel {channel_id}: {_threshold_config}")
+
                 # Also check if checking is enabled at all for this profile
                 if not profile_stream_checking.get('enabled', False):
                     logger.info(f"Stream checking disabled by profile for channel {channel_id}")
@@ -990,6 +1112,7 @@ class StreamCheckerService:
                     }
         except Exception as e:
             logger.warning(f"Failed to load profile settings for channel {channel_id}: {e}")
+            _threshold_config = {}
         
         try:
             # Get channel information from UDI
@@ -1046,12 +1169,9 @@ class StreamCheckerService:
             
             # Check if this is a force check (bypasses 2-hour immunity)
             force_check = self.update_tracker.should_force_check(channel_id)
-            
-            # Global Action / Force Check overrides profile settings
-            if force_check:
-                if not allow_revive:
-                    logger.info(f"Force check enabled for channel {channel_name}: Overriding Profile 'allow_revive' to True")
-                    allow_revive = True
+            # NOTE: force_check controls immunity bypass ONLY (all streams are re-analyzed).
+            # It no longer overrides allow_revive — the profile flag is the sole authority
+            # for whether a previously-dead stream can be promoted back to active (Bug 5 fix).
             
             # Get list of already checked streams to avoid re-analyzing
             checked_stream_info = self.update_tracker.updates.get('channels', {}).get(str(channel_id), {})
@@ -1229,14 +1349,14 @@ class StreamCheckerService:
                 temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights)
                 
                 # Update stream status based on result
-                is_dead = self._is_stream_dead(result, channel_id)
+                is_dead, _dead_reason = self._is_stream_dead(result, channel_id, threshold_config=_threshold_config)
                 
                 if stream_id in stream_statuses:
                     if result.get('status') == 'ERROR':
                         stream_statuses[stream_id]['status'] = 'error'
                         stream_statuses[stream_id]['score'] = 0.0
                     elif is_dead:
-                        stream_statuses[stream_id]['status'] = 'dead'
+                        stream_statuses[stream_id]['status'] = _dead_reason if _dead_reason == 'low_quality' else 'dead'
                         stream_statuses[stream_id]['score'] = 0.0
                     else:
                         stream_statuses[stream_id]['status'] = 'completed'
@@ -1335,17 +1455,18 @@ class StreamCheckerService:
                         # Fall back to individual updates if batching is disabled
                         self._update_stream_stats(analyzed)
                     
-                    # Check if stream is dead
-                    is_dead = self._is_stream_dead(analyzed, channel_id)
+                    # Check if stream is dead using pre-resolved threshold config
+                    # so forced_profile_id selections are honoured.
+                    is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                     stream_id = analyzed.get('stream_id')
                     stream_url = analyzed.get('stream_url', '')
                     stream_name = analyzed.get('stream_name', 'Unknown')
                     was_dead = self.dead_streams_tracker.is_dead(stream_url)
                     
                     if is_dead and not was_dead:
-                        if self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, channel_id):
+                        if self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, channel_id, reason=dead_reason):
                             dead_stream_ids.add(stream_id)
-                            logger.warning(f"Stream {stream_id} detected as DEAD: {stream_name}")
+                            logger.warning(f"Stream {stream_id} detected as DEAD: {stream_name} (reason={dead_reason})")
                         else:
                             logger.error(f"Failed to mark stream {stream_id} as dead in tracker")
                     elif not is_dead and was_dead:
@@ -1696,7 +1817,7 @@ class StreamCheckerService:
             log_function_return(logger, "_check_channel_concurrent")
 
     
-    def _check_channel_sequential(self, channel_id: int, skip_batch_changelog: bool = False, target_stream_ids: Optional[List[str]] = None):
+    def _check_channel_sequential(self, channel_id: int, skip_batch_changelog: bool = False, target_stream_ids: Optional[List[str]] = None, forced_profile_id: Optional[str] = None):
         """Check and reorder streams for a specific channel using sequential checking.
         
         Args:
@@ -1715,9 +1836,11 @@ class StreamCheckerService:
         logger.info(f"Checking channel {channel_id} (sequential mode)")
         logger.info(f"=" * 80)
         
-        # Get dead stream removal configuration early (used later in finally block)
-        dead_stream_removal_enabled = self.config.get('dead_stream_handling', {}).get('enabled', True)
-        
+        # dead_stream_removal_enabled is resolved below from the profile (Bug 2 fix).
+        # Initialise to True (removal enabled) as a safe default; the profile override
+        # applied during profile resolution is the sole authority.
+        dead_stream_removal_enabled = True
+
         # Get effective profile for this channel
         stream_limit = 0
         allow_revive = True
@@ -1727,18 +1850,31 @@ class StreamCheckerService:
         priority_m3u_ids = []
         priority_mode = 'absolute'
         scoring_weights = None
-        
+        # Initialised here; built from the resolved profile below.
+        _threshold_config: Dict[str, Any] = {}
+
         try:
             from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
-            
+
             # Fetch channel data to get group_id (might be fetched already but just in case)
             udi = get_udi_manager()
             channel = udi.get_channel_by_id(channel_id)
             group_id = channel.get('channel_group_id') if channel else None
-            
-            config = automation_config.get_effective_configuration(channel_id, group_id)
-            profile = config.get('profile') if config else None
+
+            # If a profile was explicitly selected (via ProfilePickerDialog), use it
+            # directly so all checking parameters (weights, limits, revive, loop detection)
+            # reflect the user's intent rather than whichever period is currently active.
+            if forced_profile_id:
+                profile = automation_config.get_profile(forced_profile_id)
+                if not profile:
+                    logger.warning(
+                        f"forced_profile_id={forced_profile_id!r} not found in _check_channel "
+                        f"— falling back to active period resolution"
+                    )
+            if not forced_profile_id or not profile:
+                config = automation_config.get_effective_configuration(channel_id, group_id)
+                profile = config.get('profile') if config else None
             if profile:
                 profile_stream_checking = profile.get('stream_checking', {})
                 stream_limit = profile_stream_checking.get('stream_limit', 0)
@@ -1761,7 +1897,11 @@ class StreamCheckerService:
                 )
                 # Clamp to valid range: -0.25 to 0.0
                 loop_penalty = max(-0.25, min(0.0, loop_penalty))
-                
+
+                # Build threshold config once from the resolved profile.
+                _threshold_config = self._build_threshold_config_from_profile(profile_stream_checking)
+                logger.debug(f"Threshold config for channel {channel_id}: {_threshold_config}")
+
                 # Also check if checking is enabled at all for this profile
                 if not profile_stream_checking.get('enabled', False):
                     logger.info(f"Stream checking disabled by profile for channel {channel_id}")
@@ -1773,6 +1913,7 @@ class StreamCheckerService:
                     }
         except Exception as e:
             logger.warning(f"Failed to load profile settings for channel {channel_id}: {e}")
+            _threshold_config = {}
         
         try:
             # Get channel information from UDI
@@ -1829,12 +1970,9 @@ class StreamCheckerService:
             
             # Check if this is a force check (bypasses 2-hour immunity)
             force_check = self.update_tracker.should_force_check(channel_id)
-            
-            # Global Action / Force Check overrides profile settings
-            if force_check:
-                if not allow_revive:
-                    logger.info(f"Force check enabled for channel {channel_name}: Overriding Profile 'allow_revive' to True")
-                    allow_revive = True
+            # NOTE: force_check controls immunity bypass ONLY (all streams are re-analyzed).
+            # It no longer overrides allow_revive — the profile flag is the sole authority
+            # for whether a previously-dead stream can be promoted back to active (Bug 5 fix).
             
             # Get list of already checked streams to avoid re-analyzing
             checked_stream_info = self.update_tracker.updates.get('channels', {}).get(str(channel_id), {})
@@ -1982,17 +2120,17 @@ class StreamCheckerService:
                 # Update stream stats on dispatcharr with ffmpeg-extracted data
                 self._update_stream_stats(analyzed)
                 
-                # Check if stream is dead (resolution=0 or bitrate=0)
-                is_dead = self._is_stream_dead(analyzed, channel_id)
+                # Check if stream is dead using pre-resolved threshold config
+                is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                 stream_url = stream.get('url', '')
                 stream_name = stream.get('name', 'Unknown')
                 was_dead = self.dead_streams_tracker.is_dead(stream_url)
                 
                 if is_dead and not was_dead:
                     # Mark as dead in tracker
-                    if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id):
+                    if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id, reason=dead_reason):
                         dead_stream_ids.add(stream['id'])
-                        logger.warning(f"Stream {stream['id']} detected as DEAD: {stream_name}")
+                        logger.warning(f"Stream {stream['id']} detected as DEAD: {stream_name} (reason={dead_reason})")
                     else:
                         logger.error(f"Failed to mark stream {stream['id']} as DEAD, will not remove from channel")
                 elif not is_dead and was_dead:
@@ -2019,7 +2157,7 @@ class StreamCheckerService:
                         stream_statuses[stream['id']]['status'] = 'error'
                         stream_statuses[stream['id']]['score'] = 0.0
                     elif is_dead:
-                        stream_statuses[stream['id']]['status'] = 'dead'
+                        stream_statuses[stream['id']]['status'] = dead_reason if dead_reason == 'low_quality' else 'dead'
                         stream_statuses[stream['id']]['score'] = 0.0
                     else:
                         stream_statuses[stream['id']]['status'] = 'completed'
@@ -2065,18 +2203,18 @@ class StreamCheckerService:
                         'status': 'OK'  # Assume OK for previously checked streams
                     }
                     
-                    # Check if this cached stream is dead and handle state transitions
+                    # Check if this cached stream is dead using pre-resolved threshold config
                     stream_url = stream.get('url', '')
                     stream_name = stream.get('name', 'Unknown')
-                    is_dead = self._is_stream_dead(analyzed, channel_id)
+                    is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                     was_dead = self.dead_streams_tracker.is_dead(stream_url)
                     
                     # Handle dead/alive state transitions (same logic as newly-checked streams)
                     if is_dead and not was_dead:
                         # Newly detected as dead
-                        if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id):
+                        if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id, reason=dead_reason):
                             dead_stream_ids.add(stream['id'])
-                            logger.warning(f"Cached stream {stream['id']} detected as DEAD: {stream_name}")
+                            logger.warning(f"Cached stream {stream['id']} detected as DEAD: {stream_name} (reason={dead_reason})")
                         else:
                             logger.error(f"Failed to mark cached stream {stream['id']} as DEAD, will not remove from channel")
                     elif not is_dead and was_dead:
@@ -2652,7 +2790,8 @@ class StreamCheckerService:
             scoring_weights: Optional per-profile scoring weights. Falls back to global config if not provided.
         """
         # Dead streams always get a score of 0
-        if self._is_stream_dead(stream_data):
+        _dead, _ = self._is_stream_dead(stream_data)
+        if _dead:
             return 0.0
         
         # Use per-profile weights if provided, otherwise fall back to global config
@@ -3067,7 +3206,7 @@ class StreamCheckerService:
                 
         return results
 
-    def check_single_channel(self, channel_id: int, program_name: Optional[str] = None, is_epg_scheduled: bool = False) -> Dict:
+    def check_single_channel(self, channel_id: int, program_name: Optional[str] = None, is_epg_scheduled: bool = False, forced_profile_id: Optional[str] = None) -> Dict:
         """Check a single channel immediately and return results.
         
         This performs a targeted channel refresh for a single channel:
@@ -3135,27 +3274,83 @@ class StreamCheckerService:
             # channel dict is available in local scope
             channel_group_id = channel.get('channel_group_id')
 
-            # If this is an EPG scheduled check, prefer the EPG scheduled profile override
+            # Resolve the automation profile that governs this check.
+            #
+            # Resolution order:
+            #   0. Explicitly forced profile (from ProfilePickerDialog, multi-period channels).
+            #   1. EPG scheduled profile override (channel-level then group-level).
+            #      Only consulted when is_epg_scheduled=True.
+            #   2. Active period-based profile via get_effective_configuration.
+            #   3. Hard halt — no fallback to global automation controls.
+            #
+            # Rationale: the opt-in model requires an explicit profile. Without one
+            # the system cannot know the user's intent (matching flags, checking flags,
+            # scoring weights, loop detection, minimum thresholds, etc.) and must not
+            # act. Global automation controls are a system-wide on/off switch, not a
+            # per-channel configuration, and are never an appropriate fallback here.
+
+            # Step 0: Explicitly chosen profile (from ProfilePickerDialog, multi-period channels).
+            # When the user selected a specific profile via the picker we honour it
+            # directly, skipping the schedule-based resolution entirely.
             profile = None
-            if is_epg_scheduled:
+            if forced_profile_id:
+                profile = automation_config.get_profile(forced_profile_id)
+                if profile:
+                    logger.info(
+                        f"Channel {channel_name}: using explicitly selected profile "
+                        f"'{profile.get('name')}' (id={forced_profile_id})"
+                    )
+                else:
+                    logger.warning(
+                        f"Channel {channel_name}: forced_profile_id={forced_profile_id!r} "
+                        f"not found — falling back to standard resolution"
+                    )
+
+            # Step 1: EPG scheduled profile override (EPG-triggered checks only)
+            if profile is None and is_epg_scheduled:
                 epg_profile = automation_config.get_effective_epg_scheduled_profile(channel_id, channel_group_id)
                 if epg_profile:
                     profile = epg_profile
                     logger.info(f"Channel {channel_name}: using EPG scheduled profile '{epg_profile.get('name')}'")
 
-            # Fall back to the active period-based profile if no EPG profile was found
+            # Step 2: Active period-based profile
             if profile is None:
                 config = automation_config.get_effective_configuration(channel_id, channel_group_id)
                 profile = config.get('profile') if config else None
-            
-            # Default to global automation controls when no channel/group profile applies.
-            matching_enabled = self.config.get('automation_controls.auto_stream_matching', True)
-            checking_enabled = self.config.get('automation_controls.auto_quality_checking', True)
-            if profile:
-                matching_enabled = profile.get('stream_matching', {}).get('enabled', False)
-                checking_enabled = profile.get('stream_checking', {}).get('enabled', False)
-            
-            logger.info(f"Channel {channel_name} settings: matching={matching_enabled}, checking={checking_enabled}")
+
+            # Step 3: Hard halt — no profile means no check.
+            # This replaces the former global-controls fallback which silently ran
+            # checks with system-wide defaults, ignoring per-channel intent entirely.
+            if profile is None:
+                logger.warning(
+                    f"⛔ Channel {channel_name} (ID: {channel_id}) has no automation "
+                    f"profile assigned. Health check cannot proceed without an explicit "
+                    f"profile. Assign an automation period, or for EPG checks an EPG "
+                    f"scheduled profile override."
+                )
+                return {
+                    'success': False,
+                    'error': 'no_profile',
+                    'message': (
+                        f"Channel {channel_name} has no automation profile assigned. "
+                        f"Assign an automation period with a profile before running "
+                        f"a health check."
+                    ),
+                    'channel_id': channel_id,
+                    'channel_name': channel_name,
+                }
+
+            m3u_update_enabled = profile.get('m3u_update', {}).get('enabled', False)
+            matching_enabled   = profile.get('stream_matching', {}).get('enabled', False)
+            checking_enabled   = profile.get('stream_checking', {}).get('enabled', False)
+
+            logger.info(
+                f"Channel {channel_name} profile flags: "
+                f"m3u_update={m3u_update_enabled}, "
+                f"matching={matching_enabled}, "
+                f"checking={checking_enabled}"
+            )
+            logger.info(f"UDI cache {udi.get_cache_age_description()}")
 
             # Signal to the frontend that this is a single channel check so the
             # stale batch progress card from the previous automation run is suppressed.
@@ -3208,53 +3403,123 @@ class StreamCheckerService:
                             account_ids.add(m3u_account)
                             logger.info(f"Found M3U account {m3u_account} from dead stream {dead_info.get('stream_name', 'Unknown')}")
             
-            # Step 2: Refresh playlists for those accounts
-            if account_ids:
-                logger.info(f"Step 2/6: Refreshing playlists for {len(account_ids)} M3U account(s)...")
+            # Step 2a: Provider fetch — only if m3u_update is enabled in the profile.
+            #
+            # IMPORTANT DISTINCTION:
+            #   m3u_update.enabled = True  → tell Dispatcharr to re-pull from the M3U
+            #                                 provider URL (two-hop: StreamFlow → Dispatcharr
+            #                                 → provider). The cache is confirmed current
+            #                                 before proceeding to subsequent steps.
+            #   m3u_update.enabled = False → no provider fetch is triggered. All steps
+            #                                 operate on the existing cache as-is, which
+            #                                 reflects the last completed cycle or refresh.
+            #
+            # Dispatcharr processes M3U refreshes asynchronously. After triggering the
+            # refresh we poll the UDI stream count until it changes (confirming Dispatcharr
+            # has finished processing) before proceeding.
+            if m3u_update_enabled and account_ids:
+                logger.info(
+                    f"Step 2a/6: Refreshing playlists for {len(account_ids)} M3U account(s) "
+                    f"(m3u_update enabled in profile)..."
+                )
+                # Capture stream count before triggering refresh so we can detect completion.
+                pre_refresh_stream_count = len(udi.get_streams() or [])
+
                 # Import here to allow better test mocking
                 from apps.core.api_utils import refresh_m3u_playlists
                 for account_id in account_ids:
                     logger.info(f"Refreshing M3U account {account_id}")
                     refresh_m3u_playlists(account_id=account_id)
-                
-                # Refresh UDI cache to get updated streams
-                # Also refresh M3U accounts to detect any new accounts
-                # And refresh channel groups to detect any group changes
-                udi.refresh_m3u_accounts()  # Check for new M3U accounts
+
+                logger.info(
+                    "✓ Playlist refresh triggered — waiting for Dispatcharr to process..."
+                )
+                # Calibrate poll timeout to 115% of the last known refresh_all()
+                # duration, with a floor of 60s. In environments where providers
+                # don't change stream counts on refresh, this still times out but
+                # at least waits long enough for a real count-changing refresh.
+                _known_duration = udi.get_last_refresh_duration()
+                _poll_timeout = max(60, int(_known_duration * 1.15)) if _known_duration > 0 else 60
+                logger.debug(
+                    f"Post-refresh poll timeout: {_poll_timeout}s "
+                    f"(115% of last refresh duration {_known_duration:.0f}s, floor 60s)"
+                )
+                _wait_for_udi_stream_count_stabilise(
+                    udi, pre_refresh_stream_count, timeout=_poll_timeout
+                )
+
+                # Sync UDI cache from Dispatcharr's now-updated stream pool.
+                #
+                # The provider fetch above caused Dispatcharr to update its internal
+                # stream database — potentially replacing stream IDs if the provider
+                # rotated them. The UDI cache is now stale relative to Dispatcharr.
+                # Syncing here ensures Steps 3-6 operate on current stream IDs,
+                # preventing Invalid pk errors when matching writes assignments back.
+                logger.info(
+                    "Step 2a/6: Syncing UDI cache after provider refresh..."
+                )
                 udi.refresh_streams()
                 udi.refresh_channels()
-                udi.refresh_channel_groups()  # Check for new/updated channel groups
-                logger.info("✓ Playlists refreshed and UDI cache updated")
+                logger.info("✓ UDI cache synced — Steps 3-6 will use current stream IDs")
+            elif m3u_update_enabled and not account_ids:
+                logger.info(
+                    "Step 2a/6: m3u_update enabled but no M3U accounts found for this "
+                    "channel — skipping provider fetch."
+                )
             else:
-                logger.info("Step 2/6: No M3U accounts found for this channel, skipping playlist refresh")
+                logger.info(
+                    "Step 2a/6: Skipping provider fetch (m3u_update disabled in profile). "
+                    "Subsequent steps will use the current UDI cache state."
+                )
+
+            # NOTE: No mid-pipeline UDI sync occurs here except when m3u_update=True.
+            #
+            # The UDI cache is the contract for all reads during this check. When
+            # m3u_update.enabled = False, the existing cache is used as-is —
+            # reflecting the last completed cycle, provider refresh, or startup init.
+            #
+            # When m3u_update.enabled = True, Step 2a fired a provider fetch that
+            # caused Dispatcharr to update its stream database. The UDI cache was
+            # synced immediately after the poll helper confirmed completion (above),
+            # so all subsequent steps see current stream IDs.
+            #
+            # All writes (assignments, quality scores, stream ordering) go to Dispatcharr
+            # in real time during Steps 4-6. A background UDI sync fires after this
+            # function returns to pull those writes back into the cache for the next run.
             
-            # Step 3: Clear dead streams for this channel to give them a second chance
-            logger.info(f"Step 3/6: Clearing dead streams for channel {channel_name} to give them a second chance...")
+            # Step 3: Remove stale dead-stream tracker entries whose URLs no longer exist
+            # in the current playlist. This handles the URL-rotation case where a
+            # provider assigns new stream IDs/URLs to the same logical streams after a
+            # refresh — old dead-URL entries would otherwise block those streams from
+            # ever being re-matched or re-checked.
+            #
+            # Dead status for URLs that ARE still present is intentionally preserved
+            # so that allow_revive and remove_dead_streams toggles operate correctly
+            # in Step 6 (_check_channel). Clearing all dead state here (the previous
+            # behaviour) made both profile flags permanently ineffective on this path.
+            logger.info(f"Step 3/6: Cleaning stale dead stream tracker entries for channel {channel_name}...")
             try:
-                # First, check how many dead streams exist for this channel
-                dead_streams_for_channel = self.dead_streams_tracker.get_dead_streams_for_channel(channel_id)
-                initial_dead_count = len(dead_streams_for_channel)
-                
-                if initial_dead_count > 0:
-                    logger.info(f"Found {initial_dead_count} dead stream(s) for channel {channel_id} before clearing")
-                
-                # Clear all dead streams that belong to this channel by channel_id
-                # This handles cases where playlist refresh creates new streams with different URLs
-                cleared_count = self.dead_streams_tracker.remove_dead_streams_by_channel_id(channel_id)
-                
-                if cleared_count > 0:
-                    logger.info(f"✓ Cleared {cleared_count} dead stream(s) from tracker - they will be given a second chance")
-                    
-                    # Verify the streams were actually cleared
-                    remaining_dead = self.dead_streams_tracker.get_dead_streams_for_channel(channel_id)
-                    if len(remaining_dead) > 0:
-                        logger.warning(f"⚠ {len(remaining_dead)} dead stream(s) still remain after clearing - this may indicate an issue")
-                    else:
-                        logger.info("✓ Verified: All dead streams successfully removed from tracker")
+                # Build the set of stream URLs currently visible in the UDI cache.
+                # After Step 2a this reflects the post-refresh state; when m3u_update
+                # is disabled it reflects the last known cache state — either way it
+                # is the correct boundary for stale-URL detection.
+                _ch_streams_for_step3 = udi.get_channel_streams(channel_id) or []
+                current_stream_urls_step3 = {
+                    s.get('url', '') for s in _ch_streams_for_step3
+                    if isinstance(s, dict) and s.get('url')
+                }
+                current_stream_urls_step3.discard('')
+
+                cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls_step3)
+                if cleaned_count > 0:
+                    logger.info(
+                        f"✓ Removed {cleaned_count} stale dead stream URL(s) no longer in playlist — "
+                        f"dead status for remaining URLs preserved for profile toggle evaluation"
+                    )
                 else:
-                    logger.info("✓ No dead streams to clear for this channel")
+                    logger.debug("Step 3/6: No stale dead stream URLs to clean")
             except Exception as e:
-                logger.error(f"✗ Failed to clear dead streams: {e}", exc_info=True)
+                logger.error(f"✗ Failed to clean stale dead streams: {e}", exc_info=True)
             
             # Step 4: Validate existing streams against regex patterns (if matching is enabled)
             if matching_enabled:
@@ -3275,7 +3540,21 @@ class StreamCheckerService:
                 logger.info(f"Step 4/6: Skipping stream validation (matching is disabled for this channel)")
             
             # Step 5: Re-match and assign streams for this specific channel (if matching is enabled)
-            # With dead streams cleared, previously dead streams can now be re-added
+            # With stale dead-stream URLs cleaned, streams with new URLs can be re-matched.
+            #
+            # Resolve dead_stream_removal_enabled from the profile so the matching step
+            # respects the same policy as the checking step (Bug 3 fix). Previously,
+            # discover_and_assign_streams derived this from the global StreamCheckConfig
+            # which could disagree with the per-profile remove_dead_streams setting.
+            _profile_sc = profile.get('stream_checking', {}) if profile else {}
+            _profile_remove = _profile_sc.get('remove_dead_streams')
+            if isinstance(_profile_remove, bool):
+                _step5_dead_stream_removal_enabled = _profile_remove
+            else:
+                # No per-profile override: fall back to global config default (True)
+                _step5_dead_stream_removal_enabled = True
+            _step5_allow_dead_streams = not _step5_dead_stream_removal_enabled
+
             if matching_enabled:
                 logger.info(f"Step 5/6: Re-matching streams for channel {channel_name}...")
                 try:
@@ -3283,9 +3562,16 @@ class StreamCheckerService:
                     from apps.automation.automated_stream_manager import AutomatedStreamManager
                     automation_manager = AutomatedStreamManager()
                     
-                    # Run discovery scoped to this channel only
-                    # Skip automatic check trigger since we'll perform the check explicitly in Step 6
-                    assignments = automation_manager.discover_and_assign_streams(force=True, skip_check_trigger=True, channel_id=channel_id)
+                    # Run discovery scoped to this channel only.
+                    # Pass allow_dead_streams so the matching step honours the same
+                    # dead-stream policy as the checking step (Bug 3 fix).
+                    # Skip automatic check trigger since we'll perform the check explicitly in Step 6.
+                    assignments = automation_manager.discover_and_assign_streams(
+                        force=True,
+                        skip_check_trigger=True,
+                        channel_id=channel_id,
+                        allow_dead_streams=_step5_allow_dead_streams,
+                    )
                     if assignments:
                         logger.info(f"✓ Stream matching completed")
                     else:
@@ -3295,15 +3581,25 @@ class StreamCheckerService:
             else:
                 logger.info(f"Step 5/6: Skipping stream matching (matching is disabled for this channel)")
             
-            # Refresh UDI cache again to ensure the check in Step 6 sees the newly assigned streams
-            # This is critical because discover_and_assign_streams updates the DB but UDI cache might be stale
+            # After matching writes new assignments to Dispatcharr, refresh only this
+            # channel's cache entry so Step 6 sees the updated stream list.
+            # This is a targeted single-channel read — not a full stream pool fetch.
             if matching_enabled:
-                logger.debug("Refreshing UDI cache for streams and channel to reflect new assignments...")
-                udi.refresh_streams()
                 udi.refresh_channel_by_id(channel_id)
-                logger.info(f"✓ UDI cache refreshed with latest stream assignments")
+                logger.debug("✓ Channel cache entry updated with latest stream assignments")
             
             # Step 6: Mark channel for force check and perform the check (if checking is enabled)
+            #
+            # Resolve the profile ID to pass to _check_channel. When check_single_channel
+            # was called without a forced_profile_id (e.g. EPG-triggered checks via
+            # execute_scheduled_check), the correct profile was resolved above into
+            # `profile` but forced_profile_id is still None. Without passing the resolved
+            # ID here, _check_channel re-resolves the profile independently and falls
+            # back to the active automation period — ignoring the EPG profile entirely.
+            # This caused profile flags like loop_check_enabled, grace_period, allow_revive,
+            # and scoring_weights to be read from the wrong profile on EPG-triggered runs.
+            _effective_profile_id = forced_profile_id or (profile.get('id') if profile else None)
+
             dead_count = 0
             if checking_enabled:
                 logger.info(f"Step 6/6: Force checking all streams for channel {channel_name}...")
@@ -3312,7 +3608,7 @@ class StreamCheckerService:
                 # Perform the check (this will now bypass immunity and check all streams)
                 # Returns dict with dead_streams_count and revived_streams_count
                 # Skip batch changelog since this is a single channel check
-                check_result = self._check_channel(channel_id, skip_batch_changelog=True)
+                check_result = self._check_channel(channel_id, skip_batch_changelog=True, forced_profile_id=_effective_profile_id)
                 if not check_result or not isinstance(check_result, dict):
                     # This should not happen with updated methods, but provide safe fallback
                     logger.warning(f"_check_channel did not return expected result dict, using defaults")
@@ -3333,11 +3629,13 @@ class StreamCheckerService:
                 logger.info(f"Step 6/6: Skipping stream checking (checking is disabled for this channel)")
                 analyzed_lookup = {}
             
-            # Gather statistics after check using centralized utility.
-            # Refresh UDI cache first so stream_stats reflect the post-probe
-            # database state — loop fields written by _update_stream_stats
-            # won't be visible otherwise.
-            udi.refresh_streams()
+            # Gather statistics after check using cached channel data.
+            #
+            # fetch_channel_streams reads from the UDI in-memory cache — no network call.
+            # For streams that were probed in this run, analyzed_lookup carries authoritative
+            # scores and loop results (written to Dispatcharr during Step 6 and held in
+            # memory). The background UDI sync that fires after this function returns will
+            # pull those written values back into the cache for the next invocation.
             streams = fetch_channel_streams(channel_id)
             total_streams = len(streams)
             
@@ -3484,6 +3782,32 @@ class StreamCheckerService:
 
             # Clear progress so the frontend stops showing the single channel check UI
             self.progress.clear()
+
+            # Background UDI sync — pull all writes from this check back into cache.
+            # Runs in a daemon thread so it does not block the response to the caller.
+            # Guarded on is_network_ready() to avoid firing before startup network
+            # refresh completes (is_initialized() alone is True from SQL storage load).
+            if udi.is_network_ready():
+                def _background_udi_sync(ch_id: int, ch_name: str):
+                    try:
+                        _udi = get_udi_manager()
+                        _udi.refresh_streams()
+                        _udi.refresh_channel_by_id(ch_id)
+                        logger.debug(
+                            f"Background UDI sync completed for {ch_name} "
+                            f"(channel {ch_id})"
+                        )
+                    except Exception as _e:
+                        logger.warning(
+                            f"Background UDI sync failed for {ch_name}: {_e}"
+                        )
+
+                threading.Thread(
+                    target=_background_udi_sync,
+                    args=(channel_id, channel_name),
+                    daemon=True,
+                    name=f"udi-sync-ch{channel_id}",
+                ).start()
 
             return {
                 'success': True,

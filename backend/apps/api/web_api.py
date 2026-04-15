@@ -32,6 +32,7 @@ from apps.automation.scheduling_service import get_scheduling_service
 from apps.background.scheduling_workers import (
     epg_refresh_processor_loop,
     scheduled_event_processor_loop,
+    udi_refresh_processor_loop,
 )
 from apps.stream.udp_proxy import UDPProxyManager
 
@@ -48,6 +49,9 @@ from apps.api.channel_handlers import (
     get_channel_stats_response,
     get_channels_response,
 )
+# ── NEW: active profile resolution handler ──────────────────────────────────
+from apps.api.active_profile_handlers import get_channel_active_profile_response
+# ────────────────────────────────────────────────────────────────────────────
 from apps.api.regex_handlers import (
     add_bulk_regex_patterns_response,
     add_regex_pattern_response,
@@ -149,16 +153,22 @@ from apps.api.scheduling_handlers import (
     get_scheduled_event_processor_status_response,
     get_scheduled_events_response,
     get_scheduling_config_response,
+    get_udi_refresh_processor_status_response,
+    get_udi_refresh_schedule_response,
     import_auto_create_rules_response,
     process_due_scheduled_events_response,
     start_epg_refresh_processor_api_response,
     start_scheduled_event_processor_api_response,
+    start_udi_refresh_processor_api_response,
     stop_epg_refresh_processor_api_response,
     stop_scheduled_event_processor_api_response,
+    stop_udi_refresh_processor_api_response,
     test_auto_create_rule_response,
     trigger_epg_refresh_response,
+    trigger_udi_refresh_response,
     update_auto_create_rule_response,
     update_scheduling_config_response,
+    update_udi_refresh_schedule_response,
 )
 from apps.api.acestream_handlers import (
     check_acestream_orchestrator_ready_response,
@@ -355,6 +365,9 @@ scheduled_event_processor_wake = None  # threading.Event to wake up the processo
 epg_refresh_thread = None
 epg_refresh_running = False
 epg_refresh_wake = None  # threading.Event to wake up the refresh early
+udi_refresh_thread = None
+udi_refresh_running = False
+udi_refresh_wake = None  # threading.Event to wake up the UDI refresh early
 
 
 def _set_epg_refresh_running(value: bool):
@@ -538,6 +551,66 @@ def stop_epg_refresh_processor():
         return False
     
     logger.info("EPG refresh processor stopped")
+    return True
+
+
+def udi_refresh_processor():
+    """Background thread for scheduled UDI cache refreshes.
+
+    Fires refresh_all() on the UDI manager according to the schedule stored
+    in scheduling config (udi_refresh_schedule). Skips if automation is busy.
+    """
+    return udi_refresh_processor_loop(
+        is_running=lambda: udi_refresh_running,
+        get_wake_event=lambda: udi_refresh_wake,
+        get_scheduling_service=get_scheduling_service,
+        get_udi_manager=get_udi_manager,
+        logger=logger,
+        check_interval=60,
+    )
+
+
+def start_udi_refresh_processor():
+    """Start the background thread for scheduled UDI cache refreshes."""
+    global udi_refresh_thread, udi_refresh_running, udi_refresh_wake
+
+    if udi_refresh_thread is not None and udi_refresh_thread.is_alive():
+        logger.warning("UDI refresh processor is already running")
+        return False
+
+    udi_refresh_wake = threading.Event()
+    udi_refresh_running = True
+    udi_refresh_thread = threading.Thread(
+        target=udi_refresh_processor,
+        name="UDIRefreshProcessor",
+        daemon=True,
+    )
+    udi_refresh_thread.start()
+    logger.info("UDI refresh processor started")
+    return True
+
+
+def stop_udi_refresh_processor():
+    """Stop the background thread for scheduled UDI cache refreshes."""
+    global udi_refresh_thread, udi_refresh_running, udi_refresh_wake
+
+    if udi_refresh_thread is None or not udi_refresh_thread.is_alive():
+        logger.warning("UDI refresh processor is not running")
+        return False
+
+    logger.info("Stopping UDI refresh processor...")
+    udi_refresh_running = False
+
+    if udi_refresh_wake:
+        udi_refresh_wake.set()
+
+    udi_refresh_thread.join(timeout=THREAD_SHUTDOWN_TIMEOUT_SECONDS)
+
+    if udi_refresh_thread.is_alive():
+        logger.warning("UDI refresh processor thread did not stop gracefully")
+        return False
+
+    logger.info("UDI refresh processor stopped")
     return True
 
 
@@ -985,7 +1058,23 @@ def get_m3u_accounts_endpoint():
     )
 
 
+@app.route('/api/m3u-accounts/<int:account_id>/priority', methods=['PATCH'])
+def update_m3u_account_priority(account_id):
+    """Update the priority of a specific M3U account."""
+    from apps.api.quick_action_handlers import update_m3u_account_priority_response
+    return update_m3u_account_priority_response(
+        account_id=account_id,
+        payload=request.get_json(silent=True),
+    )
 
+
+@app.route('/api/m3u-priority/global-mode', methods=['PUT'])
+def update_global_priority_mode():
+    """Update the global M3U priority mode."""
+    from apps.api.quick_action_handlers import update_global_priority_mode_response
+    return update_global_priority_mode_response(
+        payload=request.get_json(silent=True),
+    )
 
 
 @app.route('/api/setup-wizard', methods=['GET'])
@@ -1210,14 +1299,7 @@ def get_scheduling_config():
 @app.route('/api/scheduling/config', methods=['PUT'])
 @log_function_call
 def update_scheduling_config():
-    """Update scheduling configuration.
-    
-    Expected JSON body:
-    {
-        "epg_refresh_interval_minutes": 60,
-        "enabled": true
-    }
-    """
+    """Update scheduling configuration."""
     return update_scheduling_config_response(
         payload=request.get_json(silent=True),
         get_scheduling_service=get_scheduling_service,
@@ -1226,11 +1308,7 @@ def update_scheduling_config():
 @app.route('/api/scheduling/epg/grid', methods=['GET'])
 @log_function_call
 def get_epg_grid():
-    """Get EPG grid data (all programs for next 24 hours).
-    
-    Query parameters:
-    - force_refresh: If true, bypass cache and fetch fresh data
-    """
+    """Get EPG grid data (all programs for next 24 hours)."""
     return get_epg_grid_response(
         force_refresh=request.args.get('force_refresh', 'false').lower() == 'true',
         get_scheduling_service=get_scheduling_service,
@@ -1239,14 +1317,7 @@ def get_epg_grid():
 @app.route('/api/scheduling/epg/channel/<int:channel_id>', methods=['GET'])
 @log_function_call
 def get_channel_programs(channel_id):
-    """Get programs for a specific channel.
-    
-    Args:
-        channel_id: Channel ID
-    
-    Returns:
-        List of programs for the channel
-    """
+    """Get programs for a specific channel."""
     return get_channel_programs_response(
         channel_id=channel_id,
         get_scheduling_service=get_scheduling_service,
@@ -1261,17 +1332,7 @@ def get_scheduled_events():
 @app.route('/api/scheduling/events', methods=['POST'])
 @log_function_call
 def create_scheduled_event():
-    """Create a new scheduled event.
-    
-    Expected JSON body:
-    {
-        "channel_id": 123,
-        "program_start_time": "2024-01-01T10:00:00Z",
-        "program_end_time": "2024-01-01T11:00:00Z",
-        "program_title": "Program Name",
-        "minutes_before": 5
-    }
-    """
+    """Create a new scheduled event."""
     return create_scheduled_event_response(
         payload=request.get_json(silent=True),
         get_scheduling_service=get_scheduling_service,
@@ -1281,11 +1342,7 @@ def create_scheduled_event():
 @app.route('/api/scheduling/events/<event_id>', methods=['DELETE'])
 @log_function_call
 def delete_scheduled_event(event_id):
-    """Delete a scheduled event.
-    
-    Args:
-        event_id: Event ID
-    """
+    """Delete a scheduled event."""
     return delete_scheduled_event_response(
         event_id=event_id,
         get_scheduling_service=get_scheduling_service,
@@ -1302,18 +1359,7 @@ def get_auto_create_rules():
 @app.route('/api/scheduling/auto-create-rules', methods=['POST'])
 @log_function_call
 def create_auto_create_rule():
-    """Create a new auto-create rule.
-    
-    Expected JSON body:
-    {
-        "name": "Rule Name",
-        "channel_ids": [123, 456],  // or "channel_id": 123 for backward compatibility
-        "regex_pattern": "^Breaking News",
-        "minutes_before": 5,
-        "enable_looping_detection": true,
-        "enable_logo_detection": true
-    }
-    """
+    """Create a new auto-create rule."""
     return create_auto_create_rule_response(
         payload=request.get_json(silent=True),
         get_scheduling_service=get_scheduling_service,
@@ -1324,11 +1370,7 @@ def create_auto_create_rule():
 @app.route('/api/scheduling/auto-create-rules/<rule_id>', methods=['DELETE'])
 @log_function_call
 def delete_auto_create_rule(rule_id):
-    """Delete an auto-create rule.
-    
-    Args:
-        rule_id: Rule ID
-    """
+    """Delete an auto-create rule."""
     return delete_auto_create_rule_response(
         rule_id=rule_id,
         get_scheduling_service=get_scheduling_service,
@@ -1338,21 +1380,7 @@ def delete_auto_create_rule(rule_id):
 @app.route('/api/scheduling/auto-create-rules/<rule_id>', methods=['PUT', 'PATCH'])
 @log_function_call
 def update_auto_create_rule(rule_id):
-    """Update an auto-create rule.
-    
-    Args:
-        rule_id: Rule ID
-        
-    Expected JSON body (all fields optional):
-    {
-        "name": "Updated Rule Name",
-        "channel_id": 123,
-        "regex_pattern": "^Updated Pattern",
-        "minutes_before": 10,
-        "enable_looping_detection": false,
-        "enable_logo_detection": false
-    }
-    """
+    """Update an auto-create rule."""
     return update_auto_create_rule_response(
         rule_id=rule_id,
         payload=request.get_json(silent=True),
@@ -1364,14 +1392,7 @@ def update_auto_create_rule(rule_id):
 @app.route('/api/scheduling/auto-create-rules/test', methods=['POST'])
 @log_function_call
 def test_auto_create_rule():
-    """Test a regex pattern against EPG programs for a channel.
-    
-    Expected JSON body:
-    {
-        "channel_id": 123,
-        "regex_pattern": "^Breaking News"
-    }
-    """
+    """Test a regex pattern against EPG programs for a channel."""
     return test_auto_create_rule_response(
         payload=request.get_json(silent=True),
         get_scheduling_service=get_scheduling_service,
@@ -1381,33 +1402,14 @@ def test_auto_create_rule():
 @app.route('/api/scheduling/auto-create-rules/export', methods=['GET'])
 @log_function_call
 def export_auto_create_rules():
-    """Export all auto-create rules as JSON.
-    
-    Returns:
-        JSON array of auto-create rules
-    """
+    """Export all auto-create rules as JSON."""
     return export_auto_create_rules_response(get_scheduling_service=get_scheduling_service)
 
 
 @app.route('/api/scheduling/auto-create-rules/import', methods=['POST'])
 @log_function_call
 def import_auto_create_rules():
-    """Import auto-create rules from JSON.
-    
-    Expected JSON body:
-    [
-        {
-            "name": "Rule Name",
-            "channel_ids": [123, 456],
-            "regex_pattern": "^Breaking News",
-            "minutes_before": 5
-        },
-        ...
-    ]
-    
-    Returns:
-        JSON with import results
-    """
+    """Import auto-create rules from JSON."""
     return import_auto_create_rules_response(
         payload=request.get_json(silent=True),
         get_scheduling_service=get_scheduling_service,
@@ -1418,14 +1420,7 @@ def import_auto_create_rules():
 @app.route('/api/scheduling/process-due-events', methods=['POST'])
 @log_function_call
 def process_due_scheduled_events():
-    """Process all scheduled events that are due for execution.
-    
-    This endpoint should be called periodically (e.g., by a cron job or scheduler)
-    to check for and execute any scheduled channel checks.
-    
-    Returns:
-        JSON with execution results
-    """
+    """Process all scheduled events that are due for execution."""
     return process_due_scheduled_events_response(
         get_scheduling_service=get_scheduling_service,
         get_stream_checker_service=get_stream_checker_service,
@@ -1435,11 +1430,7 @@ def process_due_scheduled_events():
 @app.route('/api/scheduling/processor/status', methods=['GET'])
 @log_function_call
 def get_scheduled_event_processor_status():
-    """Get the status of the scheduled event processor background thread.
-    
-    Returns:
-        JSON with processor status
-    """
+    """Get the status of the scheduled event processor background thread."""
     return get_scheduled_event_processor_status_response(
         scheduled_event_processor_thread=scheduled_event_processor_thread,
         scheduled_event_processor_running=scheduled_event_processor_running,
@@ -1449,11 +1440,7 @@ def get_scheduled_event_processor_status():
 @app.route('/api/scheduling/processor/start', methods=['POST'])
 @log_function_call
 def start_scheduled_event_processor_api():
-    """Start the scheduled event processor background thread.
-    
-    Returns:
-        JSON with result
-    """
+    """Start the scheduled event processor background thread."""
     return start_scheduled_event_processor_api_response(
         start_scheduled_event_processor=start_scheduled_event_processor,
     )
@@ -1462,11 +1449,7 @@ def start_scheduled_event_processor_api():
 @app.route('/api/scheduling/processor/stop', methods=['POST'])
 @log_function_call
 def stop_scheduled_event_processor_api():
-    """Stop the scheduled event processor background thread.
-    
-    Returns:
-        JSON with result
-    """
+    """Stop the scheduled event processor background thread."""
     return stop_scheduled_event_processor_api_response(
         stop_scheduled_event_processor=stop_scheduled_event_processor,
     )
@@ -1475,11 +1458,7 @@ def stop_scheduled_event_processor_api():
 @app.route('/api/scheduling/epg-refresh/status', methods=['GET'])
 @log_function_call
 def get_epg_refresh_processor_status():
-    """Get the status of the EPG refresh processor background thread.
-    
-    Returns:
-        JSON with processor status
-    """
+    """Get the status of the EPG refresh processor background thread."""
     return get_epg_refresh_processor_status_response(
         epg_refresh_thread=epg_refresh_thread,
         epg_refresh_running=epg_refresh_running,
@@ -1489,11 +1468,7 @@ def get_epg_refresh_processor_status():
 @app.route('/api/scheduling/epg-refresh/start', methods=['POST'])
 @log_function_call
 def start_epg_refresh_processor_api():
-    """Start the EPG refresh processor background thread.
-    
-    Returns:
-        JSON with result
-    """
+    """Start the EPG refresh processor background thread."""
     return start_epg_refresh_processor_api_response(
         start_epg_refresh_processor=start_epg_refresh_processor,
     )
@@ -1502,11 +1477,7 @@ def start_epg_refresh_processor_api():
 @app.route('/api/scheduling/epg-refresh/stop', methods=['POST'])
 @log_function_call
 def stop_epg_refresh_processor_api():
-    """Stop the EPG refresh processor background thread.
-    
-    Returns:
-        JSON with result
-    """
+    """Stop the EPG refresh processor background thread."""
     return stop_epg_refresh_processor_api_response(
         stop_epg_refresh_processor=stop_epg_refresh_processor,
     )
@@ -1515,27 +1486,75 @@ def stop_epg_refresh_processor_api():
 @app.route('/api/scheduling/epg-refresh/trigger', methods=['POST'])
 @log_function_call
 def trigger_epg_refresh():
-    """Manually trigger an immediate EPG refresh.
-    
-    Returns:
-        JSON with result
-    """
+    """Manually trigger an immediate EPG refresh."""
     return trigger_epg_refresh_response(
         epg_refresh_wake=epg_refresh_wake,
         epg_refresh_running=epg_refresh_running,
         epg_refresh_thread=epg_refresh_thread,
     )
 
-# ==================== Automation Service API ====================
+
+@app.route('/api/scheduling/udi-refresh/status', methods=['GET'])
+@log_function_call
+def get_udi_refresh_processor_status():
+    """Get the status of the UDI refresh processor background thread."""
+    return get_udi_refresh_processor_status_response(
+        udi_refresh_thread=udi_refresh_thread,
+        udi_refresh_running=udi_refresh_running,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/start', methods=['POST'])
+@log_function_call
+def start_udi_refresh_processor_api():
+    """Start the UDI refresh processor background thread."""
+    return start_udi_refresh_processor_api_response(
+        start_udi_refresh_processor=start_udi_refresh_processor,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/stop', methods=['POST'])
+@log_function_call
+def stop_udi_refresh_processor_api():
+    """Stop the UDI refresh processor background thread."""
+    return stop_udi_refresh_processor_api_response(
+        stop_udi_refresh_processor=stop_udi_refresh_processor,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/trigger', methods=['POST'])
+@log_function_call
+def trigger_udi_refresh():
+    """Manually trigger an immediate UDI cache refresh."""
+    return trigger_udi_refresh_response(
+        udi_refresh_wake=udi_refresh_wake,
+        udi_refresh_running=udi_refresh_running,
+        udi_refresh_thread=udi_refresh_thread,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/schedule', methods=['GET'])
+@log_function_call
+def get_udi_refresh_schedule():
+    """Get the UDI refresh schedule configuration."""
+    return get_udi_refresh_schedule_response(
+        get_scheduling_service=get_scheduling_service,
+    )
+
+
+@app.route('/api/scheduling/udi-refresh/schedule', methods=['PUT'])
+@log_function_call
+def update_udi_refresh_schedule():
+    """Set or clear the UDI refresh schedule."""
+    return update_udi_refresh_schedule_response(
+        payload=request.get_json(silent=True),
+        get_scheduling_service=get_scheduling_service,
+    )
 
 @app.route('/api/automation/status', methods=['GET'])
 @log_function_call
 def get_automation_status():
-    """Get the status of the automation background service.
-    
-    Returns:
-        JSON with service status
-    """
+    """Get the status of the automation background service."""
     return get_automation_status_response(
         get_automation_manager=get_automation_manager,
         get_automation_config_manager=get_automation_config_manager,
@@ -1545,22 +1564,14 @@ def get_automation_status():
 @app.route('/api/automation/start', methods=['POST'])
 @log_function_call
 def start_automation_service_api():
-    """Start the automation background service.
-    
-    Returns:
-        JSON with result
-    """
+    """Start the automation background service."""
     return start_automation_service_api_response(get_automation_manager=get_automation_manager)
 
 
 @app.route('/api/automation/stop', methods=['POST'])
 @log_function_call
 def stop_automation_service_api():
-    """Stop the automation background service.
-    
-    Returns:
-        JSON with result
-    """
+    """Stop the automation background service."""
     return stop_automation_service_api_response(get_automation_manager=get_automation_manager)
 
 
@@ -1590,13 +1601,7 @@ def handle_automation_global_config():
 @app.route('/api/automation/profiles', methods=['GET', 'POST'])
 @log_function_call
 def handle_automation_profiles():
-    """Get all profiles or create a new profile.
-
-    GET supports optional query parameters:
-      - search (str): filter profiles by name (case-insensitive).
-      - page (int): page number (1-based). If omitted, returns full list.
-      - per_page (int): items per page (default 50, max 200).
-    """
+    """Get all profiles or create a new profile."""
     return handle_automation_profiles_response(
         method=request.method,
         args=request.args,
@@ -1726,18 +1731,7 @@ def remove_period_from_groups(period_id):
 @app.route('/api/channels/groups/batch/assign-periods', methods=['POST'])
 @log_function_call
 def batch_assign_periods_to_groups():
-    """Batch assign automation periods to multiple groups with profiles.
-
-    Expects format:
-    {
-        "group_ids": [1, 2, 3],
-        "period_assignments": [
-            {"period_id": "period1", "profile_id": "profile1"},
-            {"period_id": "period2", "profile_id": "profile2"}
-        ],
-        "replace": false
-    }
-    """
+    """Batch assign automation periods to multiple groups with profiles."""
     return batch_assign_periods_to_groups_response(
         payload=request.get_json(silent=True),
         get_automation_config_manager=get_automation_config_manager,
@@ -1745,18 +1739,11 @@ def batch_assign_periods_to_groups():
 
 
 # ==================== Automation Periods API ====================
-# Manage automation periods - multiple scheduled automation configurations per channel
 
 @app.route('/api/automation/periods', methods=['GET', 'POST'])
 @log_function_call
 def handle_automation_periods():
-    """Get all automation periods or create a new period.
-
-    GET supports optional query parameters:
-      - search (str): filter periods by name (case-insensitive).
-      - page (int): page number (1-based). If omitted, returns full list.
-      - per_page (int): items per page (default 50, max 200).
-    """
+    """Get all automation periods or create a new period."""
     return handle_automation_periods_response(
         method=request.method,
         args=request.args,
@@ -1833,22 +1820,27 @@ def get_channel_automation_periods(channel_id):
         get_udi_manager=get_udi_manager,
     )
 
+# ── NEW: active profile resolution endpoint ─────────────────────────────────
+@app.route('/api/channels/<int:channel_id>/active-profile', methods=['GET'])
+@log_function_call
+def get_channel_active_profile(channel_id):
+    """Return the resolved active automation profile and EPG override for a channel.
+
+    Uses the same resolution hierarchy as check_single_channel:
+      1. EPG scheduled profile (channel-level then group-level)
+      2. Active period-based profile (channel-level overrides group-level)
+    """
+    return get_channel_active_profile_response(
+        channel_id=channel_id,
+        get_automation_config_manager=get_automation_config_manager,
+        get_udi_manager=get_udi_manager,
+    )
+# ────────────────────────────────────────────────────────────────────────────
 
 @app.route('/api/channels/batch/assign-periods', methods=['POST'])
 @log_function_call
 def batch_assign_periods_to_channels():
-    """Batch assign automation periods to multiple channels with profiles.
-    
-    Expects format:
-    {
-        "channel_ids": [1, 2, 3],
-        "period_assignments": [
-            {"period_id": "period1", "profile_id": "profile1"},
-            {"period_id": "period2", "profile_id": "profile2"}
-        ],
-        "replace": false
-    }
-    """
+    """Batch assign automation periods to multiple channels with profiles."""
     return batch_assign_periods_to_channels_response(
         payload=request.get_json(silent=True),
         get_automation_config_manager=get_automation_config_manager,
@@ -1856,20 +1848,11 @@ def batch_assign_periods_to_channels():
 
 
 # ==================== Automation Events API ====================
-# Calculate and retrieve upcoming automation events based on periods
-
 
 @app.route('/api/automation/events/upcoming', methods=['GET'])
 @log_function_call
 def get_upcoming_automation_events():
-    """Get upcoming automation events based on configured periods.
-    
-    Query parameters:
-    - hours: Number of hours ahead to calculate (default: 24, max: 168)
-    - max_events: Maximum number of events to return (default: 100, max: 500)
-    - period_id: Filter by specific period ID
-    - force_refresh: Force cache refresh (true/false)
-    """
+    """Get upcoming automation events based on configured periods."""
     return get_upcoming_automation_events_response(
         args=request.args,
         get_events_scheduler=get_events_scheduler,
@@ -1880,18 +1863,13 @@ def get_upcoming_automation_events():
 @app.route('/api/automation/events/invalidate-cache', methods=['POST'])
 @log_function_call
 def invalidate_automation_events_cache():
-    """Invalidate the automation events cache.
-    
-    This should be called whenever automation periods are modified.
-    """
+    """Invalidate the automation events cache."""
     return invalidate_automation_events_cache_response(
         get_events_scheduler=get_events_scheduler,
     )
 
 
 # ==================== Stream Monitoring Session API ====================
-# Advanced stream monitoring with live quality tracking, reliability scoring,
-# and screenshot capture for event-based stream management
 
 from apps.stream.stream_session_manager import get_session_manager, REVIEW_DURATION
 from apps.stream.stream_monitoring_service import get_monitoring_service
@@ -1935,11 +1913,7 @@ def _acestream_client_or_error():
 
 
 def _ping_orchestrator_ready(client=None):
-    """Ping the orchestrator /api/v1/version endpoint to verify it is running and reachable.
-
-    Returns (True, version_str) on success, (False, error_msg) on failure.
-    The response must be a JSON object with a 'title' field containing 'AceStream Orchestrator'.
-    """
+    """Ping the orchestrator /api/v1/version endpoint to verify it is running and reachable."""
     if client is None:
         client = _get_acestream_monitoring_client()
     if not client.is_configured():
@@ -1965,7 +1939,6 @@ def _ping_orchestrator_ready(client=None):
     except requests.exceptions.HTTPError as exc:
         return False, f"Orchestrator /api/v1/version returned HTTP {exc.response.status_code}"
     except Exception as exc:
-        # Log full exception details server-side, but return a generic message to the client
         logger.error("Unexpected error while pinging AceStream orchestrator", exc_info=True)
         return False, "Unexpected error while pinging orchestrator"
 
@@ -1996,7 +1969,6 @@ def _parse_m3u_acestream_entries(m3u_content: str):
             })
             pending_name = None
 
-    # Deduplicate by content_id keeping first non-empty name.
     merged = {}
     for item in items:
         key = item['content_id']
@@ -2419,7 +2391,6 @@ def get_stream_metrics(session_id, stream_id):
     )
 
 
-# Serve screenshots
 @app.route('/api/data/screenshots/<filename>')
 def serve_screenshot(filename):
     """Serve screenshot files."""
@@ -2436,9 +2407,6 @@ def get_alive_screenshots(session_id):
         session_id=session_id,
         get_session_manager=get_session_manager,
     )
-
-
-
 
 
 @app.route('/api/proxy/status', methods=['GET'])
@@ -2466,8 +2434,6 @@ def get_stream_viewer_url(stream_id):
     )
 
 
-
-
 @app.route('/api/stream/proxy/<int:stream_id>', methods=['GET'])
 def stream_proxy_url(stream_id):
     """Proxy the local UDP stream from FFmpeg out via HTTP using a shared listener."""
@@ -2484,10 +2450,6 @@ def create_session_from_event(event_id):
         event_id=event_id,
         get_scheduling_service=get_scheduling_service,
     )
-
-
-
-# Serve React app for all frontend routes (catch-all - must be last!)
 
 
 # ==================== Settings API ====================
@@ -2507,6 +2469,7 @@ def handle_session_settings():
 def serve_frontend(path):
     """Serve React frontend files or return index.html for client-side routing."""
     return serve_frontend_response(static_folder=static_folder, path=path)
+
 # --- Telemetry API ---
 from apps.telemetry.telemetry_api import telemetry_bp
 app.register_blueprint(telemetry_bp, url_prefix='/api/telemetry')
@@ -2533,21 +2496,16 @@ if __name__ == '__main__':
         logger.error(f"Failed to initialize database schema: {e}", exc_info=True)
         raise
     
-    # Only start background services in the reloader process (or if not using reloader)
-    # WERKZEUG_RUN_MAIN is set to 'true' in the child process spawned by the reloader
     if not args.debug or os.environ.get("WERKZEUG_RUN_MAIN") == "true":
         logger.info("Starting background services (active process)...")
         
-        # Auto-start stream checker service if enabled and automation is configured AND wizard is complete
         try:
-            # Check if wizard has been completed
             if not check_wizard_complete():
                 logger.info("Stream checker service will not start - setup wizard has not been completed")
             else:
                 service = get_stream_checker_service()
                 automation_controls = service.config.get('automation_controls', {})
                 
-                # Check if any automation is enabled
                 any_automation_enabled = (
                     automation_controls.get('auto_m3u_updates', True) or
                     automation_controls.get('auto_stream_matching', True) or
@@ -2565,7 +2523,6 @@ if __name__ == '__main__':
         except Exception as e:
             logger.error(f"Failed to auto-start stream checker service: {e}")
             
-        # Register signal handlers for graceful shutdown (SIGTERM/SIGINT)
         try:
             import signal
             import sys
@@ -2606,9 +2563,7 @@ if __name__ == '__main__':
         except Exception as e:
             logger.error(f"Failed to register signal handlers: {e}")
         
-        # Auto-start automation service if automation is configured AND wizard is complete
         try:
-            # Check if wizard has been completed
             if not check_wizard_complete():
                 logger.info("Automation service will not start - setup wizard has not been completed")
             else:
@@ -2616,7 +2571,6 @@ if __name__ == '__main__':
                 service = get_stream_checker_service()
                 automation_controls = service.config.get('automation_controls', {})
                 
-                # Check the master switch for regular automation
                 from apps.automation.automation_config_manager import get_automation_config_manager
                 automation_config = get_automation_config_manager()
                 global_settings = automation_config.get_global_settings()
@@ -2625,13 +2579,11 @@ if __name__ == '__main__':
                 if not regular_automation_enabled:
                     logger.info("Automation service is disabled (regular_automation_enabled is False)")
                 else:
-                    # Auto-start automation
                     manager.start_automation()
                     logger.info(f"Automation service auto-started")
         except Exception as e:
             logger.error(f"Failed to auto-start automation service: {e}")
         
-        # Auto-start scheduled event processor if wizard is complete
         try:
             if not check_wizard_complete():
                 logger.info("Scheduled event processor will not start - setup wizard has not been completed")
@@ -2641,7 +2593,6 @@ if __name__ == '__main__':
         except Exception as e:
             logger.error(f"Failed to auto-start scheduled event processor: {e}")
         
-        # Auto-start EPG refresh processor if wizard is complete
         try:
             if not check_wizard_complete():
                 logger.info("EPG refresh processor will not start - setup wizard has not been completed")
@@ -2650,8 +2601,16 @@ if __name__ == '__main__':
                 logger.info("EPG refresh processor auto-started")
         except Exception as e:
             logger.error(f"Failed to auto-start EPG refresh processor: {e}")
+
+        try:
+            if not check_wizard_complete():
+                logger.info("UDI refresh processor will not start - setup wizard has not been completed")
+            else:
+                start_udi_refresh_processor()
+                logger.info("UDI refresh processor auto-started")
+        except Exception as e:
+            logger.error(f"Failed to auto-start UDI refresh processor: {e}")
         
-        # Auto-start stream monitoring service (always starts, independent of wizard)
         try:
             monitoring_service = get_monitoring_service()
             monitoring_service.start()
@@ -2659,10 +2618,6 @@ if __name__ == '__main__':
         except Exception as e:
             logger.error(f"Failed to auto-start stream monitoring service: {e}")
             
-        # Force a full UDI Refresh on startup in the background if wizard is complete.
-        # Polls Dispatcharr readiness before attempting the refresh so that a
-        # simultaneous Docker stack startup does not silently fail while Dispatcharr
-        # is still booting.
         try:
             if check_wizard_complete():
                 def startup_udi_refresh():
@@ -2671,7 +2626,7 @@ if __name__ == '__main__':
                     from apps.udi.fetcher import UDIFetcher
 
                     POLL_INTERVAL_SECONDS = 10
-                    MAX_WAIT_SECONDS = 300  # 5-minute ceiling
+                    MAX_WAIT_SECONDS = 300
 
                     fetcher = UDIFetcher()
                     elapsed = 0

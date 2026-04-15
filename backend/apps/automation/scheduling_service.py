@@ -1,5 +1,5 @@
 """
-Scheduling Service for StreamFlow.
+Scheduling Service
 
 This service manages scheduled channel checks based on EPG program data.
 It fetches EPG data from Dispatcharr, caches it, and manages scheduled events.
@@ -72,6 +72,18 @@ class NoTvgIdError(Exception):
 # ──────────────────────────────────────────────────────────────────────────
 
 
+def _parse_dt(value: str) -> datetime:
+    """Parse an ISO datetime string to a timezone-aware UTC datetime.
+
+    Handles both Z-suffix and +00:00 formats.  Always returns a tz-aware
+    datetime so callers can compare directly against datetime.now(timezone.utc).
+    """
+    dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 class SchedulingService:
     """
     Service for managing EPG-based scheduled channel checks.
@@ -96,9 +108,15 @@ class SchedulingService:
         return self._regex_matcher
 
     def _load_config(self) -> Dict[str, Any]:
-        """Load scheduling configuration from SQL."""
+        """Load scheduling configuration from SQL.
+
+        Migrates legacy epg_refresh_interval_minutes integer to the unified
+        schedule structure {type, value} on first load. Transparent to users —
+        same behaviour, no data loss, cron option unlocked going forward.
+        """
         default_config = {
-            'epg_refresh_interval_minutes': 60,
+            'epg_schedule': {'type': 'interval', 'value': 60},
+            'udi_refresh_schedule': None,
             'enabled': True
         }
         from apps.database.connection import get_session
@@ -107,9 +125,35 @@ class SchedulingService:
         try:
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'scheduling_config').first()
             if setting and setting.value:
-                return setting.value
+                config = dict(setting.value)
+                needs_save = False
+
+                # One-time migration: convert legacy integer key to schedule object
+                if 'epg_refresh_interval_minutes' in config and 'epg_schedule' not in config:
+                    legacy_minutes = config.pop('epg_refresh_interval_minutes', 60)
+                    config['epg_schedule'] = {'type': 'interval', 'value': int(legacy_minutes)}
+                    logger.info(
+                        f"Migrated EPG schedule: epg_refresh_interval_minutes={legacy_minutes} "
+                        f"→ epg_schedule={{type: interval, value: {legacy_minutes}}}"
+                    )
+                    needs_save = True
+
+                # Ensure udi_refresh_schedule key exists in older configs
+                if 'udi_refresh_schedule' not in config:
+                    config['udi_refresh_schedule'] = None
+                    needs_save = True
+
+                # Persist only when something actually changed
+                if needs_save:
+                    from sqlalchemy.orm.attributes import flag_modified
+                    setting.value = config
+                    flag_modified(setting, "value")
+                    session.commit()
+
+                return config
         except Exception as e:
             logger.error(f"Error loading scheduling config: {e}")
+            session.rollback()
         finally:
             session.close()
         return default_config
@@ -136,19 +180,98 @@ class SchedulingService:
         finally:
             session.close()
 
+    # ── LAYER 2: Load-time staleness filter ──────────────────────────────
     def _load_scheduled_events(self) -> List[Dict[str, Any]]:
+        """Load scheduled events from SQL, discarding any whose program has
+        already ended.
+
+        This is the primary defence against the container-restart scenario:
+        events that were valid when created but whose program aired during
+        downtime are dropped here before they can ever reach the processor.
+        A pruned event is logged at WARNING level so operators can see what
+        was discarded.
+        """
         from apps.database.connection import get_session
         from apps.database.models import SystemSetting
         session = get_session()
         try:
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'scheduled_events').first()
             if setting and setting.value:
-                return setting.value
+                raw_events: List[Dict[str, Any]] = setting.value
+            else:
+                return []
         except Exception as e:
             logger.error(f"Error loading scheduled events: {e}")
+            return []
         finally:
             session.close()
-        return []
+
+        now = datetime.now(timezone.utc)
+        live_events: List[Dict[str, Any]] = []
+        pruned_count = 0
+
+        for event in raw_events:
+            end_time_str = event.get('program_end_time')
+            if not end_time_str:
+                # No end time recorded — keep and let execution-time guard handle it
+                live_events.append(event)
+                continue
+
+            try:
+                end_dt = _parse_dt(end_time_str)
+            except (ValueError, AttributeError):
+                # Unparseable end time — keep and let execution-time guard handle it
+                logger.warning(
+                    f"Scheduled event {event.get('id')} has unparseable program_end_time "
+                    f"'{end_time_str}'; keeping for execution-time evaluation"
+                )
+                live_events.append(event)
+                continue
+
+            if end_dt <= now:
+                pruned_count += 1
+                logger.warning(
+                    f"Pruning stale scheduled event {event.get('id')} "
+                    f"('{event.get('program_title')}' on channel {event.get('channel_name')}): "
+                    f"program ended at {end_time_str} — likely missed during downtime"
+                )
+            else:
+                live_events.append(event)
+
+        if pruned_count:
+            logger.info(
+                f"Load-time staleness filter: pruned {pruned_count} event(s) whose programs "
+                f"have already ended. Saving cleaned list."
+            )
+            # Persist the cleaned list immediately so the stale entries don't
+            # reappear on the next restart.  We write directly to the DB here
+            # rather than calling _save_scheduled_events() because self._scheduled_events
+            # has not been assigned yet (we are still inside _load_scheduled_events).
+            try:
+                from apps.database.connection import get_session
+                from apps.database.models import SystemSetting
+                from sqlalchemy.orm.attributes import flag_modified
+                _sess = get_session()
+                try:
+                    _setting = _sess.query(SystemSetting).filter(
+                        SystemSetting.key == 'scheduled_events'
+                    ).first()
+                    if not _setting:
+                        _setting = SystemSetting(key='scheduled_events', value=live_events)
+                        _sess.add(_setting)
+                    else:
+                        _setting.value = live_events
+                        flag_modified(_setting, 'value')
+                    _sess.commit()
+                except Exception as _e:
+                    _sess.rollback()
+                    logger.error(f"Failed to persist pruned event list: {_e}")
+                finally:
+                    _sess.close()
+            except Exception as e:
+                logger.error(f"Failed to persist pruned event list: {e}")
+
+        return live_events
 
     def _save_scheduled_events(self) -> bool:
         from apps.database.connection import get_session
@@ -252,171 +375,39 @@ class SchedulingService:
             self._config.update(config)
             return self._save_config()
 
-    def _get_base_url(self) -> Optional[str]:
-        config = get_dispatcharr_config()
-        return config.get_base_url()
+    def get_epg_schedule(self) -> dict:
+        """Return the EPG refresh schedule as a {type, value} dict.
 
-    def _get_auth_token(self) -> Optional[str]:
-        return os.getenv("DISPATCHARR_TOKEN")
+        Falls back to a 60-minute interval if the config still carries the
+        legacy epg_refresh_interval_minutes key (belt-and-suspenders).
+        """
+        schedule = self._config.get('epg_schedule')
+        if schedule and isinstance(schedule, dict):
+            return schedule
+        # Legacy fallback
+        legacy_mins = self._config.get('epg_refresh_interval_minutes', 60)
+        return {'type': 'interval', 'value': int(legacy_mins)}
 
-    def fetch_channel_programs_from_api(self, tvg_id: str, hours_ahead: int = 24, force_refresh: bool = False) -> List[Dict[str, Any]]:
-        """Fetch EPG programs for a specific channel from Dispatcharr API.
+    def get_udi_refresh_schedule(self):
+        """Return the UDI refresh schedule or None if not configured.
+
+        None means the UDI refresh worker is dormant — no scheduled refreshes.
+        """
+        return self._config.get('udi_refresh_schedule')
+
+    def update_udi_refresh_schedule(self, schedule) -> bool:
+        """Set or clear the UDI refresh schedule.
 
         Args:
-            tvg_id: TVG ID of the channel
-            hours_ahead: Number of hours ahead to include (enforced client-side)
-            force_refresh: If True, bypass cache and fetch fresh data
+            schedule: Dict {type, value} for interval or cron, or None to
+                      clear (worker goes dormant).
 
         Returns:
-            List of program dictionaries
-
-        Notes (SCH-001):
-            The Dispatcharr /api/epg/programs/ endpoint accepts tvg_id as a query
-            filter but silently ignores start_time__gte / start_time__lte parameters.
-            The hours_ahead window is therefore enforced client-side after parsing
-            the response. The start_time__gte hint is still sent as a best-effort
-            performance hint in case a future Dispatcharr version honours it.
-
-            The tvg_id post-filter is applied only when programs actually carry a
-            tvg_id field in the response. When the field is absent (Dispatcharr does
-            not always echo it back) we trust the API filtered by tvg_id correctly.
+            True if saved successfully.
         """
-        if not tvg_id:
-            return []
-
-        # Check cache
         with self._lock:
-            cached_data = self._epg_cache.get(tvg_id)
-            if not force_refresh and cached_data:
-                cache_age = datetime.now() - cached_data['time']
-                refresh_interval = timedelta(minutes=self._config.get('epg_refresh_interval_minutes', 60))
-                if cache_age < refresh_interval:
-                    return cached_data['programs'].copy()
-
-        # Fetch fresh data
-        base_url = self._get_base_url()
-        if not base_url:
-            logger.error("Missing Dispatcharr configuration (base_url)")
-            return []
-
-        try:
-            now = datetime.now(timezone.utc)
-            start_time = (now - timedelta(hours=1)).isoformat()
-            end_time = now + timedelta(hours=hours_ahead)
-
-            # Send start_time__gte as a hint; end-time filter is enforced below
-            # because the API ignores start_time__lte (SCH-001).
-            url = f"{base_url}/api/epg/programs/?tvg_id={tvg_id}&start_time__gte={start_time}"
-            logger.debug(f"Fetching EPG programs for TVG ID {tvg_id}")
-
-            data = fetch_data_from_url(url)
-            if data is None:
-                logger.error(f"Failed to fetch EPG programs for TVG ID {tvg_id}")
-                return []
-
-            programs = []
-            if isinstance(data, list):
-                programs = data
-            elif isinstance(data, dict):
-                programs = data.get('results', data.get('data', data.get('programs', [])))
-                if not isinstance(programs, list):
-                    programs = []
-
-            # ── SCH-001 client-side filtering ────────────────────────────
-            # Only apply tvg_id cross-channel guard when programs actually carry
-            # the field — Dispatcharr does not always echo it back.
-            any_have_tvg_id = any(
-                isinstance(p, dict) and p.get('tvg_id')
-                for p in programs
-            )
-
-            valid_programs = []
-            for p in programs:
-                if not isinstance(p, dict):
-                    continue
-                # Optional cross-channel guard
-                if any_have_tvg_id and p.get('tvg_id') and p.get('tvg_id') != tvg_id:
-                    continue
-                # Enforce hours_ahead window
-                p_start = p.get('start_time')
-                if p_start:
-                    try:
-                        p_start_dt = datetime.fromisoformat(p_start.replace('Z', '+00:00'))
-                        if p_start_dt.tzinfo is None:
-                            p_start_dt = p_start_dt.replace(tzinfo=timezone.utc)
-                        if p_start_dt > end_time:
-                            continue
-                    except (ValueError, AttributeError):
-                        pass  # Unparseable time — include and let caller decide
-                valid_programs.append(p)
-
-            logger.debug(
-                f"Fetched {len(programs)} programs for tvg_id={tvg_id}, "
-                f"kept {len(valid_programs)} within {hours_ahead}h window"
-            )
-            # ─────────────────────────────────────────────────────────────
-
-            # Update cache
-            with self._lock:
-                self._epg_cache[tvg_id] = {
-                    'time': datetime.now(),
-                    'programs': valid_programs
-                }
-
-            return valid_programs.copy()
-
-        except Exception as e:
-            logger.error(f"Error fetching EPG programs for {tvg_id}: {e}")
-            with self._lock:
-                cached_data = self._epg_cache.get(tvg_id)
-                if cached_data:
-                    return cached_data['programs'].copy()
-            return []
-
-    def fetch_epg_grid(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
-        """Fetch EPG grid data from Dispatcharr API and trigger matching.
-
-        Note: This is now a wrapper around match_programs_to_rules to maintain
-        compatibility with legacy code and tests.
-        """
-        logger.info("Triggering EPG refresh and rule matching")
-        self.match_programs_to_rules(force_refresh=force_refresh)
-        return []
-
-    def get_programs_by_channel(self, channel_id: int, tvg_id: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get programs for a specific channel from Dispatcharr API.
-
-        Args:
-            channel_id: Channel ID
-            tvg_id: Optional TVG ID override
-
-        Returns:
-            List of program dictionaries
-
-        Raises:
-            NoTvgIdError: When the channel has no TVG-ID configured (SCH-002).
-                          Callers that want a user-facing message should catch this
-                          and surface it explicitly rather than treating it as zero
-                          results.
-        """
-        if not tvg_id:
-            udi = get_udi_manager()
-            channel = udi.get_channel_by_id(channel_id)
-            if channel:
-                tvg_id = channel.get('tvg_id')
-
-        if not tvg_id:
-            # ── SCH-002 ──────────────────────────────────────────────────
-            # Raise a typed error so the API handler can return a structured
-            # response with a specific message instead of {matches: 0}.
-            logger.warning(f"No TVG ID found for channel {channel_id}")
-            raise NoTvgIdError(channel_id)
-            # ─────────────────────────────────────────────────────────────
-
-        channel_programs = self.fetch_channel_programs_from_api(tvg_id)
-        channel_programs.sort(key=lambda p: p.get('start_time', ''))
-        logger.debug(f"Found {len(channel_programs)} programs for channel {channel_id} (tvg_id: {tvg_id})")
-        return channel_programs
+            self._config['udi_refresh_schedule'] = schedule
+            return self._save_config()
 
     def get_scheduled_events(self) -> List[Dict[str, Any]]:
         """Get all scheduled events sorted by check_time (earliest first)."""
@@ -425,30 +416,94 @@ class SchedulingService:
         def get_check_time(event):
             check_time = event.get('check_time', '')
             try:
-                return datetime.fromisoformat(check_time.replace('Z', '+00:00'))
+                return _parse_dt(check_time)
             except (ValueError, AttributeError):
                 return datetime.max.replace(tzinfo=timezone.utc)
 
         events.sort(key=get_check_time)
         return events
 
+    # ── LAYER 3: Execution-time staleness guard ───────────────────────────
     def get_due_events(self) -> List[Dict[str, Any]]:
-        """Get all events that are due for execution."""
+        """Get all events that are due for execution.
+
+        An event is due when its check_time has passed.  Additionally, if the
+        program has already ended by the time we check (e.g. the event sat in
+        the queue while the container was paused, or a very long downtime that
+        the load-time filter didn't fully cover), the event is silently
+        discarded rather than fired — a check against a finished program is
+        meaningless.
+        """
         now = datetime.now(timezone.utc)
-        due_events = []
+        due_events: List[Dict[str, Any]] = []
+        stale_ids: List[str] = []
+
         for event in self._scheduled_events:
+            event_id = event.get('id')
+
+            # --- check_time gate (existing behaviour) ---
             try:
-                check_time = datetime.fromisoformat(event['check_time'].replace('Z', '+00:00'))
-                if check_time.tzinfo is None:
-                    check_time = check_time.replace(tzinfo=timezone.utc)
-                if check_time <= now:
-                    due_events.append(event)
+                check_time = _parse_dt(event['check_time'])
             except (ValueError, KeyError) as e:
-                logger.warning(f"Invalid check_time for event {event.get('id')}: {e}")
+                logger.warning(f"Invalid check_time for event {event_id}: {e}")
+                continue
+
+            if check_time > now:
+                continue  # Not due yet
+
+            # --- program_end_time staleness guard (new) ---
+            end_time_str = event.get('program_end_time')
+            if end_time_str:
+                try:
+                    end_dt = _parse_dt(end_time_str)
+                    if end_dt <= now:
+                        logger.warning(
+                            f"Skipping stale due event {event_id} "
+                            f"('{event.get('program_title')}' on "
+                            f"channel {event.get('channel_name')}): "
+                            f"program ended at {end_time_str}"
+                        )
+                        stale_ids.append(event_id)
+                        continue
+                except (ValueError, AttributeError):
+                    # Unparseable end time — allow execution rather than silently drop
+                    logger.warning(
+                        f"Event {event_id} has unparseable program_end_time "
+                        f"'{end_time_str}'; allowing execution"
+                    )
+
+            due_events.append(event)
+
+        # Purge stale events discovered at execution time so they don't
+        # keep appearing on every processor cycle.
+        if stale_ids:
+            with self._lock:
+                self._scheduled_events = [
+                    e for e in self._scheduled_events
+                    if e.get('id') not in stale_ids
+                ]
+                self._save_scheduled_events()
+            logger.info(
+                f"Execution-time staleness filter: purged {len(stale_ids)} "
+                f"event(s) whose programs ended while in queue"
+            )
+
         return due_events
 
+    # ── LAYER 1: Creation-time temporal guard ─────────────────────────────
     def create_scheduled_event(self, event_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Create a new scheduled event."""
+        """Create a new scheduled event.
+
+        Temporal validation rules (applied before persisting):
+
+        1. program_end_time must be parseable and after program_start_time.
+        2. If program_end_time <= now the program is fully over — reject with
+           ValueError so the handler returns a clean 400 to the caller.
+        3. If check_time falls in the past but program_end_time is still in
+           the future the program is currently airing.  The event is accepted
+           (the check will execute immediately on the next processor cycle,
+           which is the correct behaviour), but a warning is logged.
+        """
         with self._lock:
             event_id = str(uuid.uuid4())
 
@@ -458,17 +513,51 @@ class SchedulingService:
             if not channel:
                 raise ValueError(f"Channel {event_data['channel_id']} not found")
 
+            # --- Parse required time fields ---
+            try:
+                program_start = _parse_dt(event_data['program_start_time'])
+            except (ValueError, AttributeError) as e:
+                raise ValueError(f"Invalid program_start_time: {e}") from e
+
+            try:
+                program_end = _parse_dt(event_data['program_end_time'])
+            except (ValueError, AttributeError) as e:
+                raise ValueError(f"Invalid program_end_time: {e}") from e
+
+            now = datetime.now(timezone.utc)
+
+            # --- Guard 1: end must be after start ---
+            if program_end <= program_start:
+                raise ValueError(
+                    f"program_end_time ({event_data['program_end_time']}) must be "
+                    f"after program_start_time ({event_data['program_start_time']})"
+                )
+
+            # --- Guard 2: reject fully-ended programs ---
+            if program_end <= now:
+                raise ValueError(
+                    f"Cannot schedule a check for '{event_data.get('program_title')}': "
+                    f"the program ended at {event_data['program_end_time']} and has already aired."
+                )
+
             # Calculate check time
-            program_start = datetime.fromisoformat(
-                event_data['program_start_time'].replace('Z', '+00:00')
-            )
             minutes_before = event_data.get('minutes_before', 0)
             check_time = program_start - timedelta(minutes=minutes_before)
 
             # Ensure check_time is timezone-aware
             if check_time.tzinfo is None:
-                logger.warning(f"check_time is missing timezone info, assuming UTC: {check_time}")
                 check_time = check_time.replace(tzinfo=timezone.utc)
+
+            # --- Guard 3: warn when program is currently airing (check_time in past,
+            #              end_time in future).  Event is still created — the processor
+            #              will fire it immediately, which is the right thing to do. ---
+            if check_time <= now:
+                logger.warning(
+                    f"Scheduled event for '{event_data.get('program_title')}' has a "
+                    f"check_time in the past ({check_time.isoformat()}). "
+                    f"The program is currently airing or minutes_before is larger than the "
+                    f"lead time. The check will execute immediately."
+                )
 
             # Get channel logo info
             logo_id = channel.get('logo_id')
@@ -655,22 +744,6 @@ class SchedulingService:
             logger.info(f"Created auto-create rule {rule_id}: {rule_data['name']}")
             return rule
 
-    def delete_auto_create_rule(self, rule_id: str) -> bool:
-        """Delete an auto-create rule."""
-        with self._lock:
-            initial_count = len(self._auto_create_rules)
-            self._auto_create_rules = [r for r in self._auto_create_rules if r.get('id') != rule_id]
-            if len(self._auto_create_rules) < initial_count:
-                self._save_auto_create_rules()
-                self._scheduled_events = [
-                    e for e in self._scheduled_events
-                    if e.get('auto_create_rule_id') != rule_id
-                ]
-                self._save_scheduled_events()
-                logger.info(f"Deleted auto-create rule {rule_id}")
-                return True
-            return False
-
     def update_auto_create_rule(self, rule_id: str, rule_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Update an existing auto-create rule."""
         with self._lock:
@@ -739,9 +812,9 @@ class SchedulingService:
                 except re.error as e:
                     raise ValueError(f"Invalid regex pattern: {e}")
 
-            for field in ['name', 'minutes_before', 'session_type', 'interval_s',
-                          'run_seconds', 'per_sample_timeout_s', 'engine_container_id',
-                          'enable_looping_detection', 'enable_logo_detection']:
+            for field in ['name', 'minutes_before', 'schedule_type', 'session_type',
+                          'interval_s', 'run_seconds', 'per_sample_timeout_s',
+                          'engine_container_id', 'enable_looping_detection', 'enable_logo_detection']:
                 if field in rule_data:
                     rule[field] = rule_data[field]
 
@@ -767,6 +840,23 @@ class SchedulingService:
 
             threading.Thread(target=match_in_background, daemon=True).start()
             return rule
+
+    def delete_auto_create_rule(self, rule_id: str) -> bool:
+        """Delete an auto-create rule."""
+        with self._lock:
+            initial_count = len(self._auto_create_rules)
+            self._auto_create_rules = [r for r in self._auto_create_rules if r.get('id') != rule_id]
+            if len(self._auto_create_rules) < initial_count:
+                self._save_auto_create_rules()
+                # Remove any events created by this rule
+                self._scheduled_events = [
+                    e for e in self._scheduled_events
+                    if e.get('auto_create_rule_id') != rule_id
+                ]
+                self._save_scheduled_events()
+                logger.info(f"Deleted auto-create rule {rule_id}")
+                return True
+            return False
 
     def test_regex_against_epg(self, channel_id: int, regex_pattern: str) -> List[Dict[str, Any]]:
         """Test a regex pattern against EPG programs for a channel.
@@ -871,6 +961,7 @@ class SchedulingService:
                 channel = udi.get_channel_by_id(channel_id)
                 logo_id = channel.get('logo_id') if channel else None
                 logo_url = f"/api/logos/{logo_id}" if logo_id else None
+                channel_name = channel_info.get('name', f'Channel {channel_id}')
 
                 for program in programs:
                     title = program.get('title', '')
@@ -884,16 +975,11 @@ class SchedulingService:
                         continue
 
                     try:
-                        start_dt = datetime.fromisoformat(program_start.replace('Z', '+00:00'))
-                        end_dt = datetime.fromisoformat(program_end.replace('Z', '+00:00'))
+                        start_dt = _parse_dt(program_start)
+                        end_dt = _parse_dt(program_end)
                     except (ValueError, AttributeError) as e:
                         logger.warning(f"Invalid program times for {title}: {e}")
                         continue
-
-                    if start_dt.tzinfo is None:
-                        start_dt = start_dt.replace(tzinfo=timezone.utc)
-                    if end_dt.tzinfo is None:
-                        end_dt = end_dt.replace(tzinfo=timezone.utc)
 
                     now = datetime.now(timezone.utc)
                     if start_dt <= now:
@@ -915,9 +1001,7 @@ class SchedulingService:
                             if not existing_start:
                                 continue
                             try:
-                                existing_dt = datetime.fromisoformat(existing_start.replace('Z', '+00:00'))
-                                if existing_dt.tzinfo is None:
-                                    existing_dt = existing_dt.replace(tzinfo=timezone.utc)
+                                existing_dt = _parse_dt(existing_start)
                                 diff = abs((start_dt - existing_dt).total_seconds())
                                 if diff <= DUPLICATE_DETECTION_WINDOW_SECONDS:
                                     existing_event = event
@@ -942,7 +1026,6 @@ class SchedulingService:
                             skipped_count += 1
                         continue
 
-                    channel_name = channel_info.get('name', f'Channel {channel_id}')
                     schedule_type = rule.get('schedule_type', 'check')
 
                     new_event = {
@@ -1143,6 +1226,165 @@ class SchedulingService:
         except Exception as e:
             logger.error(f"Error creating session from event {event_id}: {e}", exc_info=True)
             return None
+
+    def fetch_epg_grid(self, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """Fetch EPG grid and trigger rule matching.
+
+        Note: This is now a wrapper around match_programs_to_rules to maintain
+        compatibility with legacy code and tests.
+        """
+        logger.info("Triggering EPG refresh and rule matching")
+        self.match_programs_to_rules(force_refresh=force_refresh)
+        return []
+
+    def get_programs_by_channel(self, channel_id: int, tvg_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get programs for a specific channel from Dispatcharr API.
+
+        Args:
+            channel_id: Channel ID
+            tvg_id: Optional TVG ID override
+
+        Returns:
+            List of program dictionaries
+
+        Raises:
+            NoTvgIdError: When the channel has no TVG-ID configured (SCH-002).
+        """
+        if not tvg_id:
+            udi = get_udi_manager()
+            channel = udi.get_channel_by_id(channel_id)
+            if channel:
+                tvg_id = channel.get('tvg_id')
+
+        if not tvg_id:
+            logger.warning(f"No TVG ID found for channel {channel_id}")
+            raise NoTvgIdError(channel_id)
+
+        channel_programs = self.fetch_channel_programs_from_api(tvg_id)
+        channel_programs.sort(key=lambda p: p.get('start_time', ''))
+        logger.debug(f"Found {len(channel_programs)} programs for channel {channel_id} (tvg_id: {tvg_id})")
+        return channel_programs
+
+    def _get_base_url(self) -> Optional[str]:
+        config = get_dispatcharr_config()
+        return config.get_base_url()
+
+    def _get_auth_token(self) -> Optional[str]:
+        return os.getenv("DISPATCHARR_TOKEN")
+
+    def fetch_channel_programs_from_api(self, tvg_id: str, hours_ahead: int = 24, force_refresh: bool = False) -> List[Dict[str, Any]]:
+        """Fetch EPG programs for a specific channel from Dispatcharr API.
+
+        Args:
+            tvg_id: TVG ID of the channel
+            hours_ahead: Number of hours ahead to include (enforced client-side)
+            force_refresh: If True, bypass cache and fetch fresh data
+
+        Returns:
+            List of program dictionaries
+
+        Notes (SCH-001):
+            The Dispatcharr /api/epg/programs/ endpoint accepts tvg_id as a query
+            filter but silently ignores start_time__gte / start_time__lte parameters.
+            The hours_ahead window is therefore enforced client-side after parsing
+            the response. The start_time__gte hint is still sent as a best-effort
+            performance hint in case a future Dispatcharr version honours it.
+
+            The tvg_id post-filter is applied only when programs actually carry a
+            tvg_id field in the response. When the field is absent (Dispatcharr does
+            not always echo it back) we trust the API filtered by tvg_id correctly.
+        """
+        if not tvg_id:
+            return []
+
+        # Check cache
+        with self._lock:
+            cached_data = self._epg_cache.get(tvg_id)
+            if not force_refresh and cached_data:
+                cache_age = datetime.now() - cached_data['time']
+                refresh_interval = timedelta(minutes=self.get_epg_schedule().get('value', 60))
+                if cache_age < refresh_interval:
+                    return cached_data['programs'].copy()
+
+        # Fetch fresh data
+        base_url = self._get_base_url()
+        if not base_url:
+            logger.error("Missing Dispatcharr configuration (base_url)")
+            return []
+
+        try:
+            now = datetime.now(timezone.utc)
+            start_time = (now - timedelta(hours=1)).isoformat()
+            end_time = now + timedelta(hours=hours_ahead)
+
+            # Send start_time__gte as a hint; end-time filter is enforced below
+            # because the API ignores start_time__lte (SCH-001).
+            url = f"{base_url}/api/epg/programs/?tvg_id={tvg_id}&start_time__gte={start_time}"
+            logger.debug(f"Fetching EPG programs for TVG ID {tvg_id}")
+
+            data = fetch_data_from_url(url)
+            if data is None:
+                logger.error(f"Failed to fetch EPG programs for TVG ID {tvg_id}")
+                return []
+
+            programs = []
+            if isinstance(data, list):
+                programs = data
+            elif isinstance(data, dict):
+                programs = data.get('results', data.get('data', data.get('programs', [])))
+                if not isinstance(programs, list):
+                    programs = []
+
+            # ── SCH-001 client-side filtering ────────────────────────────
+            # Only apply tvg_id cross-channel guard when programs actually carry
+            # the field — Dispatcharr does not always echo it back.
+            any_have_tvg_id = any(
+                isinstance(p, dict) and p.get('tvg_id')
+                for p in programs
+            )
+
+            valid_programs = []
+            for p in programs:
+                if not isinstance(p, dict):
+                    continue
+                # Optional cross-channel guard
+                if any_have_tvg_id and p.get('tvg_id') and p.get('tvg_id') != tvg_id:
+                    continue
+                # Enforce hours_ahead window
+                p_start = p.get('start_time')
+                if p_start:
+                    try:
+                        p_start_dt = datetime.fromisoformat(p_start.replace('Z', '+00:00'))
+                        if p_start_dt.tzinfo is None:
+                            p_start_dt = p_start_dt.replace(tzinfo=timezone.utc)
+                        if p_start_dt > end_time:
+                            continue
+                    except (ValueError, AttributeError):
+                        pass  # Unparseable time — include and let caller decide
+                valid_programs.append(p)
+
+            logger.debug(
+                f"Fetched {len(programs)} programs for tvg_id={tvg_id}, "
+                f"kept {len(valid_programs)} within {hours_ahead}h window"
+            )
+            # ─────────────────────────────────────────────────────────────
+
+            # Update cache
+            with self._lock:
+                self._epg_cache[tvg_id] = {
+                    'time': datetime.now(),
+                    'programs': valid_programs
+                }
+
+            return valid_programs.copy()
+
+        except Exception as e:
+            logger.error(f"Error fetching EPG programs for {tvg_id}: {e}")
+            with self._lock:
+                cached_data = self._epg_cache.get(tvg_id)
+                if cached_data:
+                    return cached_data['programs'].copy()
+            return []
 
     def export_auto_create_rules(self) -> List[Dict[str, Any]]:
         """Export auto-create rules."""

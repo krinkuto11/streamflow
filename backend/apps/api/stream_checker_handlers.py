@@ -247,19 +247,47 @@ def check_single_channel_now_response(
     payload: Any,
     get_stream_checker_service: Callable[[], Any],
 ):
-    """Handle immediate synchronous check for one channel."""
+    """Handle immediate synchronous check for one channel.
+
+    The backend enforces the opt-in model: a channel must have an automation
+    profile assigned (via an automation period or, for EPG checks, an EPG
+    scheduled profile override) before a health check can run. When neither
+    resolves, the service returns error='no_profile'.
+
+    Returns:
+        200  — check ran successfully
+        400  — channel_id missing, OR channel has no automation profile assigned
+               (no_profile). 400 is used for no_profile rather than 500 because
+               this is a user configuration error, not an internal server fault.
+               The frontend pre-flight catches this before reaching the API in
+               the normal path; the backend guard fires as a safety net (e.g.
+               periods exist but none are currently active at execution time).
+        500  — unexpected internal error
+    """
     try:
         data = payload
         if not data or "channel_id" not in data:
             return jsonify({"error": "channel_id required"}), 400
 
         channel_id = data["channel_id"]
+        # profile_id is optionally supplied when the user explicitly chose a profile
+        # via the ProfilePickerDialog (multi-period channel). When present it is
+        # forwarded to the service so the correct profile governs the check.
+        forced_profile_id = data.get("profile_id")
         service = get_stream_checker_service()
-        result = service.check_single_channel(channel_id)
+        result = service.check_single_channel(channel_id, forced_profile_id=forced_profile_id)
 
         if result.get("success"):
-            return jsonify(result)
+            return jsonify(result), 200
+
+        # no_profile: user configuration error — channel has no automation profile.
+        # Return 400 so the frontend can distinguish this from a generic failure
+        # and surface a precise, actionable message rather than "Check Failed".
+        if result.get("error") == "no_profile":
+            return jsonify(result), 400
+
         return jsonify(result), 500
+
     except Exception as exc:
         logger.error(f"Error checking single channel: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500
