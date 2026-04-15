@@ -439,12 +439,48 @@ class UDIManager:
 
     def get_channels(self) -> List[Dict[str, Any]]:
         """Get all channels.
-        
+
+        Deduplicates by channel ``id`` before returning so that accumulation
+        bugs in the write paths (e.g. ``refresh_channel_by_id`` append,
+        ``update_channel`` for-else append) never surface to callers.
+
+        Channels whose ``id`` key is missing or ``None`` are passed through
+        unchanged (preserving existing behaviour for malformed entries rather
+        than silently dropping them).  When duplicate IDs exist the last entry
+        in ``_channels_cache`` wins, which matches the behaviour of
+        ``_build_indexes`` (dict-comprehension last-write-wins).
+
         Returns:
-            List of channel dictionaries
+            Deduplicated list of channel dictionaries, insertion-order preserved
+            for channels with valid IDs.
         """
         self._ensure_initialized()
-        return self._channels_cache.copy()
+
+        seen: Dict[Any, int] = {}   # id -> index in result
+        result: List[Dict[str, Any]] = []
+
+        for ch in self._channels_cache:
+            cid = ch.get('id')
+            if cid is None:
+                # Malformed entry — append unconditionally, do not track in seen
+                result.append(ch)
+            elif cid in seen:
+                # Duplicate: overwrite in-place so last-write-wins without
+                # changing list length or position of earlier unique entries
+                result[seen[cid]] = ch
+            else:
+                seen[cid] = len(result)
+                result.append(ch)
+
+        if len(result) != len(self._channels_cache):
+            dupes = len(self._channels_cache) - len(result)
+            logger.warning(
+                f"get_channels: deduplicated {dupes} duplicate channel entr{'y' if dupes == 1 else 'ies'} "
+                f"from _channels_cache ({len(self._channels_cache)} → {len(result)}). "
+                "Run a full UDI refresh to resolve the root cause."
+            )
+
+        return result
     
     def get_channel_by_id(self, channel_id: int, fetch_if_missing: bool = True) -> Optional[Dict[str, Any]]:
         """Get a specific channel by ID.
