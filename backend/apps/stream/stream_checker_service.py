@@ -2975,6 +2975,9 @@ class StreamCheckerService:
         elif priority_mode == 'equal':
             # In 'equal' mode, resolution and quality matter, but not M3U account priority
             return (res_tier, quality_score)
+        elif priority_mode == 'quality':
+            # Score-only mode: sort purely by quality score, ignoring account rank and resolution tier
+            return (quality_score,)
         else: # 'absolute' mode
             return (account_rank, res_tier, quality_score)
     
