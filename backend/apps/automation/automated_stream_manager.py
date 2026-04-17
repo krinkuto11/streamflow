@@ -3073,11 +3073,16 @@ class AutomatedStreamManager:
                         for ch_id in channels_to_quality_check:
                             check_all_streams = channel_check_all_streams.get(ch_id, False)
                             if not check_all_streams:
-                                # Strict validation mapping: Evaluate newly assigned streams only.
-                                if str(ch_id) in assigned_stream_ids:
+                                # Only populate target_stream_ids for channels that actually
+                                # received new stream assignments (non-empty list). Channels
+                                # with no new assignments are omitted entirely, which causes
+                                # them to fall through to the normal incremental-check branch
+                                # in the checker rather than entering the targeted-zero-streams
+                                # path that would incorrectly trigger dead removal against
+                                # unchecked streams (see: Change Block H, spec v1.0).
+                                if assigned_stream_ids.get(str(ch_id)):
                                     _target_stream_ids[ch_id] = assigned_stream_ids[str(ch_id)]
-                                else:
-                                    _target_stream_ids[ch_id] = []
+                                # else: no entry → channel uses incremental/grace-period logic
                         
                         if _target_stream_ids:
                             target_stream_ids = _target_stream_ids

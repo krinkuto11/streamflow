@@ -1289,6 +1289,12 @@ class StreamCheckerService:
                     else:
                         logger.info(f"Channel composition changed (prev: {previous_stream_count}, curr: {current_stream_count}) - will reorder")
             
+            # Streams that are actively analyzed in this pass. Used to gate
+            # dead_stream_ids mutations — only streams checked in THIS pass may
+            # be added to dead_stream_ids. Unchecked streams retain their tracker
+            # state unchanged until a future run evaluates them directly.
+            checked_stream_id_set = {s['id'] for s in streams_to_check}
+
             # Get configuration for analysis
             analysis_params = self.config.get('stream_analysis', {})
             global_limit = self.config.get('concurrent_streams.global_limit', 10)
@@ -1480,8 +1486,16 @@ class StreamCheckerService:
                             logger.info(f"Stream {stream_id} is alive but revival disabled by profile: {stream_name}")
                     elif is_dead and was_dead:
                         logger.debug(f"Stream {stream_id} remains dead (already marked)")
-                        # Add to dead_stream_ids so the stream removal logic (line 1455) will filter it out
-                        dead_stream_ids.add(stream_id)
+                        # Only act on stale dead state if this stream was part of the current
+                        # check pass. Unchecked streams must not be culled based on prior-run
+                        # tracker state — their status will be re-evaluated in the next full check.
+                        if stream_id in checked_stream_id_set:
+                            dead_stream_ids.add(stream_id)
+                        else:
+                            logger.debug(
+                                f"Stream {stream_id} skipped dead accumulation "
+                                f"(not in current check pass)"
+                            )
                     
                     # Calculate score using per-profile scoring weights
                     score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
@@ -2042,9 +2056,15 @@ class StreamCheckerService:
                     else:
                         logger.info(f"Channel composition changed (prev: {previous_stream_count}, curr: {current_stream_count}) - will reorder")
             
+            # Streams that are actively analyzed in this pass. Used to gate
+            # dead_stream_ids mutations — only streams checked in THIS pass may
+            # be added to dead_stream_ids. Unchecked streams retain their tracker
+            # state unchanged until a future run evaluates them directly.
+            checked_stream_id_set = {s['id'] for s in streams_to_check}
+
             # Import stream analysis functions from stream_check_utils
             from apps.stream.stream_check_utils import analyze_stream
-            
+
             # Analyze new/unchecked streams
             analyzed_streams = []
             dead_stream_ids = set()  # Use set for O(1) lookups
@@ -2143,9 +2163,13 @@ class StreamCheckerService:
                         dead_stream_ids.add(stream['id'])
                         logger.info(f"Stream {stream['id']} is alive but revival disabled by profile: {stream_name}")
                 elif is_dead and was_dead:
-                    # Stream remains dead
-                    dead_stream_ids.add(stream['id'])
-                
+                    # Stream remains dead. Guard is redundant here — this loop
+                    # iterates streams_to_check by definition — but kept for
+                    # symmetry with the concurrent method and to make the scope
+                    # constraint explicit at review time.
+                    if stream['id'] in checked_stream_id_set:
+                        dead_stream_ids.add(stream['id'])
+
                 # Calculate score
                 score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
                 analyzed['score'] = score
@@ -2203,34 +2227,46 @@ class StreamCheckerService:
                         'status': 'OK'  # Assume OK for previously checked streams
                     }
                     
-                    # Check if this cached stream is dead using pre-resolved threshold config
-                    stream_url = stream.get('url', '')
-                    stream_name = stream.get('name', 'Unknown')
-                    is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
-                    was_dead = self.dead_streams_tracker.is_dead(stream_url)
-                    
-                    # Handle dead/alive state transitions (same logic as newly-checked streams)
-                    if is_dead and not was_dead:
-                        # Newly detected as dead
-                        if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id, reason=dead_reason):
-                            dead_stream_ids.add(stream['id'])
-                            logger.warning(f"Cached stream {stream['id']} detected as DEAD: {stream_name} (reason={dead_reason})")
-                        else:
-                            logger.error(f"Failed to mark cached stream {stream['id']} as DEAD, will not remove from channel")
-                    elif not is_dead and was_dead:
-                        # Stream was revived!
-                        if allow_revive:
-                            if self.dead_streams_tracker.mark_as_alive(stream_url):
-                                revived_stream_ids.append(stream['id'])
-                                logger.info(f"Cached stream {stream['id']} REVIVED: {stream_name}")
-                        else:
-                            # Not allowed to revive, treat as still dead
-                            dead_stream_ids.add(stream['id'])
-                            logger.info(f"Cached stream {stream['id']} is alive but revival disabled by profile: {stream_name}")
-                    elif is_dead and was_dead:
-                        # Stream remains dead (already marked)
-                        logger.debug(f"Cached stream {stream['id']} remains dead (already marked)")
-                        dead_stream_ids.add(stream['id'])
+                    # TARGETED MODE GUARD: Dead-state transitions for streams in
+                    # streams_already_checked are intentionally suppressed. These streams
+                    # were NOT analyzed in this pass — their dead/alive determination is
+                    # based on reconstructed cached stats, which are not authoritative.
+                    # Acting on cached stats here causes every previously-flagged-dead
+                    # stream in the channel to be culled during targeted checks even when
+                    # zero new assignments were made (see: Change Block F, spec v1.0).
+                    #
+                    # All three state transitions are blocked:
+                    #   is_dead and not was_dead  → no mark_as_dead on cached stats
+                    #   not is_dead and was_dead  → no revival on cached stats
+                    #   is_dead and was_dead      → no dead_stream_ids accumulation
+                    #
+                    # Dead-state transitions require live ffmpeg analysis to be
+                    # authoritative. Leave all state changes for the next full check pass.
+                    #
+                    # NOTE: The variables below are commented out rather than deleted so
+                    # the original logic remains readable alongside the guard explanation.
+                    # stream_url = stream.get('url', '')
+                    # stream_name = stream.get('name', 'Unknown')
+                    # is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
+                    # was_dead = self.dead_streams_tracker.is_dead(stream_url)
+                    #
+                    # if is_dead and not was_dead:
+                    #     if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id, reason=dead_reason):
+                    #         dead_stream_ids.add(stream['id'])
+                    #         logger.warning(f"Cached stream {stream['id']} detected as DEAD: {stream_name} (reason={dead_reason})")
+                    #     else:
+                    #         logger.error(f"Failed to mark cached stream {stream['id']} as DEAD, will not remove from channel")
+                    # elif not is_dead and was_dead:
+                    #     if allow_revive:
+                    #         if self.dead_streams_tracker.mark_as_alive(stream_url):
+                    #             revived_stream_ids.append(stream['id'])
+                    #             logger.info(f"Cached stream {stream['id']} REVIVED: {stream_name}")
+                    #     else:
+                    #         dead_stream_ids.add(stream['id'])
+                    #         logger.info(f"Cached stream {stream['id']} is alive but revival disabled by profile: {stream_name}")
+                    # elif is_dead and was_dead:
+                    #     logger.debug(f"Cached stream {stream['id']} remains dead (already marked)")
+                    #     dead_stream_ids.add(stream['id'])
                     
                     # Calculate score using stored stats and CURRENT profile weights
                     score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
