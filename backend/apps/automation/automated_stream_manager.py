@@ -3066,7 +3066,14 @@ class AutomatedStreamManager:
                         from apps.stream.stream_checker_service import get_stream_checker_service
                         stream_checker = get_stream_checker_service()
                         logger.info(f"Running synchronous quality checks for {len(channels_to_quality_check)} channels...")
-                        
+
+                        # Normalise assigned_stream_ids to integer keys. The dict returned by
+                        # _discover_and_assign_streams_impl uses integer channel IDs (from
+                        # defaultdict keyed by channel_id integers), but previous code looked
+                        # up keys with str(ch_id) which never matched. Normalising here once
+                        # ensures the lookup never misses due to an int/str type mismatch.
+                        _assigned_by_int = {int(k): v for k, v in assigned_stream_ids.items()}
+
                         channels_to_check_sync = []
                         _target_stream_ids = {}
 
@@ -3075,14 +3082,14 @@ class AutomatedStreamManager:
                             if check_all_streams:
                                 # check_all_streams=True: always include, no stream targeting
                                 channels_to_check_sync.append(ch_id)
-                            elif assigned_stream_ids.get(str(ch_id)):
+                            elif _assigned_by_int.get(ch_id):
                                 # check_all_streams=False with new assignments: include, targeted to
                                 # newly assigned streams only. Channels with no new assignments are
                                 # omitted entirely — they fall through to the background worker's
                                 # normal incremental logic rather than entering a full re-check via
                                 # the grace_period=False branch in _check_channel_concurrent/sequential.
                                 channels_to_check_sync.append(ch_id)
-                                _target_stream_ids[ch_id] = assigned_stream_ids[str(ch_id)]
+                                _target_stream_ids[ch_id] = _assigned_by_int[ch_id]
                             # else: check_all_streams=False, no new assignments → skip this cycle
 
                         # Run checks synchronously and collect results
