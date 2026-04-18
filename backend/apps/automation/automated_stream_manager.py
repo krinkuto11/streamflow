@@ -3065,14 +3065,18 @@ class AutomatedStreamManager:
                     try:
                         from apps.stream.stream_checker_service import get_stream_checker_service
                         stream_checker = get_stream_checker_service()
-                        logger.info(f"Running synchronous quality checks for {len(channels_to_quality_check)} channels...")
 
                         # Normalise assigned_stream_ids to integer keys. The dict returned by
                         # _discover_and_assign_streams_impl uses integer channel IDs (from
-                        # defaultdict keyed by channel_id integers), but previous code looked
-                        # up keys with str(ch_id) which never matched. Normalising here once
-                        # ensures the lookup never misses due to an int/str type mismatch.
+                        # defaultdict keyed by channel_id integers), but lookups with
+                        # str(ch_id) never matched. Normalising here ensures the lookup
+                        # never misses due to an int/str type mismatch.
                         _assigned_by_int = {int(k): v for k, v in assigned_stream_ids.items()}
+                        logger.info(
+                            f"Running synchronous quality checks for "
+                            f"{len(channels_to_quality_check)} eligible channels "
+                            f"({len(_assigned_by_int)} received new assignments this cycle)"
+                        )
 
                         channels_to_check_sync = []
                         _target_stream_ids = {}
@@ -3091,6 +3095,13 @@ class AutomatedStreamManager:
                                 channels_to_check_sync.append(ch_id)
                                 _target_stream_ids[ch_id] = _assigned_by_int[ch_id]
                             # else: check_all_streams=False, no new assignments → skip this cycle
+
+                        logger.info(
+                            f"Quality check dispatch: {len(channels_to_check_sync)} channels selected "
+                            f"({len(_target_stream_ids)} targeted, "
+                            f"{len(channels_to_check_sync) - len(_target_stream_ids)} full-check, "
+                            f"{len(channels_to_quality_check) - len(channels_to_check_sync)} skipped)"
+                        )
 
                         # Run checks synchronously and collect results
                         if channels_to_check_sync:
