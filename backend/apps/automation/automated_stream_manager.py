@@ -3082,18 +3082,26 @@ class AutomatedStreamManager:
                         _target_stream_ids = {}
 
                         for ch_id in channels_to_quality_check:
-                            check_all_streams = channel_check_all_streams.get(ch_id, False)
+                            # Normalise ch_id to int for all lookups. channels_to_quality_check
+                            # may contain mixed int/str entries if populated from multiple sources.
+                            _ch_id_int = int(ch_id)
+                            check_all_streams = channel_check_all_streams.get(_ch_id_int, False)
+                            logger.debug(
+                                f"Quality check loop: ch_id={ch_id!r}({type(ch_id).__name__}) "
+                                f"check_all={check_all_streams} "
+                                f"assigned={_assigned_by_int.get(_ch_id_int, None) is not None}"
+                            )
                             if check_all_streams:
                                 # check_all_streams=True: always include, no stream targeting
-                                channels_to_check_sync.append(ch_id)
-                            elif _assigned_by_int.get(ch_id):
+                                channels_to_check_sync.append(_ch_id_int)
+                            elif _assigned_by_int.get(_ch_id_int):
                                 # check_all_streams=False with new assignments: include, targeted to
                                 # newly assigned streams only. Channels with no new assignments are
                                 # omitted entirely — they fall through to the background worker's
                                 # normal incremental logic rather than entering a full re-check via
                                 # the grace_period=False branch in _check_channel_concurrent/sequential.
-                                channels_to_check_sync.append(ch_id)
-                                _target_stream_ids[ch_id] = _assigned_by_int[ch_id]
+                                channels_to_check_sync.append(_ch_id_int)
+                                _target_stream_ids[_ch_id_int] = _assigned_by_int[_ch_id_int]
                             # else: check_all_streams=False, no new assignments → skip this cycle
 
                         logger.info(
