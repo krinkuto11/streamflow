@@ -3067,33 +3067,36 @@ class AutomatedStreamManager:
                         stream_checker = get_stream_checker_service()
                         logger.info(f"Running synchronous quality checks for {len(channels_to_quality_check)} channels...")
                         
-                        target_stream_ids = None
+                        channels_to_check_sync = []
                         _target_stream_ids = {}
-                        
+
                         for ch_id in channels_to_quality_check:
                             check_all_streams = channel_check_all_streams.get(ch_id, False)
-                            if not check_all_streams:
-                                # Only populate target_stream_ids for channels that actually
-                                # received new stream assignments (non-empty list). Channels
-                                # with no new assignments are omitted entirely, which causes
-                                # them to fall through to the normal incremental-check branch
-                                # in the checker rather than entering the targeted-zero-streams
-                                # path that would incorrectly trigger dead removal against
-                                # unchecked streams (see: Change Block H, spec v1.0).
-                                if assigned_stream_ids.get(str(ch_id)):
-                                    _target_stream_ids[ch_id] = assigned_stream_ids[str(ch_id)]
-                                # else: no entry → channel uses incremental/grace-period logic
-                        
-                        if _target_stream_ids:
-                            target_stream_ids = _target_stream_ids
-                            
+                            if check_all_streams:
+                                # check_all_streams=True: always include, no stream targeting
+                                channels_to_check_sync.append(ch_id)
+                            elif assigned_stream_ids.get(str(ch_id)):
+                                # check_all_streams=False with new assignments: include, targeted to
+                                # newly assigned streams only. Channels with no new assignments are
+                                # omitted entirely — they fall through to the background worker's
+                                # normal incremental logic rather than entering a full re-check via
+                                # the grace_period=False branch in _check_channel_concurrent/sequential.
+                                channels_to_check_sync.append(ch_id)
+                                _target_stream_ids[ch_id] = assigned_stream_ids[str(ch_id)]
+                            # else: check_all_streams=False, no new assignments → skip this cycle
+
                         # Run checks synchronously and collect results
-                        check_results = stream_checker.check_channels_synchronously(
-                            channel_ids=channels_to_quality_check, 
-                            force_check=forced,
-                            target_stream_ids=target_stream_ids
-                        )
-                        logger.info(f"Synchronous quality checks completed for {len(check_results)} channels")
+                        if channels_to_check_sync:
+                            target_stream_ids = _target_stream_ids if _target_stream_ids else None
+                            check_results = stream_checker.check_channels_synchronously(
+                                channel_ids=channels_to_check_sync,
+                                force_check=forced,
+                                target_stream_ids=target_stream_ids
+                            )
+                            logger.info(f"Synchronous quality checks completed for {len(check_results)} channels")
+                        else:
+                            logger.info("No channels require synchronous quality checks this cycle (no new assignments)")
+                            check_results = {}
                     except Exception as e:
                         logger.error(f"✗ Failed to run quality checks: {e}")
                         check_results = {}
