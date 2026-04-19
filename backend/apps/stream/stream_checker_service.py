@@ -612,6 +612,40 @@ class StreamCheckerService:
         except Exception as e:
             logger.debug(f"Could not fetch M3U account for stream {stream_id}: {e}")
             return None
+
+    def _skip_empty_targeted_check(
+        self,
+        channel_id: int,
+        channel_name: str,
+        streams: List[Dict[str, Any]],
+        current_stream_ids: List[int],
+    ) -> Dict[str, Any]:
+        """Complete a targeted check that has no matching streams without reordering."""
+        logger.info(
+            f"Targeted stream check for channel {channel_name} has no matching "
+            "target streams; skipping reorder/update"
+        )
+        self.check_queue.mark_completed(channel_id)
+        self.update_tracker.mark_channel_checked(
+            channel_id,
+            stream_count=len(streams),
+            checked_stream_ids=current_stream_ids,
+        )
+        return {
+            'dead_streams_count': 0,
+            'revived_streams_count': 0,
+            'dead_streams': [],
+            'revived_streams': [],
+            'skipped': True,
+            'skip_reason': 'no_matching_target_streams',
+            'skipped_streams_count': len(streams),
+            'skipped_streams': [
+                {'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")}
+                for s in streams
+            ],
+            'checked_streams': [],
+            'analyzed_streams': [],
+        }
     
     
     def _update_stream_stats(self, stream_data: Dict) -> bool:
@@ -1195,9 +1229,17 @@ class StreamCheckerService:
             
             if target_stream_ids is not None:
                 # Targeted check mode: Evaluates newly assigned streams ONLY
-                streams_to_check = [s for s in streams if str(s['id']) in [str(ts) for ts in target_stream_ids]]
-                streams_already_checked = [s for s in streams if str(s['id']) not in [str(ts) for ts in target_stream_ids]]
+                target_stream_id_set = {str(ts) for ts in target_stream_ids}
+                streams_to_check = [s for s in streams if str(s['id']) in target_stream_id_set]
+                streams_already_checked = [s for s in streams if str(s['id']) not in target_stream_id_set]
                 logger.info(f"Targeted stream check: evaluating {len(streams_to_check)} specific newly assigned streams")
+                if not streams_to_check:
+                    return self._skip_empty_targeted_check(
+                        channel_id,
+                        channel_name,
+                        streams,
+                        current_stream_ids,
+                    )
                 
             elif force_check or (grace_period and immunity_expired) or (not grace_period and not force_check):
                 # If grace period is DISABLED, we check everything every time unless it's a "needs_check" trigger?
@@ -1996,9 +2038,17 @@ class StreamCheckerService:
             
             if target_stream_ids is not None:
                 # Targeted check mode: Evaluates newly assigned streams ONLY
-                streams_to_check = [s for s in streams if str(s['id']) in [str(ts) for ts in target_stream_ids]]
-                streams_already_checked = [s for s in streams if str(s['id']) not in [str(ts) for ts in target_stream_ids]]
+                target_stream_id_set = {str(ts) for ts in target_stream_ids}
+                streams_to_check = [s for s in streams if str(s['id']) in target_stream_id_set]
+                streams_already_checked = [s for s in streams if str(s['id']) not in target_stream_id_set]
                 logger.info(f"Targeted stream check: evaluating {len(streams_to_check)} specific newly assigned streams")
+                if not streams_to_check:
+                    return self._skip_empty_targeted_check(
+                        channel_id,
+                        channel_name,
+                        streams,
+                        current_stream_ids,
+                    )
                 
             elif force_check or (grace_period and immunity_expired) or (not grace_period and not force_check):
                 streams_to_check = streams
