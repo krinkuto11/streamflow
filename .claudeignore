@@ -1,0 +1,14 @@
+# 1. Ignore everything by default
+*
+
+# 2. Allow directories so Claude can find files inside them
+!*/
+
+# 3. Whitelist specific file extensions
+!*.py
+!*.jsx
+
+# 4. Optional: Allow key documentation/instruction files
+!CLAUDE.md
+!README.md
+!AGENT.md

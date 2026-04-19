@@ -134,7 +134,7 @@ export default function AutomationProfileEditor() {
 
     const updateProfile = (field, value) => {
         setProfile(prev => {
-            const newData = { ...prev }
+            const newData = JSON.parse(JSON.stringify(prev))  // Deep clone — prevents nested object mutation via shared reference
             if (field.includes('.')) {
                 const parts = field.split('.')
                 let current = newData
