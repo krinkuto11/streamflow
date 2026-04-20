@@ -234,6 +234,8 @@ class AutomationConfigManager:
                 if k not in ['name', 'description', 'enabled', 'parallel_checks', 'id']:
                     current_extra[k] = v
             p.extra_settings = current_extra
+            from sqlalchemy.orm.attributes import flag_modified
+            flag_modified(p, "extra_settings")
             session.commit()
             return True
         except Exception as e:

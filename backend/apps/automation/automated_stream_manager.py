@@ -3065,30 +3065,64 @@ class AutomatedStreamManager:
                     try:
                         from apps.stream.stream_checker_service import get_stream_checker_service
                         stream_checker = get_stream_checker_service()
-                        logger.info(f"Running synchronous quality checks for {len(channels_to_quality_check)} channels...")
-                        
-                        target_stream_ids = None
-                        _target_stream_ids = {}
-                        
-                        for ch_id in channels_to_quality_check:
-                            check_all_streams = channel_check_all_streams.get(ch_id, False)
-                            if not check_all_streams:
-                                # Strict validation mapping: Evaluate newly assigned streams only.
-                                if str(ch_id) in assigned_stream_ids:
-                                    _target_stream_ids[ch_id] = assigned_stream_ids[str(ch_id)]
-                                else:
-                                    _target_stream_ids[ch_id] = []
-                        
-                        if _target_stream_ids:
-                            target_stream_ids = _target_stream_ids
-                            
-                        # Run checks synchronously and collect results
-                        check_results = stream_checker.check_channels_synchronously(
-                            channel_ids=channels_to_quality_check, 
-                            force_check=forced,
-                            target_stream_ids=target_stream_ids
+
+                        # Normalise assigned_stream_ids to integer keys. The dict returned by
+                        # _discover_and_assign_streams_impl uses integer channel IDs (from
+                        # defaultdict keyed by channel_id integers), but lookups with
+                        # str(ch_id) never matched. Normalising here ensures the lookup
+                        # never misses due to an int/str type mismatch.
+                        _assigned_by_int = {int(k): v for k, v in assigned_stream_ids.items()}
+                        logger.info(
+                            f"Running synchronous quality checks for "
+                            f"{len(channels_to_quality_check)} eligible channels "
+                            f"({len(_assigned_by_int)} received new assignments this cycle)"
                         )
-                        logger.info(f"Synchronous quality checks completed for {len(check_results)} channels")
+
+                        channels_to_check_sync = []
+                        _target_stream_ids = {}
+
+                        for ch_id in channels_to_quality_check:
+                            # Normalise ch_id to int for all lookups. channels_to_quality_check
+                            # may contain mixed int/str entries if populated from multiple sources.
+                            _ch_id_int = int(ch_id)
+                            check_all_streams = channel_check_all_streams.get(_ch_id_int, False)
+                            logger.debug(
+                                f"Quality check loop: ch_id={ch_id!r}({type(ch_id).__name__}) "
+                                f"check_all={check_all_streams} "
+                                f"assigned={_assigned_by_int.get(_ch_id_int, None) is not None}"
+                            )
+                            if check_all_streams:
+                                # check_all_streams=True: always include, no stream targeting
+                                channels_to_check_sync.append(_ch_id_int)
+                            elif _assigned_by_int.get(_ch_id_int):
+                                # check_all_streams=False with new assignments: include, targeted to
+                                # newly assigned streams only. Channels with no new assignments are
+                                # omitted entirely — they fall through to the background worker's
+                                # normal incremental logic rather than entering a full re-check via
+                                # the grace_period=False branch in _check_channel_concurrent/sequential.
+                                channels_to_check_sync.append(_ch_id_int)
+                                _target_stream_ids[_ch_id_int] = _assigned_by_int[_ch_id_int]
+                            # else: check_all_streams=False, no new assignments → skip this cycle
+
+                        logger.info(
+                            f"Quality check dispatch: {len(channels_to_check_sync)} channels selected "
+                            f"({len(_target_stream_ids)} targeted, "
+                            f"{len(channels_to_check_sync) - len(_target_stream_ids)} full-check, "
+                            f"{len(channels_to_quality_check) - len(channels_to_check_sync)} skipped)"
+                        )
+
+                        # Run checks synchronously and collect results
+                        if channels_to_check_sync:
+                            target_stream_ids = _target_stream_ids if _target_stream_ids else None
+                            check_results = stream_checker.check_channels_synchronously(
+                                channel_ids=channels_to_check_sync,
+                                force_check=forced,
+                                target_stream_ids=target_stream_ids
+                            )
+                            logger.info(f"Synchronous quality checks completed for {len(check_results)} channels")
+                        else:
+                            logger.info("No channels require synchronous quality checks this cycle (no new assignments)")
+                            check_results = {}
                     except Exception as e:
                         logger.error(f"✗ Failed to run quality checks: {e}")
                         check_results = {}
