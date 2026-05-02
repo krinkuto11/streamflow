@@ -536,14 +536,23 @@ class UDIManager:
             return []
         
         stream_ids = channel.get('streams', [])
-        missing = [sid for sid in stream_ids if sid not in self._streams_by_id]
+        # Build the result in a single pass; track any IDs absent from the cache
+        # so they can be logged without iterating stream_ids a second time.
+        result = []
+        missing = []
+        for sid in stream_ids:
+            stream = self._streams_by_id.get(sid)
+            if stream is not None:
+                result.append(stream)
+            else:
+                missing.append(sid)
         if missing:
             logger.debug(
                 f"Channel {channel_id}: {len(missing)} stream ID(s) not in UDI stream cache "
                 f"(stale cache? IDs: {missing[:10]}{'...' if len(missing) > 10 else ''}). "
                 "Consider refreshing streams."
             )
-        return [self._streams_by_id.get(sid) for sid in stream_ids if sid in self._streams_by_id]
+        return result
     
     def get_streams(self, log_result: bool = True) -> List[Dict[str, Any]]:
         """Get all streams.

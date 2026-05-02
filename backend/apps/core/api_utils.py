@@ -900,7 +900,7 @@ def add_streams_to_channel(
                 f"stream ID(s) not in UDI stream cache — preserving to avoid accidental "
                 f"removal: {_uncached[:5]}{'...' if len(_uncached) > 5 else ''}"
             )
-            current_stream_ids = current_stream_ids + _uncached
+            current_stream_ids.extend(_uncached)
     
     # Filter out stream IDs that no longer exist in Dispatcharr
     if valid_stream_ids is None:

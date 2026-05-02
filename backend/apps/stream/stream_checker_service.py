@@ -1652,7 +1652,7 @@ class StreamCheckerService:
                     f"Preserving in write-back to avoid accidental removal: "
                     f"{_uncached_ids[:5]}{'...' if len(_uncached_ids) > 5 else ''}"
                 )
-                reordered_ids = reordered_ids + _uncached_ids
+                reordered_ids.extend(_uncached_ids)
 
             update_channel_streams(channel_id, reordered_ids, allow_dead_streams=(not dead_stream_removal_enabled))
             
@@ -2417,7 +2417,7 @@ class StreamCheckerService:
                     f"Preserving in write-back to avoid accidental removal: "
                     f"{_uncached_ids[:5]}{'...' if len(_uncached_ids) > 5 else ''}"
                 )
-                reordered_ids = reordered_ids + _uncached_ids
+                reordered_ids.extend(_uncached_ids)
 
             update_channel_streams(channel_id, reordered_ids, allow_dead_streams=(not dead_stream_removal_enabled))
             
