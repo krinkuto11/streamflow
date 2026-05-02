@@ -2220,7 +2220,15 @@ class AutomatedStreamManager:
                             continue
                         
                         # Normal channel assignment (not in session)
-                        added_count = add_streams_to_channel(channel_id_int, stream_ids, allow_dead_streams=(not dead_stream_removal_enabled))
+                        # When allow_revive is enabled for this channel, pass allow_dead_streams=True
+                        # so that previously-dead streams that matched are actually added back to
+                        # the channel. Without this, _match_streams_batch correctly lets them
+                        # through the revive filter but add_streams_to_channel (and the
+                        # update_channel_streams it calls internally) would filter them out again
+                        # via filter_dead_streams, making allow_revive permanently ineffective.
+                        _ch_revive_enabled = channel_to_revive_enabled.get(channel_id, False)
+                        _ch_allow_dead = (not dead_stream_removal_enabled) or _ch_revive_enabled
+                        added_count = add_streams_to_channel(channel_id_int, stream_ids, allow_dead_streams=_ch_allow_dead)
                         assignment_count[channel_id] = added_count
                         
                         # Verify streams were added correctly (if enabled in config)
