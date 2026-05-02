@@ -547,7 +547,7 @@ class UDIManager:
             else:
                 missing.append(sid)
         if missing:
-            logger.debug(
+            logger.warning(
                 f"Channel {channel_id}: {len(missing)} stream ID(s) not in UDI stream cache "
                 f"(stale cache? IDs: {missing[:10]}{'...' if len(missing) > 10 else ''}). "
                 "Consider refreshing streams."

@@ -477,6 +477,29 @@ class StreamCheckerService:
 
         return config
 
+    @staticmethod
+    def _get_uncached_channel_stream_ids(
+        raw_channel_stream_ids: List[int],
+        analyzed_id_set: set,
+        dead_stream_removal_enabled: bool,
+        dead_stream_ids: set,
+    ) -> List[int]:
+        """Return stream IDs present in the channel's raw Dispatcharr assignment list
+        but absent from the UDI stream cache (i.e. not in analyzed_id_set).
+
+        These IDs need to be preserved in the write-back to Dispatcharr to avoid
+        accidentally dropping streams that are validly assigned but not yet indexed
+        in the UDI cache (stale cache scenario).
+
+        When dead_stream_removal_enabled is True, IDs that are known dead (in
+        dead_stream_ids) are excluded so they are still removed as intended.
+        """
+        return [
+            sid for sid in raw_channel_stream_ids
+            if sid not in analyzed_id_set
+            and (not dead_stream_removal_enabled or sid not in dead_stream_ids)
+        ]
+
     def _is_stream_dead(self, stream_data: Dict[str, Any], channel_id: Optional[int] = None, threshold_config: Optional[Dict[str, Any]] = None) -> Tuple[bool, str]:
         """
         Check if a stream should be considered dead based on profile or global settings.
@@ -1638,13 +1661,12 @@ class StreamCheckerService:
             # were not returned by get_channel_streams() due to a stale UDI stream cache.
             # Without this guard, a stale cache causes those streams to be silently dropped
             # when the checker PATCHes the channel's stream list back to Dispatcharr.
-            _analyzed_id_set = set(reordered_ids)
-            _raw_channel_stream_ids = channel_data.get('streams', [])
-            _uncached_ids = [
-                sid for sid in _raw_channel_stream_ids
-                if sid not in _analyzed_id_set
-                and (not dead_stream_removal_enabled or sid not in dead_stream_ids)
-            ]
+            _uncached_ids = self._get_uncached_channel_stream_ids(
+                channel_data.get('streams', []),
+                set(reordered_ids),
+                dead_stream_removal_enabled,
+                dead_stream_ids,
+            )
             if _uncached_ids:
                 logger.warning(
                     f"Channel {channel_name}: {len(_uncached_ids)} stream ID(s) were assigned "
@@ -2403,13 +2425,12 @@ class StreamCheckerService:
             # were not returned by get_channel_streams() due to a stale UDI stream cache.
             # Without this guard, a stale cache causes those streams to be silently dropped
             # when the checker PATCHes the channel's stream list back to Dispatcharr.
-            _analyzed_id_set = set(reordered_ids)
-            _raw_channel_stream_ids = channel_data.get('streams', [])
-            _uncached_ids = [
-                sid for sid in _raw_channel_stream_ids
-                if sid not in _analyzed_id_set
-                and (not dead_stream_removal_enabled or sid not in dead_stream_ids)
-            ]
+            _uncached_ids = self._get_uncached_channel_stream_ids(
+                channel_data.get('streams', []),
+                set(reordered_ids),
+                dead_stream_removal_enabled,
+                dead_stream_ids,
+            )
             if _uncached_ids:
                 logger.warning(
                     f"Channel {channel_name}: {len(_uncached_ids)} stream ID(s) were assigned "
