@@ -480,12 +480,12 @@ class StreamCheckerService:
     @staticmethod
     def _get_uncached_channel_stream_ids(
         raw_channel_stream_ids: List[int],
-        analyzed_id_set: set,
+        cached_stream_id_set: set,
         dead_stream_removal_enabled: bool,
         dead_stream_ids: set,
     ) -> List[int]:
         """Return stream IDs present in the channel's raw Dispatcharr assignment list
-        but absent from the UDI stream cache (i.e. not in analyzed_id_set).
+        but absent from the UDI stream cache (i.e. not in cached_stream_id_set).
 
         These IDs need to be preserved in the write-back to Dispatcharr to avoid
         accidentally dropping streams that are validly assigned but not yet indexed
@@ -496,7 +496,7 @@ class StreamCheckerService:
         """
         return [
             sid for sid in raw_channel_stream_ids
-            if sid not in analyzed_id_set
+            if sid not in cached_stream_id_set
             and (not dead_stream_removal_enabled or sid not in dead_stream_ids)
         ]
 
