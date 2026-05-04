@@ -884,6 +884,23 @@ def add_streams_to_channel(
         )
     
     current_stream_ids = [s['id'] for s in current_streams]
+
+    # Preserve any stream IDs that are assigned to the channel in Dispatcharr but were
+    # not returned by fetch_channel_streams() due to a stale UDI stream cache.
+    # Without this, those streams would be silently dropped when updated_streams is
+    # written back to the channel.
+    _raw_channel = get_udi_manager().get_channel_by_id(channel_id)
+    if _raw_channel:
+        _raw_ids = _raw_channel.get('streams', [])
+        _current_id_set = set(current_stream_ids)
+        _uncached = [sid for sid in _raw_ids if sid not in _current_id_set]
+        if _uncached:
+            logger.warning(
+                f"add_streams_to_channel: channel {channel_id} has {len(_uncached)} "
+                f"stream ID(s) not in UDI stream cache — preserving to avoid accidental "
+                f"removal: {_uncached[:5]}{'...' if len(_uncached) > 5 else ''}"
+            )
+            current_stream_ids.extend(_uncached)
     
     # Filter out stream IDs that no longer exist in Dispatcharr
     if valid_stream_ids is None:
