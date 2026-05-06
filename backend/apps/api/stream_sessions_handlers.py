@@ -153,13 +153,14 @@ def create_group_stream_sessions_response(
         data = GroupStreamSessionsCreateSchema.from_payload(payload or {})
 
         udi = get_udi_manager()
-        channels = udi.get_channels_by_group(data.group_id)
+        group_id = int(data.group_id)
+        channels = udi.get_channels_by_group(group_id)
 
         if not channels:
             return error_response("Group not found or has no channels", status_code=404, code="not_found")
 
         if udi.refresh_streams():
-            logger.info(f"Refreshed stream list before batch session creation for group {data.group_id}")
+            logger.info(f"Refreshed stream list before batch session creation for group {group_id}")
 
         session_manager = get_session_manager()
         monitoring_service = get_monitoring_service()
@@ -226,6 +227,7 @@ def create_group_stream_sessions_response(
             jsonify(
                 {
                     "message": f"Started {len(created_sessions)} sessions from group {data.group_id}",
+                    "group_id": group_id,
                     "sessions": created_sessions,
                     "errors": errors,
                 }
