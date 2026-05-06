@@ -10,7 +10,7 @@ import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 import requests
 
 from apps.core.logging_config import setup_logging, log_api_request, log_api_response
@@ -91,52 +91,133 @@ class UDIFetcher:
         except Exception:
             return False
     
+    def fetch_all_ids(self) -> Dict[str, Set[int]]:
+        """Fetch all channel and stream IDs concurrently from the /ids/ endpoints.
+
+        Both requests run in parallel — total cost is one round-trip rather than two.
+        The resulting sets are the primary input for delta-sync diffing.
+
+        Returns:
+            Dict with keys ``'channels'`` and ``'streams'``, each mapped to a
+            ``Set[int]``.  A key is absent when its endpoint was unreachable.
+        """
+        if not self.base_url:
+            logger.warning("fetch_all_ids: base_url not set")
+            return {}
+
+        def _ids_from_url(url: str) -> Optional[Set[int]]:
+            data = self._fetch_url(url)
+            if not isinstance(data, list):
+                return None
+            try:
+                return {int(i) for i in data}
+            except (TypeError, ValueError) as e:
+                logger.warning(f"fetch_all_ids: non-integer ID in response from {url}: {e}")
+                return None
+
+        result: Dict[str, Set[int]] = {}
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            ch_future = ex.submit(_ids_from_url, f"{self.base_url}/api/channels/channels/ids/")
+            st_future = ex.submit(_ids_from_url, f"{self.base_url}/api/channels/streams/ids/")
+            ch_ids = ch_future.result()
+            st_ids = st_future.result()
+
+        if ch_ids is not None:
+            result['channels'] = ch_ids
+            logger.info(f"fetch_all_ids: {len(ch_ids)} channels")
+        else:
+            logger.warning("fetch_all_ids: failed to fetch channel IDs")
+        if st_ids is not None:
+            result['streams'] = st_ids
+            logger.info(f"fetch_all_ids: {len(st_ids)} streams")
+        else:
+            logger.warning("fetch_all_ids: failed to fetch stream IDs")
+
+        return result
+
     def fetch_entity_counts(self) -> Dict[str, Optional[int]]:
-        """Fetch lightweight entity counts from Dispatcharr without pulling full objects.
-
-        Uses the ``/ids/`` action endpoints exposed by ChannelViewSet and
-        StreamViewSet — each returns only a flat list of IDs, making this
-        much cheaper than a full paginated fetch while still giving an
-        authoritative total from Dispatcharr's database.
-
-        Designed to be called *before* a full refresh so manager.py can
-        compare post-fetch counts against a known-good oracle, and also
-        *after* a refresh to verify completeness independently of the
-        pagination envelope.
+        """Return entity counts derived from fetch_all_ids() (integrity oracle for refresh_all).
 
         Returns:
             Dict with keys ``'channels'`` and ``'streams'``, each mapped to
             an integer count or ``None`` if the endpoint was unreachable.
         """
-        if not self.base_url:
-            logger.warning("fetch_entity_counts: base_url not set")
-            return {'channels': None, 'streams': None}
-
-        counts: Dict[str, Optional[int]] = {'channels': None, 'streams': None}
-
-        # Channels /ids/ — ChannelViewSet.get_ids() returns a flat list of IDs
-        try:
-            channel_ids = self._fetch_url(f"{self.base_url}/api/channels/channels/ids/")
-            if isinstance(channel_ids, list):
-                counts['channels'] = len(channel_ids)
-                logger.info(f"fetch_entity_counts: {counts['channels']} channels (from /ids/)")
-            else:
-                logger.warning("fetch_entity_counts: unexpected response from channels/ids/")
-        except Exception as e:
-            logger.warning(f"fetch_entity_counts: failed to fetch channel IDs: {e}")
-
-        # Streams /ids/ — StreamViewSet.get_ids() returns a flat list of IDs
-        try:
-            stream_ids = self._fetch_url(f"{self.base_url}/api/channels/streams/ids/")
-            if isinstance(stream_ids, list):
-                counts['streams'] = len(stream_ids)
-                logger.info(f"fetch_entity_counts: {counts['streams']} streams (from /ids/)")
-            else:
-                logger.warning("fetch_entity_counts: unexpected response from streams/ids/")
-        except Exception as e:
-            logger.warning(f"fetch_entity_counts: failed to fetch stream IDs: {e}")
-
+        ids = self.fetch_all_ids()
+        counts: Dict[str, Optional[int]] = {
+            'channels': len(ids['channels']) if 'channels' in ids else None,
+            'streams':  len(ids['streams'])  if 'streams'  in ids else None,
+        }
+        logger.info(
+            f"fetch_entity_counts: channels={counts['channels']}, streams={counts['streams']}"
+        )
         return counts
+
+    # Maximum IDs per POST body for by-ids endpoints.  Keeps request bodies
+    # within a safe size even for very large delta batches.
+    _BULK_CHUNK = 500
+
+    def fetch_streams_by_ids(self, stream_ids: List[int]) -> List[Dict[str, Any]]:
+        """Fetch specific streams by ID using the bulk POST endpoint.
+
+        Sends a single ``POST /api/channels/streams/by-ids/`` per chunk of
+        ``_BULK_CHUNK`` IDs instead of one GET per stream.  For typical delta
+        batches (tens to low-hundreds of new streams) this is a single call.
+
+        Args:
+            stream_ids: List of stream IDs to fetch.
+
+        Returns:
+            List of stream dicts for IDs that were found (order not guaranteed).
+        """
+        if not self.base_url or not stream_ids:
+            return []
+
+        url = f"{self.base_url}/api/channels/streams/by-ids/"
+        ids = list(stream_ids)
+        results: List[Dict[str, Any]] = []
+
+        for i in range(0, len(ids), self._BULK_CHUNK):
+            chunk = ids[i: i + self._BULK_CHUNK]
+            data = self._post_url(url, {"ids": chunk})
+            if isinstance(data, list):
+                results.extend(data)
+            else:
+                logger.error(
+                    f"fetch_streams_by_ids: unexpected response for chunk "
+                    f"{i}–{i + len(chunk)}: {type(data).__name__}"
+                )
+
+        logger.debug(
+            f"fetch_streams_by_ids: fetched {len(results)}/{len(ids)} streams "
+            f"in {math.ceil(len(ids) / self._BULK_CHUNK)} POST(s)"
+        )
+        return results
+
+    def fetch_channels_by_ids(self, channel_ids: List[int]) -> List[Dict[str, Any]]:
+        """Fetch specific channels by ID concurrently (one GET per ID).
+
+        Used by delta refresh to pull only newly added channels.
+
+        Args:
+            channel_ids: List of channel IDs to fetch.
+
+        Returns:
+            List of channel dicts for IDs that were found.
+        """
+        if not self.base_url or not channel_ids:
+            return []
+        results: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=min(20, len(channel_ids))) as ex:
+            futures = {ex.submit(self.fetch_channel_by_id, cid): cid for cid in channel_ids}
+            for future in as_completed(futures):
+                cid = futures[future]
+                try:
+                    data = future.result()
+                    if data:
+                        results.append(data)
+                except Exception as e:
+                    logger.error(f"Error fetching channel {cid}: {e}")
+        return results
 
     def _fetch_url(self, url: str) -> Optional[Any]:
         """Fetch data from a URL with authentication and retry logic.
@@ -169,6 +250,38 @@ class UDIFetcher:
             logger.error(f"Error fetching {url}: {e}")
             return None
     
+    def _post_url(self, url: str, json_body: Any) -> Optional[Any]:
+        """POST JSON to a URL with authentication and one auto-retry on 401.
+
+        Args:
+            url:       The endpoint URL.
+            json_body: Dict/list to serialise as the request body.
+
+        Returns:
+            Parsed JSON response, or None on failure.
+        """
+        try:
+            start_time = time.time()
+            log_api_request(logger, "POST", url, json=json_body)
+            resp = requests.post(url, headers=_get_auth_headers(), json=json_body, timeout=30)
+            elapsed = time.time() - start_time
+            log_api_response(logger, "POST", url, resp.status_code, elapsed)
+
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 401:
+                if _refresh_token():
+                    logger.info("Retrying POST request with new token...")
+                    resp = requests.post(url, headers=_get_auth_headers(), json=json_body, timeout=30)
+                    resp.raise_for_status()
+                    return resp.json()
+            logger.error(f"Error POSTing to {url}: {e}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error POSTing to {url}: {e}")
+            return None
+
     def _fetch_paginated(self, base_url: str, page_size: int = 100) -> FetchResult:
         """Fetch paginated data from an API endpoint.
 
