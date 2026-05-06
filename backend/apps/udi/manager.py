@@ -174,7 +174,7 @@ class UDIManager:
             'percentage': 0,
             'message': '',
             'current_step': '',
-            'total_steps': 7,       # channels, streams, groups, logos, m3u_accounts, profiles, profile_channels
+            'total_steps': 6,       # channels, streams, groups, logos, m3u_accounts, profiles
             # entity_counts is populated after each full refresh_all() run.
             # Each entry: { 'received': int, 'expected': int | None }
             # 'expected' is None when the Dispatcharr endpoint did not report a total.
@@ -782,23 +782,18 @@ class UDIManager:
             self._update_init_progress(percentage=60, message='Fetching M3U accounts...', current_step='m3u_accounts')
             m3u_accounts = self.fetcher.fetch_m3u_accounts()
 
-            # Step 6: Channel Profiles (non-paginated — no integrity check)
+            # Step 6: Channel Profiles — list response already includes channel IDs,
+            # so no separate per-profile fetch is needed.
             self._update_init_progress(percentage=70, message='Fetching profiles...', current_step='profiles')
             channel_profiles = self.fetcher.fetch_channel_profiles()
-
-            # Step 7: Profile Channels
-            profile_ids = [p.get('id') for p in channel_profiles if p.get('id')]
-            if profile_ids:
-                logger.debug(f"Fetching channel data for {len(profile_ids)} profiles...")
-                
-                def profile_progress(i, total, msg):
-                    # Progress between 80% and 90%
-                    percentage = 80 + int((i / total) * 10)
-                    self._update_init_progress(percentage=percentage, message=msg)
-                
-                profile_channels = self.fetcher.fetch_profile_channels(profile_ids, progress_callback=profile_progress)
-            else:
-                profile_channels = {}
+            profile_channels = {
+                p['id']: {
+                    'profile': p,
+                    'channels': p.get('channels') if isinstance(p.get('channels'), list) else [],
+                }
+                for p in channel_profiles
+                if p.get('id') is not None
+            }
 
             # Build entity_counts for the progress dict — used by the frontend
             # stats panel and the future unstable-state check.
@@ -1294,13 +1289,17 @@ class UDIManager:
                 }
             self.cache.mark_refreshed('channel_profiles')
 
-            profile_ids = [p.get('id') for p in profiles if p.get('id')]
-            if profile_ids:
-                logger.info(f"Fetching channel data for {len(profile_ids)} profiles...")
-                profile_channels = self.fetcher.fetch_profile_channels(profile_ids)
-                with self._lock:
-                    self._profile_channels_cache = profile_channels
-                self.cache.mark_refreshed('profile_channels')
+            profile_channels = {
+                p['id']: {
+                    'profile': p,
+                    'channels': p.get('channels') if isinstance(p.get('channels'), list) else [],
+                }
+                for p in profiles
+                if p.get('id') is not None
+            }
+            with self._lock:
+                self._profile_channels_cache = profile_channels
+            self.cache.mark_refreshed('profile_channels')
 
             return True
         except Exception as e:

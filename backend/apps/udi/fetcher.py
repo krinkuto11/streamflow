@@ -282,7 +282,7 @@ class UDIFetcher:
             logger.error(f"Error POSTing to {url}: {e}")
             return None
 
-    def _fetch_paginated(self, base_url: str, page_size: int = 100) -> FetchResult:
+    def _fetch_paginated(self, base_url: str, page_size: int = 1000) -> FetchResult:
         """Fetch paginated data from an API endpoint.
 
         Page 1 is fetched synchronously to capture the total ``count``.  All
