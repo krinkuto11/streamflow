@@ -156,6 +156,9 @@ class UDIManager:
         self._profiles_by_id: Dict[int, Dict[str, Any]] = {}
         self._channel_groups_by_id: Dict[int, Dict[str, Any]] = {}
         self._logos_by_id: Dict[int, Dict[str, Any]] = {}
+        self._m3u_accounts_by_id: Dict[int, Dict[str, Any]] = {}
+        # group_id -> [channel, ...] for O(1) get_channels_by_group()
+        self._channels_by_group_id: Dict[int, List[Dict[str, Any]]] = {}
         # stream_id -> account_id (derived from stream['m3u_account'])
         self._stream_account_id: Dict[int, int] = {}
         # profile_id -> account_id (derived from M3UAccount.profiles nesting)
@@ -322,7 +325,17 @@ class UDIManager:
                         self._profile_to_account_id[pid] = aid
 
         self._has_custom_streams = any(st.get('is_custom', False) for st in self._streams_cache)
-    
+
+        self._m3u_accounts_by_id = {
+            a.get('id'): a for a in self._m3u_accounts_cache if a.get('id') is not None
+        }
+
+        self._channels_by_group_id = {}
+        for ch in self._channels_cache:
+            gid = ch.get('channel_group_id')
+            if gid is not None:
+                self._channels_by_group_id.setdefault(gid, []).append(ch)
+
     # === Data Access Methods ===
     
     def get_init_progress(self) -> Dict[str, Any]:
@@ -586,7 +599,7 @@ class UDIManager:
         self._ensure_initialized()
         if log_result:
             logger.debug(f"Returning {len(self._streams_cache)} streams from UDI")
-        return self._streams_cache.copy()
+        return self._streams_cache
     
     def get_stream_by_id(self, stream_id: int) -> Optional[Dict[str, Any]]:
         """Get a specific stream by ID.
@@ -664,13 +677,8 @@ class UDIManager:
         group = self.get_channel_group_by_id(group_id)
         if not group:
             return None
-        
-        # Filter channels by group
-        channels = [
-            channel for channel in self._channels_cache
-            if channel.get('channel_group_id') == group_id
-        ]
-        return channels
+
+        return list(self._channels_by_group_id.get(group_id, []))
     
     def get_logos(self) -> List[Dict[str, Any]]:
         """Get all logos.
@@ -715,18 +723,9 @@ class UDIManager:
             M3U account dictionary or None if not found
         """
         self._ensure_initialized()
-        
-        # Try fast lookup from storage if using Redis
-        if hasattr(self.storage, 'get_m3u_account_by_id'):
-            account = self.storage.get_m3u_account_by_id(account_id)
-            if account:
-                return account
-        
-        # Fallback to in-memory cache
-        for account in self._m3u_accounts_cache:
-            if account.get('id') == account_id:
-                return account.copy()
-        
+        account = self._m3u_accounts_by_id.get(account_id)
+        if account is not None:
+            return account.copy()
         logger.debug(f"M3U account {account_id} not found in UDI")
         return None
     
@@ -990,9 +989,16 @@ class UDIManager:
         logger.info("Refreshing channels...")
         try:
             result = self.fetcher.fetch_channels()
-            # FetchResult supports len() and iteration — assign .items to cache
-            self._channels_cache = result.items
-            self._channels_by_id = {ch.get('id'): ch for ch in result.items if ch.get('id') is not None}
+            with self._lock:
+                self._channels_cache = result.items
+                self._channels_by_id = {
+                    ch.get('id'): ch for ch in result.items if ch.get('id') is not None
+                }
+                self._channels_by_group_id = {}
+                for ch in result.items:
+                    gid = ch.get('channel_group_id')
+                    if gid is not None:
+                        self._channels_by_group_id.setdefault(gid, []).append(ch)
             self.storage.save_channels(result.items)
             self.cache.mark_refreshed('channels')
             return True
@@ -1045,10 +1051,22 @@ class UDIManager:
         logger.info("Refreshing streams...")
         try:
             result = self.fetcher.fetch_streams()
-            self._streams_cache = result.items
-            self._streams_by_id = {st.get('id'): st for st in result.items if st.get('id') is not None}
-            self._streams_by_url = {st.get('url'): st for st in result.items if st.get('url')}
-            self._valid_stream_ids = set(self._streams_by_id.keys())
+            with self._lock:
+                self._streams_cache = result.items
+                self._streams_by_id = {
+                    st.get('id'): st for st in result.items if st.get('id') is not None
+                }
+                self._streams_by_url = {st.get('url'): st for st in result.items if st.get('url')}
+                self._valid_stream_ids = set(self._streams_by_id.keys())
+                self._streams_by_account_id = {}
+                self._stream_account_id = {}
+                for st in result.items:
+                    sid = st.get('id')
+                    aid = st.get('m3u_account')
+                    if sid is not None and aid is not None:
+                        self._stream_account_id[sid] = aid
+                        self._streams_by_account_id.setdefault(aid, []).append(st)
+                self._has_custom_streams = any(st.get('is_custom', False) for st in result.items)
             self.storage.save_streams(result.items)
             self.cache.mark_refreshed('streams')
             return True
@@ -1065,7 +1083,11 @@ class UDIManager:
         logger.info("Refreshing channel groups...")
         try:
             groups = self.fetcher.fetch_channel_groups()
-            self._channel_groups_cache = groups
+            with self._lock:
+                self._channel_groups_cache = groups
+                self._channel_groups_by_id = {
+                    g.get('id'): g for g in groups if g.get('id') is not None
+                }
             self.storage.save_channel_groups(groups)
             self.cache.mark_refreshed('channel_groups')
             return True
@@ -1082,7 +1104,22 @@ class UDIManager:
         logger.info("Refreshing M3U accounts...")
         try:
             accounts = self.fetcher.fetch_m3u_accounts()
-            self._m3u_accounts_cache = accounts
+            with self._lock:
+                self._m3u_accounts_cache = accounts
+                self._m3u_accounts_by_id = {
+                    a.get('id'): a for a in accounts if a.get('id') is not None
+                }
+                # Rebuild profile->account mapping since profiles nest inside accounts
+                self._profile_to_account_id = {}
+                for account in accounts:
+                    aid = account.get('id')
+                    if aid is None:
+                        continue
+                    for profile in account.get('profiles', []):
+                        if isinstance(profile, dict):
+                            pid = profile.get('id')
+                            if pid is not None:
+                                self._profile_to_account_id[pid] = aid
             self.storage.save_m3u_accounts(accounts)
             self.cache.mark_refreshed('m3u_accounts')
             return True
@@ -1099,21 +1136,23 @@ class UDIManager:
         logger.info("Refreshing channel profiles...")
         try:
             profiles = self.fetcher.fetch_channel_profiles()
-            self._channel_profiles_cache = profiles
-            self._profiles_by_id = {p.get('id'): p for p in profiles if p.get('id') is not None}
-            if hasattr(self.storage, 'save_channel_profiles'):
-                self.storage.save_channel_profiles(profiles)
+            with self._lock:
+                self._channel_profiles_cache = profiles
+                self._profiles_by_id = {
+                    p.get('id'): p for p in profiles if p.get('id') is not None
+                }
+            self.storage.save_channel_profiles(profiles)
             self.cache.mark_refreshed('channel_profiles')
-            
-            # Also refresh profile channel associations
+
             profile_ids = [p.get('id') for p in profiles if p.get('id')]
             if profile_ids:
                 logger.info(f"Fetching channel data for {len(profile_ids)} profiles...")
-                self._profile_channels_cache = self.fetcher.fetch_profile_channels(profile_ids)
-                if hasattr(self.storage, 'save_profile_channels'):
-                    self.storage.save_profile_channels(self._profile_channels_cache)
+                profile_channels = self.fetcher.fetch_profile_channels(profile_ids)
+                with self._lock:
+                    self._profile_channels_cache = profile_channels
+                self.storage.save_profile_channels(profile_channels)
                 self.cache.mark_refreshed('profile_channels')
-            
+
             return True
         except Exception as e:
             logger.error(f"Error refreshing channel profiles: {e}")
@@ -1268,7 +1307,6 @@ class UDIManager:
                 'channel_profiles': len(self._channel_profiles_cache)
             },
             'cache_status': self.cache.get_status(),
-            'storage_path': str(self.storage.storage_dir)
         }
     
     def get_cache_last_refresh(self, entity_type: str) -> Optional[Any]:
@@ -1312,14 +1350,6 @@ class UDIManager:
         except Exception as e:
             logger.error(f"Error getting storage count for {entity_type}: {e}")
             return 0
-    
-    def is_initialized(self) -> bool:
-        """Check if UDI Manager is initialized.
-        
-        Returns:
-            True if initialized
-        """
-        return self._initialized
     
     def _find_account_for_profile(self, profile_id: int) -> Optional[int]:
         """Find the M3U account ID that contains a specific profile.

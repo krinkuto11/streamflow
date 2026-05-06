@@ -4,8 +4,11 @@ API data fetching for the Universal Data Index (UDI) system.
 Handles fetching data from the Dispatcharr API for initial load and refresh operations.
 """
 
+import math
+import threading
 import time
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any
 import requests
@@ -169,8 +172,9 @@ class UDIFetcher:
     def _fetch_paginated(self, base_url: str, page_size: int = 100) -> FetchResult:
         """Fetch paginated data from an API endpoint.
 
-        Captures the ``count`` field from the first-page response so callers
-        can compare expected vs. received totals for integrity checking.
+        Page 1 is fetched synchronously to capture the total ``count``.  All
+        remaining pages are then fetched concurrently so that a 1 000-page
+        dataset completes in roughly one round-trip rather than 1 000.
 
         Args:
             base_url:  The base URL for the endpoint (no query string).
@@ -180,38 +184,69 @@ class UDIFetcher:
             FetchResult with all collected items and the expected_count
             reported by the API on the first page (None if not present).
         """
-        all_items: List[Dict[str, Any]] = []
-        expected_count: Optional[int] = None
-        first_page = True
         # Include page=1 explicitly so ChannelPagination does not short-circuit
         # into bare-list mode (it disables pagination when no 'page' param is
         # present, which drops the DRF count/results envelope).
-        url = f"{base_url}?page_size={page_size}&page=1"
+        response = self._fetch_url(f"{base_url}?page_size={page_size}&page=1")
+        if not response:
+            return FetchResult()
 
-        while url:
-            response = self._fetch_url(url)
-            if not response:
-                break
+        # Non-paginated endpoint returns a bare list.
+        if isinstance(response, list):
+            return FetchResult(items=response, expected_count=None)
 
-            if isinstance(response, dict) and 'results' in response:
-                # Capture total count from the first page only
-                if first_page:
-                    raw_count = response.get('count')
-                    if raw_count is not None:
-                        try:
-                            expected_count = int(raw_count)
-                        except (TypeError, ValueError):
-                            logger.warning(
-                                f"Unexpected 'count' value in paginated response: {raw_count!r}"
-                            )
-                    first_page = False
+        if not (isinstance(response, dict) and 'results' in response):
+            return FetchResult()
 
-                all_items.extend(response.get('results', []))
-                url = response.get('next')
-            else:
-                if isinstance(response, list):
-                    all_items.extend(response)
-                break
+        all_items: List[Dict[str, Any]] = list(response.get('results', []))
+        expected_count: Optional[int] = None
+
+        raw_count = response.get('count')
+        if raw_count is not None:
+            try:
+                expected_count = int(raw_count)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Unexpected 'count' value in paginated response: {raw_count!r}"
+                )
+
+        # If we already have everything (or count is unknown), return early.
+        if expected_count is None or expected_count <= page_size:
+            return FetchResult(items=all_items, expected_count=expected_count)
+
+        total_pages = math.ceil(expected_count / page_size)
+        remaining = range(2, total_pages + 1)
+        logger.debug(
+            f"Fetching {total_pages - 1} remaining pages of {base_url} concurrently "
+            f"(page_size={page_size}, expected={expected_count})"
+        )
+
+        # Fetch remaining pages concurrently.  Cap at 10 workers to avoid
+        # overwhelming Dispatcharr; auth retries inside _fetch_url are
+        # serialised by _token_refresh_lock so 401 bursts are safe.
+        page_results: Dict[int, List] = {}
+        with ThreadPoolExecutor(max_workers=min(10, len(remaining))) as executor:
+            future_to_page = {
+                executor.submit(
+                    self._fetch_url,
+                    f"{base_url}?page_size={page_size}&page={p}",
+                ): p
+                for p in remaining
+            }
+            for future in as_completed(future_to_page):
+                page_num = future_to_page[future]
+                try:
+                    result = future.result()
+                    if result and isinstance(result, dict) and 'results' in result:
+                        page_results[page_num] = result['results']
+                    elif result and isinstance(result, list):
+                        page_results[page_num] = result
+                except Exception as e:
+                    logger.error(f"Error fetching page {page_num} of {base_url}: {e}")
+
+        # Merge pages in page-number order so item ordering is deterministic.
+        for page_num in sorted(page_results):
+            all_items.extend(page_results[page_num])
 
         return FetchResult(items=all_items, expected_count=expected_count)
     
@@ -414,53 +449,67 @@ class UDIFetcher:
         return self._fetch_url(url)
     
     def fetch_profile_channels(self, profile_ids: List[int], progress_callback=None) -> Dict[int, Dict[str, Any]]:
-        """Fetch channel associations for multiple profiles.
-        
+        """Fetch channel associations for multiple profiles concurrently.
+
         Args:
             profile_ids: List of profile IDs to fetch channels for
-            progress_callback: Optional function(index, total, message) for progress reporting
-            
+            progress_callback: Optional function(completed, total, message) for progress reporting
+
         Returns:
             Dictionary mapping profile_id to profile channel data
         """
         if not self.base_url:
             logger.error("DISPATCHARR_BASE_URL not set")
             return {}
-        
-        profile_channels = {}
+
         total = len(profile_ids)
-        for i, profile_id in enumerate(profile_ids):
-            try:
-                if progress_callback:
-                    progress_callback(i, total, f"Fetching profile channels {i+1}/{total}")
-                
-                url = f"{self.base_url}/api/channels/profiles/{profile_id}/"
-                logger.debug(f"Fetching channels for profile {profile_id} from {url}")
-                profile_data = self._fetch_url(url)
-                
-                if profile_data:
-                    # Parse the channels field
-                    channels_data = profile_data.get('channels', '')
-                    
-                    # Try to parse if it's a JSON string
-                    if isinstance(channels_data, str) and channels_data.strip():
-                        try:
-                            channels_data = json.loads(channels_data)
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"Could not parse channels for profile {profile_id}: {e}")
-                            channels_data = []
-                    elif not isinstance(channels_data, list):
-                        channels_data = []
-                    
-                    profile_channels[profile_id] = {
-                        'profile': profile_data,
-                        'channels': channels_data
-                    }
-                    logger.debug(f"Fetched {len(channels_data)} channel associations for profile {profile_id}")
-            except Exception as e:
-                logger.error(f"Error fetching channels for profile {profile_id}: {e}")
-                continue
-        
+        profile_channels: Dict[int, Dict[str, Any]] = {}
+        completed = [0]
+        progress_lock = threading.Lock()
+
+        def fetch_one(profile_id: int):
+            url = f"{self.base_url}/api/channels/profiles/{profile_id}/"
+            logger.debug(f"Fetching channels for profile {profile_id}")
+            profile_data = self._fetch_url(url)
+            if not profile_data:
+                return profile_id, None
+
+            channels_data = profile_data.get('channels', '')
+            if isinstance(channels_data, str) and channels_data.strip():
+                try:
+                    channels_data = json.loads(channels_data)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Could not parse channels for profile {profile_id}: {e}")
+                    channels_data = []
+            elif not isinstance(channels_data, list):
+                channels_data = []
+
+            return profile_id, {'profile': profile_data, 'channels': channels_data}
+
+        workers = min(8, max(1, total))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_id = {executor.submit(fetch_one, pid): pid for pid in profile_ids}
+            for future in as_completed(future_to_id):
+                pid = future_to_id[future]
+                try:
+                    profile_id, data = future.result()
+                    if data is not None:
+                        profile_channels[profile_id] = data
+                        logger.debug(
+                            f"Fetched {len(data['channels'])} channel associations "
+                            f"for profile {profile_id}"
+                        )
+                except Exception as e:
+                    logger.error(f"Error fetching channels for profile {pid}: {e}")
+
+                with progress_lock:
+                    completed[0] += 1
+                    if progress_callback:
+                        progress_callback(
+                            completed[0], total,
+                            f"Fetching profile channels {completed[0]}/{total}",
+                        )
+
         logger.debug(f"Fetched channel data for {len(profile_channels)} profiles")
         return profile_channels
     

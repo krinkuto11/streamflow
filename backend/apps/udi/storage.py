@@ -5,7 +5,6 @@ Provides SQL database persistence for cached data with thread-safe operations.
 """
 
 import json
-import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -14,8 +13,25 @@ from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
 
-# Protects read-modify-write of the profile_channels JSON blob
-_profile_channels_lock = threading.Lock()
+# SQLite's compiled SQLITE_MAX_VARIABLE_NUMBER is often 999 on older builds
+# and 32766 on modern ones; 100k+ streams exceed both.  Chunk all IN queries
+# to stay safely under the lower bound.
+_SQLITE_CHUNK = 500
+
+
+def _query_by_ids(session, model_class, ids: list) -> dict:
+    """Query rows by ID list in chunks to avoid SQLite variable limits.
+
+    Returns a {id: row} dict.  Assumes the model has an ``id`` column.
+    """
+    if not ids:
+        return {}
+    result = {}
+    for i in range(0, len(ids), _SQLITE_CHUNK):
+        chunk = ids[i:i + _SQLITE_CHUNK]
+        for row in session.query(model_class).filter(model_class.id.in_(chunk)).all():
+            result[row.id] = row
+    return result
 
 
 class UDIStorage:
@@ -80,21 +96,13 @@ class UDIStorage:
         session = get_session()
         try:
             ids = [item.get('id') for item in channels if item.get('id') is not None]
-            # One query to fetch all existing channel rows
-            existing = {c.id: c for c in session.query(Channel).filter(Channel.id.in_(ids)).all()}
+            existing = _query_by_ids(session, Channel, ids)
 
-            # Collect all stream IDs needed across all channels in one pass
+            # Collect all stream IDs across all channels, then fetch in chunks.
             all_stream_ids = []
             for item in channels:
                 all_stream_ids.extend(item.get('streams', []))
-
-            # One query to fetch all needed stream rows
-            streams_by_id = {}
-            if all_stream_ids:
-                streams_by_id = {
-                    s.id: s
-                    for s in session.query(Stream).filter(Stream.id.in_(all_stream_ids)).all()
-                }
+            streams_by_id = _query_by_ids(session, Stream, all_stream_ids)
 
             for item in channels:
                 chan_id = item.get('id')
@@ -149,7 +157,7 @@ class UDIStorage:
         session = get_session()
         try:
             ids = [item.get('id') for item in streams if item.get('id') is not None]
-            existing = {s.id: s for s in session.query(Stream).filter(Stream.id.in_(ids)).all()}
+            existing = _query_by_ids(session, Stream, ids)
             for item in streams:
                 sid = item.get('id')
                 s = existing.get(sid)
@@ -206,7 +214,7 @@ class UDIStorage:
         session = get_session()
         try:
             ids = [item.get('id') for item in groups if item.get('id') is not None]
-            existing = {g.id: g for g in session.query(ChannelGroup).filter(ChannelGroup.id.in_(ids)).all()}
+            existing = _query_by_ids(session, ChannelGroup, ids)
             for item in groups:
                 gid = item.get('id')
                 g = existing.get(gid)
@@ -245,7 +253,7 @@ class UDIStorage:
         session = get_session()
         try:
             ids = [item.get('id') for item in logos if item.get('id') is not None]
-            existing = {lo.id: lo for lo in session.query(Logo).filter(Logo.id.in_(ids)).all()}
+            existing = _query_by_ids(session, Logo, ids)
             for item in logos:
                 lid = item.get('id')
                 lo = existing.get(lid)
@@ -294,7 +302,7 @@ class UDIStorage:
         session = get_session()
         try:
             ids = [item.get('id') for item in accounts if item.get('id') is not None]
-            existing = {a.id: a for a in session.query(M3UAccount).filter(M3UAccount.id.in_(ids)).all()}
+            existing = _query_by_ids(session, M3UAccount, ids)
             for item in accounts:
                 aid = item.get('id')
                 a = existing.get(aid)
@@ -338,7 +346,7 @@ class UDIStorage:
         session = get_session()
         try:
             ids = [item.get('id') for item in profiles if item.get('id') is not None]
-            existing = {p.id: p for p in session.query(M3UAccountProfile).filter(M3UAccountProfile.id.in_(ids)).all()}
+            existing = _query_by_ids(session, M3UAccountProfile, ids)
             for item in profiles:
                 pid = item.get('id')
                 p = existing.get(pid)
@@ -359,15 +367,43 @@ class UDIStorage:
             session.close()
     
     # Profile Channels
+    # Each profile is stored as its own SystemSetting row under key
+    # 'udi_profile_channels_{profile_id}' rather than a single blob so that
+    # per-profile updates are O(1) single-row upserts with no read-modify-write.
+    _PROFILE_CHANNELS_PREFIX = 'udi_profile_channels_'
+
     def load_profile_channels(self) -> Dict[int, Dict[str, Any]]:
         from apps.database.models import SystemSetting
         from apps.database.connection import get_session
         session = get_session()
         try:
-            s = session.query(SystemSetting).filter(SystemSetting.key == 'udi_profile_channels').first()
-            if s and s.value:
-                return {int(k): v for k, v in s.value.items()}
-            return {}
+            rows = session.query(SystemSetting).filter(
+                SystemSetting.key.like(f'{self._PROFILE_CHANNELS_PREFIX}%')
+            ).all()
+            result = {}
+            for row in rows:
+                try:
+                    profile_id = int(row.key[len(self._PROFILE_CHANNELS_PREFIX):])
+                    result[profile_id] = row.value
+                except (ValueError, TypeError):
+                    continue
+
+            # One-time migration from the old single-blob format.
+            if not result:
+                old = session.query(SystemSetting).filter(
+                    SystemSetting.key == 'udi_profile_channels'
+                ).first()
+                if old and old.value:
+                    for k, v in old.value.items():
+                        try:
+                            result[int(k)] = v
+                        except (ValueError, TypeError):
+                            continue
+                    # Delete the old blob so this branch never runs again.
+                    session.delete(old)
+                    session.commit()
+
+            return result
         finally:
             session.close()
 
@@ -376,11 +412,18 @@ class UDIStorage:
         from apps.database.connection import get_session
         session = get_session()
         try:
-            s = session.query(SystemSetting).filter(SystemSetting.key == 'udi_profile_channels').first()
-            if not s:
-                s = SystemSetting(key='udi_profile_channels')
-                session.add(s)
-            s.value = {str(k): v for k, v in profile_channels.items()}
+            keys = [f'{self._PROFILE_CHANNELS_PREFIX}{pid}' for pid in profile_channels]
+            existing = {
+                s.key: s
+                for s in session.query(SystemSetting).filter(SystemSetting.key.in_(keys)).all()
+            }
+            for profile_id, data in profile_channels.items():
+                key = f'{self._PROFILE_CHANNELS_PREFIX}{profile_id}'
+                s = existing.get(key)
+                if not s:
+                    s = SystemSetting(key=key)
+                    session.add(s)
+                s.value = data
             session.commit()
             if not skip_metadata:
                 self._update_metadata('profile_channels_last_updated')
@@ -392,14 +435,34 @@ class UDIStorage:
             session.close()
 
     def load_profile_channels_by_id(self, profile_id: int) -> Optional[Dict[str, Any]]:
-        return self.load_profile_channels().get(profile_id)
+        from apps.database.models import SystemSetting
+        from apps.database.connection import get_session
+        session = get_session()
+        try:
+            key = f'{self._PROFILE_CHANNELS_PREFIX}{profile_id}'
+            s = session.query(SystemSetting).filter(SystemSetting.key == key).first()
+            return s.value if s else None
+        finally:
+            session.close()
 
     def save_profile_channels_by_id(self, profile_id: int, channels_data: Dict[str, Any]) -> bool:
-        # Lock prevents concurrent read-modify-write races on the shared blob
-        with _profile_channels_lock:
-            data = self.load_profile_channels()
-            data[profile_id] = channels_data
-            return self.save_profile_channels(data)
+        from apps.database.models import SystemSetting
+        from apps.database.connection import get_session
+        session = get_session()
+        try:
+            key = f'{self._PROFILE_CHANNELS_PREFIX}{profile_id}'
+            s = session.query(SystemSetting).filter(SystemSetting.key == key).first()
+            if not s:
+                s = SystemSetting(key=key)
+                session.add(s)
+            s.value = channels_data
+            session.commit()
+            return True
+        except Exception:
+            session.rollback()
+            return False
+        finally:
+            session.close()
     
     # Metadata
     def load_metadata(self) -> Dict[str, Any]:
