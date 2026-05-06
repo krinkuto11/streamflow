@@ -241,3 +241,5 @@ dev.sh
 docker-compose.dev.yml
 .agent
 dispatcharr
+DispatcharrAPI.yaml
+.DS_Store

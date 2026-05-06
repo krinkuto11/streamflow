@@ -43,6 +43,25 @@ class AutomationConfigManager:
 
     def _set_config_dict(self, key: str, value: Any):
         return self.db.set_system_setting(key, value)
+
+    def get_bulk_enrichment_data(self) -> Dict[str, Any]:
+        """Fetch all config dicts needed for channel list enrichment in one query.
+
+        Returns a dict with six keys — each value is a dict keyed by str(id):
+          channel_assignments, group_assignments,
+          channel_period_assignments, group_period_assignments,
+          channel_epg_scheduled_assignments, group_epg_scheduled_assignments.
+        """
+        keys = [
+            "channel_assignments",
+            "group_assignments",
+            "channel_period_assignments",
+            "group_period_assignments",
+            "channel_epg_scheduled_assignments",
+            "group_epg_scheduled_assignments",
+        ]
+        raw = self.db.get_system_settings_multi(keys)
+        return {k: (raw.get(k) or {}) for k in keys}
         
     def _load_config(self):
         """Deprecated."""

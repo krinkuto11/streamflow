@@ -5,7 +5,6 @@ Provides SQL database persistence for cached data with thread-safe operations.
 """
 
 import json
-import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +13,9 @@ from typing import Dict, List, Optional, Any
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
+
+# Protects read-modify-write of the profile_channels JSON blob
+_profile_channels_lock = threading.Lock()
 
 
 class UDIStorage:
@@ -69,28 +71,47 @@ class UDIStorage:
             return [self._channel_to_dict(c) for c in channels]
         finally:
             session.close()
-    
-    def save_channels(self, channels: List[Dict[str, Any]]) -> bool:
-        from apps.database.models import Channel
+
+    def save_channels(self, channels: List[Dict[str, Any]], skip_metadata: bool = False) -> bool:
+        if not channels:
+            return True
+        from apps.database.models import Channel, Stream
         from apps.database.connection import get_session
         session = get_session()
         try:
+            ids = [item.get('id') for item in channels if item.get('id') is not None]
+            # One query to fetch all existing channel rows
+            existing = {c.id: c for c in session.query(Channel).filter(Channel.id.in_(ids)).all()}
+
+            # Collect all stream IDs needed across all channels in one pass
+            all_stream_ids = []
+            for item in channels:
+                all_stream_ids.extend(item.get('streams', []))
+
+            # One query to fetch all needed stream rows
+            streams_by_id = {}
+            if all_stream_ids:
+                streams_by_id = {
+                    s.id: s
+                    for s in session.query(Stream).filter(Stream.id.in_(all_stream_ids)).all()
+                }
+
             for item in channels:
                 chan_id = item.get('id')
-                c = session.query(Channel).filter(Channel.id == chan_id).first()
+                c = existing.get(chan_id)
                 if not c:
                     c = Channel(id=chan_id)
                     session.add(c)
-                for k,v in item.items():
+                for k, v in item.items():
                     if k != 'streams' and hasattr(c, k):
-                         setattr(c, k, v)
+                        setattr(c, k, v)
                 if 'streams' in item:
-                    from apps.database.models import Stream
-                    c.streams = session.query(Stream).filter(Stream.id.in_(item['streams'])).all()
+                    c.streams = [streams_by_id[sid] for sid in item['streams'] if sid in streams_by_id]
             session.commit()
-            self._update_metadata('channels_last_updated')
+            if not skip_metadata:
+                self._update_metadata('channels_last_updated')
             return True
-        except:
+        except Exception:
             session.rollback()
             return False
         finally:
@@ -120,27 +141,34 @@ class UDIStorage:
         finally:
             session.close()
     
-    def save_streams(self, streams: List[Dict[str, Any]]) -> bool:
+    def save_streams(self, streams: List[Dict[str, Any]], skip_metadata: bool = False) -> bool:
+        if not streams:
+            return True
         from apps.database.models import Stream
         from apps.database.connection import get_session
         session = get_session()
         try:
+            ids = [item.get('id') for item in streams if item.get('id') is not None]
+            existing = {s.id: s for s in session.query(Stream).filter(Stream.id.in_(ids)).all()}
             for item in streams:
                 sid = item.get('id')
-                s = session.query(Stream).filter(Stream.id == sid).first()
+                s = existing.get(sid)
                 if not s:
                     s = Stream(id=sid)
                     session.add(s)
-                for k,v in item.items():
+                for k, v in item.items():
                     if hasattr(s, k):
-                         if k in ['updated_at', 'last_seen', 'stats_updated_at'] and isinstance(v, str):
-                             try: v = datetime.fromisoformat(v)
-                             except: pass
-                         setattr(s, k, v)
+                        if k in ['updated_at', 'last_seen', 'stats_updated_at'] and isinstance(v, str):
+                            try:
+                                v = datetime.fromisoformat(v)
+                            except Exception:
+                                pass
+                        setattr(s, k, v)
             session.commit()
-            self._update_metadata('streams_last_updated')
+            if not skip_metadata:
+                self._update_metadata('streams_last_updated')
             return True
-        except:
+        except Exception:
             session.rollback()
             return False
         finally:
@@ -170,23 +198,29 @@ class UDIStorage:
         finally:
             session.close()
     
-    def save_channel_groups(self, groups: List[Dict[str, Any]]) -> bool:
+    def save_channel_groups(self, groups: List[Dict[str, Any]], skip_metadata: bool = False) -> bool:
+        if not groups:
+            return True
         from apps.database.models import ChannelGroup
         from apps.database.connection import get_session
         session = get_session()
         try:
+            ids = [item.get('id') for item in groups if item.get('id') is not None]
+            existing = {g.id: g for g in session.query(ChannelGroup).filter(ChannelGroup.id.in_(ids)).all()}
             for item in groups:
                 gid = item.get('id')
-                g = session.query(ChannelGroup).filter(ChannelGroup.id == gid).first()
+                g = existing.get(gid)
                 if not g:
                     g = ChannelGroup(id=gid)
                     session.add(g)
-                for k,v in item.items():
-                    if hasattr(g, k): setattr(g, k, v)
+                for k, v in item.items():
+                    if hasattr(g, k):
+                        setattr(g, k, v)
             session.commit()
-            self._update_metadata('channel_groups_last_updated')
+            if not skip_metadata:
+                self._update_metadata('channel_groups_last_updated')
             return True
-        except:
+        except Exception:
             session.rollback()
             return False
         finally:
@@ -203,23 +237,29 @@ class UDIStorage:
         finally:
             session.close()
     
-    def save_logos(self, logos: List[Dict[str, Any]]) -> bool:
+    def save_logos(self, logos: List[Dict[str, Any]], skip_metadata: bool = False) -> bool:
+        if not logos:
+            return True
         from apps.database.models import Logo
         from apps.database.connection import get_session
         session = get_session()
         try:
+            ids = [item.get('id') for item in logos if item.get('id') is not None]
+            existing = {lo.id: lo for lo in session.query(Logo).filter(Logo.id.in_(ids)).all()}
             for item in logos:
                 lid = item.get('id')
-                l = session.query(Logo).filter(Logo.id == lid).first()
-                if not l:
-                    l = Logo(id=lid)
-                    session.add(l)
-                for k,v in item.items():
-                    if hasattr(l, k): setattr(l, k, v)
+                lo = existing.get(lid)
+                if not lo:
+                    lo = Logo(id=lid)
+                    session.add(lo)
+                for k, v in item.items():
+                    if hasattr(lo, k):
+                        setattr(lo, k, v)
             session.commit()
-            self._update_metadata('logos_last_updated')
+            if not skip_metadata:
+                self._update_metadata('logos_last_updated')
             return True
-        except:
+        except Exception:
             session.rollback()
             return False
         finally:
@@ -246,27 +286,34 @@ class UDIStorage:
         finally:
             session.close()
     
-    def save_m3u_accounts(self, accounts: List[Dict[str, Any]]) -> bool:
+    def save_m3u_accounts(self, accounts: List[Dict[str, Any]], skip_metadata: bool = False) -> bool:
+        if not accounts:
+            return True
         from apps.database.models import M3UAccount
         from apps.database.connection import get_session
         session = get_session()
         try:
+            ids = [item.get('id') for item in accounts if item.get('id') is not None]
+            existing = {a.id: a for a in session.query(M3UAccount).filter(M3UAccount.id.in_(ids)).all()}
             for item in accounts:
                 aid = item.get('id')
-                a = session.query(M3UAccount).filter(M3UAccount.id == aid).first()
+                a = existing.get(aid)
                 if not a:
                     a = M3UAccount(id=aid)
                     session.add(a)
-                for k,v in item.items():
+                for k, v in item.items():
                     if hasattr(a, k):
-                         if k in ['created_at', 'updated_at'] and isinstance(v, str):
-                             try: v = datetime.fromisoformat(v)
-                             except: pass
-                         setattr(a, k, v)
+                        if k in ['created_at', 'updated_at'] and isinstance(v, str):
+                            try:
+                                v = datetime.fromisoformat(v)
+                            except Exception:
+                                pass
+                        setattr(a, k, v)
             session.commit()
-            self._update_metadata('m3u_accounts_last_updated')
+            if not skip_metadata:
+                self._update_metadata('m3u_accounts_last_updated')
             return True
-        except:
+        except Exception:
             session.rollback()
             return False
         finally:
@@ -283,23 +330,29 @@ class UDIStorage:
         finally:
             session.close()
     
-    def save_channel_profiles(self, profiles: List[Dict[str, Any]]) -> bool:
+    def save_channel_profiles(self, profiles: List[Dict[str, Any]], skip_metadata: bool = False) -> bool:
+        if not profiles:
+            return True
         from apps.database.models import M3UAccountProfile
         from apps.database.connection import get_session
         session = get_session()
         try:
+            ids = [item.get('id') for item in profiles if item.get('id') is not None]
+            existing = {p.id: p for p in session.query(M3UAccountProfile).filter(M3UAccountProfile.id.in_(ids)).all()}
             for item in profiles:
                 pid = item.get('id')
-                p = session.query(M3UAccountProfile).filter(M3UAccountProfile.id == pid).first()
+                p = existing.get(pid)
                 if not p:
                     p = M3UAccountProfile(id=pid)
                     session.add(p)
-                for k,v in item.items():
-                    if hasattr(p, k): setattr(p, k, v)
+                for k, v in item.items():
+                    if hasattr(p, k):
+                        setattr(p, k, v)
             session.commit()
-            self._update_metadata('channel_profiles_last_updated')
+            if not skip_metadata:
+                self._update_metadata('channel_profiles_last_updated')
             return True
-        except:
+        except Exception:
             session.rollback()
             return False
         finally:
@@ -313,12 +366,12 @@ class UDIStorage:
         try:
             s = session.query(SystemSetting).filter(SystemSetting.key == 'udi_profile_channels').first()
             if s and s.value:
-                return {int(k): v for k,v in s.value.items()}
+                return {int(k): v for k, v in s.value.items()}
             return {}
         finally:
             session.close()
-    
-    def save_profile_channels(self, profile_channels: Dict[int, Dict[str, Any]]) -> bool:
+
+    def save_profile_channels(self, profile_channels: Dict[int, Dict[str, Any]], skip_metadata: bool = False) -> bool:
         from apps.database.models import SystemSetting
         from apps.database.connection import get_session
         session = get_session()
@@ -327,23 +380,26 @@ class UDIStorage:
             if not s:
                 s = SystemSetting(key='udi_profile_channels')
                 session.add(s)
-            s.value = {str(k): v for k,v in profile_channels.items()}
+            s.value = {str(k): v for k, v in profile_channels.items()}
             session.commit()
-            self._update_metadata('profile_channels_last_updated')
+            if not skip_metadata:
+                self._update_metadata('profile_channels_last_updated')
             return True
-        except:
+        except Exception:
             session.rollback()
             return False
         finally:
             session.close()
-    
+
     def load_profile_channels_by_id(self, profile_id: int) -> Optional[Dict[str, Any]]:
         return self.load_profile_channels().get(profile_id)
-    
+
     def save_profile_channels_by_id(self, profile_id: int, channels_data: Dict[str, Any]) -> bool:
-        data = self.load_profile_channels()
-        data[profile_id] = channels_data
-        return self.save_profile_channels(data)
+        # Lock prevents concurrent read-modify-write races on the shared blob
+        with _profile_channels_lock:
+            data = self.load_profile_channels()
+            data[profile_id] = channels_data
+            return self.save_profile_channels(data)
     
     # Metadata
     def load_metadata(self) -> Dict[str, Any]:
@@ -368,7 +424,7 @@ class UDIStorage:
             s.value = metadata
             session.commit()
             return True
-        except:
+        except Exception:
             session.rollback()
             return False
         finally:
@@ -388,29 +444,33 @@ class UDIStorage:
         try:
             from apps.automation.match_profiles_manager import get_match_profiles_manager
             return get_match_profiles_manager().get_all_profiles()
-        except: return []
-    
+        except Exception:
+            return []
+
     def save_match_profiles(self, profiles: List[Dict[str, Any]]) -> bool:
-         # Handled by MatchProfilesManager
-         return True
-    
+        # Handled by MatchProfilesManager
+        return True
+
     def get_match_profile(self, profile_id: int) -> Optional[Dict[str, Any]]:
         try:
             from apps.automation.match_profiles_manager import get_match_profiles_manager
             return get_match_profiles_manager().get_profile(str(profile_id))
-        except: return None
-    
+        except Exception:
+            return None
+
     def update_match_profile(self, profile_id: int, profile_data: Dict[str, Any]) -> bool:
         try:
             from apps.automation.match_profiles_manager import get_match_profiles_manager
             return get_match_profiles_manager().update_profile(str(profile_id), profile_data)
-        except: return False
-    
+        except Exception:
+            return False
+
     def delete_match_profile(self, profile_id: int) -> bool:
         try:
             from apps.automation.match_profiles_manager import get_match_profiles_manager
             return get_match_profiles_manager().delete_profile(str(profile_id))
-        except: return False
+        except Exception:
+            return False
     
     def clear_all(self) -> bool:
         # Avoid clearing main databases unless explicitly asked!

@@ -126,7 +126,7 @@ def _wait_for_udi_stream_count_stabilise(
         time.sleep(poll_interval)
         elapsed += poll_interval
         try:
-            current_count = len(udi.get_streams() or [])
+            current_count = udi.get_stream_count()
             if current_count != pre_count:
                 logger.info(
                     f"UDI stream count changed after playlist refresh: "
@@ -3525,7 +3525,7 @@ class StreamCheckerService:
                     f"(m3u_update enabled in profile)..."
                 )
                 # Capture stream count before triggering refresh so we can detect completion.
-                pre_refresh_stream_count = len(udi.get_streams() or [])
+                pre_refresh_stream_count = udi.get_stream_count()
 
                 # Import here to allow better test mocking
                 from apps.core.api_utils import refresh_m3u_playlists
