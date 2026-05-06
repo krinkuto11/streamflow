@@ -3316,7 +3316,7 @@ class StreamCheckerService:
         - Refreshes playlists for accounts associated with the channel
         - Clears dead streams for the specified channel to give them a second chance
         - Re-matches and assigns streams (including previously dead ones) if matching_mode is enabled
-        - Force checks all streams (bypasses 2-hour immunity) if checking_mode is enabled
+        - Checks streams according to profile grace period/immunity settings if checking_mode is enabled
         - Detects newly dead streams and marks them (if checking is enabled)
         - Detects revived streams and marks them as alive (if checking is enabled)
         - Removes dead streams from the channel (if checking is enabled)
@@ -3690,7 +3690,7 @@ class StreamCheckerService:
                 udi.refresh_channel_by_id(channel_id)
                 logger.debug("✓ Channel cache entry updated with latest stream assignments")
             
-            # Step 6: Mark channel for force check and perform the check (if checking is enabled)
+            # Step 6: Perform the stream check (if checking is enabled)
             #
             # Resolve the profile ID to pass to _check_channel. When check_single_channel
             # was called without a forced_profile_id (e.g. EPG-triggered checks via
@@ -3704,10 +3704,12 @@ class StreamCheckerService:
 
             dead_count = 0
             if checking_enabled:
-                logger.info(f"Step 6/6: Force checking all streams for channel {channel_name}...")
-                self.update_tracker.mark_channel_for_force_check(channel_id)
+                logger.info(
+                    f"Step 6/6: Checking streams for channel {channel_name} "
+                    f"(respecting profile grace period settings)..."
+                )
                 
-                # Perform the check (this will now bypass immunity and check all streams)
+                # Perform the check using normal profile logic.
                 # Returns dict with dead_streams_count and revived_streams_count
                 # Skip batch changelog since this is a single channel check
                 check_result = self._check_channel(channel_id, skip_batch_changelog=True, forced_profile_id=_effective_profile_id)
