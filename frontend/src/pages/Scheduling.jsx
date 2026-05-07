@@ -1363,7 +1363,7 @@ export default function Scheduling() {
                     Add Rule
                   </Button>
                 </DialogTrigger>
-                <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+                <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col">
                   <DialogHeader>
                     <DialogTitle>
                       <div className="flex items-center justify-between">
@@ -1392,7 +1392,7 @@ export default function Scheduling() {
                     style={{ display: 'none' }}
                   />
 
-                  <div className="space-y-4 py-4">
+                  <div className="flex-1 overflow-y-auto"><div className="space-y-4 py-4">
                     {/* Rule Name */}
                     <div className="space-y-2">
                       <Label htmlFor="rule-name">Rule Name</Label>
@@ -1771,7 +1771,7 @@ export default function Scheduling() {
                         )}
                       </>
                     )}
-                  </div>
+                  </div></div>
 
                   <DialogFooter>
                     <Button variant="outline" onClick={() => {

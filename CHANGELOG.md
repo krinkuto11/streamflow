@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Creating/updating auto-create rules timed out and queued Waitress workers** — `create_auto_create_rule` and `update_auto_create_rule` both called `match_programs_to_rules()` synchronously on the request thread. That function holds the scheduling lock and fires HTTP calls to Dispatcharr for every channel's EPG data, routinely taking 30+ seconds. The 30-second axios timeout on the frontend caused the create/update to appear failed even though the rule had already been saved. Waitress logged "task queue depth is 1" because all worker threads were stalled on these calls. Matching is now fired in a daemon background thread for create; for update, the redundant handler-level call is removed since `update_auto_create_rule()` already spawns its own background match thread. Both endpoints now return immediately after saving.
+- **EPG rule dialog footer scrolled out of view** — the rule creation/edit dialog used `overflow-y-auto` on the full `DialogContent`, causing the Cancel and Create Rule buttons to scroll off-screen when the form was tall (e.g., with AceStream monitoring settings expanded). The dialog is now a flex column with scroll confined to the form body only, keeping the footer always visible.
 - **EPG rule regex preview showed past/airing programs** — `test_regex_against_epg` returned all matching EPG programs, including those that had already started or finished. The preview now filters out programs whose `start_time <= now`, matching the behaviour of `match_programs_to_rules()` exactly. Users will no longer see matches in the test panel that the rule would never actually schedule.
 
 ## [2.6.0] - 2026-05-07
