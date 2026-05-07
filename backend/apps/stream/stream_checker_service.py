@@ -3537,14 +3537,15 @@ class StreamCheckerService:
                     "✓ Playlist refresh triggered — waiting for Dispatcharr to process..."
                 )
                 # Calibrate poll timeout to 115% of the last known refresh_all()
-                # duration, with a floor of 60s. In environments where providers
-                # don't change stream counts on refresh, this still times out but
-                # at least waits long enough for a real count-changing refresh.
+                # duration, with a floor of 5s for single channel checks (which
+                # are user-triggered and must feel responsive) or 60s for
+                # automation cycles (which run unattended and can afford to wait).
                 _known_duration = udi.get_last_refresh_duration()
-                _poll_timeout = max(60, int(_known_duration * 1.15)) if _known_duration > 0 else 60
+                _floor = 5
+                _poll_timeout = max(_floor, int(_known_duration * 1.15)) if _known_duration > 0 else _floor
                 logger.debug(
                     f"Post-refresh poll timeout: {_poll_timeout}s "
-                    f"(115% of last refresh duration {_known_duration:.0f}s, floor 60s)"
+                    f"(115% of last refresh duration {_known_duration:.0f}s, floor {_floor}s)"
                 )
                 _wait_for_udi_stream_count_stabilise(
                     udi, pre_refresh_stream_count, timeout=_poll_timeout
