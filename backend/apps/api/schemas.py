@@ -447,7 +447,7 @@ class StreamSessionCreateSchema:
 
 @dataclass(frozen=True)
 class GroupStreamSessionsCreateSchema:
-    group_id: str
+    group_id: int
     regex_filter: Optional[str]
     pre_event_minutes: int
     stagger_ms: int
@@ -460,9 +460,13 @@ class GroupStreamSessionsCreateSchema:
     def from_payload(cls, payload: Any) -> "GroupStreamSessionsCreateSchema":
         data = _ensure_dict(payload, message="No group session data provided")
 
-        group_id = str(data.get("group_id", "")).strip()
-        if not group_id:
+        group_id_raw = data.get("group_id")
+        if group_id_raw in (None, ""):
             raise ValidationError("group_id is required")
+        try:
+            group_id = int(group_id_raw)
+        except (TypeError, ValueError):
+            raise ValidationError("group_id must be an integer") from None
 
         try:
             pre_event_minutes = int(data.get("pre_event_minutes", 30))

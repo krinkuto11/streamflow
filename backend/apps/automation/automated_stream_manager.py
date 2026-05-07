@@ -2679,12 +2679,18 @@ class AutomatedStreamManager:
                 next_run = cron.get_next(datetime)
                 return datetime.now() >= next_run
             except Exception as e:
-                logger.warning(f"Invalid cron expression for period {period_id}, falling back to default interval: {e}")
-                interval_mins = 60
-                return datetime.now() - last_run >= timedelta(minutes=interval_mins)
+                logger.error(
+                    f"Invalid cron expression for period {period_id} "
+                    f"(value={schedule.get('value')!r}): {e} — period will be skipped until the "
+                    f"expression is corrected."
+                )
+                return False
         elif schedule_type == "cron":
-             logger.warning(f"croniter not available, falling back to 60m interval for period {period_id}")
-             return datetime.now() - last_run >= timedelta(minutes=60)
+            logger.error(
+                f"croniter is not installed — cron schedule for period {period_id} cannot be "
+                f"evaluated. Period will be skipped. Install croniter to enable cron support."
+            )
+            return False
              
         return False
 

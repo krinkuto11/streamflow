@@ -176,15 +176,21 @@ def udi_refresh_processor_loop(
 ):
     """Run periodic UDI cache refresh loop until is_running() becomes False.
 
-    Fires refresh_all() on the UDI manager according to the schedule stored in
-    the scheduling config (udi_refresh_schedule). Supports both interval and
-    cron schedule types, identical to automation periods.
+    Two-tier refresh strategy:
+    - Full refresh (refresh_all):  fires according to ``udi_refresh_schedule``.
+    - Delta refresh (refresh_delta): fires on every ``check_interval`` tick
+      *between* full refresh slots. Delta detects add/delete events cheaply via
+      the /ids/ endpoints and falls back to refresh_all() automatically when the
+      change ratio exceeds the threshold or when not network-ready.
 
-    Guards:
+    When no schedule is configured the worker is dormant — neither full nor
+    delta refreshes run.
+
+    Guards (shared by both refresh types):
     - is_network_ready(): skips until startup network refresh completes.
     - is_automation_busy(): skips the slot if a cycle or single-channel check
-      is running. Does not queue — waits for the next scheduled slot.
-    - Schedule null/not configured: worker is dormant, logs nothing.
+      is running. Does not queue — waits for the next tick.
+    - stream_checking_mode: skips when queue-based stream checking is active.
     """
     logger.info("UDI refresh processor thread started")
 
@@ -216,45 +222,50 @@ def udi_refresh_processor_loop(
                 # No schedule configured — worker is dormant
                 continue
 
-            last_run = udi.get_udi_refresh_last_run()
-
-            if not _is_schedule_due(schedule, last_run):
-                continue
-
-            # Guard: skip if a cycle or single-channel check is running
+            # Guard: skip if a cycle or single-channel check is running.
+            # Shared by both full and delta refresh paths.
             if udi.is_automation_busy():
-                logger.info(
-                    "UDI refresh skipping slot — automation is currently busy. "
-                    "Will retry at next scheduled time."
+                logger.debug(
+                    "UDI refresh skipping tick — automation is currently busy."
                 )
                 continue
 
             # Guard: skip if queue-based stream checking is active.
             # The _worker_loop processes queued channels outside check_single_channel
-            # so is_automation_busy() does not cover it. stream_checking_mode
-            # reflects queue activity, in-progress checks, and sync batch state.
+            # so is_automation_busy() does not cover it.
             try:
                 from apps.stream.stream_checker_service import get_stream_checker_service
                 checker_status = get_stream_checker_service().get_status()
                 if checker_status.get('stream_checking_mode', False):
-                    logger.info(
-                        "UDI refresh skipping slot — stream checking is active. "
-                        "Will retry at next scheduled time."
+                    logger.debug(
+                        "UDI refresh skipping tick — stream checking is active."
                     )
                     continue
             except Exception as _sc_err:
                 logger.debug(f"Could not check stream checking mode: {_sc_err}")
 
-            logger.info(
-                f"Scheduled UDI refresh firing "
-                f"(schedule: {schedule.get('type')} {schedule.get('value')})..."
-            )
-            success = udi.refresh_all()
-            if success:
-                udi.set_udi_refresh_last_run()
-                logger.info("✓ Scheduled UDI refresh completed")
+            last_run = udi.get_udi_refresh_last_run()
+
+            if _is_schedule_due(schedule, last_run):
+                # Full refresh slot
+                logger.info(
+                    f"Scheduled full UDI refresh firing "
+                    f"(schedule: {schedule.get('type')} {schedule.get('value')})..."
+                )
+                success = udi.refresh_all()
+                if success:
+                    udi.set_udi_refresh_last_run()
+                    logger.info("✓ Scheduled full UDI refresh completed")
+                else:
+                    logger.warning(
+                        "Scheduled full UDI refresh failed — will retry at next scheduled time"
+                    )
             else:
-                logger.warning("Scheduled UDI refresh failed — will retry at next scheduled time")
+                # Between full refresh slots: lightweight delta sync.
+                # refresh_delta() falls back to refresh_all() automatically when
+                # the change ratio exceeds UDI_DELTA_FALLBACK_THRESHOLD.
+                logger.debug("UDI delta refresh tick...")
+                udi.refresh_delta()
 
         except Exception as exc:
             logger.error(f"Error in UDI refresh processor: {exc}", exc_info=True)

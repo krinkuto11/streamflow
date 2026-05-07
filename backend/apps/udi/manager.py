@@ -26,12 +26,13 @@ Usage:
 import threading
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Set, Tuple
 
-from apps.udi.storage import UDIStorage
-from apps.udi.fetcher import UDIFetcher, FetchResult, _get_auth_headers
+from apps.udi.fetcher import UDIFetcher, FetchResult
 from apps.udi.cache import UDICache
+from apps.core.auth import _get_auth_headers
 
 from apps.core.logging_config import setup_logging
 
@@ -47,6 +48,11 @@ CHANNEL_STATE_ACTIVE = 'active'
 # considered potentially truncated.  0.9 means "warn if we received less than
 # 90 % of what Dispatcharr told us to expect."  None / 0 disables the check.
 UDI_INTEGRITY_THRESHOLD = 0.9
+
+# When more than this fraction of stream or channel IDs have changed between
+# the cached state and Dispatcharr, refresh_delta() falls back to refresh_all().
+# 20 % covers large M3U imports while still catching single-item add/delete quickly.
+UDI_DELTA_FALLBACK_THRESHOLD = 0.20
 
 
 def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
@@ -106,11 +112,7 @@ class UDIManager:
     """
     
     def __init__(self):
-        """Initialize the UDI Manager with SQL backend storage."""
-        from apps.udi.storage import UDIStorage
-        self.storage = UDIStorage()
-        logger.info("Using SQL backend storage for UDI")
-        
+        """Initialize the UDI Manager (pure in-memory, no local persistence)."""
         self.fetcher = UDIFetcher()
         self.cache = UDICache()
         
@@ -124,6 +126,10 @@ class UDIManager:
         # replacing the cache mid-pipeline. Cleared before any background sync fires.
         self._automation_busy: bool = False
         self._automation_busy_lock = threading.Lock()
+        self._automation_busy_since: Optional[datetime] = None
+        # If busy flag is not cleared within this window (e.g. due to a crash),
+        # is_automation_busy() auto-clears it to prevent permanent deadlock.
+        self._automation_busy_timeout_seconds: int = 3600
 
         # Last run timestamp for the scheduled UDI refresh worker.
         # In-memory only — resets on restart, which is correct behaviour.
@@ -131,7 +137,8 @@ class UDIManager:
 
         self._lock = threading.Lock()
         self._refresh_thread = None
-        self._refresh_running = False
+        self._refresh_running = False       # controls background refresh loop thread
+        self._init_in_progress = False      # re-entry guard for initialize()
         
         # In-memory caches for faster access
         self._channels_cache: List[Dict[str, Any]] = []
@@ -148,6 +155,19 @@ class UDIManager:
         self._streams_by_url: Dict[str, Dict[str, Any]] = {}
         self._valid_stream_ids: Set[int] = set()
         self._profiles_by_id: Dict[int, Dict[str, Any]] = {}
+        self._channel_groups_by_id: Dict[int, Dict[str, Any]] = {}
+        self._logos_by_id: Dict[int, Dict[str, Any]] = {}
+        self._m3u_accounts_by_id: Dict[int, Dict[str, Any]] = {}
+        # group_id -> [channel, ...] for O(1) get_channels_by_group()
+        self._channels_by_group_id: Dict[int, List[Dict[str, Any]]] = {}
+        # stream_id -> account_id (derived from stream['m3u_account'])
+        self._stream_account_id: Dict[int, int] = {}
+        # profile_id -> account_id (derived from M3UAccount.profiles nesting)
+        self._profile_to_account_id: Dict[int, int] = {}
+        # account_id -> list of stream dicts
+        self._streams_by_account_id: Dict[int, List[Dict[str, Any]]] = {}
+        # maintained flag so has_custom_streams() is O(1)
+        self._has_custom_streams: bool = False
         
         # Initialization progress tracking
         self._init_progress = {
@@ -155,7 +175,7 @@ class UDIManager:
             'percentage': 0,
             'message': '',
             'current_step': '',
-            'total_steps': 7,       # channels, streams, groups, logos, m3u_accounts, profiles, profile_channels
+            'total_steps': 6,       # channels, streams, groups, logos, m3u_accounts, profiles
             # entity_counts is populated after each full refresh_all() run.
             # Each entry: { 'received': int, 'expected': int | None }
             # 'expected' is None when the Dispatcharr endpoint did not report a total.
@@ -188,37 +208,19 @@ class UDIManager:
             if self._initialized and not force_refresh:
                 logger.debug("UDI Manager already initialized")
                 return True
-                
-            if getattr(self, '_refresh_running', False):
-                logger.debug("UDI Manager refresh already running in another thread")
+
+            if self._init_in_progress:
+                logger.debug("UDI Manager initialization already in progress in another thread")
                 return True
-            
-            logger.debug("Initializing UDI Manager...")
-            
-            # Check if we have existing data
-            if not force_refresh and self.storage.is_initialized():
-                logger.debug("Loading existing data from storage...")
-                self._load_from_storage()
-                
-                # Check if we actually loaded complete data to prevent initializing with missing accounts/streams
-                if len(self._channels_cache) > 0 and len(self._m3u_accounts_cache) > 0:
-                    self._initialized = True
-                    logger.info(f"UDI initialized from storage: {len(self._channels_cache)} channels, {len(self._m3u_accounts_cache)} accounts")
-                    return True
-                else:
-                    logger.info(f"UDI storage loaded but incomplete ({len(self._channels_cache)} channels, {len(self._m3u_accounts_cache)} accounts). Falling back to API fetch...")
-            
-            # Check if Dispatcharr is configured before fetching from API
+
             config = get_dispatcharr_config()
             if not config.is_configured():
-                logger.warning("Cannot fetch data from API: Dispatcharr credentials not configured")
-                # Mark as initialized with empty data to prevent repeated attempts
+                logger.warning("Cannot initialize UDI: Dispatcharr credentials not configured")
                 self._initialized = True
                 return False
-            
-            # Mark as refreshing to prevent re-entrancy
-            self._refresh_running = True
-            
+
+            self._init_in_progress = True
+
         # 2. Fetch fresh data from API (OUTSIDE Lock)
         logger.debug("Fetching fresh data from API...")
         try:
@@ -226,55 +228,13 @@ class UDIManager:
             with self._lock:
                 if success:
                     self._initialized = True
-                    # Success message logged in refresh_all()
                 return success
         except Exception as e:
             logger.error(f"Error initializing UDI Manager: {e}")
             return False
         finally:
             with self._lock:
-                self._refresh_running = False
-    
-    def _load_from_storage(self) -> None:
-        """Load all data from storage into memory caches."""
-        self._channels_cache = self.storage.load_channels()
-        self._streams_cache = self.storage.load_streams()
-        self._channel_groups_cache = self.storage.load_channel_groups()
-        self._logos_cache = self.storage.load_logos()
-        self._m3u_accounts_cache = self.storage.load_m3u_accounts()
-        self._channel_profiles_cache = self.storage.load_channel_profiles()
-        self._profile_channels_cache = self.storage.load_profile_channels()
-        
-        # Build index caches
-        self._build_indexes()
-        
-        # Mark caches as refreshed based on storage metadata
-        metadata = self.storage.load_metadata()
-        for entity_type in ['channels', 'streams', 'channel_groups', 'logos', 'm3u_accounts', 'channel_profiles']:
-            timestamp_str = metadata.get(f'{entity_type}_last_updated')
-            if timestamp_str:
-                try:
-                    timestamp = datetime.fromisoformat(timestamp_str)
-                    self.cache.mark_refreshed(entity_type, timestamp)
-                except ValueError:
-                    pass
-        
-        # Also mark profile_channels if present
-        profile_channels_timestamp = metadata.get('profile_channels_last_updated')
-        if profile_channels_timestamp:
-            try:
-                timestamp = datetime.fromisoformat(profile_channels_timestamp)
-                self.cache.mark_refreshed('profile_channels', timestamp)
-            except ValueError:
-                pass
-        
-        logger.info(
-            f"Loaded from storage: {len(self._channels_cache)} channels, "
-            f"{len(self._streams_cache)} streams, {len(self._channel_groups_cache)} groups, "
-            f"{len(self._logos_cache)} logos, {len(self._m3u_accounts_cache)} M3U accounts, "
-            f"{len(self._channel_profiles_cache)} profiles, "
-            f"{len(self._profile_channels_cache)} profile channels"
-        )
+                self._init_in_progress = False
     
     def _build_indexes(self) -> None:
         """Build index caches for fast lookups."""
@@ -283,7 +243,43 @@ class UDIManager:
         self._streams_by_url = {st.get('url'): st for st in self._streams_cache if st.get('url')}
         self._valid_stream_ids = set(self._streams_by_id.keys())
         self._profiles_by_id = {p.get('id'): p for p in self._channel_profiles_cache if p.get('id') is not None}
-    
+        self._channel_groups_by_id = {g.get('id'): g for g in self._channel_groups_cache if g.get('id') is not None}
+        self._logos_by_id = {lo.get('id'): lo for lo in self._logos_cache if lo.get('id') is not None}
+
+        # account_id -> [stream, ...] and stream_id -> account_id
+        self._streams_by_account_id = {}
+        self._stream_account_id = {}
+        for st in self._streams_cache:
+            sid = st.get('id')
+            aid = st.get('m3u_account')
+            if sid is not None and aid is not None:
+                self._stream_account_id[sid] = aid
+                self._streams_by_account_id.setdefault(aid, []).append(st)
+
+        # profile_id -> account_id (profiles are nested inside m3u_accounts)
+        self._profile_to_account_id = {}
+        for account in self._m3u_accounts_cache:
+            aid = account.get('id')
+            if aid is None:
+                continue
+            for profile in account.get('profiles', []):
+                if isinstance(profile, dict):
+                    pid = profile.get('id')
+                    if pid is not None:
+                        self._profile_to_account_id[pid] = aid
+
+        self._has_custom_streams = any(st.get('is_custom', False) for st in self._streams_cache)
+
+        self._m3u_accounts_by_id = {
+            a.get('id'): a for a in self._m3u_accounts_cache if a.get('id') is not None
+        }
+
+        self._channels_by_group_id = {}
+        for ch in self._channels_cache:
+            gid = ch.get('channel_group_id')
+            if gid is not None:
+                self._channels_by_group_id.setdefault(gid, []).append(ch)
+
     # === Data Access Methods ===
     
     def get_init_progress(self) -> Dict[str, Any]:
@@ -401,6 +397,7 @@ class UDIManager:
         """
         with self._automation_busy_lock:
             self._automation_busy = True
+            self._automation_busy_since = datetime.now()
 
     def clear_automation_busy(self) -> None:
         """Clear the automation busy flag.
@@ -411,15 +408,31 @@ class UDIManager:
         """
         with self._automation_busy_lock:
             self._automation_busy = False
+            self._automation_busy_since = None
 
     def is_automation_busy(self) -> bool:
         """Return True if a cycle or single-channel check is currently running.
 
-        Used by the scheduled UDI refresh worker to determine whether to
-        skip the current slot. Does not block — caller decides what to do.
+        Auto-clears the flag if it has been held longer than
+        _automation_busy_timeout_seconds (default 3600s) to recover from
+        crashes that prevented clear_automation_busy() from executing.
+        Does not block — caller decides what to do.
         """
         with self._automation_busy_lock:
-            return self._automation_busy
+            if not self._automation_busy:
+                return False
+            if self._automation_busy_since is not None:
+                elapsed = (datetime.now() - self._automation_busy_since).total_seconds()
+                if elapsed > self._automation_busy_timeout_seconds:
+                    logger.warning(
+                        f"Automation busy flag timed out after {elapsed:.0f}s — "
+                        "auto-clearing to recover from stale lock. "
+                        "This usually means automation crashed without calling clear_automation_busy()."
+                    )
+                    self._automation_busy = False
+                    self._automation_busy_since = None
+                    return False
+            return True
 
     def get_udi_refresh_last_run(self) -> Optional[datetime]:
         """Return the timestamp of the last scheduled UDI refresh run.
@@ -440,47 +453,11 @@ class UDIManager:
     def get_channels(self) -> List[Dict[str, Any]]:
         """Get all channels.
 
-        Deduplicates by channel ``id`` before returning so that accumulation
-        bugs in the write paths (e.g. ``refresh_channel_by_id`` append,
-        ``update_channel`` for-else append) never surface to callers.
-
-        Channels whose ``id`` key is missing or ``None`` are passed through
-        unchanged (preserving existing behaviour for malformed entries rather
-        than silently dropping them).  When duplicate IDs exist the last entry
-        in ``_channels_cache`` wins, which matches the behaviour of
-        ``_build_indexes`` (dict-comprehension last-write-wins).
-
         Returns:
-            Deduplicated list of channel dictionaries, insertion-order preserved
-            for channels with valid IDs.
+            List of channel dictionaries.
         """
         self._ensure_initialized()
-
-        seen: Dict[Any, int] = {}   # id -> index in result
-        result: List[Dict[str, Any]] = []
-
-        for ch in self._channels_cache:
-            cid = ch.get('id')
-            if cid is None:
-                # Malformed entry — append unconditionally, do not track in seen
-                result.append(ch)
-            elif cid in seen:
-                # Duplicate: overwrite in-place so last-write-wins without
-                # changing list length or position of earlier unique entries
-                result[seen[cid]] = ch
-            else:
-                seen[cid] = len(result)
-                result.append(ch)
-
-        if len(result) != len(self._channels_cache):
-            dupes = len(self._channels_cache) - len(result)
-            logger.warning(
-                f"get_channels: deduplicated {dupes} duplicate channel entr{'y' if dupes == 1 else 'ies'} "
-                f"from _channels_cache ({len(self._channels_cache)} → {len(result)}). "
-                "Run a full UDI refresh to resolve the root cause."
-            )
-
-        return result
+        return list(self._channels_cache)
     
     def get_channel_by_id(self, channel_id: int, fetch_if_missing: bool = True) -> Optional[Dict[str, Any]]:
         """Get a specific channel by ID.
@@ -566,7 +543,7 @@ class UDIManager:
         self._ensure_initialized()
         if log_result:
             logger.debug(f"Returning {len(self._streams_cache)} streams from UDI")
-        return self._streams_cache.copy()
+        return self._streams_cache
     
     def get_stream_by_id(self, stream_id: int) -> Optional[Dict[str, Any]]:
         """Get a specific stream by ID.
@@ -619,18 +596,15 @@ class UDIManager:
     
     def get_channel_group_by_id(self, group_id: int) -> Optional[Dict[str, Any]]:
         """Get a specific channel group by ID.
-        
+
         Args:
             group_id: The channel group ID
-            
+
         Returns:
             Channel group dictionary or None if not found
         """
         self._ensure_initialized()
-        for group in self._channel_groups_cache:
-            if group.get('id') == group_id:
-                return group
-        return None
+        return self._channel_groups_by_id.get(group_id)
     
     def get_channels_by_group(self, group_id: int) -> Optional[List[Dict[str, Any]]]:
         """Get all channels that belong to a specific channel group.
@@ -647,13 +621,8 @@ class UDIManager:
         group = self.get_channel_group_by_id(group_id)
         if not group:
             return None
-        
-        # Filter channels by group
-        channels = [
-            channel for channel in self._channels_cache
-            if channel.get('channel_group_id') == group_id
-        ]
-        return channels
+
+        return list(self._channels_by_group_id.get(group_id, []))
     
     def get_logos(self) -> List[Dict[str, Any]]:
         """Get all logos.
@@ -666,18 +635,15 @@ class UDIManager:
     
     def get_logo_by_id(self, logo_id: int) -> Optional[Dict[str, Any]]:
         """Get a specific logo by ID.
-        
+
         Args:
             logo_id: The logo ID
-            
+
         Returns:
             Logo dictionary or None if not found
         """
         self._ensure_initialized()
-        for logo in self._logos_cache:
-            if logo.get('id') == logo_id:
-                return logo
-        return None
+        return self._logos_by_id.get(logo_id)
     
     def get_m3u_accounts(self) -> List[Dict[str, Any]]:
         """Get all M3U accounts with priority_mode merged from local config.
@@ -701,18 +667,9 @@ class UDIManager:
             M3U account dictionary or None if not found
         """
         self._ensure_initialized()
-        
-        # Try fast lookup from storage if using Redis
-        if hasattr(self.storage, 'get_m3u_account_by_id'):
-            account = self.storage.get_m3u_account_by_id(account_id)
-            if account:
-                return account
-        
-        # Fallback to in-memory cache
-        for account in self._m3u_accounts_cache:
-            if account.get('id') == account_id:
-                return account.copy()
-        
+        account = self._m3u_accounts_by_id.get(account_id)
+        if account is not None:
+            return account.copy()
         logger.debug(f"M3U account {account_id} not found in UDI")
         return None
     
@@ -756,8 +713,13 @@ class UDIManager:
             True if at least one custom stream exists
         """
         self._ensure_initialized()
-        return any(st.get('is_custom', False) for st in self._streams_cache)
-    
+        return self._has_custom_streams
+
+    def get_stream_count(self) -> int:
+        """Return the number of cached streams without copying the list."""
+        self._ensure_initialized()
+        return len(self._streams_cache)
+
     # === Refresh Methods ===
     
     def refresh_all(self) -> bool:
@@ -777,73 +739,75 @@ class UDIManager:
             return False
         
         try:
-            # Set automation busy for the duration of this full refresh.
-            # Prevents the scheduled UDI refresh worker from firing a concurrent
-            # refresh_all() that would race with this one on the cache.
-            # Also prevents check_single_channel and run_automation_cycle from
-            # starting while a full cache rebuild is in progress.
-            self.set_automation_busy()
             _refresh_start = datetime.now()
 
-            # Pre-fetch step: get authoritative counts from lightweight /ids/
-            # endpoints before pulling full objects.  These counts serve as the
-            # integrity oracle when the pagination envelope does not include a
-            # 'count' field (e.g. ChannelPagination in older Dispatcharr builds).
-            self._update_init_progress(percentage=2, message='Fetching entity counts...', current_step='pre_count')
-            pre_counts = self.fetcher.fetch_entity_counts()
+            # Fetch all entity types concurrently — none depend on each other,
+            # and pre_counts (the integrity oracle) is only consumed after all
+            # fetches complete, so it can run in the same wave.
+            # Progress advances as each future lands via as_completed so the
+            # frontend bar still moves steadily.
+            _fetch_tasks = {
+                'pre_counts':   self.fetcher.fetch_entity_counts,
+                'channels':     self.fetcher.fetch_channels,
+                'streams':      self.fetcher.fetch_streams,
+                'groups':       self.fetcher.fetch_channel_groups,
+                'logos':        self.fetcher.fetch_logos,
+                'm3u_accounts': self.fetcher.fetch_m3u_accounts,
+                'profiles':     self.fetcher.fetch_channel_profiles,
+            }
+            _fetch_results: Dict[str, Any] = {}
+            self._update_init_progress(percentage=5, message='Fetching all data...', current_step='fetch')
+            with ThreadPoolExecutor(max_workers=len(_fetch_tasks)) as _executor:
+                _future_to_name = {_executor.submit(fn): name for name, fn in _fetch_tasks.items()}
+                for _i, _future in enumerate(as_completed(_future_to_name), 1):
+                    _name = _future_to_name[_future]
+                    try:
+                        _fetch_results[_name] = _future.result()
+                    except Exception as _exc:
+                        logger.error(f"Entity fetch failed for '{_name}': {_exc}")
+                        _fetch_results[_name] = None
+                    self._update_init_progress(
+                        percentage=5 + int(_i / len(_fetch_tasks) * 65),
+                        message=f'Fetching data ({_i}/{len(_fetch_tasks)} done)...',
+                        current_step='fetch',
+                    )
+
+            pre_counts      = _fetch_results.get('pre_counts') or {}
+            channels_result = _fetch_results.get('channels') or FetchResult()
+            streams_result  = _fetch_results.get('streams')  or FetchResult()
+            channel_groups  = _fetch_results.get('groups')   or []
+            logos_result    = _fetch_results.get('logos')    or FetchResult()
+            m3u_accounts    = _fetch_results.get('m3u_accounts') or []
+            channel_profiles = _fetch_results.get('profiles') or []
+
             logger.info(
                 f"UDI pre-fetch oracle: channels={pre_counts.get('channels')}, "
                 f"streams={pre_counts.get('streams')} (from Dispatcharr /ids/ endpoints)"
             )
 
-            # Step 1: Channels
-            self._update_init_progress(percentage=5, message='Fetching channels...', current_step='channels')
-            channels_result = self.fetcher.fetch_channels()
-            # If pagination envelope omitted 'count', fall back to the /ids/ oracle
+            # Apply /ids/ oracle when the paginated envelope omitted 'count'
+            # (can happen with older Dispatcharr builds / custom pagination).
             if channels_result.expected_count is None and pre_counts.get('channels') is not None:
                 channels_result.expected_count = pre_counts['channels']
                 logger.info(f"UDI integrity: using /ids/ oracle for channels — expected {channels_result.expected_count}")
-            channels_ok = _check_fetch_integrity('channels', channels_result)
-
-            # Step 2: Streams
-            self._update_init_progress(percentage=20, message='Fetching streams...', current_step='streams')
-            streams_result = self.fetcher.fetch_streams()
-            # If pagination envelope omitted 'count', fall back to the /ids/ oracle
             if streams_result.expected_count is None and pre_counts.get('streams') is not None:
                 streams_result.expected_count = pre_counts['streams']
                 logger.info(f"UDI integrity: using /ids/ oracle for streams — expected {streams_result.expected_count}")
-            streams_ok = _check_fetch_integrity('streams', streams_result)
 
-            # Step 3: Channel Groups (non-paginated — no integrity check)
-            self._update_init_progress(percentage=40, message='Fetching groups...', current_step='groups')
-            channel_groups = self.fetcher.fetch_channel_groups()
-
-            # Step 4: Logos
-            self._update_init_progress(percentage=50, message='Fetching logos...', current_step='logos')
-            logos_result = self.fetcher.fetch_logos()
+            channels_ok = _check_fetch_integrity('channels', channels_result)
+            streams_ok  = _check_fetch_integrity('streams',  streams_result)
             _check_fetch_integrity('logos', logos_result)
 
-            # Step 5: M3U Accounts (non-paginated — no integrity check)
-            self._update_init_progress(percentage=60, message='Fetching M3U accounts...', current_step='m3u_accounts')
-            m3u_accounts = self.fetcher.fetch_m3u_accounts()
-
-            # Step 6: Channel Profiles (non-paginated — no integrity check)
-            self._update_init_progress(percentage=70, message='Fetching profiles...', current_step='profiles')
-            channel_profiles = self.fetcher.fetch_channel_profiles()
-
-            # Step 7: Profile Channels
-            profile_ids = [p.get('id') for p in channel_profiles if p.get('id')]
-            if profile_ids:
-                logger.debug(f"Fetching channel data for {len(profile_ids)} profiles...")
-                
-                def profile_progress(i, total, msg):
-                    # Progress between 80% and 90%
-                    percentage = 80 + int((i / total) * 10)
-                    self._update_init_progress(percentage=percentage, message=msg)
-                
-                profile_channels = self.fetcher.fetch_profile_channels(profile_ids, progress_callback=profile_progress)
-            else:
-                profile_channels = {}
+            # Profile channels are embedded in the profiles list response — no
+            # separate per-profile fetch needed.
+            profile_channels = {
+                p['id']: {
+                    'profile': p,
+                    'channels': p.get('channels') if isinstance(p.get('channels'), list) else [],
+                }
+                for p in channel_profiles
+                if p.get('id') is not None
+            }
 
             # Build entity_counts for the progress dict — used by the frontend
             # stats panel and the future unstable-state check.
@@ -868,48 +832,101 @@ class UDIManager:
                 },
             }
 
-            self._update_init_progress(percentage=90, message='Building indexes and saving...', current_step='finalize')
-            
-            with self._lock:
-                # Unpack .items from FetchResult objects for cache storage
-                self._channels_cache = channels_result.items
-                self._streams_cache = streams_result.items
-                self._channel_groups_cache = channel_groups
-                self._logos_cache = logos_result.items
-                self._m3u_accounts_cache = m3u_accounts
-                self._channel_profiles_cache = channel_profiles
-                self._profile_channels_cache = profile_channels
-                
-                # Build index caches
-                self._build_indexes()
-            
-            # Save to storage
-            self.storage.save_channels(self._channels_cache)
-            self.storage.save_streams(self._streams_cache)
-            self.storage.save_channel_groups(self._channel_groups_cache)
-            self.storage.save_logos(self._logos_cache)
-            self.storage.save_m3u_accounts(self._m3u_accounts_cache)
-            self.storage.save_channel_profiles(self._channel_profiles_cache)
-            self.storage.save_profile_channels(self._profile_channels_cache)
-            
-            # Update metadata
-            now = datetime.now()
-            metadata = {
-                'last_full_refresh': now.isoformat(),
-                'channels_last_updated': now.isoformat(),
-                'streams_last_updated': now.isoformat(),
-                'channel_groups_last_updated': now.isoformat(),
-                'logos_last_updated': now.isoformat(),
-                'm3u_accounts_last_updated': now.isoformat(),
-                'channel_profiles_last_updated': now.isoformat(),
-                'profile_channels_last_updated': now.isoformat(),
-                'version': '1.0.0'
+            self._update_init_progress(percentage=85, message='Building indexes...', current_step='index')
+
+            # ----------------------------------------------------------------
+            # Swap-pointer pattern: build everything in local variables so
+            # the lock is held only for the pointer swap (microseconds), not
+            # for index construction or storage writes (potentially seconds).
+            # ----------------------------------------------------------------
+            new_channels    = channels_result.items
+            new_streams     = streams_result.items
+            new_groups      = channel_groups
+            new_logos       = logos_result.items
+            new_accounts    = m3u_accounts
+            new_profiles    = channel_profiles
+            new_prof_chans  = profile_channels
+
+            # Build every index in local scope — no readers can see these yet.
+            new_channels_by_id = {
+                ch.get('id'): ch for ch in new_channels if ch.get('id') is not None
             }
-            self.storage.save_metadata(metadata)
-            
+            new_streams_by_id = {
+                st.get('id'): st for st in new_streams if st.get('id') is not None
+            }
+            new_streams_by_url = {
+                st.get('url'): st for st in new_streams if st.get('url')
+            }
+            new_valid_stream_ids: Set[int] = set(new_streams_by_id.keys())
+            new_profiles_by_id = {
+                p.get('id'): p for p in new_profiles if p.get('id') is not None
+            }
+            new_groups_by_id = {
+                g.get('id'): g for g in new_groups if g.get('id') is not None
+            }
+            new_logos_by_id = {
+                lo.get('id'): lo for lo in new_logos if lo.get('id') is not None
+            }
+            new_accounts_by_id = {
+                a.get('id'): a for a in new_accounts if a.get('id') is not None
+            }
+            new_channels_by_group: Dict[int, List[Dict[str, Any]]] = {}
+            for ch in new_channels:
+                gid = ch.get('channel_group_id')
+                if gid is not None:
+                    new_channels_by_group.setdefault(gid, []).append(ch)
+            new_streams_by_account: Dict[int, List[Dict[str, Any]]] = {}
+            new_stream_account_id: Dict[int, int] = {}
+            for st in new_streams:
+                sid = st.get('id')
+                aid = st.get('m3u_account')
+                if sid is not None and aid is not None:
+                    new_stream_account_id[sid] = aid
+                    new_streams_by_account.setdefault(aid, []).append(st)
+            new_profile_to_account: Dict[int, int] = {}
+            for account in new_accounts:
+                aid = account.get('id')
+                if aid is None:
+                    continue
+                for profile in account.get('profiles', []):
+                    if isinstance(profile, dict):
+                        pid = profile.get('id')
+                        if pid is not None:
+                            new_profile_to_account[pid] = aid
+            new_has_custom = any(st.get('is_custom', False) for st in new_streams)
+
+            # Automation is blocked only for the pointer swap — O(1) assignments.
+            self.set_automation_busy()
+
+            with self._lock:
+                self._channels_cache          = new_channels
+                self._streams_cache           = new_streams
+                self._channel_groups_cache    = new_groups
+                self._logos_cache             = new_logos
+                self._m3u_accounts_cache      = new_accounts
+                self._channel_profiles_cache  = new_profiles
+                self._profile_channels_cache  = new_prof_chans
+
+                self._channels_by_id          = new_channels_by_id
+                self._streams_by_id           = new_streams_by_id
+                self._streams_by_url          = new_streams_by_url
+                self._valid_stream_ids        = new_valid_stream_ids
+                self._profiles_by_id          = new_profiles_by_id
+                self._channel_groups_by_id    = new_groups_by_id
+                self._logos_by_id             = new_logos_by_id
+                self._m3u_accounts_by_id      = new_accounts_by_id
+                self._channels_by_group_id    = new_channels_by_group
+                self._streams_by_account_id   = new_streams_by_account
+                self._stream_account_id       = new_stream_account_id
+                self._profile_to_account_id   = new_profile_to_account
+                self._has_custom_streams      = new_has_custom
+
+            now = datetime.now()
+
             # Mark all caches as refreshed
             for entity_type in ['channels', 'streams', 'channel_groups', 'logos', 'm3u_accounts', 'channel_profiles', 'profile_channels']:
                 self.cache.mark_refreshed(entity_type, now)
+
             
             logger.info(
                 f"UDI initialized: {len(self._channels_cache)} channels, {len(self._streams_cache)} streams, "
@@ -954,7 +971,181 @@ class UDIManager:
 
         finally:
             self.clear_automation_busy()
-    
+
+    def refresh_delta(self) -> bool:
+        """Incremental refresh: detect and apply stream/channel structural changes.
+
+        Uses the /ids/ endpoints to diff Dispatcharr's current ID set against
+        the UDI cache.  Only add/delete events are handled — field-level updates
+        (e.g. a stream's URL changing) require a full refresh_all().
+
+        Falls back to refresh_all() when:
+        - The UDI is not yet network-ready (no prior live fetch)
+        - Either /ids/ endpoint is unreachable
+        - The change ratio exceeds UDI_DELTA_FALLBACK_THRESHOLD (bulk import, etc.)
+
+        Newly added streams are inserted into all stream indexes.  The embedded
+        channel.streams ID lists are NOT updated for new streams (they reflect the
+        last full refresh); use refresh_all() periodically to re-sync assignments.
+        Deleted streams ARE stripped from channel.streams lists immediately.
+
+        Returns:
+            True if the refresh succeeded (delta applied or full fallback).
+        """
+        if not self._initialized or not self._network_ready:
+            logger.info("Delta refresh: not network-ready, falling back to full refresh")
+            return self.refresh_all()
+
+        config = get_dispatcharr_config()
+        if not config.is_configured():
+            logger.warning("Delta refresh: Dispatcharr not configured")
+            return False
+
+        logger.info("Starting delta refresh...")
+
+        # ---- Step 1: fetch current ID sets (two concurrent /ids/ calls) ----
+        current_ids = self.fetcher.fetch_all_ids()
+        if not current_ids:
+            logger.warning("Delta refresh: /ids/ endpoints unreachable, falling back to full refresh")
+            return self.refresh_all()
+
+        dispatcharr_stream_ids:  Set[int] = current_ids.get('streams',  set())
+        dispatcharr_channel_ids: Set[int] = current_ids.get('channels', set())
+
+        # ---- Step 2: compute delta ----
+        cached_stream_ids:  Set[int] = self._valid_stream_ids.copy()
+        cached_channel_ids: Set[int] = set(self._channels_by_id.keys())
+
+        added_stream_ids    = dispatcharr_stream_ids  - cached_stream_ids
+        deleted_stream_ids  = cached_stream_ids       - dispatcharr_stream_ids
+        added_channel_ids   = dispatcharr_channel_ids - cached_channel_ids
+        deleted_channel_ids = cached_channel_ids      - dispatcharr_channel_ids
+
+        stream_change_ratio  = (len(added_stream_ids)  + len(deleted_stream_ids))  / max(len(dispatcharr_stream_ids),  1)
+        channel_change_ratio = (len(added_channel_ids) + len(deleted_channel_ids)) / max(len(dispatcharr_channel_ids), 1)
+
+        logger.info(
+            f"Delta: streams +{len(added_stream_ids)} -{len(deleted_stream_ids)} "
+            f"({stream_change_ratio:.1%}), "
+            f"channels +{len(added_channel_ids)} -{len(deleted_channel_ids)} "
+            f"({channel_change_ratio:.1%})"
+        )
+
+        # ---- Step 3: fall back if the delta is too large ----
+        if (stream_change_ratio  > UDI_DELTA_FALLBACK_THRESHOLD or
+                channel_change_ratio > UDI_DELTA_FALLBACK_THRESHOLD):
+            logger.info(
+                f"Delta too large (streams {stream_change_ratio:.1%}, "
+                f"channels {channel_change_ratio:.1%}) — falling back to full refresh"
+            )
+            return self.refresh_all()
+
+        if not any([added_stream_ids, deleted_stream_ids, added_channel_ids, deleted_channel_ids]):
+            logger.info("Delta refresh: no structural changes detected")
+            return True
+
+        # ---- Step 4: fetch new items — both concurrently (outside the lock) ----
+        new_streams:  List[Dict[str, Any]] = []
+        new_channels: List[Dict[str, Any]] = []
+
+        if added_stream_ids or added_channel_ids:
+            with ThreadPoolExecutor(max_workers=2) as _ex:
+                _st_future = (
+                    _ex.submit(self.fetcher.fetch_streams_by_ids, list(added_stream_ids))
+                    if added_stream_ids else None
+                )
+                _ch_future = (
+                    _ex.submit(self.fetcher.fetch_channels_by_ids, list(added_channel_ids))
+                    if added_channel_ids else None
+                )
+                if _st_future is not None:
+                    new_streams = _st_future.result()
+                    logger.info(f"Fetched {len(new_streams)}/{len(added_stream_ids)} new streams")
+                if _ch_future is not None:
+                    new_channels = _ch_future.result()
+                    logger.info(f"Fetched {len(new_channels)}/{len(added_channel_ids)} new channels")
+
+        # ---- Step 5: apply delta atomically under lock ----
+        with self._lock:
+            # Stream additions
+            for st in new_streams:
+                sid = st.get('id')
+                if sid is None:
+                    continue
+                self._streams_cache.append(st)
+                self._streams_by_id[sid] = st
+                if st.get('url'):
+                    self._streams_by_url[st['url']] = st
+                self._valid_stream_ids.add(sid)
+                aid = st.get('m3u_account')
+                if aid is not None:
+                    self._stream_account_id[sid] = aid
+                    self._streams_by_account_id.setdefault(aid, []).append(st)
+                if st.get('is_custom'):
+                    self._has_custom_streams = True
+
+            # Stream deletions
+            if deleted_stream_ids:
+                self._streams_cache = [
+                    st for st in self._streams_cache
+                    if st.get('id') not in deleted_stream_ids
+                ]
+                for sid in deleted_stream_ids:
+                    st = self._streams_by_id.pop(sid, None)
+                    if st and st.get('url'):
+                        self._streams_by_url.pop(st['url'], None)
+                    self._valid_stream_ids.discard(sid)
+                    aid = self._stream_account_id.pop(sid, None)
+                    if aid is not None and aid in self._streams_by_account_id:
+                        self._streams_by_account_id[aid] = [
+                            s for s in self._streams_by_account_id[aid]
+                            if s.get('id') != sid
+                        ]
+                # Strip deleted IDs from channel.streams lists for cache consistency.
+                # Mutating ch['streams'] in-place is reflected in _channels_by_id
+                # automatically (both hold references to the same dict objects).
+                for ch in self._channels_cache:
+                    ch_streams = ch.get('streams')
+                    if isinstance(ch_streams, list):
+                        ch['streams'] = [s for s in ch_streams if s not in deleted_stream_ids]
+                self._has_custom_streams = any(
+                    st.get('is_custom', False) for st in self._streams_cache
+                )
+
+            # Channel additions
+            for ch in new_channels:
+                cid = ch.get('id')
+                if cid is None:
+                    continue
+                self._channels_cache.append(ch)
+                self._channels_by_id[cid] = ch
+                gid = ch.get('channel_group_id')
+                if gid is not None:
+                    self._channels_by_group_id.setdefault(gid, []).append(ch)
+
+            # Channel deletions
+            if deleted_channel_ids:
+                for cid in deleted_channel_ids:
+                    ch = self._channels_by_id.pop(cid, None)
+                    if ch:
+                        gid = ch.get('channel_group_id')
+                        if gid is not None and gid in self._channels_by_group_id:
+                            self._channels_by_group_id[gid] = [
+                                c for c in self._channels_by_group_id[gid]
+                                if c.get('id') != cid
+                            ]
+                self._channels_cache = [
+                    ch for ch in self._channels_cache
+                    if ch.get('id') not in deleted_channel_ids
+                ]
+
+        logger.info(
+            f"Delta refresh complete — "
+            f"streams +{len(new_streams)} -{len(deleted_stream_ids)}, "
+            f"channels +{len(new_channels)} -{len(deleted_channel_ids)}"
+        )
+        return True
+
     def refresh_channels(self) -> bool:
         """Refresh only channels data.
         
@@ -970,10 +1161,16 @@ class UDIManager:
         logger.info("Refreshing channels...")
         try:
             result = self.fetcher.fetch_channels()
-            # FetchResult supports len() and iteration — assign .items to cache
-            self._channels_cache = result.items
-            self._channels_by_id = {ch.get('id'): ch for ch in result.items if ch.get('id') is not None}
-            self.storage.save_channels(result.items)
+            with self._lock:
+                self._channels_cache = result.items
+                self._channels_by_id = {
+                    ch.get('id'): ch for ch in result.items if ch.get('id') is not None
+                }
+                self._channels_by_group_id = {}
+                for ch in result.items:
+                    gid = ch.get('channel_group_id')
+                    if gid is not None:
+                        self._channels_by_group_id.setdefault(gid, []).append(ch)
             self.cache.mark_refreshed('channels')
             return True
         except Exception as e:
@@ -982,13 +1179,13 @@ class UDIManager:
     
     def refresh_channel_by_id(self, channel_id: int) -> bool:
         """Refresh a single channel by ID from the API.
-        
+
         This is more efficient than refreshing all channels when only one channel
         needs to be updated (e.g., after modifying its stream list).
-        
+
         Args:
             channel_id: The channel ID to refresh
-            
+
         Returns:
             True if refresh successful
         """
@@ -996,24 +1193,16 @@ class UDIManager:
         try:
             channel = self.fetcher.fetch_channel_by_id(channel_id)
             if channel:
-                # Update in-memory caches
                 with self._lock:
+                    is_new = channel_id not in self._channels_by_id
                     self._channels_by_id[channel_id] = channel
-                    
-                    # Update list cache
-                    found = False
-                    for i, ch in enumerate(self._channels_cache):
-                        if ch.get('id') == channel_id:
-                            self._channels_cache[i] = channel
-                            found = True
-                            break
-                    
-                    if not found:
+                    if is_new:
                         self._channels_cache.append(channel)
-                    
-                    # Update storage
-                    self.storage.update_channel(channel_id, channel)
-                
+                    else:
+                        for i, ch in enumerate(self._channels_cache):
+                            if ch.get('id') == channel_id:
+                                self._channels_cache[i] = channel
+                                break
                 logger.debug(f"Channel {channel_id} refreshed successfully")
                 return True
             else:
@@ -1032,11 +1221,22 @@ class UDIManager:
         logger.info("Refreshing streams...")
         try:
             result = self.fetcher.fetch_streams()
-            self._streams_cache = result.items
-            self._streams_by_id = {st.get('id'): st for st in result.items if st.get('id') is not None}
-            self._streams_by_url = {st.get('url'): st for st in result.items if st.get('url')}
-            self._valid_stream_ids = set(self._streams_by_id.keys())
-            self.storage.save_streams(result.items)
+            with self._lock:
+                self._streams_cache = result.items
+                self._streams_by_id = {
+                    st.get('id'): st for st in result.items if st.get('id') is not None
+                }
+                self._streams_by_url = {st.get('url'): st for st in result.items if st.get('url')}
+                self._valid_stream_ids = set(self._streams_by_id.keys())
+                self._streams_by_account_id = {}
+                self._stream_account_id = {}
+                for st in result.items:
+                    sid = st.get('id')
+                    aid = st.get('m3u_account')
+                    if sid is not None and aid is not None:
+                        self._stream_account_id[sid] = aid
+                        self._streams_by_account_id.setdefault(aid, []).append(st)
+                self._has_custom_streams = any(st.get('is_custom', False) for st in result.items)
             self.cache.mark_refreshed('streams')
             return True
         except Exception as e:
@@ -1052,8 +1252,11 @@ class UDIManager:
         logger.info("Refreshing channel groups...")
         try:
             groups = self.fetcher.fetch_channel_groups()
-            self._channel_groups_cache = groups
-            self.storage.save_channel_groups(groups)
+            with self._lock:
+                self._channel_groups_cache = groups
+                self._channel_groups_by_id = {
+                    g.get('id'): g for g in groups if g.get('id') is not None
+                }
             self.cache.mark_refreshed('channel_groups')
             return True
         except Exception as e:
@@ -1069,8 +1272,22 @@ class UDIManager:
         logger.info("Refreshing M3U accounts...")
         try:
             accounts = self.fetcher.fetch_m3u_accounts()
-            self._m3u_accounts_cache = accounts
-            self.storage.save_m3u_accounts(accounts)
+            with self._lock:
+                self._m3u_accounts_cache = accounts
+                self._m3u_accounts_by_id = {
+                    a.get('id'): a for a in accounts if a.get('id') is not None
+                }
+                # Rebuild profile->account mapping since profiles nest inside accounts
+                self._profile_to_account_id = {}
+                for account in accounts:
+                    aid = account.get('id')
+                    if aid is None:
+                        continue
+                    for profile in account.get('profiles', []):
+                        if isinstance(profile, dict):
+                            pid = profile.get('id')
+                            if pid is not None:
+                                self._profile_to_account_id[pid] = aid
             self.cache.mark_refreshed('m3u_accounts')
             return True
         except Exception as e:
@@ -1086,21 +1303,25 @@ class UDIManager:
         logger.info("Refreshing channel profiles...")
         try:
             profiles = self.fetcher.fetch_channel_profiles()
-            self._channel_profiles_cache = profiles
-            self._profiles_by_id = {p.get('id'): p for p in profiles if p.get('id') is not None}
-            if hasattr(self.storage, 'save_channel_profiles'):
-                self.storage.save_channel_profiles(profiles)
+            with self._lock:
+                self._channel_profiles_cache = profiles
+                self._profiles_by_id = {
+                    p.get('id'): p for p in profiles if p.get('id') is not None
+                }
             self.cache.mark_refreshed('channel_profiles')
-            
-            # Also refresh profile channel associations
-            profile_ids = [p.get('id') for p in profiles if p.get('id')]
-            if profile_ids:
-                logger.info(f"Fetching channel data for {len(profile_ids)} profiles...")
-                self._profile_channels_cache = self.fetcher.fetch_profile_channels(profile_ids)
-                if hasattr(self.storage, 'save_profile_channels'):
-                    self.storage.save_profile_channels(self._profile_channels_cache)
-                self.cache.mark_refreshed('profile_channels')
-            
+
+            profile_channels = {
+                p['id']: {
+                    'profile': p,
+                    'channels': p.get('channels') if isinstance(p.get('channels'), list) else [],
+                }
+                for p in profiles
+                if p.get('id') is not None
+            }
+            with self._lock:
+                self._profile_channels_cache = profile_channels
+            self.cache.mark_refreshed('profile_channels')
+
             return True
         except Exception as e:
             logger.error(f"Error refreshing channel profiles: {e}")
@@ -1161,60 +1382,54 @@ class UDIManager:
     
     def update_channel(self, channel_id: int, channel_data: Dict[str, Any]) -> bool:
         """Update a channel in the cache.
-        
+
         This is called after a successful API update to keep the cache in sync.
-        
+
         Args:
             channel_id: The channel ID
             channel_data: The updated channel data
-            
+
         Returns:
             True if successful
         """
         with self._lock:
-            # Update in-memory cache
+            is_new = channel_id not in self._channels_by_id
             self._channels_by_id[channel_id] = channel_data
-            
-            # Update list cache
-            for i, ch in enumerate(self._channels_cache):
-                if ch.get('id') == channel_id:
-                    self._channels_cache[i] = channel_data
-                    break
-            else:
+            if is_new:
                 self._channels_cache.append(channel_data)
-            
-            # Save to storage
-            return self.storage.update_channel(channel_id, channel_data)
+            else:
+                for i, ch in enumerate(self._channels_cache):
+                    if ch.get('id') == channel_id:
+                        self._channels_cache[i] = channel_data
+                        break
+            return True
     
     def update_stream(self, stream_id: int, stream_data: Dict[str, Any]) -> bool:
         """Update a stream in the cache.
-        
+
         This is called after a successful API update to keep the cache in sync.
-        
+
         Args:
             stream_id: The stream ID
             stream_data: The updated stream data
-            
+
         Returns:
             True if successful
         """
         with self._lock:
-            # Update in-memory caches
+            is_new = stream_id not in self._streams_by_id
             self._streams_by_id[stream_id] = stream_data
             if stream_data.get('url'):
                 self._streams_by_url[stream_data['url']] = stream_data
-            
-            # Update list cache
-            for i, st in enumerate(self._streams_cache):
-                if st.get('id') == stream_id:
-                    self._streams_cache[i] = stream_data
-                    break
-            else:
+            if is_new:
                 self._streams_cache.append(stream_data)
                 self._valid_stream_ids.add(stream_id)
-            
-            # Save to storage
-            return self.storage.update_stream(stream_id, stream_data)
+            else:
+                for i, st in enumerate(self._streams_cache):
+                    if st.get('id') == stream_id:
+                        self._streams_cache[i] = stream_data
+                        break
+            return True
     
     def update_profile_channels(self, profile_id: int, profile_channels_data: Dict[str, Any]) -> bool:
         """Update profile channels data in the cache.
@@ -1229,17 +1444,8 @@ class UDIManager:
             True if successful
         """
         with self._lock:
-            # Update in-memory cache
             self._profile_channels_cache[profile_id] = profile_channels_data
-            
-            # Save to storage
-            if hasattr(self.storage, 'save_profile_channels_by_id'):
-                try:
-                    return self.storage.save_profile_channels_by_id(profile_id, profile_channels_data)
-                except Exception as e:
-                    logger.error(f"Error saving profile channels to storage: {e}")
-                    return False
-            return True
+        return True
     
     # === Status Methods ===
     
@@ -1261,7 +1467,6 @@ class UDIManager:
                 'channel_profiles': len(self._channel_profiles_cache)
             },
             'cache_status': self.cache.get_status(),
-            'storage_path': str(self.storage.storage_dir)
         }
     
     def get_cache_last_refresh(self, entity_type: str) -> Optional[Any]:
@@ -1275,70 +1480,16 @@ class UDIManager:
         """
         return self.cache.get_last_refresh(entity_type)
     
-    def get_storage_count(self, entity_type: str) -> int:
-        """Get the count of entities in storage for a specific type.
-        
-        Args:
-            entity_type: The entity type to query (e.g., 'channel_profiles')
-            
-        Returns:
-            Count of entities in storage, or 0 on error
-        """
-        # Mapping of entity types to storage loader methods
-        entity_loaders = {
-            'channels': self.storage.load_channels,
-            'streams': self.storage.load_streams,
-            'channel_groups': self.storage.load_channel_groups,
-            'logos': self.storage.load_logos,
-            'm3u_accounts': self.storage.load_m3u_accounts,
-            'channel_profiles': self.storage.load_channel_profiles
-        }
-        
-        loader = entity_loaders.get(entity_type)
-        if not loader:
-            logger.warning(f"Unknown entity type: {entity_type}")
-            return 0
-        
-        try:
-            data = loader()
-            return len(data) if data else 0
-        except Exception as e:
-            logger.error(f"Error getting storage count for {entity_type}: {e}")
-            return 0
-    
-    def is_initialized(self) -> bool:
-        """Check if UDI Manager is initialized.
-        
-        Returns:
-            True if initialized
-        """
-        return self._initialized
-    
     def _find_account_for_profile(self, profile_id: int) -> Optional[int]:
         """Find the M3U account ID that contains a specific profile.
-        
+
         Args:
             profile_id: M3U account profile ID
-            
+
         Returns:
             M3U account ID or None if profile not found
         """
-        accounts = self.get_m3u_accounts()
-        
-        for account in accounts:
-            profiles = account.get('profiles', [])
-            if isinstance(profiles, list):
-                for profile in profiles:
-                    if isinstance(profile, dict) and profile.get('id') == profile_id:
-                        # Return account ID from profile's account_id field if available
-                        # Use explicit None check to handle account_id=0 case
-                        profile_account_id = profile.get('account_id')
-                        if profile_account_id is not None:
-                            return profile_account_id
-                        # Fallback to parent account's ID
-                        return account.get('id')
-        
-        return None
+        return self._profile_to_account_id.get(profile_id)
     
     def _is_channel_status_active(self, status: Dict[str, Any]) -> bool:
         """Check if a channel status indicates it's active.
@@ -1461,12 +1612,10 @@ class UDIManager:
         Returns:
             Total number of viewers
         """
-        total_viewers = 0
-        for stream in self._streams_cache:
-            if stream.get('m3u_account') == account_id:
-                current_viewers = stream.get('current_viewers', 0)
-                total_viewers += current_viewers
-        return total_viewers
+        return sum(
+            st.get('current_viewers', 0)
+            for st in self._streams_by_account_id.get(account_id, [])
+        )
     
     def get_active_streams_for_profile(self, profile_id: int) -> int:
         """Calculate the number of active streams for a specific M3U account profile.
@@ -1826,21 +1975,10 @@ class UDIManager:
         if available, or fetching from API if configured.
         """
         if not self._initialized:
-            # Try to load from storage first if available
-            if self.storage.is_initialized():
-                logger.info("UDI Manager not initialized, loading from storage...")
-                self._load_from_storage()
-                self._initialized = True
-                logger.info("UDI Manager initialized from storage")
-                return
-            
-            # Check if Dispatcharr is configured before auto-initializing
             config = get_dispatcharr_config()
-            
             if not config.is_configured():
-                logger.warning("UDI Manager not initialized and Dispatcharr credentials not configured. Skipping auto-initialization.")
+                logger.warning("UDI Manager not initialized and Dispatcharr not configured — skipping auto-init.")
                 return
-            
             logger.info("UDI Manager not initialized, auto-initializing from API...")
             self.initialize()
     
@@ -1880,52 +2018,71 @@ class UDIManager:
     def bulk_delete_streams(self, stream_ids: List[int]) -> bool:
         """
         Delete multiple streams from Dispatcharr by their IDs.
-        
+
         Args:
             stream_ids: List of stream IDs to delete
-            
+
         Returns:
             True if deletion successful, False otherwise
         """
         if not stream_ids:
             logger.debug("No stream IDs provided for bulk delete")
             return True
-        
+
         try:
             config = get_dispatcharr_config()
             base_url = config.get_base_url()
-            
+
             if not base_url:
                 logger.error("DISPATCHARR_BASE_URL not set, cannot delete streams")
                 return False
-            
+
             url = f"{base_url}/api/channels/streams/bulk-delete/"
             headers = _get_auth_headers()
             payload = {"stream_ids": stream_ids}
-            
+
             logger.info(f"Bulk deleting {len(stream_ids)} streams from Dispatcharr")
             response = requests.delete(url, headers=headers, json=payload, timeout=30)
-            
+
             if response.status_code == 204:
                 logger.info(f"Successfully deleted {len(stream_ids)} streams from Dispatcharr")
-                # Invalidate streams cache after deletion
-                self._invalidate_streams_cache()
+                self._invalidate_streams_cache(deleted_stream_ids=set(stream_ids))
                 return True
             else:
                 logger.error(f"Failed to delete streams: HTTP {response.status_code}")
                 return False
-                
+
         except Exception as e:
             logger.error(f"Error deleting streams from Dispatcharr: {e}", exc_info=True)
             return False
-    
-    def _invalidate_streams_cache(self) -> None:
-        """Invalidate streams cache after modification operations."""
+
+    def _invalidate_streams_cache(self, deleted_stream_ids: Optional[set] = None) -> None:
+        """Invalidate streams cache after modification operations.
+
+        If deleted_stream_ids is provided, also strips those IDs from the
+        embedded stream lists in _channels_cache so subsequent get_channel_streams()
+        calls don't emit stale-ID warnings.
+        """
         with self._lock:
             self._streams_cache = []
             self._streams_by_id = {}
             self._streams_by_url = {}
             self._valid_stream_ids = set()
+            self._streams_by_account_id = {}
+            self._stream_account_id = {}
+            self._has_custom_streams = False
+
+            if deleted_stream_ids:
+                for ch in self._channels_cache:
+                    streams_list = ch.get('streams')
+                    if isinstance(streams_list, list):
+                        ch['streams'] = [sid for sid in streams_list if sid not in deleted_stream_ids]
+                # Rebuild id→channel index to reflect updated stream lists
+                self._channels_by_id = {
+                    ch.get('id'): ch
+                    for ch in self._channels_cache
+                    if ch.get('id') is not None
+                }
 
 
 # Global singleton instance

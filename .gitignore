@@ -238,6 +238,7 @@ node_modules
 package-lock.json
 package.json
 dev.sh
-docker-compose.dev.yml
 .agent
+dispatcharr
+DispatcharrAPI.yaml
 .DS_Store

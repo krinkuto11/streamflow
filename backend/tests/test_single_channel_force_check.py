@@ -14,17 +14,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 class TestSingleChannelForceCheck(unittest.TestCase):
-    """Test that single channel check bypasses immunity and force checks all streams."""
+    """Test single-channel check behavior around stream-check triggering."""
     
     @patch('stream_checker_service.StreamCheckConfig')
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.fetch_channel_streams')
     @patch('automated_stream_manager.AutomatedStreamManager')
     @patch('api_utils.refresh_m3u_playlists')
-    def test_single_channel_check_marks_force_check(
+    def test_single_channel_check_does_not_mark_force_check(
         self, mock_refresh, mock_automation_class, mock_fetch_streams, mock_udi, mock_config_class
     ):
-        """Test that check_single_channel marks the channel for force checking."""
+        """check_single_channel should not force bypass immunity; profile grace rules must apply."""
         from apps.stream.stream_checker_service import StreamCheckerService
         
         # Mock config
@@ -74,11 +74,11 @@ class TestSingleChannelForceCheck(unittest.TestCase):
         # Call check_single_channel
         result = service.check_single_channel(channel_id=16)
         
-        # Verify that force check was marked
-        assert service.update_tracker.should_force_check(16), \
-            "Channel should be marked for force check"
+        # Verify that force check was NOT marked
+        assert not service.update_tracker.should_force_check(16), \
+            "Channel should not be marked for force check"
         
-        # Verify _check_channel was called (this is where the force check takes effect)
+        # Verify _check_channel was called
         service._check_channel.assert_called_once_with(16, skip_batch_changelog=True)
     
     @patch('stream_checker_service.StreamCheckConfig')

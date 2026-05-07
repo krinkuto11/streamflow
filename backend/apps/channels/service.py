@@ -47,28 +47,23 @@ class ChannelService:
 
         filtered = self._apply_search(channels, query.search)
         sorted_channels = self._apply_sorting(filtered, query.sort_by, query.sort_dir)
-        enriched = self._enrich_channels(sorted_channels)
 
         if query.page is None:
-            ordered = self._channel_order_manager.apply_order(enriched)
+            # No pagination: apply order, then enrich the full ordered list
+            ordered = self._channel_order_manager.apply_order(sorted_channels)
             return {
-                "items": ordered,
+                "items": self._enrich_channels(ordered),
                 "paginated": False,
             }
 
-        return self._paginate(enriched, query.page, query.per_page)
+        # Paginate first, then enrich only the page slice — avoids O(N) enrichment
+        # for every channel when the caller only wants one page of results.
+        result = self._paginate(sorted_channels, query.page, query.per_page)
+        result["items"] = self._enrich_channels(result["items"])
+        return result
 
     def get_channel_stats(self, channel_id: int) -> Dict[str, Any]:
-        channels = self._repository.get_channels()
-        if channels is None:
-            return {"error": "Failed to fetch channels", "status": 500}
-
-        channels_dict = {
-            cast(int, ch["id"]): ch
-            for ch in channels
-            if isinstance(ch, dict) and "id" in ch
-        }
-        channel = channels_dict.get(channel_id)
+        channel = self._repository.get_channel_by_id(channel_id)
         if not channel:
             return {"error": "Channel not found", "status": 404}
 
@@ -136,6 +131,18 @@ class ChannelService:
         )
 
     def _enrich_channels(self, channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not channels:
+            return channels
+
+        # One DB query fetches all six config dicts; remaining work is pure dict lookups.
+        bulk = self._automation_config.get_bulk_enrichment_data()
+        chan_assign = bulk.get("channel_assignments", {})
+        grp_assign = bulk.get("group_assignments", {})
+        chan_periods = bulk.get("channel_period_assignments", {})
+        grp_periods = bulk.get("group_period_assignments", {})
+        chan_epg = bulk.get("channel_epg_scheduled_assignments", {})
+        grp_epg = bulk.get("group_epg_scheduled_assignments", {})
+
         enriched = []
         for channel in channels:
             ch_copy = channel.copy()
@@ -157,49 +164,46 @@ class ChannelService:
 
             channel_id = cast(int, channel_id)
             group_id = cast(Optional[int], group_id)
+            cid_str = str(channel_id)
+            gid_str = str(group_id) if group_id is not None else None
 
-            ch_copy["automation_profile_id"] = self._automation_config.get_effective_profile_id(
-                channel_id,
-                group_id,
-            )
-            ch_copy["assigned_profile_id"] = self._automation_config.get_channel_assignment(channel_id)
-            ch_copy["group_profile_id"] = (
-                self._automation_config.get_group_assignment(group_id)
-                if group_id is not None
-                else None
-            )
-            if ch_copy["assigned_profile_id"]:
+            # Automation profile — in-memory lookups only
+            assigned_profile_id = chan_assign.get(cid_str)
+            group_profile_id = grp_assign.get(gid_str) if gid_str else None
+            ch_copy["automation_profile_id"] = assigned_profile_id or group_profile_id
+            ch_copy["assigned_profile_id"] = assigned_profile_id
+            ch_copy["group_profile_id"] = group_profile_id
+            if assigned_profile_id:
                 ch_copy["automation_profile_source"] = "channel"
-            elif ch_copy["group_profile_id"]:
+            elif group_profile_id:
                 ch_copy["automation_profile_source"] = "group"
             else:
                 ch_copy["automation_profile_source"] = "default"
 
-            periods = self._automation_config.get_effective_channel_periods(channel_id, group_id)
-            ch_copy["automation_periods_count"] = len(periods)
-
-            channel_periods = self._automation_config.get_channel_periods(channel_id)
-            group_periods = (
-                self._automation_config.get_group_periods(group_id)
-                if group_id is not None
-                else {}
-            )
-            ch_copy["channel_periods_count"] = len(channel_periods)
-            ch_copy["group_periods_count"] = len(group_periods)
-            if ch_copy["channel_periods_count"] > 0:
+            # Periods
+            channel_period_map = chan_periods.get(cid_str, {})
+            if not isinstance(channel_period_map, dict):
+                channel_period_map = {}
+            group_period_map = grp_periods.get(gid_str, {}) if gid_str else {}
+            if not isinstance(group_period_map, dict):
+                group_period_map = {}
+            effective_periods = {**group_period_map, **channel_period_map}
+            ch_copy["automation_periods_count"] = len(effective_periods)
+            ch_copy["channel_periods_count"] = len(channel_period_map)
+            ch_copy["group_periods_count"] = len(group_period_map)
+            if channel_period_map:
                 ch_copy["automation_periods_source"] = "channel"
-            elif ch_copy["group_periods_count"] > 0:
+            elif group_period_map:
                 ch_copy["automation_periods_source"] = "group"
             else:
                 ch_copy["automation_periods_source"] = "none"
 
-            ch_copy["channel_epg_scheduled_profile_id"] = (
-                self._automation_config.get_channel_epg_scheduled_assignment(channel_id)
-            )
-            ch_copy["epg_scheduled_profile_id"] = self._automation_config.get_effective_epg_scheduled_profile_id(
-                channel_id,
-                group_id,
-            )
+            # EPG scheduled profile
+            channel_epg_id = chan_epg.get(cid_str)
+            group_epg_id = grp_epg.get(gid_str) if gid_str else None
+            ch_copy["channel_epg_scheduled_profile_id"] = channel_epg_id
+            ch_copy["epg_scheduled_profile_id"] = channel_epg_id or group_epg_id
+
             enriched.append(ch_copy)
 
         return enriched

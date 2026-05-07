@@ -4,34 +4,32 @@ API data fetching for the Universal Data Index (UDI) system.
 Handles fetching data from the Dispatcharr API for initial load and refresh operations.
 """
 
-import os
-import sys
+import math
+import threading
 import time
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 import requests
-from pathlib import Path
-from dotenv import load_dotenv, set_key
 
 from apps.core.logging_config import setup_logging, log_api_request, log_api_response
-
-# Import Dispatcharr configuration manager
 from apps.config.dispatcharr_config import get_dispatcharr_config
 
+# All auth primitives live in apps.core.auth so they can be shared with
+# api_utils without a circular import (api_utils → udi → manager → fetcher).
+from apps.core.auth import (
+    _get_base_url,
+    _get_auth_headers,
+    _validate_token,
+    _refresh_token,
+    _token_refresh_lock,
+    _token_validation_cache,
+    TOKEN_VALIDATION_TTL,
+    _clear_token_validation_cache,
+)
+
 logger = setup_logging(__name__)
-
-env_path = Path('.') / '.env'
-
-# Load environment variables from .env file if it exists
-if env_path.exists():
-    load_dotenv(dotenv_path=env_path)
-
-# Token validation cache - stores last validated token and timestamp
-# This reduces redundant API calls for token validation
-_token_validation_cache: Dict[str, float] = {}
-# Default TTL for token validation cache (in seconds)
-TOKEN_VALIDATION_TTL = int(os.getenv("TOKEN_VALIDATION_TTL", "60"))
 
 
 @dataclass
@@ -69,200 +67,6 @@ class FetchResult:
         return self.items[index]
 
 
-def _get_base_url() -> Optional[str]:
-    """Get the base URL from configuration.
-    
-    Priority: Environment variable > Config file
-    
-    Returns:
-        The Dispatcharr base URL or None if not configured.
-    """
-    config = get_dispatcharr_config()
-    return config.get_base_url()
-
-
-def _validate_token(token: str) -> bool:
-    """Validate if a token is still valid by making a test API request.
-    
-    Uses a cache to avoid redundant API calls for token validation.
-    The cache TTL is controlled by TOKEN_VALIDATION_TTL environment variable
-    (default: 60 seconds).
-    
-    Args:
-        token: The authentication token to validate
-        
-    Returns:
-        True if token is valid, False otherwise
-    """
-    base_url = _get_base_url()
-    if not base_url or not token:
-        return False
-    
-    # Check cache first - if token was recently validated, skip API call
-    cache_check_start = time.time()
-    cached_time = _token_validation_cache.get(token)
-    if cached_time is not None:
-        age = cache_check_start - cached_time
-        if age < TOKEN_VALIDATION_TTL:
-            logger.debug(f"Token validation cached (age: {age:.1f}s, TTL: {TOKEN_VALIDATION_TTL}s)")
-            return True
-        else:
-            logger.debug(f"Token validation cache expired (age: {age:.1f}s, TTL: {TOKEN_VALIDATION_TTL}s)")
-    
-    try:
-        test_url = f"{base_url}/api/channels/channels/"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
-        log_api_request(logger, "GET", test_url, params={'page_size': 1})
-        start_time = time.time()
-        resp = requests.get(test_url, headers=headers, timeout=5, params={'page_size': 1})
-        elapsed = time.time() - start_time
-        log_api_response(logger, "GET", test_url, resp.status_code, elapsed)
-        
-        result = resp.status_code == 200
-        
-        # Cache successful validation using start_time as the reference point
-        if result:
-            _token_validation_cache[token] = start_time
-            logger.debug(f"Token validation successful, cached for {TOKEN_VALIDATION_TTL}s")
-        else:
-            # Clear cache on failed validation
-            _token_validation_cache.pop(token, None)
-        
-        return result
-    except Exception:
-        # Clear cache on error
-        _token_validation_cache.pop(token, None)
-        return False
-
-
-def _clear_token_validation_cache() -> None:
-    """Clear the token validation cache.
-    
-    This should be called when the token changes (e.g., after login or token refresh)
-    to ensure the new token is properly validated.
-    """
-    _token_validation_cache.clear()
-    logger.debug("Token validation cache cleared")
-
-
-def _login() -> bool:
-    """Log into Dispatcharr and save the token.
-    
-    Returns:
-        True if login successful, False otherwise.
-    """
-    config = get_dispatcharr_config()
-    username = config.get_username()
-    password = config.get_password()
-    base_url = config.get_base_url()
-
-    if not all([username, password, base_url]):
-        logger.error(
-            "DISPATCHARR_USER, DISPATCHARR_PASS, and "
-            "DISPATCHARR_BASE_URL must be configured."
-        )
-        return False
-
-    login_url = f"{base_url}/api/accounts/token/"
-    logger.debug(f"Attempting to log in to {base_url}...")
-
-    try:
-        resp = requests.post(
-            login_url,
-            headers={"Content-Type": "application/json"},
-            json={"username": username, "password": password},
-            timeout=10
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        token = data.get("access") or data.get("token")
-
-        if token:
-            # Clear old token validation cache before saving new token
-            _clear_token_validation_cache()
-            if env_path.exists():
-                set_key(env_path, "DISPATCHARR_TOKEN", token)
-                logger.info("Login successful. Token saved.")
-            else:
-                os.environ["DISPATCHARR_TOKEN"] = token
-                logger.debug("Login successful. Token stored in memory.")
-            return True
-        else:
-            logger.error("Login failed: No access token found in response.")
-            return False
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Login failed: {e}")
-        return False
-    except json.JSONDecodeError:
-        logger.error("Login failed: Invalid JSON response from server.")
-        return False
-
-
-def _get_auth_headers() -> Dict[str, str]:
-    """Get authorization headers for API requests.
-    
-    Token validation is not done proactively - invalid tokens are 
-    handled by the 401 retry logic in the calling functions (e.g.,
-    _fetch_url, fetch_data_from_url) that make requests with these headers.
-    
-    Returns:
-        Dictionary containing authorization headers.
-        
-    Raises:
-        SystemExit: If login fails or token cannot be retrieved.
-    """
-    current_token = os.getenv("DISPATCHARR_TOKEN")
-    
-    # If token exists, use it directly (validation happens on 401 response)
-    if current_token:
-        return {
-            "Authorization": f"Bearer {current_token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
-    
-    # Token is missing, need to login
-    logger.debug("DISPATCHARR_TOKEN not found. Attempting to log in...")
-    
-    if _login():
-        if env_path.exists():
-            load_dotenv(dotenv_path=env_path, override=True)
-        current_token = os.getenv("DISPATCHARR_TOKEN")
-        if not current_token:
-            logger.error("Login succeeded, but token not found.")
-            raise Exception("Login succeeded but token not found")
-    else:
-        logger.error("Login failed. Check credentials.")
-        raise Exception("Login failed")
-
-    return {
-        "Authorization": f"Bearer {current_token}",
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    }
-
-
-def _refresh_token() -> bool:
-    """Refresh the authentication token.
-    
-    Returns:
-        True if refresh successful, False otherwise.
-    """
-    logger.info("Token expired or invalid. Attempting to refresh...")
-    if _login():
-        if env_path.exists():
-            load_dotenv(dotenv_path=env_path, override=True)
-        logger.info("Token refreshed successfully.")
-        return True
-    else:
-        logger.error("Token refresh failed.")
-        return False
-
-
 class UDIFetcher:
     """Fetches data from the Dispatcharr API for the UDI system."""
     
@@ -287,52 +91,133 @@ class UDIFetcher:
         except Exception:
             return False
     
+    def fetch_all_ids(self) -> Dict[str, Set[int]]:
+        """Fetch all channel and stream IDs concurrently from the /ids/ endpoints.
+
+        Both requests run in parallel — total cost is one round-trip rather than two.
+        The resulting sets are the primary input for delta-sync diffing.
+
+        Returns:
+            Dict with keys ``'channels'`` and ``'streams'``, each mapped to a
+            ``Set[int]``.  A key is absent when its endpoint was unreachable.
+        """
+        if not self.base_url:
+            logger.warning("fetch_all_ids: base_url not set")
+            return {}
+
+        def _ids_from_url(url: str) -> Optional[Set[int]]:
+            data = self._fetch_url(url)
+            if not isinstance(data, list):
+                return None
+            try:
+                return {int(i) for i in data}
+            except (TypeError, ValueError) as e:
+                logger.warning(f"fetch_all_ids: non-integer ID in response from {url}: {e}")
+                return None
+
+        result: Dict[str, Set[int]] = {}
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            ch_future = ex.submit(_ids_from_url, f"{self.base_url}/api/channels/channels/ids/")
+            st_future = ex.submit(_ids_from_url, f"{self.base_url}/api/channels/streams/ids/")
+            ch_ids = ch_future.result()
+            st_ids = st_future.result()
+
+        if ch_ids is not None:
+            result['channels'] = ch_ids
+            logger.info(f"fetch_all_ids: {len(ch_ids)} channels")
+        else:
+            logger.warning("fetch_all_ids: failed to fetch channel IDs")
+        if st_ids is not None:
+            result['streams'] = st_ids
+            logger.info(f"fetch_all_ids: {len(st_ids)} streams")
+        else:
+            logger.warning("fetch_all_ids: failed to fetch stream IDs")
+
+        return result
+
     def fetch_entity_counts(self) -> Dict[str, Optional[int]]:
-        """Fetch lightweight entity counts from Dispatcharr without pulling full objects.
-
-        Uses the ``/ids/`` action endpoints exposed by ChannelViewSet and
-        StreamViewSet — each returns only a flat list of IDs, making this
-        much cheaper than a full paginated fetch while still giving an
-        authoritative total from Dispatcharr's database.
-
-        Designed to be called *before* a full refresh so manager.py can
-        compare post-fetch counts against a known-good oracle, and also
-        *after* a refresh to verify completeness independently of the
-        pagination envelope.
+        """Return entity counts derived from fetch_all_ids() (integrity oracle for refresh_all).
 
         Returns:
             Dict with keys ``'channels'`` and ``'streams'``, each mapped to
             an integer count or ``None`` if the endpoint was unreachable.
         """
-        if not self.base_url:
-            logger.warning("fetch_entity_counts: base_url not set")
-            return {'channels': None, 'streams': None}
-
-        counts: Dict[str, Optional[int]] = {'channels': None, 'streams': None}
-
-        # Channels /ids/ — ChannelViewSet.get_ids() returns a flat list of IDs
-        try:
-            channel_ids = self._fetch_url(f"{self.base_url}/api/channels/channels/ids/")
-            if isinstance(channel_ids, list):
-                counts['channels'] = len(channel_ids)
-                logger.info(f"fetch_entity_counts: {counts['channels']} channels (from /ids/)")
-            else:
-                logger.warning("fetch_entity_counts: unexpected response from channels/ids/")
-        except Exception as e:
-            logger.warning(f"fetch_entity_counts: failed to fetch channel IDs: {e}")
-
-        # Streams /ids/ — StreamViewSet.get_ids() returns a flat list of IDs
-        try:
-            stream_ids = self._fetch_url(f"{self.base_url}/api/channels/streams/ids/")
-            if isinstance(stream_ids, list):
-                counts['streams'] = len(stream_ids)
-                logger.info(f"fetch_entity_counts: {counts['streams']} streams (from /ids/)")
-            else:
-                logger.warning("fetch_entity_counts: unexpected response from streams/ids/")
-        except Exception as e:
-            logger.warning(f"fetch_entity_counts: failed to fetch stream IDs: {e}")
-
+        ids = self.fetch_all_ids()
+        counts: Dict[str, Optional[int]] = {
+            'channels': len(ids['channels']) if 'channels' in ids else None,
+            'streams':  len(ids['streams'])  if 'streams'  in ids else None,
+        }
+        logger.info(
+            f"fetch_entity_counts: channels={counts['channels']}, streams={counts['streams']}"
+        )
         return counts
+
+    # Maximum IDs per POST body for by-ids endpoints.  Keeps request bodies
+    # within a safe size even for very large delta batches.
+    _BULK_CHUNK = 500
+
+    def fetch_streams_by_ids(self, stream_ids: List[int]) -> List[Dict[str, Any]]:
+        """Fetch specific streams by ID using the bulk POST endpoint.
+
+        Sends a single ``POST /api/channels/streams/by-ids/`` per chunk of
+        ``_BULK_CHUNK`` IDs instead of one GET per stream.  For typical delta
+        batches (tens to low-hundreds of new streams) this is a single call.
+
+        Args:
+            stream_ids: List of stream IDs to fetch.
+
+        Returns:
+            List of stream dicts for IDs that were found (order not guaranteed).
+        """
+        if not self.base_url or not stream_ids:
+            return []
+
+        url = f"{self.base_url}/api/channels/streams/by-ids/"
+        ids = list(stream_ids)
+        results: List[Dict[str, Any]] = []
+
+        for i in range(0, len(ids), self._BULK_CHUNK):
+            chunk = ids[i: i + self._BULK_CHUNK]
+            data = self._post_url(url, {"ids": chunk})
+            if isinstance(data, list):
+                results.extend(data)
+            else:
+                logger.error(
+                    f"fetch_streams_by_ids: unexpected response for chunk "
+                    f"{i}–{i + len(chunk)}: {type(data).__name__}"
+                )
+
+        logger.debug(
+            f"fetch_streams_by_ids: fetched {len(results)}/{len(ids)} streams "
+            f"in {math.ceil(len(ids) / self._BULK_CHUNK)} POST(s)"
+        )
+        return results
+
+    def fetch_channels_by_ids(self, channel_ids: List[int]) -> List[Dict[str, Any]]:
+        """Fetch specific channels by ID concurrently (one GET per ID).
+
+        Used by delta refresh to pull only newly added channels.
+
+        Args:
+            channel_ids: List of channel IDs to fetch.
+
+        Returns:
+            List of channel dicts for IDs that were found.
+        """
+        if not self.base_url or not channel_ids:
+            return []
+        results: List[Dict[str, Any]] = []
+        with ThreadPoolExecutor(max_workers=min(20, len(channel_ids))) as ex:
+            futures = {ex.submit(self.fetch_channel_by_id, cid): cid for cid in channel_ids}
+            for future in as_completed(futures):
+                cid = futures[future]
+                try:
+                    data = future.result()
+                    if data:
+                        results.append(data)
+                except Exception as e:
+                    logger.error(f"Error fetching channel {cid}: {e}")
+        return results
 
     def _fetch_url(self, url: str) -> Optional[Any]:
         """Fetch data from a URL with authentication and retry logic.
@@ -365,11 +250,44 @@ class UDIFetcher:
             logger.error(f"Error fetching {url}: {e}")
             return None
     
-    def _fetch_paginated(self, base_url: str, page_size: int = 100) -> FetchResult:
+    def _post_url(self, url: str, json_body: Any) -> Optional[Any]:
+        """POST JSON to a URL with authentication and one auto-retry on 401.
+
+        Args:
+            url:       The endpoint URL.
+            json_body: Dict/list to serialise as the request body.
+
+        Returns:
+            Parsed JSON response, or None on failure.
+        """
+        try:
+            start_time = time.time()
+            log_api_request(logger, "POST", url, json=json_body)
+            resp = requests.post(url, headers=_get_auth_headers(), json=json_body, timeout=30)
+            elapsed = time.time() - start_time
+            log_api_response(logger, "POST", url, resp.status_code, elapsed)
+
+            resp.raise_for_status()
+            return resp.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 401:
+                if _refresh_token():
+                    logger.info("Retrying POST request with new token...")
+                    resp = requests.post(url, headers=_get_auth_headers(), json=json_body, timeout=30)
+                    resp.raise_for_status()
+                    return resp.json()
+            logger.error(f"Error POSTing to {url}: {e}")
+            return None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error POSTing to {url}: {e}")
+            return None
+
+    def _fetch_paginated(self, base_url: str, page_size: int = 1000) -> FetchResult:
         """Fetch paginated data from an API endpoint.
 
-        Captures the ``count`` field from the first-page response so callers
-        can compare expected vs. received totals for integrity checking.
+        Page 1 is fetched synchronously to capture the total ``count``.  All
+        remaining pages are then fetched concurrently so that a 1 000-page
+        dataset completes in roughly one round-trip rather than 1 000.
 
         Args:
             base_url:  The base URL for the endpoint (no query string).
@@ -379,38 +297,69 @@ class UDIFetcher:
             FetchResult with all collected items and the expected_count
             reported by the API on the first page (None if not present).
         """
-        all_items: List[Dict[str, Any]] = []
-        expected_count: Optional[int] = None
-        first_page = True
         # Include page=1 explicitly so ChannelPagination does not short-circuit
         # into bare-list mode (it disables pagination when no 'page' param is
         # present, which drops the DRF count/results envelope).
-        url = f"{base_url}?page_size={page_size}&page=1"
+        response = self._fetch_url(f"{base_url}?page_size={page_size}&page=1")
+        if not response:
+            return FetchResult()
 
-        while url:
-            response = self._fetch_url(url)
-            if not response:
-                break
+        # Non-paginated endpoint returns a bare list.
+        if isinstance(response, list):
+            return FetchResult(items=response, expected_count=None)
 
-            if isinstance(response, dict) and 'results' in response:
-                # Capture total count from the first page only
-                if first_page:
-                    raw_count = response.get('count')
-                    if raw_count is not None:
-                        try:
-                            expected_count = int(raw_count)
-                        except (TypeError, ValueError):
-                            logger.warning(
-                                f"Unexpected 'count' value in paginated response: {raw_count!r}"
-                            )
-                    first_page = False
+        if not (isinstance(response, dict) and 'results' in response):
+            return FetchResult()
 
-                all_items.extend(response.get('results', []))
-                url = response.get('next')
-            else:
-                if isinstance(response, list):
-                    all_items.extend(response)
-                break
+        all_items: List[Dict[str, Any]] = list(response.get('results', []))
+        expected_count: Optional[int] = None
+
+        raw_count = response.get('count')
+        if raw_count is not None:
+            try:
+                expected_count = int(raw_count)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"Unexpected 'count' value in paginated response: {raw_count!r}"
+                )
+
+        # If we already have everything (or count is unknown), return early.
+        if expected_count is None or expected_count <= page_size:
+            return FetchResult(items=all_items, expected_count=expected_count)
+
+        total_pages = math.ceil(expected_count / page_size)
+        remaining = range(2, total_pages + 1)
+        logger.debug(
+            f"Fetching {total_pages - 1} remaining pages of {base_url} concurrently "
+            f"(page_size={page_size}, expected={expected_count})"
+        )
+
+        # Fetch remaining pages concurrently.  Cap at 10 workers to avoid
+        # overwhelming Dispatcharr; auth retries inside _fetch_url are
+        # serialised by _token_refresh_lock so 401 bursts are safe.
+        page_results: Dict[int, List] = {}
+        with ThreadPoolExecutor(max_workers=min(10, len(remaining))) as executor:
+            future_to_page = {
+                executor.submit(
+                    self._fetch_url,
+                    f"{base_url}?page_size={page_size}&page={p}",
+                ): p
+                for p in remaining
+            }
+            for future in as_completed(future_to_page):
+                page_num = future_to_page[future]
+                try:
+                    result = future.result()
+                    if result and isinstance(result, dict) and 'results' in result:
+                        page_results[page_num] = result['results']
+                    elif result and isinstance(result, list):
+                        page_results[page_num] = result
+                except Exception as e:
+                    logger.error(f"Error fetching page {page_num} of {base_url}: {e}")
+
+        # Merge pages in page-number order so item ordering is deterministic.
+        for page_num in sorted(page_results):
+            all_items.extend(page_results[page_num])
 
         return FetchResult(items=all_items, expected_count=expected_count)
     
@@ -613,53 +562,67 @@ class UDIFetcher:
         return self._fetch_url(url)
     
     def fetch_profile_channels(self, profile_ids: List[int], progress_callback=None) -> Dict[int, Dict[str, Any]]:
-        """Fetch channel associations for multiple profiles.
-        
+        """Fetch channel associations for multiple profiles concurrently.
+
         Args:
             profile_ids: List of profile IDs to fetch channels for
-            progress_callback: Optional function(index, total, message) for progress reporting
-            
+            progress_callback: Optional function(completed, total, message) for progress reporting
+
         Returns:
             Dictionary mapping profile_id to profile channel data
         """
         if not self.base_url:
             logger.error("DISPATCHARR_BASE_URL not set")
             return {}
-        
-        profile_channels = {}
+
         total = len(profile_ids)
-        for i, profile_id in enumerate(profile_ids):
-            try:
-                if progress_callback:
-                    progress_callback(i, total, f"Fetching profile channels {i+1}/{total}")
-                
-                url = f"{self.base_url}/api/channels/profiles/{profile_id}/"
-                logger.debug(f"Fetching channels for profile {profile_id} from {url}")
-                profile_data = self._fetch_url(url)
-                
-                if profile_data:
-                    # Parse the channels field
-                    channels_data = profile_data.get('channels', '')
-                    
-                    # Try to parse if it's a JSON string
-                    if isinstance(channels_data, str) and channels_data.strip():
-                        try:
-                            channels_data = json.loads(channels_data)
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"Could not parse channels for profile {profile_id}: {e}")
-                            channels_data = []
-                    elif not isinstance(channels_data, list):
-                        channels_data = []
-                    
-                    profile_channels[profile_id] = {
-                        'profile': profile_data,
-                        'channels': channels_data
-                    }
-                    logger.debug(f"Fetched {len(channels_data)} channel associations for profile {profile_id}")
-            except Exception as e:
-                logger.error(f"Error fetching channels for profile {profile_id}: {e}")
-                continue
-        
+        profile_channels: Dict[int, Dict[str, Any]] = {}
+        completed = [0]
+        progress_lock = threading.Lock()
+
+        def fetch_one(profile_id: int):
+            url = f"{self.base_url}/api/channels/profiles/{profile_id}/"
+            logger.debug(f"Fetching channels for profile {profile_id}")
+            profile_data = self._fetch_url(url)
+            if not profile_data:
+                return profile_id, None
+
+            channels_data = profile_data.get('channels', '')
+            if isinstance(channels_data, str) and channels_data.strip():
+                try:
+                    channels_data = json.loads(channels_data)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Could not parse channels for profile {profile_id}: {e}")
+                    channels_data = []
+            elif not isinstance(channels_data, list):
+                channels_data = []
+
+            return profile_id, {'profile': profile_data, 'channels': channels_data}
+
+        workers = min(8, max(1, total))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_id = {executor.submit(fetch_one, pid): pid for pid in profile_ids}
+            for future in as_completed(future_to_id):
+                pid = future_to_id[future]
+                try:
+                    profile_id, data = future.result()
+                    if data is not None:
+                        profile_channels[profile_id] = data
+                        logger.debug(
+                            f"Fetched {len(data['channels'])} channel associations "
+                            f"for profile {profile_id}"
+                        )
+                except Exception as e:
+                    logger.error(f"Error fetching channels for profile {pid}: {e}")
+
+                with progress_lock:
+                    completed[0] += 1
+                    if progress_callback:
+                        progress_callback(
+                            completed[0], total,
+                            f"Fetching profile channels {completed[0]}/{total}",
+                        )
+
         logger.debug(f"Fetched channel data for {len(profile_channels)} profiles")
         return profile_channels
     

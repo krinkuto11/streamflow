@@ -13,11 +13,10 @@ import re
 import json
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from apps.core.logging_config import setup_logging
-from apps.udi.storage import UDIStorage
 from apps.udi.models import MatchProfile, MatchProfileStep
 
 logger = setup_logging(__name__)
@@ -342,7 +341,7 @@ _match_profiles_manager = None
 _manager_lock = threading.Lock()
 
 
-def get_match_profiles_manager(storage: Optional[UDIStorage] = None) -> MatchProfilesManager:
+def get_match_profiles_manager(storage: Optional[Any] = None) -> MatchProfilesManager:
     """
     Get the global MatchProfilesManager instance (thread-safe singleton).
     
