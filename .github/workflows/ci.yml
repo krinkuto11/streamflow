@@ -2,6 +2,11 @@ name: Build and Push Docker Image to GHCR
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to use (e.g. 2.5.6). Leave empty for branch-based versioning.'
+        required: false
+        default: ''
   release:
     types: [published]
   pull_request:
@@ -58,6 +63,8 @@ jobs:
           # For releases, use the tag name (strip leading "v" if present)
           raw_tag="${GITHUB_REF##*/}"
           VERSION="${raw_tag#v}"
+        elif [ -n "${{ github.event.inputs.version }}" ]; then
+          VERSION="${{ github.event.inputs.version }}"
         else
           # For non-release builds, use branch name and build date
           BRANCH_NAME="${GITHUB_REF##*/}"
@@ -110,6 +117,8 @@ jobs:
           # strip leading v if present, e.g. v2.0 -> 2.0
           raw_tag="${raw_tag#v}"
           image_tag="${raw_tag}"
+        elif [ -n "${{ github.event.inputs.version }}" ]; then
+          image_tag="${{ github.event.inputs.version }}"
         elif [ "${GITHUB_REF##*/}" = "main" ]; then
           image_tag="latest"
         elif [ "${GITHUB_REF##*/}" = "dev" ]; then
@@ -191,6 +200,8 @@ jobs:
             raw_tag="${GITHUB_REF##*/}"
             raw_tag="${raw_tag#v}"
             image_tag="${raw_tag}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            image_tag="${{ github.event.inputs.version }}"
           elif [ "${GITHUB_REF##*/}" = "main" ]; then
             image_tag="latest"
           elif [ "${GITHUB_REF##*/}" = "dev" ]; then
