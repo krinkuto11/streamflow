@@ -26,6 +26,7 @@ Usage:
 import threading
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Set, Tuple
 
@@ -740,52 +741,65 @@ class UDIManager:
         try:
             _refresh_start = datetime.now()
 
-            # Pre-fetch step: get authoritative counts from lightweight /ids/
-            # endpoints before pulling full objects.  These counts serve as the
-            # integrity oracle when the pagination envelope does not include a
-            # 'count' field (e.g. ChannelPagination in older Dispatcharr builds).
-            self._update_init_progress(percentage=2, message='Fetching entity counts...', current_step='pre_count')
-            pre_counts = self.fetcher.fetch_entity_counts()
+            # Fetch all entity types concurrently — none depend on each other,
+            # and pre_counts (the integrity oracle) is only consumed after all
+            # fetches complete, so it can run in the same wave.
+            # Progress advances as each future lands via as_completed so the
+            # frontend bar still moves steadily.
+            _fetch_tasks = {
+                'pre_counts':   self.fetcher.fetch_entity_counts,
+                'channels':     self.fetcher.fetch_channels,
+                'streams':      self.fetcher.fetch_streams,
+                'groups':       self.fetcher.fetch_channel_groups,
+                'logos':        self.fetcher.fetch_logos,
+                'm3u_accounts': self.fetcher.fetch_m3u_accounts,
+                'profiles':     self.fetcher.fetch_channel_profiles,
+            }
+            _fetch_results: Dict[str, Any] = {}
+            self._update_init_progress(percentage=5, message='Fetching all data...', current_step='fetch')
+            with ThreadPoolExecutor(max_workers=len(_fetch_tasks)) as _executor:
+                _future_to_name = {_executor.submit(fn): name for name, fn in _fetch_tasks.items()}
+                for _i, _future in enumerate(as_completed(_future_to_name), 1):
+                    _name = _future_to_name[_future]
+                    try:
+                        _fetch_results[_name] = _future.result()
+                    except Exception as _exc:
+                        logger.error(f"Entity fetch failed for '{_name}': {_exc}")
+                        _fetch_results[_name] = None
+                    self._update_init_progress(
+                        percentage=5 + int(_i / len(_fetch_tasks) * 65),
+                        message=f'Fetching data ({_i}/{len(_fetch_tasks)} done)...',
+                        current_step='fetch',
+                    )
+
+            pre_counts      = _fetch_results.get('pre_counts') or {}
+            channels_result = _fetch_results.get('channels') or FetchResult()
+            streams_result  = _fetch_results.get('streams')  or FetchResult()
+            channel_groups  = _fetch_results.get('groups')   or []
+            logos_result    = _fetch_results.get('logos')    or FetchResult()
+            m3u_accounts    = _fetch_results.get('m3u_accounts') or []
+            channel_profiles = _fetch_results.get('profiles') or []
+
             logger.info(
                 f"UDI pre-fetch oracle: channels={pre_counts.get('channels')}, "
                 f"streams={pre_counts.get('streams')} (from Dispatcharr /ids/ endpoints)"
             )
 
-            # Step 1: Channels
-            self._update_init_progress(percentage=5, message='Fetching channels...', current_step='channels')
-            channels_result = self.fetcher.fetch_channels()
-            # If pagination envelope omitted 'count', fall back to the /ids/ oracle
+            # Apply /ids/ oracle when the paginated envelope omitted 'count'
+            # (can happen with older Dispatcharr builds / custom pagination).
             if channels_result.expected_count is None and pre_counts.get('channels') is not None:
                 channels_result.expected_count = pre_counts['channels']
                 logger.info(f"UDI integrity: using /ids/ oracle for channels — expected {channels_result.expected_count}")
-            channels_ok = _check_fetch_integrity('channels', channels_result)
-
-            # Step 2: Streams
-            self._update_init_progress(percentage=20, message='Fetching streams...', current_step='streams')
-            streams_result = self.fetcher.fetch_streams()
-            # If pagination envelope omitted 'count', fall back to the /ids/ oracle
             if streams_result.expected_count is None and pre_counts.get('streams') is not None:
                 streams_result.expected_count = pre_counts['streams']
                 logger.info(f"UDI integrity: using /ids/ oracle for streams — expected {streams_result.expected_count}")
-            streams_ok = _check_fetch_integrity('streams', streams_result)
 
-            # Step 3: Channel Groups (non-paginated — no integrity check)
-            self._update_init_progress(percentage=40, message='Fetching groups...', current_step='groups')
-            channel_groups = self.fetcher.fetch_channel_groups()
-
-            # Step 4: Logos
-            self._update_init_progress(percentage=50, message='Fetching logos...', current_step='logos')
-            logos_result = self.fetcher.fetch_logos()
+            channels_ok = _check_fetch_integrity('channels', channels_result)
+            streams_ok  = _check_fetch_integrity('streams',  streams_result)
             _check_fetch_integrity('logos', logos_result)
 
-            # Step 5: M3U Accounts (non-paginated — no integrity check)
-            self._update_init_progress(percentage=60, message='Fetching M3U accounts...', current_step='m3u_accounts')
-            m3u_accounts = self.fetcher.fetch_m3u_accounts()
-
-            # Step 6: Channel Profiles — list response already includes channel IDs,
-            # so no separate per-profile fetch is needed.
-            self._update_init_progress(percentage=70, message='Fetching profiles...', current_step='profiles')
-            channel_profiles = self.fetcher.fetch_channel_profiles()
+            # Profile channels are embedded in the profiles list response — no
+            # separate per-profile fetch needed.
             profile_channels = {
                 p['id']: {
                     'profile': p,
@@ -1030,18 +1044,26 @@ class UDIManager:
             logger.info("Delta refresh: no structural changes detected")
             return True
 
-        # ---- Step 4: fetch new items concurrently (outside the lock) ----
-        new_streams: List[Dict[str, Any]] = []
-        if added_stream_ids:
-            logger.info(f"Fetching {len(added_stream_ids)} new streams...")
-            new_streams = self.fetcher.fetch_streams_by_ids(list(added_stream_ids))
-            logger.info(f"Fetched {len(new_streams)}/{len(added_stream_ids)} new streams")
-
+        # ---- Step 4: fetch new items — both concurrently (outside the lock) ----
+        new_streams:  List[Dict[str, Any]] = []
         new_channels: List[Dict[str, Any]] = []
-        if added_channel_ids:
-            logger.info(f"Fetching {len(added_channel_ids)} new channels...")
-            new_channels = self.fetcher.fetch_channels_by_ids(list(added_channel_ids))
-            logger.info(f"Fetched {len(new_channels)}/{len(added_channel_ids)} new channels")
+
+        if added_stream_ids or added_channel_ids:
+            with ThreadPoolExecutor(max_workers=2) as _ex:
+                _st_future = (
+                    _ex.submit(self.fetcher.fetch_streams_by_ids, list(added_stream_ids))
+                    if added_stream_ids else None
+                )
+                _ch_future = (
+                    _ex.submit(self.fetcher.fetch_channels_by_ids, list(added_channel_ids))
+                    if added_channel_ids else None
+                )
+                if _st_future is not None:
+                    new_streams = _st_future.result()
+                    logger.info(f"Fetched {len(new_streams)}/{len(added_stream_ids)} new streams")
+                if _ch_future is not None:
+                    new_channels = _ch_future.result()
+                    logger.info(f"Fetched {len(new_channels)}/{len(added_channel_ids)} new channels")
 
         # ---- Step 5: apply delta atomically under lock ----
         with self._lock:
@@ -1079,14 +1101,13 @@ class UDIManager:
                             s for s in self._streams_by_account_id[aid]
                             if s.get('id') != sid
                         ]
-                # Strip deleted IDs from channel.streams lists for cache consistency
+                # Strip deleted IDs from channel.streams lists for cache consistency.
+                # Mutating ch['streams'] in-place is reflected in _channels_by_id
+                # automatically (both hold references to the same dict objects).
                 for ch in self._channels_cache:
                     ch_streams = ch.get('streams')
                     if isinstance(ch_streams, list):
                         ch['streams'] = [s for s in ch_streams if s not in deleted_stream_ids]
-                self._channels_by_id = {
-                    ch.get('id'): ch for ch in self._channels_cache if ch.get('id') is not None
-                }
                 self._has_custom_streams = any(
                     st.get('is_custom', False) for st in self._streams_cache
                 )
