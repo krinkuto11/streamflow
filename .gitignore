@@ -240,3 +240,4 @@ package.json
 dev.sh
 docker-compose.dev.yml
 .agent
+.DS_Store
