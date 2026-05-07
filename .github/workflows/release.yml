@@ -1,0 +1,46 @@
+name: Create GitHub Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Extract changelog notes
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF##*/}"
+          VERSION="${TAG#v}"
+          VERSION_ESCAPED=$(printf '%s' "$VERSION" | sed 's/\./\\./g')
+
+          NOTES=$(awk "
+            /^## \[${VERSION_ESCAPED}\]/ { found=1; next }
+            found && /^## \[/            { exit }
+            found                        { print }
+          " CHANGELOG.md | sed '/^[[:space:]]*$/{ N; /^\n$/d }')
+
+          if [ -z "$NOTES" ]; then
+            echo "::warning::No CHANGELOG.md entry found for version $VERSION"
+            NOTES="See [CHANGELOG.md](CHANGELOG.md) for details."
+          fi
+
+          # Write to a temp file to avoid quoting issues with multiline strings
+          echo "$NOTES" > /tmp/release_notes.md
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "${{ github.ref_name }}" \
+            --notes-file /tmp/release_notes.md
