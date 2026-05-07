@@ -165,9 +165,10 @@ def normalize_resolution(resolution: Any) -> str:
     
     # Already a string in correct format (including "0x0" for dead stream detection)
     if isinstance(resolution, str):
-        # Check if it's a valid resolution format (e.g., "1920x1080" or "0x0")
-        if 'x' in resolution:
-            return resolution
+        value = resolution.strip().lower().replace(' ', '')
+        # Accept both 'x' and uppercase 'X' separators.
+        if 'x' in value:
+            return value
     
     return 'N/A'
 
@@ -234,17 +235,27 @@ def extract_stream_stats(stream_data: Dict[str, Any]) -> Dict[str, Any]:
     
     # If stream_stats exists and is a dict, extract from it
     if stream_stats and isinstance(stream_stats, dict):
-        # Resolution - use as-is
-        result['resolution'] = normalize_resolution(stream_stats.get('resolution'))
+        # Resolution - prefer canonical field, then legacy width/height pair.
+        resolution_value = stream_stats.get('resolution')
+        if not resolution_value and stream_stats.get('resolution_width') and stream_stats.get('resolution_height'):
+            resolution_value = f"{stream_stats.get('resolution_width')}x{stream_stats.get('resolution_height')}"
+        result['resolution'] = normalize_resolution(resolution_value)
         
-        # FPS - use source_fps (standard field name from Dispatcharr)
+        # FPS - use source_fps (standard), then fps fallback.
         result['fps'] = parse_fps_value(stream_stats.get('source_fps'))
+        if result['fps'] is None:
+            result['fps'] = parse_fps_value(stream_stats.get('fps'))
         
-        # Bitrate - use ffmpeg_output_bitrate (standard field name from Dispatcharr)
+        # Bitrate - use ffmpeg_output_bitrate (standard), then common legacy aliases.
         result['bitrate_kbps'] = parse_bitrate_value(stream_stats.get('ffmpeg_output_bitrate'))
+        if result['bitrate_kbps'] is None:
+            result['bitrate_kbps'] = parse_bitrate_value(stream_stats.get('bitrate_kbps'))
+        if result['bitrate_kbps'] is None:
+            result['bitrate_kbps'] = parse_bitrate_value(stream_stats.get('bitrate'))
         
         # Codecs
-        result['video_codec'] = stream_stats.get('video_codec', 'N/A') or 'N/A'
+        video_codec_value = stream_stats.get('video_codec') or stream_stats.get('codec')
+        result['video_codec'] = video_codec_value or 'N/A'
         result['audio_codec'] = stream_stats.get('audio_codec', 'N/A') or 'N/A'
         
         # HDR Format
@@ -260,15 +271,31 @@ def extract_stream_stats(stream_data: Dict[str, Any]) -> Dict[str, Any]:
     # Fallback: check if fields are directly on stream_data (e.g., from analyze_stream)
     if result['resolution'] == 'N/A' and 'resolution' in stream_data:
         result['resolution'] = normalize_resolution(stream_data.get('resolution'))
+    if (
+        result['resolution'] == 'N/A'
+        and stream_data.get('resolution_width')
+        and stream_data.get('resolution_height')
+    ):
+        result['resolution'] = normalize_resolution(
+            f"{stream_data.get('resolution_width')}x{stream_data.get('resolution_height')}"
+        )
     
     if result['fps'] is None and 'fps' in stream_data:
         result['fps'] = parse_fps_value(stream_data.get('fps'))
+    if result['fps'] is None and 'source_fps' in stream_data:
+        result['fps'] = parse_fps_value(stream_data.get('source_fps'))
     
     if result['bitrate_kbps'] is None and 'bitrate_kbps' in stream_data:
         result['bitrate_kbps'] = parse_bitrate_value(stream_data.get('bitrate_kbps'))
+    if result['bitrate_kbps'] is None and 'ffmpeg_output_bitrate' in stream_data:
+        result['bitrate_kbps'] = parse_bitrate_value(stream_data.get('ffmpeg_output_bitrate'))
+    if result['bitrate_kbps'] is None and 'bitrate' in stream_data:
+        result['bitrate_kbps'] = parse_bitrate_value(stream_data.get('bitrate'))
     
     if result['video_codec'] == 'N/A' and 'video_codec' in stream_data:
         result['video_codec'] = stream_data.get('video_codec', 'N/A') or 'N/A'
+    if result['video_codec'] == 'N/A' and 'codec' in stream_data:
+        result['video_codec'] = stream_data.get('codec', 'N/A') or 'N/A'
     
     if result['audio_codec'] == 'N/A' and 'audio_codec' in stream_data:
         result['audio_codec'] = stream_data.get('audio_codec', 'N/A') or 'N/A'

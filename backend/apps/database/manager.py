@@ -357,6 +357,19 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def get_system_settings_multi(self, keys: List[str]) -> Dict[str, Any]:
+        """Fetch multiple system settings in a single IN query."""
+        from apps.database.models import SystemSetting
+        session = self._get_session()
+        try:
+            rows = session.query(SystemSetting).filter(SystemSetting.key.in_(keys)).all()
+            return {row.key: row.value for row in rows}
+        except Exception as e:
+            logger.debug(f"Error getting system settings {keys}: {e}")
+            return {}
+        finally:
+            session.close()
+
     def set_system_setting(self, key: str, value: Any):
         from apps.database.models import SystemSetting
         session = self._get_session()

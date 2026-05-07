@@ -1,6 +1,7 @@
 """Scheduling endpoint handlers extracted from web_api."""
 
 import logging
+import threading
 from typing import Any, Callable
 
 from flask import jsonify
@@ -164,11 +165,14 @@ def create_auto_create_rule_response(
         service = get_scheduling_service()
         rule = service.create_auto_create_rule(schema.rule_data)
 
-        try:
-            service.match_programs_to_rules()
-            logger.info("Triggered immediate program matching after creating auto-create rule")
-        except Exception as exc:
-            logger.warning(f"Failed to immediately match programs to new rule: {exc}")
+        def _match_in_background():
+            try:
+                service.match_programs_to_rules()
+                logger.info("Background program matching complete after creating auto-create rule")
+            except Exception as exc:
+                logger.warning(f"Background program matching failed after creating auto-create rule: {exc}")
+
+        threading.Thread(target=_match_in_background, daemon=True).start()
 
         if scheduled_event_processor_wake is not None and hasattr(scheduled_event_processor_wake, "set"):
             scheduled_event_processor_wake.set()
@@ -217,12 +221,6 @@ def update_auto_create_rule_response(
         updated_rule = service.update_auto_create_rule(rule_id, schema.rule_data)
 
         if updated_rule:
-            try:
-                service.match_programs_to_rules()
-                logger.info("Triggered immediate program matching after updating auto-create rule")
-            except Exception as exc:
-                logger.warning(f"Failed to immediately match programs to updated rule: {exc}")
-
             if scheduled_event_processor_wake is not None and hasattr(scheduled_event_processor_wake, "set"):
                 scheduled_event_processor_wake.set()
 

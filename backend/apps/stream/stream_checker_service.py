@@ -126,7 +126,7 @@ def _wait_for_udi_stream_count_stabilise(
         time.sleep(poll_interval)
         elapsed += poll_interval
         try:
-            current_count = len(udi.get_streams() or [])
+            current_count = udi.get_stream_count()
             if current_count != pre_count:
                 logger.info(
                     f"UDI stream count changed after playlist refresh: "
@@ -1051,10 +1051,9 @@ class StreamCheckerService:
         logger.info(f"Checking channel {channel_id} (parallel mode)")
         logger.info(f"=" * 80)
         
-        # dead_stream_removal_enabled is resolved below from the profile (Bug 2 fix).
-        # Initialise to True (removal enabled) as a safe default; the profile override
-        # applied during profile resolution is the sole authority.
-        dead_stream_removal_enabled = True
+        # Default to False (safe: do not remove) until the profile is resolved below.
+        # If profile resolution fails, streams are left in place rather than silently removed.
+        dead_stream_removal_enabled = False
 
         # Get effective profile for this channel
         stream_limit = 0
@@ -1893,10 +1892,9 @@ class StreamCheckerService:
         logger.info(f"Checking channel {channel_id} (sequential mode)")
         logger.info(f"=" * 80)
         
-        # dead_stream_removal_enabled is resolved below from the profile (Bug 2 fix).
-        # Initialise to True (removal enabled) as a safe default; the profile override
-        # applied during profile resolution is the sole authority.
-        dead_stream_removal_enabled = True
+        # Default to False (safe: do not remove) until the profile is resolved below.
+        # If profile resolution fails, streams are left in place rather than silently removed.
+        dead_stream_removal_enabled = False
 
         # Get effective profile for this channel
         stream_limit = 0
@@ -3316,7 +3314,7 @@ class StreamCheckerService:
         - Refreshes playlists for accounts associated with the channel
         - Clears dead streams for the specified channel to give them a second chance
         - Re-matches and assigns streams (including previously dead ones) if matching_mode is enabled
-        - Force checks all streams (bypasses 2-hour immunity) if checking_mode is enabled
+        - Checks streams according to profile grace period/immunity settings if checking_mode is enabled
         - Detects newly dead streams and marks them (if checking is enabled)
         - Detects revived streams and marks them as alive (if checking is enabled)
         - Removes dead streams from the channel (if checking is enabled)
@@ -3525,7 +3523,7 @@ class StreamCheckerService:
                     f"(m3u_update enabled in profile)..."
                 )
                 # Capture stream count before triggering refresh so we can detect completion.
-                pre_refresh_stream_count = len(udi.get_streams() or [])
+                pre_refresh_stream_count = udi.get_stream_count()
 
                 # Import here to allow better test mocking
                 from apps.core.api_utils import refresh_m3u_playlists
@@ -3537,14 +3535,15 @@ class StreamCheckerService:
                     "✓ Playlist refresh triggered — waiting for Dispatcharr to process..."
                 )
                 # Calibrate poll timeout to 115% of the last known refresh_all()
-                # duration, with a floor of 60s. In environments where providers
-                # don't change stream counts on refresh, this still times out but
-                # at least waits long enough for a real count-changing refresh.
+                # duration, with a floor of 5s for single channel checks (which
+                # are user-triggered and must feel responsive) or 60s for
+                # automation cycles (which run unattended and can afford to wait).
                 _known_duration = udi.get_last_refresh_duration()
-                _poll_timeout = max(60, int(_known_duration * 1.15)) if _known_duration > 0 else 60
+                _floor = 5
+                _poll_timeout = max(_floor, int(_known_duration * 1.15)) if _known_duration > 0 else _floor
                 logger.debug(
                     f"Post-refresh poll timeout: {_poll_timeout}s "
-                    f"(115% of last refresh duration {_known_duration:.0f}s, floor 60s)"
+                    f"(115% of last refresh duration {_known_duration:.0f}s, floor {_floor}s)"
                 )
                 _wait_for_udi_stream_count_stabilise(
                     udi, pre_refresh_stream_count, timeout=_poll_timeout
@@ -3653,8 +3652,8 @@ class StreamCheckerService:
             if isinstance(_profile_remove, bool):
                 _step5_dead_stream_removal_enabled = _profile_remove
             else:
-                # No per-profile override: fall back to global config default (True)
-                _step5_dead_stream_removal_enabled = True
+                # No per-profile override: default to False (safe: do not remove).
+                _step5_dead_stream_removal_enabled = False
             _step5_allow_dead_streams = not _step5_dead_stream_removal_enabled
 
             if matching_enabled:
@@ -3690,7 +3689,7 @@ class StreamCheckerService:
                 udi.refresh_channel_by_id(channel_id)
                 logger.debug("✓ Channel cache entry updated with latest stream assignments")
             
-            # Step 6: Mark channel for force check and perform the check (if checking is enabled)
+            # Step 6: Perform the stream check (if checking is enabled)
             #
             # Resolve the profile ID to pass to _check_channel. When check_single_channel
             # was called without a forced_profile_id (e.g. EPG-triggered checks via
@@ -3704,10 +3703,12 @@ class StreamCheckerService:
 
             dead_count = 0
             if checking_enabled:
-                logger.info(f"Step 6/6: Force checking all streams for channel {channel_name}...")
-                self.update_tracker.mark_channel_for_force_check(channel_id)
+                logger.info(
+                    f"Step 6/6: Checking streams for channel {channel_name} "
+                    f"(respecting profile grace period settings)..."
+                )
                 
-                # Perform the check (this will now bypass immunity and check all streams)
+                # Perform the check using normal profile logic.
                 # Returns dict with dead_streams_count and revived_streams_count
                 # Skip batch changelog since this is a single channel check
                 check_result = self._check_channel(channel_id, skip_batch_changelog=True, forced_profile_id=_effective_profile_id)

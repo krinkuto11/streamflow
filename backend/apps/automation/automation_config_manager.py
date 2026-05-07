@@ -43,6 +43,25 @@ class AutomationConfigManager:
 
     def _set_config_dict(self, key: str, value: Any):
         return self.db.set_system_setting(key, value)
+
+    def get_bulk_enrichment_data(self) -> Dict[str, Any]:
+        """Fetch all config dicts needed for channel list enrichment in one query.
+
+        Returns a dict with six keys — each value is a dict keyed by str(id):
+          channel_assignments, group_assignments,
+          channel_period_assignments, group_period_assignments,
+          channel_epg_scheduled_assignments, group_epg_scheduled_assignments.
+        """
+        keys = [
+            "channel_assignments",
+            "group_assignments",
+            "channel_period_assignments",
+            "group_period_assignments",
+            "channel_epg_scheduled_assignments",
+            "group_epg_scheduled_assignments",
+        ]
+        raw = self.db.get_system_settings_multi(keys)
+        return {k: (raw.get(k) or {}) for k in keys}
         
     def _load_config(self):
         """Deprecated."""
@@ -185,6 +204,13 @@ class AutomationConfigManager:
         session = get_session()
         try:
             p = session.query(AutomationProfile).filter(AutomationProfile.id == pid).first()
+            if p is None:
+                logger.warning(
+                    "Profile ID %s referenced in an assignment does not exist. "
+                    "The assignment is stale and will be skipped. "
+                    "Delete and re-create the assignment to clear this warning.",
+                    profile_id,
+                )
             return self._profile_to_dict(p)
         finally:
             session.close()
@@ -626,21 +652,28 @@ class AutomationConfigManager:
             session.close()
 
     def assign_period_to_channels(self, period_id: str, channel_ids: List[int], profile_id: str, replace: bool = False) -> bool:
-        assignments = self._get_config_dict("channel_period_assignments", {})
-        pid = str(period_id)
-        changed = False
+        if self.get_profile(profile_id) is None:
+            logger.error(
+                "assign_period_to_channels: profile ID %s does not exist — assignment rejected.",
+                profile_id,
+            )
+            return False
+        with self._lock:
+            assignments = self._get_config_dict("channel_period_assignments", {})
+            pid = str(period_id)
+            changed = False
 
-        for cid_raw in channel_ids:
-            cid = str(cid_raw)
-            if replace or cid not in assignments or not isinstance(assignments[cid], dict):
-                assignments[cid] = {}
-            if assignments[cid].get(pid) != str(profile_id):
-                assignments[cid][pid] = str(profile_id)
-                changed = True
+            for cid_raw in channel_ids:
+                cid = str(cid_raw)
+                if replace or cid not in assignments or not isinstance(assignments[cid], dict):
+                    assignments[cid] = {}
+                if assignments[cid].get(pid) != str(profile_id):
+                    assignments[cid][pid] = str(profile_id)
+                    changed = True
 
-        if changed:
-            return self._set_config_dict("channel_period_assignments", assignments)
-        return True
+            if changed:
+                return self._set_config_dict("channel_period_assignments", assignments)
+            return True
 
     def remove_period_from_channels(self, period_id: str, channel_ids: List[int]) -> bool:
         assignments = self._get_config_dict("channel_period_assignments", {})
@@ -764,21 +797,28 @@ class AutomationConfigManager:
 
     def assign_period_to_groups(self, period_id: str, group_ids: List[int], profile_id: str, replace: bool = False) -> bool:
         """Assign an automation period with a profile to one or more groups."""
-        assignments = self._get_config_dict("group_period_assignments", {})
-        pid = str(period_id)
-        changed = False
+        if self.get_profile(profile_id) is None:
+            logger.error(
+                "assign_period_to_groups: profile ID %s does not exist — assignment rejected.",
+                profile_id,
+            )
+            return False
+        with self._lock:
+            assignments = self._get_config_dict("group_period_assignments", {})
+            pid = str(period_id)
+            changed = False
 
-        for gid_raw in group_ids:
-            gid = str(gid_raw)
-            if replace or gid not in assignments or not isinstance(assignments[gid], dict):
-                assignments[gid] = {}
-            if assignments[gid].get(pid) != str(profile_id):
-                assignments[gid][pid] = str(profile_id)
-                changed = True
+            for gid_raw in group_ids:
+                gid = str(gid_raw)
+                if replace or gid not in assignments or not isinstance(assignments[gid], dict):
+                    assignments[gid] = {}
+                if assignments[gid].get(pid) != str(profile_id):
+                    assignments[gid][pid] = str(profile_id)
+                    changed = True
 
-        if changed:
-            return self._set_config_dict("group_period_assignments", assignments)
-        return True
+            if changed:
+                return self._set_config_dict("group_period_assignments", assignments)
+            return True
 
     def remove_period_from_groups(self, period_id: str, group_ids: List[int]) -> bool:
         """Remove an automation period from one or more groups."""
@@ -841,7 +881,7 @@ class AutomationConfigManager:
     def get_effective_configuration(self, channel_id: int, group_id: Optional[int] = None) -> Optional[Dict]:
         active_periods = self.get_active_periods_for_channel(channel_id, group_id)
         if active_periods:
-            if len(active_periods) > 1: active_periods.sort(key=lambda p: (-int(p.get('priority', 0)), p.get('id', '')))
+            if len(active_periods) > 1: active_periods.sort(key=lambda p: (-int(p.get('priority', 0)), int(p.get('id', 0))))
             period = active_periods[0]
             profile = period.get('profile')
             if profile:

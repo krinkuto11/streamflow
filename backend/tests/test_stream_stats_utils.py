@@ -222,6 +222,46 @@ class TestExtractStreamStats(unittest.TestCase):
         self.assertEqual(result['fps'], 30.0)
         self.assertEqual(result['bitrate_kbps'], 5000.0)
 
+    def test_extract_legacy_stream_stats_aliases(self):
+        """Legacy keys should still map to scoring fields."""
+        stream_data = {
+            'id': 1,
+            'stream_stats': {
+                'resolution_width': 1920,
+                'resolution_height': 1080,
+                'fps': '25',
+                'bitrate': '4200 kbps',
+                'codec': 'h264',
+                'audio_codec': 'aac'
+            }
+        }
+
+        result = extract_stream_stats(stream_data)
+        self.assertEqual(result['resolution'], '1920x1080')
+        self.assertEqual(result['fps'], 25.0)
+        self.assertEqual(result['bitrate_kbps'], 4200.0)
+        self.assertEqual(result['video_codec'], 'h264')
+        self.assertEqual(result['audio_codec'], 'aac')
+
+    def test_extract_direct_legacy_fields(self):
+        """Legacy direct fields should be normalized when stream_stats is absent."""
+        stream_data = {
+            'stream_id': 99,
+            'resolution_width': 1280,
+            'resolution_height': 720,
+            'ffmpeg_output_bitrate': 3100,
+            'source_fps': 50,
+            'codec': 'hevc',
+            'audio_codec': 'ac3',
+        }
+
+        result = extract_stream_stats(stream_data)
+        self.assertEqual(result['resolution'], '1280x720')
+        self.assertEqual(result['fps'], 50.0)
+        self.assertEqual(result['bitrate_kbps'], 3100.0)
+        self.assertEqual(result['video_codec'], 'hevc')
+        self.assertEqual(result['audio_codec'], 'ac3')
+
 
 class TestIsStreamDead(unittest.TestCase):
     """Test dead stream detection."""
@@ -267,7 +307,7 @@ class TestIsStreamDead(unittest.TestCase):
                 'ffmpeg_output_bitrate': 5000
             }
         }
-        self.assertFalse(is_stream_dead(stream_data))
+        self.assertFalse(is_stream_dead(stream_data)[0])
 
 
 class TestCalculateChannelAverages(unittest.TestCase):

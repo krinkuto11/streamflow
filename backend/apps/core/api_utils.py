@@ -11,7 +11,6 @@ Write operations (PATCH, POST, DELETE) still use direct API calls.
 
 import os
 import json
-import sys
 import time
 from typing import Dict, List, Optional, Any, Tuple
 import requests
@@ -26,269 +25,34 @@ from apps.core.logging_config import (
 # Import UDI Manager for data access
 from apps.udi import get_udi_manager
 
-# Import Dispatcharr configuration manager
-from apps.config.dispatcharr_config import get_dispatcharr_config
+# Auth primitives — all live in apps.core.auth to break the circular import
+# (api_utils → apps.udi → manager → fetcher).  Import everything from there;
+# do not define local copies.
+from apps.core.auth import (
+    _get_base_url,
+    _get_auth_headers,
+    _refresh_token,
+    _validate_token,
+    _clear_token_validation_cache,
+    _token_validation_cache,
+    _token_refresh_lock,
+    TOKEN_VALIDATION_TTL,
+    _login,
+    env_path,
+)
 
-# Setup logging for this module
 logger = setup_logging(__name__)
 
-env_path = Path('.') / '.env'
-
-# Load environment variables from .env file if it exists
-# This allows fallback to .env file while supporting env vars
 if env_path.exists():
     load_dotenv(dotenv_path=env_path)
-    logger.debug(f"Loaded environment from {env_path}")
-
-# Token validation cache - stores last validated token and timestamp
-# This reduces redundant API calls for token validation
-_token_validation_cache: Dict[str, float] = {}
-# Default TTL for token validation cache (in seconds)
-# Token validation result is cached for this duration to reduce API calls
-TOKEN_VALIDATION_TTL = int(os.getenv("TOKEN_VALIDATION_TTL", "60"))
-
-
-def _get_base_url() -> Optional[str]:
-    """
-    Get the base URL from configuration.
-    
-    Priority: Environment variable > Config file
-    
-    Returns:
-        Optional[str]: The Dispatcharr base URL or None if not set.
-    """
-    config = get_dispatcharr_config()
-    return config.get_base_url()
-
-def _validate_token(token: str) -> bool:
-    """
-    Validate if a token is still valid by making a test API request.
-    
-    Uses a cache to avoid redundant API calls for token validation.
-    The cache TTL is controlled by TOKEN_VALIDATION_TTL environment variable
-    (default: 60 seconds).
-    
-    Args:
-        token: The authentication token to validate
-        
-    Returns:
-        bool: True if token is valid, False otherwise
-    """
-    log_function_call(logger, "_validate_token", token="<redacted>")
-    base_url = _get_base_url()
-    if not base_url or not token:
-        logger.debug("Validation failed: missing base_url or token")
-        return False
-    
-    # Check cache first - if token was recently validated, skip API call
-    cache_check_start = time.time()
-    cached_time = _token_validation_cache.get(token)
-    if cached_time is not None:
-        age = cache_check_start - cached_time
-        if age < TOKEN_VALIDATION_TTL:
-            cache_elapsed = time.time() - cache_check_start
-            logger.debug(f"Token validation cached (age: {age:.1f}s, TTL: {TOKEN_VALIDATION_TTL}s)")
-            log_function_return(logger, "_validate_token", "cached", cache_elapsed)
-            return True
-        else:
-            logger.debug(f"Token validation cache expired (age: {age:.1f}s, TTL: {TOKEN_VALIDATION_TTL}s)")
-    
-    try:
-        start_time = time.time()
-        # Make a lightweight API call to validate token
-        test_url = f"{base_url}/api/channels/channels/"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
-        log_api_request(logger, "GET", test_url, params={'page_size': 1})
-        resp = requests.get(test_url, headers=headers, timeout=5, params={'page_size': 1})
-        elapsed = time.time() - start_time
-        log_api_response(logger, "GET", test_url, resp.status_code, elapsed)
-        
-        result = resp.status_code == 200
-        
-        # Cache successful validation using start_time as the reference point
-        if result:
-            _token_validation_cache[token] = start_time
-            logger.debug(f"Token validation successful, cached for {TOKEN_VALIDATION_TTL}s")
-        else:
-            # Clear cache on failed validation
-            _token_validation_cache.pop(token, None)
-        
-        log_function_return(logger, "_validate_token", result, elapsed)
-        return result
-    except Exception as e:
-        # Clear cache on error
-        _token_validation_cache.pop(token, None)
-        log_exception(logger, e, "_validate_token")
-        return False
-
-
-def _clear_token_validation_cache() -> None:
-    """
-    Clear the token validation cache.
-    
-    This should be called when the token changes (e.g., after login or token refresh)
-    to ensure the new token is properly validated.
-    """
-    _token_validation_cache.clear()
-    logger.debug("Token validation cache cleared")
 
 
 def login() -> bool:
-    """
-    Log into Dispatcharr and save the token to .env file.
-    
-    Authenticates with Dispatcharr using credentials from configuration
-    (JSON file or environment variables). Stores the received token in 
-    .env file if it exists, otherwise stores it in memory.
-    
-    Returns:
-        bool: True if login successful, False otherwise.
-    """
+    """Public alias for _login() with structured logging wrappers."""
     log_function_call(logger, "login")
-    config = get_dispatcharr_config()
-    username = config.get_username()
-    password = config.get_password()
-    base_url = config.get_base_url()
-
-    if not all([username, password, base_url]):
-        logger.error(
-            "DISPATCHARR_USER, DISPATCHARR_PASS, and "
-            "DISPATCHARR_BASE_URL must be configured."
-        )
-        return False
-
-    login_url = f"{base_url}/api/accounts/token/"
-    logger.info(f"Attempting to log in to {base_url}...")
-
-    try:
-        start_time = time.time()
-        log_api_request(logger, "POST", login_url, json={"username": username, "password": "***"})
-        resp = requests.post(
-            login_url,
-            headers={"Content-Type": "application/json"},
-            json={"username": username, "password": password},
-            timeout=10
-        )
-        elapsed = time.time() - start_time
-        log_api_response(logger, "POST", login_url, resp.status_code, elapsed)
-        
-        resp.raise_for_status()
-        data = resp.json()
-        token = data.get("access") or data.get("token")
-
-        if token:
-            logger.debug(f"Received token (length: {len(token)})")
-            # Clear old token validation cache before saving new token
-            _clear_token_validation_cache()
-            # Save token to .env if exists, else store in memory
-            if env_path.exists():
-                set_key(env_path, "DISPATCHARR_TOKEN", token)
-                logger.info("Login successful. Token saved.")
-            else:
-                # Token needs refresh on restart when no .env file
-                os.environ["DISPATCHARR_TOKEN"] = token
-                logger.info(
-                    "Login successful. Token stored in memory."
-                )
-            log_function_return(logger, "login", True, elapsed)
-            return True
-        else:
-            logger.error(
-                "Login failed: No access token found in response."
-            )
-            logger.debug(f"Response data: {data}")
-            return False
-    except requests.exceptions.RequestException as e:
-        log_exception(logger, e, "login")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"Response content: {e.response.text}")
-        return False
-    except json.JSONDecodeError as e:
-        log_exception(logger, e, "login - JSON decode")
-        logger.error(
-            "Login failed: Invalid JSON response from server."
-        )
-        return False
-
-def _get_auth_headers() -> Dict[str, str]:
-    """
-    Get authorization headers for API requests.
-    
-    Retrieves the authentication token from environment variables.
-    If no token is found, attempts to log in first. Token validation
-    is not done proactively - invalid tokens are handled by the 401
-    retry logic in API request functions.
-    
-    Returns:
-        Dict[str, str]: Dictionary containing authorization headers.
-        
-    Raises:
-        SystemExit: If login fails or token cannot be retrieved.
-    """
-    log_function_call(logger, "_get_auth_headers")
-    current_token = os.getenv("DISPATCHARR_TOKEN")
-    
-    # If token exists, use it directly (validation happens on 401 response)
-    if current_token:
-        logger.debug("Using existing token")
-        log_function_return(logger, "_get_auth_headers", "<headers with token>")
-        return {
-            "Authorization": f"Bearer {current_token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
-    
-    # Token is missing, need to login
-    logger.info("DISPATCHARR_TOKEN not found. Attempting to log in...")
-    
-    if login():
-        # Reload from .env file only if it exists
-        if env_path.exists():
-            load_dotenv(dotenv_path=env_path, override=True)
-            logger.debug("Reloaded environment variables after login")
-        current_token = os.getenv("DISPATCHARR_TOKEN")
-        if not current_token:
-            logger.error(
-                "Login succeeded, but token not found. Aborting."
-            )
-            sys.exit(1)
-    else:
-        logger.error(
-            "Login failed. Check credentials. Aborting."
-        )
-        sys.exit(1)
-
-    log_function_return(logger, "_get_auth_headers", "<headers with token>")
-    return {
-        "Authorization": f"Bearer {current_token}",
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-    }
-
-def _refresh_token() -> bool:
-    """
-    Refresh the authentication token.
-    
-    Attempts to refresh the authentication token by calling the login
-    function. If successful, reloads environment variables.
-    
-    Returns:
-        bool: True if refresh successful, False otherwise.
-    """
-    logger.info("Token expired or invalid. Attempting to refresh...")
-    if login():
-        # Reload from .env file only if it exists
-        if env_path.exists():
-            load_dotenv(dotenv_path=env_path, override=True)
-        logger.info("Token refreshed successfully.")
-        return True
-    else:
-        logger.error("Token refresh failed.")
-        return False
+    result = _login()
+    log_function_return(logger, "login", result)
+    return result
 
 def fetch_data_from_url(url: str) -> Optional[Any]:
     """
@@ -545,16 +309,19 @@ def update_channel_streams(
                 f"Successfully updated channel {channel_id} with "
                 f"{len(filtered_stream_ids)} streams"
             )
-            
-            # Refresh the channel in UDI cache to ensure fresh stream data
-            # This is critical for immediate stream checking after assignment
+
+            # Update UDI cache directly — we know exactly which streams were
+            # assigned, so no extra HTTP call is needed.
             try:
                 udi = get_udi_manager()
-                udi.refresh_channel_by_id(channel_id)
-                logger.debug(f"Refreshed UDI cache for channel {channel_id} after stream update")
+                channel = udi.get_channel_by_id(channel_id)
+                if channel:
+                    updated = channel.copy()
+                    updated['streams'] = filtered_stream_ids
+                    udi.update_channel(channel_id, updated)
             except Exception as e:
-                logger.warning(f"Failed to refresh UDI cache for channel {channel_id}: {e}")
-            
+                logger.warning(f"Failed to update UDI cache for channel {channel_id}: {e}")
+
             return True
         else:
             status = response.status_code if response else 'None'
@@ -595,6 +362,14 @@ def update_channel_streams(
                             f"✓ Successfully updated channel {channel_id} with "
                             f"{len(revalidated_stream_ids)} validated streams (after retry)"
                         )
+                        try:
+                            channel = udi.get_channel_by_id(channel_id)
+                            if channel:
+                                updated = channel.copy()
+                                updated['streams'] = revalidated_stream_ids
+                                udi.update_channel(channel_id, updated)
+                        except Exception as cache_err:
+                            logger.warning(f"Failed to update UDI cache for channel {channel_id} after retry: {cache_err}")
                         return True
                 else:
                     logger.warning(
