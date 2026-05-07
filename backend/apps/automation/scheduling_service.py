@@ -882,13 +882,24 @@ class SchedulingService:
         # NoTvgIdError intentionally not caught here — let it propagate to the handler
         programs = self.get_programs_by_channel(channel_id)
 
+        now = datetime.now(timezone.utc)
         matching_programs = []
         for program in programs:
             title = program.get('title', '')
-            if pattern.search(title):
-                matching_programs.append(program)
+            if not pattern.search(title):
+                continue
+            # Mirror match_programs_to_rules: skip programs that have already started
+            start_str = program.get('start_time')
+            if start_str:
+                try:
+                    start_dt = _parse_dt(start_str)
+                    if start_dt <= now:
+                        continue
+                except (ValueError, AttributeError):
+                    pass
+            matching_programs.append(program)
 
-        logger.debug(f"Regex '{effective_pattern}' matched {len(matching_programs)} programs for channel {channel_id}")
+        logger.debug(f"Regex '{effective_pattern}' matched {len(matching_programs)} future programs for channel {channel_id}")
         return matching_programs
 
     def match_programs_to_rules(self, force_refresh: bool = False) -> Dict[str, Any]:
