@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **EPG rule regex preview showed past/airing programs** — `test_regex_against_epg` returned all matching EPG programs, including those that had already started or finished. The preview now filters out programs whose `start_time <= now`, matching the behaviour of `match_programs_to_rules()` exactly. Users will no longer see matches in the test panel that the rule would never actually schedule.
+
 ## [2.6.0] - 2026-05-07
 
 ### Removed
