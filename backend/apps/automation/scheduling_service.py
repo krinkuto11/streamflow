@@ -919,7 +919,14 @@ class SchedulingService:
         - Empty regex_pattern is treated as unconfigured and the rule is skipped
           (fixes Bug 4).
         - Invalid regex surfaces the rule name in the error log (fixes Bug 7).
+        - EPG data is pre-fetched outside _lock via _fetch_and_cache_all_programs so
+          that the scheduling lock is never held during network I/O. Inside _lock the
+          matching and event-write cycle uses the pre-fetched snapshot directly.
         """
+        # Pre-fetch outside _lock — _fetch_and_cache_all_programs takes _lock only
+        # briefly for cache read/write, so this never causes re-entrant acquisition.
+        all_epg = self._fetch_and_cache_all_programs(force_refresh=force_refresh)
+
         with self._lock:
             if not self._auto_create_rules:
                 logger.debug("No auto-create rules to process")
@@ -1011,7 +1018,19 @@ class SchedulingService:
                         continue
 
                     if tvg_id not in programs_by_tvg_id:
-                        fetched = self.fetch_channel_programs_from_api(tvg_id, force_refresh=force_refresh)
+                        end_time = datetime.now(timezone.utc) + timedelta(hours=24)
+                        raw = all_epg.get(tvg_id, [])
+                        fetched = []
+                        for p in raw:
+                            p_start = p.get('start_time')
+                            if p_start:
+                                try:
+                                    p_start_dt = _parse_dt(p_start)
+                                    if p_start_dt > end_time:
+                                        continue
+                                except (ValueError, AttributeError):
+                                    pass
+                            fetched.append(p)
                         fetched.sort(key=lambda p: p.get('start_time', ''))
                         programs_by_tvg_id[tvg_id] = fetched
 
@@ -1310,21 +1329,26 @@ class SchedulingService:
         full program list regardless. Fetching once and grouping client-side is
         therefore strictly equivalent to N per-channel fetches but costs one
         round-trip instead of N.
+
+        Lock discipline: _lock is never held during the HTTP call. Only the cache
+        read-check and the cache write use short critical sections, so callers
+        holding _lock (e.g. match_programs_to_rules) can call this safely.
         """
+        # Cache check — short critical section, no I/O inside
         with self._lock:
             if not force_refresh and self._epg_all_programs_cache:
                 cache_age = datetime.now() - self._epg_all_programs_cache['time']
                 refresh_interval = timedelta(minutes=self.get_epg_schedule().get('value', 60))
                 if cache_age < refresh_interval:
                     return self._epg_all_programs_cache['by_tvg_id']
+            stale_cache = self._epg_all_programs_cache
 
+        # HTTP fetch outside the lock so concurrent callers and lock-holders
+        # are never blocked waiting on network I/O.
         base_url = self._get_base_url()
         if not base_url:
             logger.error("Missing Dispatcharr configuration (base_url)")
-            with self._lock:
-                if self._epg_all_programs_cache:
-                    return self._epg_all_programs_cache['by_tvg_id']
-            return {}
+            return stale_cache['by_tvg_id'] if stale_cache else {}
 
         try:
             url = f"{base_url}/api/epg/programs/"
@@ -1333,10 +1357,7 @@ class SchedulingService:
             data = fetch_data_from_url(url)
             if data is None:
                 logger.error("Failed to fetch EPG programs from Dispatcharr")
-                with self._lock:
-                    if self._epg_all_programs_cache:
-                        return self._epg_all_programs_cache['by_tvg_id']
-                return {}
+                return stale_cache['by_tvg_id'] if stale_cache else {}
 
             raw: List[Dict[str, Any]] = []
             if isinstance(data, list):
@@ -1365,6 +1386,7 @@ class SchedulingService:
             )
 
             result = dict(by_tvg_id)
+            # Cache write — short critical section
             with self._lock:
                 self._epg_all_programs_cache = {
                     'time': datetime.now(),
@@ -1374,10 +1396,7 @@ class SchedulingService:
 
         except Exception as e:
             logger.error(f"Error fetching all EPG programs: {e}")
-            with self._lock:
-                if self._epg_all_programs_cache:
-                    return self._epg_all_programs_cache['by_tvg_id']
-            return {}
+            return stale_cache['by_tvg_id'] if stale_cache else {}
 
     def fetch_channel_programs_from_api(self, tvg_id: str, hours_ahead: int = 24, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """Return EPG programs for tvg_id from the shared all-programs cache.
