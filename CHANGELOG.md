@@ -31,6 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Redundant `_channels_by_id` rebuild** — After stripping deleted stream IDs from channel stream lists, the code rebuilt the entire `_channels_by_id` index unnecessarily. Removed — in-place `ch['streams']` mutation propagates through shared dict references.
 - **Scheduler guard log noise** — Guard skip messages in `udi_refresh_processor_loop()` demoted from `INFO` to `DEBUG` (were emitting every 60 seconds).
 
+### Fixed (automation profile/period handling)
+- **Stale profile reference warning** — `get_profile()` now logs a `WARNING` when a referenced profile ID does not exist in the database, making stale assignments visible in the logs instead of silently returning `None`.
+- **Assignment validation** — `assign_period_to_channels()` and `assign_period_to_groups()` now validate that the target profile exists before writing. An invalid profile ID is rejected with an `ERROR` log and returns `False`, preventing stale references from accumulating.
+- **Assignment race condition** — both assignment methods now hold `self._lock` around the read-modify-write of the config dict, preventing concurrent assignments from losing each other's writes.
+- **Period priority tie-break** — when multiple periods share the same `priority`, they are now sorted by numeric period ID instead of lexicographic string comparison (e.g. period `9` no longer sorts after `10`).
+- **Invalid cron expression** — a malformed cron expression on a period now causes that period to be **skipped** with an `ERROR` log (including the bad expression value) instead of silently falling back to a 60-minute interval. Same behaviour when `croniter` is not installed.
+- **Dead stream removal safe default** — `dead_stream_removal_enabled` is now initialised to `False` in `_check_channel_concurrent()`, `_check_channel_sequential()`, and the single-channel check step 5 fallback. If profile resolution fails, streams are left in place rather than silently removed.
+
 ### Refactored
 - **Auth consolidation in upload modules** — `channels_upload.py` and `groups_upload.py` each contained ~100 lines of duplicated auth logic without the thread-safety lock present in `apps.core.auth`. Both now import from `apps.core.auth` directly, eliminating a concurrent token-refresh race condition.
 - **`total_steps` reduced from 7 to 6** — The `fetch_profile_channels()` step is no longer a separate tracked step in the init progress reporting.

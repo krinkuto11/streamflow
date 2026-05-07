@@ -1051,10 +1051,9 @@ class StreamCheckerService:
         logger.info(f"Checking channel {channel_id} (parallel mode)")
         logger.info(f"=" * 80)
         
-        # dead_stream_removal_enabled is resolved below from the profile (Bug 2 fix).
-        # Initialise to True (removal enabled) as a safe default; the profile override
-        # applied during profile resolution is the sole authority.
-        dead_stream_removal_enabled = True
+        # Default to False (safe: do not remove) until the profile is resolved below.
+        # If profile resolution fails, streams are left in place rather than silently removed.
+        dead_stream_removal_enabled = False
 
         # Get effective profile for this channel
         stream_limit = 0
@@ -1893,10 +1892,9 @@ class StreamCheckerService:
         logger.info(f"Checking channel {channel_id} (sequential mode)")
         logger.info(f"=" * 80)
         
-        # dead_stream_removal_enabled is resolved below from the profile (Bug 2 fix).
-        # Initialise to True (removal enabled) as a safe default; the profile override
-        # applied during profile resolution is the sole authority.
-        dead_stream_removal_enabled = True
+        # Default to False (safe: do not remove) until the profile is resolved below.
+        # If profile resolution fails, streams are left in place rather than silently removed.
+        dead_stream_removal_enabled = False
 
         # Get effective profile for this channel
         stream_limit = 0
@@ -3654,8 +3652,8 @@ class StreamCheckerService:
             if isinstance(_profile_remove, bool):
                 _step5_dead_stream_removal_enabled = _profile_remove
             else:
-                # No per-profile override: fall back to global config default (True)
-                _step5_dead_stream_removal_enabled = True
+                # No per-profile override: default to False (safe: do not remove).
+                _step5_dead_stream_removal_enabled = False
             _step5_allow_dead_streams = not _step5_dead_stream_removal_enabled
 
             if matching_enabled:
