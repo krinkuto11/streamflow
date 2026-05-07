@@ -73,7 +73,7 @@ class SchedulingService:
     def __init__(self):
         """Initialize the scheduling service."""
         self._lock = threading.Lock()
-        self._epg_cache: Dict[str, Dict[str, Any]] = {}
+        self._epg_all_programs_cache: Optional[Dict[str, Any]] = None
         self._config = self._load_config()
         self._scheduled_events = self._load_scheduled_events()
         self._auto_create_rules = self._load_auto_create_rules()
@@ -1303,119 +1303,115 @@ class SchedulingService:
     def _get_auth_token(self) -> Optional[str]:
         return os.getenv("DISPATCHARR_TOKEN")
 
+    def _fetch_and_cache_all_programs(self, force_refresh: bool = False) -> Dict[str, List[Dict[str, Any]]]:
+        """Fetch ALL EPG programs in one HTTP call and return them grouped by tvg_id.
+
+        SCH-001: Dispatcharr ignores tvg_id/start_time filter params, returning the
+        full program list regardless. Fetching once and grouping client-side is
+        therefore strictly equivalent to N per-channel fetches but costs one
+        round-trip instead of N.
+        """
+        with self._lock:
+            if not force_refresh and self._epg_all_programs_cache:
+                cache_age = datetime.now() - self._epg_all_programs_cache['time']
+                refresh_interval = timedelta(minutes=self.get_epg_schedule().get('value', 60))
+                if cache_age < refresh_interval:
+                    return self._epg_all_programs_cache['by_tvg_id']
+
+        base_url = self._get_base_url()
+        if not base_url:
+            logger.error("Missing Dispatcharr configuration (base_url)")
+            with self._lock:
+                if self._epg_all_programs_cache:
+                    return self._epg_all_programs_cache['by_tvg_id']
+            return {}
+
+        try:
+            url = f"{base_url}/api/epg/programs/"
+            logger.debug("Fetching all EPG programs (shared cache)")
+
+            data = fetch_data_from_url(url)
+            if data is None:
+                logger.error("Failed to fetch EPG programs from Dispatcharr")
+                with self._lock:
+                    if self._epg_all_programs_cache:
+                        return self._epg_all_programs_cache['by_tvg_id']
+                return {}
+
+            raw: List[Dict[str, Any]] = []
+            if isinstance(data, list):
+                raw = data
+            elif isinstance(data, dict):
+                raw = data.get('results', data.get('data', data.get('programs', [])))
+                if not isinstance(raw, list):
+                    raw = []
+
+            by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            skipped = 0
+            for p in raw:
+                if not isinstance(p, dict):
+                    continue
+                tid = p.get('tvg_id')
+                if not tid:
+                    skipped += 1
+                    continue
+                by_tvg_id[tid].append(p)
+
+            if skipped:
+                logger.debug(f"Skipped {skipped} EPG programs with no tvg_id field")
+
+            logger.debug(
+                f"Fetched {len(raw)} EPG programs across {len(by_tvg_id)} tvg_ids"
+            )
+
+            result = dict(by_tvg_id)
+            with self._lock:
+                self._epg_all_programs_cache = {
+                    'time': datetime.now(),
+                    'by_tvg_id': result,
+                }
+            return result
+
+        except Exception as e:
+            logger.error(f"Error fetching all EPG programs: {e}")
+            with self._lock:
+                if self._epg_all_programs_cache:
+                    return self._epg_all_programs_cache['by_tvg_id']
+            return {}
+
     def fetch_channel_programs_from_api(self, tvg_id: str, hours_ahead: int = 24, force_refresh: bool = False) -> List[Dict[str, Any]]:
-        """Fetch EPG programs for a specific channel from Dispatcharr API.
+        """Return EPG programs for tvg_id from the shared all-programs cache.
 
-        Args:
-            tvg_id: TVG ID of the channel
-            hours_ahead: Number of hours ahead to include (enforced client-side)
-            force_refresh: If True, bypass cache and fetch fresh data
-
-        Returns:
-            List of program dictionaries
-
-        Notes (SCH-001):
-            The Dispatcharr /api/epg/programs/ endpoint accepts tvg_id as a query
-            filter but silently ignores start_time__gte / start_time__lte parameters.
-            The hours_ahead window is therefore enforced client-side after parsing
-            the response. The start_time__gte hint is still sent as a best-effort
-            performance hint in case a future Dispatcharr version honours it.
-
-            The tvg_id post-filter is applied only when programs actually carry a
-            tvg_id field in the response. When the field is absent (Dispatcharr does
-            not always echo it back) we trust the API filtered by tvg_id correctly.
+        One HTTP call to /api/epg/programs/ serves all channels for the lifetime
+        of the cache window (see _fetch_and_cache_all_programs). The hours_ahead
+        window is enforced client-side; the API ignores time filter params (SCH-001).
         """
         if not tvg_id:
             return []
 
-        # Check cache
-        with self._lock:
-            cached_data = self._epg_cache.get(tvg_id)
-            if not force_refresh and cached_data:
-                cache_age = datetime.now() - cached_data['time']
-                refresh_interval = timedelta(minutes=self.get_epg_schedule().get('value', 60))
-                if cache_age < refresh_interval:
-                    return cached_data['programs'].copy()
+        by_tvg_id = self._fetch_and_cache_all_programs(force_refresh=force_refresh)
+        programs = by_tvg_id.get(tvg_id, [])
 
-        # Fetch fresh data
-        base_url = self._get_base_url()
-        if not base_url:
-            logger.error("Missing Dispatcharr configuration (base_url)")
-            return []
+        end_time = datetime.now(timezone.utc) + timedelta(hours=hours_ahead)
+        valid_programs = []
+        for p in programs:
+            p_start = p.get('start_time')
+            if p_start:
+                try:
+                    p_start_dt = datetime.fromisoformat(p_start.replace('Z', '+00:00'))
+                    if p_start_dt.tzinfo is None:
+                        p_start_dt = p_start_dt.replace(tzinfo=timezone.utc)
+                    if p_start_dt > end_time:
+                        continue
+                except (ValueError, AttributeError):
+                    pass
+            valid_programs.append(p)
 
-        try:
-            now = datetime.now(timezone.utc)
-            start_time = (now - timedelta(hours=1)).isoformat()
-            end_time = now + timedelta(hours=hours_ahead)
-
-            # Send start_time__gte as a hint; end-time filter is enforced below
-            # because the API ignores start_time__lte (SCH-001).
-            url = f"{base_url}/api/epg/programs/?tvg_id={tvg_id}&start_time__gte={start_time}"
-            logger.debug(f"Fetching EPG programs for TVG ID {tvg_id}")
-
-            data = fetch_data_from_url(url)
-            if data is None:
-                logger.error(f"Failed to fetch EPG programs for TVG ID {tvg_id}")
-                return []
-
-            programs = []
-            if isinstance(data, list):
-                programs = data
-            elif isinstance(data, dict):
-                programs = data.get('results', data.get('data', data.get('programs', [])))
-                if not isinstance(programs, list):
-                    programs = []
-
-            # ── SCH-001 client-side filtering ────────────────────────────
-            # Only apply tvg_id cross-channel guard when programs actually carry
-            # the field — Dispatcharr does not always echo it back.
-            any_have_tvg_id = any(
-                isinstance(p, dict) and p.get('tvg_id')
-                for p in programs
-            )
-
-            valid_programs = []
-            for p in programs:
-                if not isinstance(p, dict):
-                    continue
-                # Optional cross-channel guard
-                if any_have_tvg_id and p.get('tvg_id') and p.get('tvg_id') != tvg_id:
-                    continue
-                # Enforce hours_ahead window
-                p_start = p.get('start_time')
-                if p_start:
-                    try:
-                        p_start_dt = datetime.fromisoformat(p_start.replace('Z', '+00:00'))
-                        if p_start_dt.tzinfo is None:
-                            p_start_dt = p_start_dt.replace(tzinfo=timezone.utc)
-                        if p_start_dt > end_time:
-                            continue
-                    except (ValueError, AttributeError):
-                        pass  # Unparseable time — include and let caller decide
-                valid_programs.append(p)
-
-            logger.debug(
-                f"Fetched {len(programs)} programs for tvg_id={tvg_id}, "
-                f"kept {len(valid_programs)} within {hours_ahead}h window"
-            )
-            # ─────────────────────────────────────────────────────────────
-
-            # Update cache
-            with self._lock:
-                self._epg_cache[tvg_id] = {
-                    'time': datetime.now(),
-                    'programs': valid_programs
-                }
-
-            return valid_programs.copy()
-
-        except Exception as e:
-            logger.error(f"Error fetching EPG programs for {tvg_id}: {e}")
-            with self._lock:
-                cached_data = self._epg_cache.get(tvg_id)
-                if cached_data:
-                    return cached_data['programs'].copy()
-            return []
+        logger.debug(
+            f"Serving {len(valid_programs)} programs for tvg_id={tvg_id} "
+            f"(within {hours_ahead}h) from shared EPG cache"
+        )
+        return valid_programs
 
     def export_auto_create_rules(self) -> List[Dict[str, Any]]:
         """Export auto-create rules."""
