@@ -699,11 +699,14 @@ class SchedulingService:
                 raise ValueError("No valid channels found for this rule")
 
             # Validate regex
+            raw_pattern = rule_data.get('regex_pattern', '')
+            if not raw_pattern or not raw_pattern.strip():
+                raise ValueError("Regex pattern must not be empty.")
             try:
-                validation_pattern = rule_data['regex_pattern'].replace('CHANNEL_NAME', 'PLACEHOLDER')
+                validation_pattern = raw_pattern.replace('CHANNEL_NAME', 'PLACEHOLDER')
                 if is_dangerous_regex(validation_pattern):
                     raise ValueError("Regex pattern contains dangerous nested quantifiers (ReDoS risk)")
-                re.compile(validation_pattern)
+                re.compile(validation_pattern, re.IGNORECASE)
             except re.error as e:
                 raise ValueError(f"Invalid regex pattern: {e}")
 
@@ -803,12 +806,15 @@ class SchedulingService:
                     rule['tvg_id'] = channels_info[0].get('tvg_id')
 
             if 'regex_pattern' in rule_data:
+                raw_pattern = rule_data['regex_pattern']
+                if not raw_pattern or not raw_pattern.strip():
+                    raise ValueError("Regex pattern must not be empty.")
                 try:
-                    validation_pattern = rule_data['regex_pattern'].replace('CHANNEL_NAME', 'PLACEHOLDER')
+                    validation_pattern = raw_pattern.replace('CHANNEL_NAME', 'PLACEHOLDER')
                     if is_dangerous_regex(validation_pattern):
                         raise ValueError("Regex pattern contains dangerous nested quantifiers (ReDoS risk)")
-                    re.compile(validation_pattern)
-                    rule['regex_pattern'] = rule_data['regex_pattern']
+                    re.compile(validation_pattern, re.IGNORECASE)
+                    rule['regex_pattern'] = raw_pattern
                 except re.error as e:
                     raise ValueError(f"Invalid regex pattern: {e}")
 
@@ -824,16 +830,21 @@ class SchedulingService:
 
             logger.info(f"Updated auto-create rule {rule_id}")
 
-            initial_count = len(self._scheduled_events)
-            self._scheduled_events = [
-                e for e in self._scheduled_events
-                if e.get('auto_create_rule_id') != rule_id
-            ]
-            if len(self._scheduled_events) < initial_count:
-                self._save_scheduled_events()
-
+            # Purge stale events for this rule and re-match atomically in the
+            # background.  The background thread acquires _lock itself before
+            # touching shared state, so no separate deletion step is needed here —
+            # match_programs_to_rules() will overwrite/recreate events correctly
+            # via its own duplicate-detection logic.  Doing the delete here and
+            # re-matching in a separate thread without the lock held was the root
+            # cause of the duplicate-event race (Bug 1/2).
             def match_in_background():
                 try:
+                    with self._lock:
+                        self._scheduled_events = [
+                            e for e in self._scheduled_events
+                            if e.get('auto_create_rule_id') != rule_id
+                        ]
+                        self._save_scheduled_events()
                     self.fetch_epg_grid()
                 except Exception as e:
                     logger.error(f"Error matching programs to updated rule: {e}", exc_info=True)
@@ -861,20 +872,31 @@ class SchedulingService:
     def test_regex_against_epg(self, channel_id: int, regex_pattern: str) -> List[Dict[str, Any]]:
         """Test a regex pattern against EPG programs for a channel.
 
+        CHANNEL_NAME is substituted with the actual channel name before compiling,
+        matching the behaviour of match_programs_to_rules() so test results are
+        representative of what the rule will do at match time.
+
         Raises:
             NoTvgIdError: propagated from get_programs_by_channel when channel
                           has no TVG-ID (SCH-002).
             ValueError: for dangerous or syntactically invalid patterns.
         """
+        if not regex_pattern or not regex_pattern.strip():
+            raise ValueError("Regex pattern must not be empty.")
+
+        udi = get_udi_manager()
+        channel = udi.get_channel_by_id(channel_id)
+        channel_name = channel.get('name', '') if channel else ''
+        effective_pattern = regex_pattern.replace('CHANNEL_NAME', re.escape(channel_name))
+
         try:
-            validation_pattern = regex_pattern.replace('CHANNEL_NAME', 'PLACEHOLDER')
-            if is_dangerous_regex(validation_pattern):
+            if is_dangerous_regex(effective_pattern):
                 raise ValueError("Regex pattern contains dangerous nested quantifiers (ReDoS risk)")
-            re.compile(validation_pattern, re.IGNORECASE)
+            re.compile(effective_pattern, re.IGNORECASE)
         except re.error as e:
             raise ValueError(f"Invalid regex pattern: {e}")
 
-        pattern = re.compile(regex_pattern, re.IGNORECASE)  # lgtm [py/regex-injection]
+        pattern = re.compile(effective_pattern, re.IGNORECASE)  # lgtm [py/regex-injection]
 
         # NoTvgIdError intentionally not caught here — let it propagate to the handler
         programs = self.get_programs_by_channel(channel_id)
@@ -885,178 +907,195 @@ class SchedulingService:
             if pattern.search(title):
                 matching_programs.append(program)
 
-        logger.debug(f"Regex '{regex_pattern}' matched {len(matching_programs)} programs for channel {channel_id}")
+        logger.debug(f"Regex '{effective_pattern}' matched {len(matching_programs)} programs for channel {channel_id}")
         return matching_programs
 
     def match_programs_to_rules(self, force_refresh: bool = False) -> Dict[str, Any]:
-        """Match EPG programs to auto-create rules and create/update scheduled events."""
+        """Match EPG programs to auto-create rules and create/update scheduled events.
+
+        Correctness invariants:
+        - The entire match-then-write cycle runs under _lock so concurrent callers
+          cannot interleave their check-then-add sequences (fixes Bug 1).
+        - channels_info is always rebuilt from UDI at match time; stored tvg_ids in
+          the rule document are ignored so stale tvg_ids cannot cause missed matches
+          (fixes Bug 6).
+        - Duplicate detection uses (channel_id, rule_id, program_start_time) as the
+          composite key instead of a ±300s time window, so nearby programs on the
+          same channel no longer overwrite each other (fixes Bug 5).
+        - CHANNEL_NAME token is substituted with the actual channel name before the
+          pattern is compiled (fixes Bug 3).
+        - Empty regex_pattern is treated as unconfigured and the rule is skipped
+          (fixes Bug 4).
+        - Invalid regex surfaces the rule name in the error log (fixes Bug 7).
+        """
         with self._lock:
             if not self._auto_create_rules:
                 logger.debug("No auto-create rules to process")
                 return {'created': 0, 'updated': 0, 'skipped': 0}
-            rules_snapshot = self._auto_create_rules.copy()
+            rules_snapshot = list(self._auto_create_rules)
 
-        created_count = 0
-        updated_count = 0
-        skipped_count = 0
+            created_count = 0
+            updated_count = 0
+            skipped_count = 0
 
-        udi = get_udi_manager()
-        events_to_add = []
-        programs_by_tvg_id = {}
+            udi = get_udi_manager()
+            programs_by_tvg_id: Dict[str, List] = {}
 
-        for rule in rules_snapshot:
-            channel_ids = rule.get('channel_ids') or ([rule.get('channel_id')] if rule.get('channel_id') else [])
-            channel_group_ids = rule.get('channel_group_ids', [])
-            regex_pattern = rule.get('regex_pattern')
-            minutes_before = rule.get('minutes_before', 5)
+            # Build a lookup of existing auto-created events keyed by
+            # (channel_id, rule_id, program_start_time) for O(1) deduplication.
+            existing_keys: Dict[tuple, Dict] = {}
+            for ev in self._scheduled_events:
+                if not ev.get('auto_created'):
+                    continue
+                key = (
+                    ev.get('channel_id'),
+                    ev.get('auto_create_rule_id'),
+                    ev.get('program_start_time'),
+                )
+                if all(k is not None for k in key):
+                    existing_keys[key] = ev
 
-            all_channel_ids = set(channel_ids)
+            events_to_add: List[Dict] = []
 
-            # Dynamically expand channel groups
-            for group_id in channel_group_ids:
-                group_channels = udi.get_channels_by_group(group_id) or []
-                for ch in group_channels:
-                    all_channel_ids.add(ch.get('id'))
+            for rule in rules_snapshot:
+                rule_id = rule.get('id')
+                rule_name = rule.get('name', rule_id)
+                regex_pattern = rule.get('regex_pattern')
+                minutes_before = rule.get('minutes_before', 5)
 
-            channels_info = rule.get('channels_info', [])
-            if not channels_info:
-                channels_info = []
-                for cid in all_channel_ids:
-                    channel = udi.get_channel_by_id(cid)
-                    if channel:
-                        channels_info.append({
-                            'id': cid,
-                            'name': channel.get('name', ''),
-                            'tvg_id': channel.get('tvg_id'),
-                        })
-
-            if not regex_pattern:
-                continue
-
-            try:
-                validation_pattern = regex_pattern.replace('CHANNEL_NAME', 'PLACEHOLDER')
-                re.compile(validation_pattern, re.IGNORECASE)
-            except re.error as e:
-                logger.error(f"Invalid regex pattern in rule {rule.get('id')}: {e}")
-                continue
-
-            pattern = re.compile(regex_pattern, re.IGNORECASE)  # lgtm [py/regex-injection]
-
-            for channel_info in channels_info:
-                channel_id = channel_info.get('id')
-                tvg_id = channel_info.get('tvg_id')
-
-                if not tvg_id:
-                    logger.warning(f"Rule {rule.get('id')} channel {channel_id} has no TVG ID, skipping")
+                # Bug 4: reject empty pattern — it would match every program
+                if not regex_pattern or not regex_pattern.strip():
+                    logger.warning(
+                        f"Rule '{rule_name}' ({rule_id}) has an empty regex_pattern — skipping. "
+                        "Set a pattern to enable matching."
+                    )
                     continue
 
-                if tvg_id not in programs_by_tvg_id:
-                    fetched = self.fetch_channel_programs_from_api(tvg_id, force_refresh=force_refresh)
-                    fetched.sort(key=lambda p: p.get('start_time', ''))
-                    programs_by_tvg_id[tvg_id] = fetched
+                # Bug 6: always resolve channels from UDI so tvg_ids are current
+                channel_ids = set(rule.get('channel_ids') or
+                                  ([rule.get('channel_id')] if rule.get('channel_id') else []))
+                for group_id in rule.get('channel_group_ids', []):
+                    for ch in (udi.get_channels_by_group(group_id) or []):
+                        channel_ids.add(ch.get('id'))
 
-                programs = programs_by_tvg_id.get(tvg_id, [])
+                channels_info = []
+                for cid in channel_ids:
+                    channel = udi.get_channel_by_id(cid)
+                    if channel:
+                        logo_id = channel.get('logo_id')
+                        channels_info.append({
+                            'id': cid,
+                            'name': channel.get('name', f'Channel {cid}'),
+                            'tvg_id': channel.get('tvg_id'),
+                            'logo_url': f"/api/logos/{logo_id}" if logo_id else None,
+                        })
 
-                # Get channel logo for events created by rule matching
-                channel = udi.get_channel_by_id(channel_id)
-                logo_id = channel.get('logo_id') if channel else None
-                logo_url = f"/api/logos/{logo_id}" if logo_id else None
-                channel_name = channel_info.get('name', f'Channel {channel_id}')
+                for channel_info in channels_info:
+                    channel_id = channel_info['id']
+                    channel_name = channel_info['name']
+                    tvg_id = channel_info.get('tvg_id')
+                    logo_url = channel_info.get('logo_url')
 
-                for program in programs:
-                    title = program.get('title', '')
-                    if not pattern.search(title):
+                    if not tvg_id:
+                        logger.warning(
+                            f"Rule '{rule_name}' ({rule_id}): channel {channel_id} "
+                            "has no TVG-ID — skipping. Set a TVG-ID in Dispatcharr to enable matching."
+                        )
                         continue
 
-                    program_start = program.get('start_time')
-                    program_end = program.get('end_time')
-
-                    if not program_start or not program_end:
-                        continue
+                    # Bug 3: substitute CHANNEL_NAME with the actual channel name
+                    effective_pattern = regex_pattern.replace('CHANNEL_NAME', re.escape(channel_name))
 
                     try:
-                        start_dt = _parse_dt(program_start)
-                        end_dt = _parse_dt(program_end)
-                    except (ValueError, AttributeError) as e:
-                        logger.warning(f"Invalid program times for {title}: {e}")
+                        if is_dangerous_regex(effective_pattern):
+                            raise re.error("pattern contains dangerous nested quantifiers (ReDoS risk)")
+                        pattern = re.compile(effective_pattern, re.IGNORECASE)
+                    except re.error as e:
+                        # Bug 7: include rule name and pattern in the error log
+                        logger.error(
+                            f"Rule '{rule_name}' ({rule_id}): invalid regex "
+                            f"'{effective_pattern}': {e} — rule skipped."
+                        )
                         continue
+
+                    if tvg_id not in programs_by_tvg_id:
+                        fetched = self.fetch_channel_programs_from_api(tvg_id, force_refresh=force_refresh)
+                        fetched.sort(key=lambda p: p.get('start_time', ''))
+                        programs_by_tvg_id[tvg_id] = fetched
 
                     now = datetime.now(timezone.utc)
-                    if start_dt <= now:
-                        continue
 
-                    if self._is_event_executed(channel_id, program_start):
-                        continue
+                    for program in programs_by_tvg_id.get(tvg_id, []):
+                        title = program.get('title', '')
+                        if not pattern.search(title):
+                            continue
 
-                    check_time = start_dt - timedelta(minutes=minutes_before)
-                    program_date = start_dt.date().isoformat()
+                        program_start = program.get('start_time')
+                        program_end = program.get('end_time')
+                        if not program_start or not program_end:
+                            continue
 
-                    # Duplicate detection
-                    with self._lock:
-                        existing_event = None
-                        for event in self._scheduled_events:
-                            if event.get('channel_id') != channel_id:
-                                continue
-                            existing_start = event.get('program_start_time')
-                            if not existing_start:
-                                continue
-                            try:
-                                existing_dt = _parse_dt(existing_start)
-                                diff = abs((start_dt - existing_dt).total_seconds())
-                                if diff <= DUPLICATE_DETECTION_WINDOW_SECONDS:
-                                    existing_event = event
-                                    break
-                            except (ValueError, AttributeError):
-                                continue
+                        try:
+                            start_dt = _parse_dt(program_start)
+                            _parse_dt(program_end)
+                        except (ValueError, AttributeError) as e:
+                            logger.warning(f"Invalid program times for '{title}': {e}")
+                            continue
 
-                    if existing_event:
-                        if (existing_event.get('program_title') != title or
-                                existing_event.get('program_start_time') != program_start):
-                            with self._lock:
-                                for event in self._scheduled_events:
-                                    if event.get('id') == existing_event.get('id'):
-                                        event['program_title'] = title
-                                        event['program_start_time'] = program_start
-                                        event['program_end_time'] = program_end
-                                        event['check_time'] = check_time.isoformat()
-                                        break
-                                self._save_scheduled_events()
-                            updated_count += 1
-                        else:
+                        if start_dt <= now:
+                            continue
+
+                        if self._is_event_executed(channel_id, program_start):
+                            continue
+
+                        check_time = start_dt - timedelta(minutes=minutes_before)
+                        program_date = start_dt.date().isoformat()
+
+                        # Bug 5: deduplicate on (channel, rule, exact start time)
+                        dedup_key = (channel_id, rule_id, program_start)
+                        if dedup_key in existing_keys:
                             skipped_count += 1
-                        continue
+                            continue
 
-                    schedule_type = rule.get('schedule_type', 'check')
+                        # Also skip if already queued in this batch
+                        if any(
+                            e.get('channel_id') == channel_id
+                            and e.get('auto_create_rule_id') == rule_id
+                            and e.get('program_start_time') == program_start
+                            for e in events_to_add
+                        ):
+                            skipped_count += 1
+                            continue
 
-                    new_event = {
-                        'id': str(uuid.uuid4()),
-                        'channel_id': channel_id,
-                        'channel_name': channel_name,
-                        'channel_logo_url': logo_url,
-                        'program_title': title,
-                        'program_start_time': program_start,
-                        'program_end_time': program_end,
-                        'minutes_before': minutes_before,
-                        'check_time': check_time.isoformat(),
-                        'tvg_id': tvg_id,
-                        'schedule_type': schedule_type,
-                        'session_type': rule.get('session_type', 'standard'),
-                        'interval_s': rule.get('interval_s', 1.0),
-                        'run_seconds': rule.get('run_seconds', 0),
-                        'per_sample_timeout_s': rule.get('per_sample_timeout_s', 1.0),
-                        'engine_container_id': rule.get('engine_container_id'),
-                        'enable_looping_detection': rule.get('enable_looping_detection', True),
-                        'enable_logo_detection': rule.get('enable_logo_detection', True),
-                        'created_at': datetime.now(timezone.utc).isoformat(),
-                        'auto_created': True,
-                        'auto_create_rule_id': rule.get('id'),
-                        'program_date': program_date,
-                    }
-                    events_to_add.append(new_event)
-                    created_count += 1
+                        new_event = {
+                            'id': str(uuid.uuid4()),
+                            'channel_id': channel_id,
+                            'channel_name': channel_name,
+                            'channel_logo_url': logo_url,
+                            'program_title': title,
+                            'program_start_time': program_start,
+                            'program_end_time': program_end,
+                            'minutes_before': minutes_before,
+                            'check_time': check_time.isoformat(),
+                            'tvg_id': tvg_id,
+                            'schedule_type': rule.get('schedule_type', 'check'),
+                            'session_type': rule.get('session_type', 'standard'),
+                            'interval_s': rule.get('interval_s', 1.0),
+                            'run_seconds': rule.get('run_seconds', 0),
+                            'per_sample_timeout_s': rule.get('per_sample_timeout_s', 1.0),
+                            'engine_container_id': rule.get('engine_container_id'),
+                            'enable_looping_detection': rule.get('enable_looping_detection', True),
+                            'enable_logo_detection': rule.get('enable_logo_detection', True),
+                            'created_at': datetime.now(timezone.utc).isoformat(),
+                            'auto_created': True,
+                            'auto_create_rule_id': rule_id,
+                            'program_date': program_date,
+                        }
+                        events_to_add.append(new_event)
+                        existing_keys[dedup_key] = new_event
+                        created_count += 1
 
-        if events_to_add:
-            with self._lock:
+            if events_to_add:
                 self._scheduled_events.extend(events_to_add)
                 self._save_scheduled_events()
 
