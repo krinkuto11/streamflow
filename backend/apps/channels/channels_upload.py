@@ -15,58 +15,11 @@ import argparse
 import json
 
 from apps.core.logging_config import setup_logging, log_function_call, log_function_return, log_exception
-from apps.core.auth import _get_auth_headers, _get_base_url, _refresh_token
+from apps.core.auth import _get_base_url
+from apps.channels.http import make_request as _make_request
 
 # --- Setup ---
 logger = setup_logging(__name__)
-
-
-def _make_request(
-    method: str, url: str, **kwargs: Any
-) -> requests.Response:
-    """
-    Make a request with authentication and retry logic.
-    
-    Parameters:
-        method (str): HTTP method (GET, POST, PATCH, etc.).
-        url (str): The URL to send the request to.
-        **kwargs: Additional arguments to pass to requests.
-        
-    Returns:
-        requests.Response: The response object.
-        
-    Raises:
-        requests.exceptions.RequestException: If request fails.
-    """
-    try:
-        resp = requests.request(
-            method, url, headers=_get_auth_headers(), **kwargs
-        )
-        resp.raise_for_status()
-        return resp
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 401:
-            if _refresh_token():
-                logger.info(
-                    f"Retrying {method} request to {url} "
-                    f"with new token..."
-                )
-                resp = requests.request(
-                    method, url, headers=_get_auth_headers(), **kwargs
-                )
-                resp.raise_for_status()
-                return resp
-            else:
-                raise
-        else:
-            logger.error(
-                f"HTTP Error: {e.response.status_code} for URL: {url}"
-            )
-            logger.error(f"Response: {e.response.text}")
-            raise
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request failed: {e}")
-        raise
 
 # --- Main Functionality ---
 def fetch_existing_channels() -> Dict[str, Dict[str, Any]]:

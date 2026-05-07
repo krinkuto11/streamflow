@@ -1,2 +1,0 @@
-channel_number,channel_id,stream_id,stream_name,stream_url,channel_group_id,timestamp,video_codec,audio_codec,interlaced_status,status,bitrate_kbps,fps,resolution,frames_decoded,frames_dropped,err_decode,err_discontinuity,err_timeout
-21.0,550,3018,GOL PLAY FHD 0612 --> NEW ERA,http://gluetun:6878/ace/getstream?id=9fb99c40a2c45d5c5342b30626eb56140f980612,4,2025-09-04T21:04:05.862678,N/A,N/A,UNKNOWN,OK,N/A,N/A,N/A,N/A,N/A,False,False,False

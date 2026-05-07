@@ -8,26 +8,6 @@ It fetches EPG data from Dispatcharr, caches it, and manages scheduled events.
 import json
 import os
 import re
-
-def is_dangerous_regex(pattern: str) -> bool:
-    """Return True if the regex pattern contains nested quantifiers (ReDoS risk)."""
-    inside_parens = False
-    has_inner_quantifier = False
-    for i, char in enumerate(pattern):
-        if i > 0 and pattern[i-1] == '\\':
-            continue
-        if char == '(':
-            inside_parens = True
-            has_inner_quantifier = False
-        elif char == ')':
-            if inside_parens and has_inner_quantifier:
-                if i + 1 < len(pattern) and pattern[i+1] in '+*':
-                    return True
-            inside_parens = False
-        elif inside_parens and char in '+*':
-            has_inner_quantifier = True
-    return False
-
 import uuid
 import requests
 import threading
@@ -40,6 +20,7 @@ from apps.core.logging_config import setup_logging
 from apps.udi import get_udi_manager
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.api_utils import fetch_data_from_url
+from apps.automation.regex_validation import is_dangerous_regex
 
 logger = setup_logging(__name__)
 
