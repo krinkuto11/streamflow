@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 
 
-## [2.6.0] - 2026-05-07
+## [2.5.6] - 2026-05-07
 
 ### Removed
 - **SQL persistence layer removed from UDI** — `UDIStorage` previously persisted all cached data to SQLite. Because Streamflow requires a live Dispatcharr connection to function, the warm-start benefit did not justify the complexity. The UDI now operates as a pure in-memory cache repopulated from the API on every startup. `storage.py` is retained as a stub so existing imports do not break.
