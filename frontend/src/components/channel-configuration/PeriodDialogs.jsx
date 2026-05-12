@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Loader2, Calendar, Clock, Trash2 } from 'lucide-react'
+import { Loader2, Calendar, Clock, Trash2, Users } from 'lucide-react'
 
 import { Button } from '@/components/ui/button.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Checkbox } from '@/components/ui/checkbox.jsx'
+import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip.jsx'
 import {
   Dialog,
   DialogContent,
@@ -552,25 +553,46 @@ export function BatchPeriodEditDialog({ open, onOpenChange, selectedChannelIds, 
                         <Badge variant="secondary">
                           Used in {item.count} channel{item.count !== 1 ? 's' : ''} ({item.percentage}%)
                         </Badge>
+                        {item.group_only && (
+                          <Badge variant="outline" className="text-xs gap-1 text-muted-foreground">
+                            <Users className="h-3 w-3" />
+                            Group inherited
+                          </Badge>
+                        )}
                       </div>
                       <div className="text-sm text-muted-foreground">
-                        Manage this period's profile or remove it from all {selectedChannelIds.length} channels.
+                        {item.group_only
+                          ? 'This period is inherited from a group. To remove it, edit the group\'s automation periods.'
+                          : `Manage this period's profile or remove it from all ${selectedChannelIds.length} channels.`}
                       </div>
                     </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="text-destructive border-destructive hover:bg-destructive/10"
-                      disabled={removing === item.id}
-                      onClick={() => handleRemovePeriod(item.id)}
-                    >
-                      {removing === item.id ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        <Trash2 className="h-4 w-4 mr-2" />
-                      )}
-                      Remove from All
-                    </Button>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="text-destructive border-destructive hover:bg-destructive/10"
+                              disabled={removing === item.id || item.group_only}
+                              onClick={() => !item.group_only && handleRemovePeriod(item.id)}
+                            >
+                              {removing === item.id ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-4 w-4 mr-2" />
+                              )}
+                              Remove from All
+                            </Button>
+                          </span>
+                        </TooltipTrigger>
+                        {item.group_only && (
+                          <TooltipContent>
+                            <p>Group-inherited periods must be removed from the group configuration</p>
+                          </TooltipContent>
+                        )}
+                      </Tooltip>
+                    </TooltipProvider>
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">

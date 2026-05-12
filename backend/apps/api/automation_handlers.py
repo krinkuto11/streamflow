@@ -862,18 +862,40 @@ def get_batch_period_usage_response(
     *,
     payload: Optional[Dict[str, Any]],
     get_automation_config_manager: Callable[[], Any],
+    get_udi_manager: Callable[[], Any],
 ):
-    """Analyze automation period usage across multiple channels."""
+    """Analyze automation period usage across multiple channels.
+
+    Uses effective period assignments (channel-level + group-inherited) so that
+    periods inherited from a group are visible in the batch edit dialog.
+    Each period in the response includes `group_only: true` when every occurrence
+    of that period across the selected channels comes from a group assignment —
+    i.e. it cannot be removed at the individual channel level.
+    """
     try:
         data = BatchPeriodUsageSchema.from_payload(payload or {})
         channel_ids = data.channel_ids
 
         automation_config = get_automation_config_manager()
+        udi = get_udi_manager()
+
+        # Build channel_id -> group_id map in one pass to avoid repeated lookups.
+        channel_group_map: Dict[int, Optional[int]] = {}
+        for ch_id in channel_ids:
+            channel = udi.get_channel_by_id(ch_id)
+            group_id = channel.get("channel_group_id") if channel else None
+            channel_group_map[ch_id] = group_id
+
         period_usage: Dict[str, Dict[str, Any]] = {}
 
         for ch_id in channel_ids:
-            assignments = automation_config.get_channel_periods(ch_id)
-            for pid, prof_id in assignments.items():
+            group_id = channel_group_map.get(ch_id)
+            effective = automation_config.get_effective_channel_periods(ch_id, group_id)
+            direct = automation_config.get_channel_periods(ch_id)
+
+            for pid, prof_id in effective.items():
+                is_group_source = pid not in direct
+
                 if pid not in period_usage:
                     period = automation_config.get_period(pid)
                     if not period:
@@ -882,11 +904,15 @@ def get_batch_period_usage_response(
                         "id": pid,
                         "name": period.get("name", "Unknown"),
                         "count": 0,
+                        "group_only": True,
                         "profile_breakdown": {},
                     }
 
                 usage = period_usage[pid]
                 usage["count"] += 1
+                # Mark as not group_only once any channel has a direct assignment.
+                if not is_group_source:
+                    usage["group_only"] = False
 
                 if prof_id not in usage["profile_breakdown"]:
                     profile = automation_config.get_profile(prof_id)
@@ -906,6 +932,7 @@ def get_batch_period_usage_response(
                     "name": usage["name"],
                     "count": usage["count"],
                     "percentage": round((usage["count"] / len(channel_ids)) * 100, 1),
+                    "group_only": usage["group_only"],
                     "profiles": list(usage["profile_breakdown"].values()),
                 }
             )

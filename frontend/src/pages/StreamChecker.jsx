@@ -163,7 +163,7 @@ export default function StreamChecker() {
   const loadDeadStreams = async (page = deadStreamsPagination.page) => {
     try {
       setDeadStreamsLoading(true)
-      const response = await deadStreamsAPI.getDeadStreams(page, deadStreamsPagination.per_page)
+      const response = await deadStreamsAPI.getDeadStreams({ page, per_page: deadStreamsPagination.per_page })
       const deadStreamsData = response.data.dead_streams || []
       const paginationData = response.data.pagination || {}
 
