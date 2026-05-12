@@ -769,7 +769,7 @@ export default function StreamChecker() {
                           <Button
                             variant="outline"
                             size="sm"
-                            onClick={loadDeadStreams}
+                            onClick={() => loadDeadStreams()}
                             disabled={deadStreamsLoading}
                           >
                             {deadStreamsLoading ? (
