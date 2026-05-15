@@ -1808,6 +1808,7 @@ def get_batch_period_usage():
     return get_batch_period_usage_response(
         payload=request.get_json(),
         get_automation_config_manager=get_automation_config_manager,
+        get_udi_manager=get_udi_manager,
     )
 
 @app.route('/api/channels/<int:channel_id>/automation-periods', methods=['GET'])
