@@ -16,6 +16,8 @@ on:
   push:
     branches:
       - dev
+    tags:
+      - '*'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -236,8 +238,9 @@ jobs:
         run: |
           # Start with the primary tag (preserves the sanitized or semver tag chosen above)
           tags="-t ghcr.io/${{ github.repository_owner }}/streamflow:${{ steps.set_tag.outputs.tag }}"
-          # For releases, also add the semver tags from metadata and a :latest tag
-          if [ "${{ github.event_name }}" = "release" ]; then
+          # For published releases, or manual dispatches with an explicit version,
+          # also add semver-style tags from metadata and :latest.
+          if [ "${{ github.event_name }}" = "release" ] || { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; }; then
             tags="$tags -t ghcr.io/${{ github.repository_owner }}/streamflow:latest $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}')"
           fi
 
