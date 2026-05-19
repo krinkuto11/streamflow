@@ -681,12 +681,16 @@ class StreamCheckerService:
             "loop_detected": stream_data.get("loop_detected") if stream_data.get("loop_probe_ran") else False,
             "loop_duration_secs": stream_data.get("loop_duration_secs") if stream_data.get("loop_detected") else None,
             "loop_score_penalty": stream_data.get("loop_score_penalty"),
+            "blank_probe_ran": True if stream_data.get("blank_probe_ran") else False,
+            "blank_detected": stream_data.get("blank_detected") if stream_data.get("blank_probe_ran") else False,
+            "blank_duration_secs": stream_data.get("blank_duration_secs") if stream_data.get("blank_probe_ran") else None,
+            "blank_ratio": stream_data.get("blank_ratio") if stream_data.get("blank_probe_ran") else None,
         }
         
         # Clean up the payload, removing None and N/A values.
         # PRESERVE_FALSE: keep False values for boolean loop fields so they
         # explicitly clear stale True values in Dispatcharr on PATCH merge.
-        PRESERVE_FALSE = {"loop_probe_ran", "loop_detected"}
+        PRESERVE_FALSE = {"loop_probe_ran", "loop_detected", "blank_probe_ran", "blank_detected"}
         stream_stats_payload = {
             k: v for k, v in stream_stats_payload.items()
             if v not in [None, "N/A"] or (v is None and k not in PRESERVE_FALSE)
@@ -780,12 +784,16 @@ class StreamCheckerService:
             "loop_detected": stream_data.get("loop_detected") if stream_data.get("loop_probe_ran") else False,
             "loop_duration_secs": stream_data.get("loop_duration_secs") if stream_data.get("loop_detected") else None,
             "loop_score_penalty": stream_data.get("loop_score_penalty"),
+            "blank_probe_ran": True if stream_data.get("blank_probe_ran") else False,
+            "blank_detected": stream_data.get("blank_detected") if stream_data.get("blank_probe_ran") else False,
+            "blank_duration_secs": stream_data.get("blank_duration_secs") if stream_data.get("blank_probe_ran") else None,
+            "blank_ratio": stream_data.get("blank_ratio") if stream_data.get("blank_probe_ran") else None,
         }
         
         # Clean up the payload, removing None and N/A values.
         # PRESERVE_FALSE: keep False values for boolean loop fields so they
         # explicitly clear stale True values in Dispatcharr on PATCH merge.
-        PRESERVE_FALSE = {"loop_probe_ran", "loop_detected"}
+        PRESERVE_FALSE = {"loop_probe_ran", "loop_detected", "blank_probe_ran", "blank_detected"}
         stream_stats_payload = {
             k: v for k, v in stream_stats_payload.items()
             if v not in [None, "N/A"] or (v is None and k not in PRESERVE_FALSE)
@@ -1060,6 +1068,7 @@ class StreamCheckerService:
         allow_revive = True
         grace_period = False
         loop_check_enabled = False
+        blank_check_enabled = False
         loop_penalty = 0.0
         priority_m3u_ids = []
         priority_mode = 'absolute'
@@ -1102,6 +1111,7 @@ class StreamCheckerService:
                 priority_mode = profile_stream_checking.get('m3u_priority_mode', 'absolute')
                 grace_period = profile_stream_checking.get('grace_period', False)
                 loop_check_enabled = profile_stream_checking.get('loop_check_enabled', False)
+                blank_check_enabled = profile_stream_checking.get('blank_check_enabled', False)
                 profile_remove_dead_streams = profile_stream_checking.get('remove_dead_streams')
                 if isinstance(profile_remove_dead_streams, bool):
                     dead_stream_removal_enabled = profile_remove_dead_streams
@@ -1384,7 +1394,7 @@ class StreamCheckerService:
                         stream_statuses[stream_id]['status'] = 'error'
                         stream_statuses[stream_id]['score'] = 0.0
                     elif is_dead:
-                        stream_statuses[stream_id]['status'] = _dead_reason if _dead_reason == 'low_quality' else 'dead'
+                        stream_statuses[stream_id]['status'] = _dead_reason if _dead_reason in ('low_quality', 'blank') else 'dead'
                         stream_statuses[stream_id]['score'] = 0.0
                     else:
                         stream_statuses[stream_id]['status'] = 'completed'
@@ -1435,7 +1445,7 @@ class StreamCheckerService:
                             self.progress.update(
                                 channel_id=channel_id,
                                 channel_name=channel_name,
-                                current=sum(1 for s in stream_statuses.values() if s.get('status') in ('completed', 'dead', 'error', 'loop_detected')),
+                                current=sum(1 for s in stream_statuses.values() if s.get('status') in ('completed', 'dead', 'error', 'loop_detected', 'blank')),
                                 total=total_streams,
                                 status='analyzing',
                                 step='Analyzing streams with account limits',
@@ -1463,7 +1473,11 @@ class StreamCheckerService:
                         retries=analysis_params.get('retries', 1),
                         retry_delay=analysis_params.get('retry_delay', 10),
                         user_agent=analysis_params.get('user_agent', 'VLC/3.0.14'),
-                        stream_startup_buffer=analysis_params.get('stream_startup_buffer', 10)
+                        stream_startup_buffer=analysis_params.get('stream_startup_buffer', 10),
+                        blank_check_enabled=blank_check_enabled,
+                        blank_check_min_duration=analysis_params.get('blank_check_min_duration', 2.0),
+                        blank_check_pixel_threshold=analysis_params.get('blank_check_pixel_threshold', 0.10),
+                        blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80)
                     )
                 finally:
                     _heartbeat_stop.set()
@@ -1490,6 +1504,8 @@ class StreamCheckerService:
                     stream_url = analyzed.get('stream_url', '')
                     stream_name = analyzed.get('stream_name', 'Unknown')
                     was_dead = self.dead_streams_tracker.is_dead(stream_url)
+                    if is_dead:
+                        analyzed['dead_reason'] = dead_reason
                     
                     if is_dead and not was_dead:
                         if self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, channel_id, reason=dead_reason):
@@ -1558,6 +1574,10 @@ class StreamCheckerService:
                             'video_codec': stream_stats.get('video_codec', 'N/A'),
                             'audio_codec': stream_stats.get('audio_codec', 'N/A'),
                             'hdr_format': stream_stats.get('hdr_format'),
+                            'blank_probe_ran': stream_stats.get('blank_probe_ran', False),
+                            'blank_detected': stream_stats.get('blank_detected', False),
+                            'blank_duration_secs': stream_stats.get('blank_duration_secs'),
+                            'blank_ratio': stream_stats.get('blank_ratio'),
                             'status': 'cached',
                             'channel_id': channel_id,
                             'channel_name': channel_name,
@@ -1744,7 +1764,7 @@ class StreamCheckerService:
                     
                     # Mark dead streams as "dead" instead of showing score:0
                     if is_dead:
-                        stream_stat['status'] = 'dead'
+                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') == 'blank' else 'dead'
                     elif is_revived:
                         stream_stat['status'] = 'revived'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
@@ -1756,6 +1776,11 @@ class StreamCheckerService:
                         stream_stat['loop_probe_ran']      = True
                         stream_stat['loop_detected']       = analyzed.get('loop_detected')
                         stream_stat['loop_duration_secs']  = analyzed.get('loop_duration_secs')
+                    if analyzed.get('blank_probe_ran'):
+                        stream_stat['blank_probe_ran']     = True
+                        stream_stat['blank_detected']      = analyzed.get('blank_detected')
+                        stream_stat['blank_duration_secs'] = analyzed.get('blank_duration_secs')
+                        stream_stat['blank_ratio']         = analyzed.get('blank_ratio')
 
                     # Clean up N/A values for cleaner JSON
                     cleaned_stat = {k: v for k, v in stream_stat.items() if v not in [None]}
@@ -1901,6 +1926,7 @@ class StreamCheckerService:
         allow_revive = True
         grace_period = False
         loop_check_enabled = False
+        blank_check_enabled = False
         loop_penalty = 0.0
         priority_m3u_ids = []
         priority_mode = 'absolute'
@@ -1938,6 +1964,7 @@ class StreamCheckerService:
                 priority_mode = profile_stream_checking.get('m3u_priority_mode', 'absolute')
                 grace_period = profile_stream_checking.get('grace_period', False)
                 loop_check_enabled = profile_stream_checking.get('loop_check_enabled', False)
+                blank_check_enabled = profile_stream_checking.get('blank_check_enabled', False)
                 profile_remove_dead_streams = profile_stream_checking.get('remove_dead_streams')
                 if isinstance(profile_remove_dead_streams, bool):
                     dead_stream_removal_enabled = profile_remove_dead_streams
@@ -2175,7 +2202,11 @@ class StreamCheckerService:
                     retries=analysis_params.get('retries', 1),
                     retry_delay=analysis_params.get('retry_delay', 10),
                     user_agent=analysis_params.get('user_agent', 'VLC/3.0.14'),
-                    stream_startup_buffer=analysis_params.get('stream_startup_buffer', 10)
+                    stream_startup_buffer=analysis_params.get('stream_startup_buffer', 10),
+                    blank_check_enabled=blank_check_enabled,
+                    blank_check_min_duration=analysis_params.get('blank_check_min_duration', 2.0),
+                    blank_check_pixel_threshold=analysis_params.get('blank_check_pixel_threshold', 0.10),
+                    blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80)
                 )
                 
                 # Update stream stats on dispatcharr with ffmpeg-extracted data
@@ -2186,6 +2217,8 @@ class StreamCheckerService:
                 stream_url = stream.get('url', '')
                 stream_name = stream.get('name', 'Unknown')
                 was_dead = self.dead_streams_tracker.is_dead(stream_url)
+                if is_dead:
+                    analyzed['dead_reason'] = dead_reason
                 
                 if is_dead and not was_dead:
                     # Mark as dead in tracker
@@ -2222,7 +2255,7 @@ class StreamCheckerService:
                         stream_statuses[stream['id']]['status'] = 'error'
                         stream_statuses[stream['id']]['score'] = 0.0
                     elif is_dead:
-                        stream_statuses[stream['id']]['status'] = dead_reason if dead_reason == 'low_quality' else 'dead'
+                        stream_statuses[stream['id']]['status'] = dead_reason if dead_reason in ('low_quality', 'blank') else 'dead'
                         stream_statuses[stream['id']]['score'] = 0.0
                     else:
                         stream_statuses[stream['id']]['status'] = 'completed'
@@ -2265,6 +2298,10 @@ class StreamCheckerService:
                         'audio_codec': stream_stats.get('audio_codec', 'N/A'),
                         'hdr_format': stream_stats.get('hdr_format'),
                         'bitrate_kbps': stream_stats.get('ffmpeg_output_bitrate', 0),
+                        'blank_probe_ran': stream_stats.get('blank_probe_ran', False),
+                        'blank_detected': stream_stats.get('blank_detected', False),
+                        'blank_duration_secs': stream_stats.get('blank_duration_secs'),
+                        'blank_ratio': stream_stats.get('blank_ratio'),
                         'status': 'OK'  # Assume OK for previously checked streams
                     }
                     
@@ -2333,7 +2370,11 @@ class StreamCheckerService:
                         retries=analysis_params.get('retries', 1),
                         retry_delay=analysis_params.get('retry_delay', 10),
                         user_agent=analysis_params.get('user_agent', 'VLC/3.0.14'),
-                        stream_startup_buffer=analysis_params.get('stream_startup_buffer', 10)
+                        stream_startup_buffer=analysis_params.get('stream_startup_buffer', 10),
+                        blank_check_enabled=blank_check_enabled,
+                        blank_check_min_duration=analysis_params.get('blank_check_min_duration', 2.0),
+                        blank_check_pixel_threshold=analysis_params.get('blank_check_pixel_threshold', 0.10),
+                        blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80)
                     )
                     self._update_stream_stats(analyzed)
                     score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode)
@@ -2508,7 +2549,7 @@ class StreamCheckerService:
                     }
 
                     if is_dead:
-                        stream_stat['status'] = 'dead'
+                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') == 'blank' else 'dead'
                     elif is_revived:
                         stream_stat['status'] = 'revived'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
@@ -2522,6 +2563,11 @@ class StreamCheckerService:
                         stream_stat['loop_probe_ran']     = True
                         stream_stat['loop_detected']      = analyzed.get('loop_detected')
                         stream_stat['loop_duration_secs'] = analyzed.get('loop_duration_secs')
+                    if analyzed.get('blank_probe_ran'):
+                        stream_stat['blank_probe_ran']     = True
+                        stream_stat['blank_detected']      = analyzed.get('blank_detected')
+                        stream_stat['blank_duration_secs'] = analyzed.get('blank_duration_secs')
+                        stream_stat['blank_ratio']         = analyzed.get('blank_ratio')
 
                     stream_stat = {k: v for k, v in stream_stat.items() if v not in [None, "N/A"]}
                     stream_stats.append(stream_stat)
@@ -3789,7 +3835,9 @@ class StreamCheckerService:
                     'resolution': stream_stats.get('resolution', '0x0'),
                     'fps': stream_stats.get('source_fps', 0),
                     'video_codec': stream_stats.get('video_codec', 'N/A'),
-                    'bitrate_kbps': stream_stats.get('ffmpeg_output_bitrate', 0)
+                    'bitrate_kbps': stream_stats.get('ffmpeg_output_bitrate', 0),
+                    'blank_probe_ran': stream_stats.get('blank_probe_ran', False),
+                    'blank_detected': stream_stats.get('blank_detected', False)
                 }
                 
                 # Calculate score — prefer the in-memory score from the check run
@@ -3836,6 +3884,16 @@ class StreamCheckerService:
                     stream_detail['loop_probe_ran']     = True
                     stream_detail['loop_detected']      = stream_stats.get('loop_detected')
                     stream_detail['loop_duration_secs'] = stream_stats.get('loop_duration_secs')
+                if analyzed and analyzed.get('blank_probe_ran'):
+                    stream_detail['blank_probe_ran']     = True
+                    stream_detail['blank_detected']      = analyzed.get('blank_detected')
+                    stream_detail['blank_duration_secs'] = analyzed.get('blank_duration_secs')
+                    stream_detail['blank_ratio']         = analyzed.get('blank_ratio')
+                elif stream_stats.get('blank_probe_ran'):
+                    stream_detail['blank_probe_ran']     = True
+                    stream_detail['blank_detected']      = stream_stats.get('blank_detected')
+                    stream_detail['blank_duration_secs'] = stream_stats.get('blank_duration_secs')
+                    stream_detail['blank_ratio']         = stream_stats.get('blank_ratio')
 
                 check_stats['stream_details'].append(stream_detail)
             

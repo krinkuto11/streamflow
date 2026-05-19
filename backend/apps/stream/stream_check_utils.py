@@ -49,7 +49,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, List
 
 from PIL import Image
 from apps.core.logging_config import setup_logging
@@ -76,6 +76,11 @@ MAX_DEBUG_LINES_TO_LOG = 10  # Maximum number of debug lines to log from ffmpeg 
 # has flowed.  Values at or below this threshold are startup artifacts and
 # are ignored so they cannot be mistaken for a real (very low) bitrate.
 MIN_VALID_PROGRESS_BITRATE = 10.0  # kbps
+
+BLACK_START_RE = re.compile(r'black_start:(?P<start>-?[0-9]+(?:\.[0-9]+)?)')
+BLACK_END_RE = re.compile(r'black_end:(?P<end>-?[0-9]+(?:\.[0-9]+)?)')
+BLACK_DURATION_RE = re.compile(r'black_duration:(?P<duration>-?[0-9]+(?:\.[0-9]+)?)')
+FFMPEG_TIME_RE = re.compile(r'time=(?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+(?:\.\d+)?)')
 
 # FourCC to common codec name mapping
 FOURCC_TO_CODEC = {
@@ -135,6 +140,106 @@ def _log_ffmpeg_errors(output: str, logger: logging.Logger, error_patterns: list
         for line in output.splitlines()[-MAX_DEBUG_LINES_TO_LOG:]:
             if line.strip():
                 logger.debug(f"     {line.strip()}")
+
+
+def _parse_ffmpeg_progress_time(line: str) -> Optional[float]:
+    """Parse ffmpeg progress time=HH:MM:SS.xx into seconds."""
+    match = FFMPEG_TIME_RE.search(line)
+    if not match:
+        return None
+
+    try:
+        return (
+            int(match.group('hours')) * 3600
+            + int(match.group('minutes')) * 60
+            + float(match.group('seconds'))
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_blank_detection(
+    output: str,
+    duration: int,
+    blank_ratio_threshold: float = 0.80,
+) -> Dict[str, Any]:
+    """Parse ffmpeg blackdetect output into blank-screen metrics."""
+    segments: List[Dict[str, float]] = []
+    pending_start: Optional[float] = None
+    last_media_time: float = 0.0
+
+    for line in output.splitlines():
+        progress_time = _parse_ffmpeg_progress_time(line)
+        if progress_time is not None:
+            last_media_time = max(last_media_time, progress_time)
+
+        start_match = BLACK_START_RE.search(line)
+        end_match = BLACK_END_RE.search(line)
+        duration_match = BLACK_DURATION_RE.search(line)
+
+        start = None
+        if start_match:
+            try:
+                start = max(0.0, float(start_match.group('start')))
+                pending_start = start
+            except (TypeError, ValueError):
+                start = None
+
+        if not end_match:
+            continue
+
+        try:
+            end = max(0.0, float(end_match.group('end')))
+        except (TypeError, ValueError):
+            pending_start = None
+            continue
+
+        segment_start = start if start is not None else pending_start
+        segment_duration = None
+        if duration_match:
+            try:
+                segment_duration = max(0.0, float(duration_match.group('duration')))
+            except (TypeError, ValueError):
+                segment_duration = None
+
+        if segment_start is None and segment_duration is not None:
+            segment_start = max(0.0, end - segment_duration)
+        elif segment_start is None:
+            segment_start = 0.0
+
+        if segment_duration is None:
+            segment_duration = max(0.0, end - segment_start)
+
+        segments.append({
+            'start': round(segment_start, 3),
+            'end': round(end, 3),
+            'duration': round(segment_duration, 3),
+        })
+        pending_start = None
+
+    if pending_start is not None:
+        observed_end = max(float(duration or 0), last_media_time, pending_start)
+        segments.append({
+            'start': round(pending_start, 3),
+            'end': round(observed_end, 3),
+            'duration': round(max(0.0, observed_end - pending_start), 3),
+        })
+
+    blank_duration = sum(segment.get('duration', 0.0) for segment in segments)
+    probe_duration = float(duration or 0)
+    if probe_duration > 0:
+        blank_duration = min(blank_duration, probe_duration)
+        blank_ratio = min(1.0, blank_duration / probe_duration)
+    else:
+        blank_ratio = 0.0
+
+    return {
+        'blank_probe_ran': True,
+        'blank_detected': blank_ratio >= blank_ratio_threshold,
+        'blank_duration_secs': round(blank_duration, 3),
+        'blank_ratio': round(blank_ratio, 4),
+        'blank_segments': segments,
+    }
 
 
 def _extract_codec_from_line(line: str, codec_type: str) -> Optional[str]:
@@ -406,7 +511,17 @@ def get_stream_info(url: str, timeout: int = 30, user_agent: str = 'VLC/3.0.14')
         return None, None
 
 
-def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30, user_agent: str = 'VLC/3.0.14', stream_startup_buffer: int = 10) -> Dict[str, Any]:
+def get_stream_info_and_bitrate(
+    url: str,
+    duration: int = 30,
+    timeout: int = 30,
+    user_agent: str = 'VLC/3.0.14',
+    stream_startup_buffer: int = 10,
+    blank_check_enabled: bool = False,
+    blank_check_min_duration: float = 2.0,
+    blank_check_pixel_threshold: float = 0.10,
+    blank_check_ratio_threshold: float = 0.80,
+) -> Dict[str, Any]:
     """
     Get complete stream information using ffmpeg in a single call.
 
@@ -424,12 +539,17 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
         timeout: Base timeout in seconds (actual timeout includes duration + overhead)
         user_agent: User agent string to use for HTTP requests
         stream_startup_buffer: Buffer in seconds for stream startup (default: 10s)
+        blank_check_enabled: Run ffmpeg blackdetect on the same input connection
+        blank_check_min_duration: Minimum continuous black duration in seconds
+        blank_check_pixel_threshold: blackdetect pixel threshold
+        blank_check_ratio_threshold: Probe-window ratio required to flag blank
 
     Returns:
         Dictionary containing:
         - video_codec, audio_codec, resolution, fps, bitrate_kbps
         - hdr_format, pixel_format, audio_sample_rate, audio_channels
         - channel_layout, audio_bitrate, status, elapsed_time
+        - blank_probe_ran, blank_detected, blank_duration_secs, blank_ratio
     """
     # Validate and sanitize URL to prevent command injection
     if not url or not isinstance(url, str):
@@ -439,7 +559,10 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
             'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,
             'pixel_format': None, 'audio_sample_rate': None,
             'audio_channels': None, 'channel_layout': None,
-            'audio_bitrate': None, 'status': 'Error', 'elapsed_time': 0
+            'audio_bitrate': None, 'status': 'Error', 'elapsed_time': 0,
+            'blank_probe_ran': False, 'blank_detected': False,
+            'blank_duration_secs': None, 'blank_ratio': None,
+            'blank_segments': []
         }
 
     url_lower = url.lower()
@@ -451,7 +574,10 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
             'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,
             'pixel_format': None, 'audio_sample_rate': None,
             'audio_channels': None, 'channel_layout': None,
-            'audio_bitrate': None, 'status': 'Error', 'elapsed_time': 0
+            'audio_bitrate': None, 'status': 'Error', 'elapsed_time': 0,
+            'blank_probe_ran': False, 'blank_detected': False,
+            'blank_duration_secs': None, 'blank_ratio': None,
+            'blank_segments': []
         }
 
     logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url[:50]}...")
@@ -484,12 +610,26 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
         '-c', 'copy', '-f', 'mpegts', 'pipe:1'
     ]
 
+    if blank_check_enabled:
+        command += [
+            '-map', '0:v:0?', '-t', str(duration),
+            '-an', '-sn',
+            '-vf', (
+                f'blackdetect=d={float(blank_check_min_duration):g}:'
+                f'pix_th={float(blank_check_pixel_threshold):g}'
+            ),
+            '-f', 'null', os.devnull,
+        ]
+
     result_data = {
         'video_codec': 'N/A', 'audio_codec': 'N/A', 'resolution': '0x0',
         'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,
         'pixel_format': None, 'audio_sample_rate': None,
         'audio_channels': None, 'channel_layout': None,
-        'audio_bitrate': None, 'status': 'OK', 'elapsed_time': 0
+        'audio_bitrate': None, 'status': 'OK', 'elapsed_time': 0,
+        'blank_probe_ran': False, 'blank_detected': False,
+        'blank_duration_secs': None, 'blank_ratio': None,
+        'blank_segments': []
     }
 
     # Total subprocess timeout: analysis window + startup headroom
@@ -508,6 +648,18 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
         result_data['elapsed_time'] = elapsed
 
         output = result.stderr
+        if blank_check_enabled:
+            result_data.update(_parse_blank_detection(
+                output,
+                duration=duration,
+                blank_ratio_threshold=float(blank_check_ratio_threshold),
+            ))
+            if result_data.get('blank_detected'):
+                logger.warning(
+                    "  [blank-detect] Blank screen detected "
+                    f"({result_data['blank_duration_secs']:.1f}s/"
+                    f"{duration}s, ratio={result_data['blank_ratio']:.2f})"
+                )
         progress_bitrate = None
         last_stats_line = None  # keeps updating; final line is the most stable average
 
@@ -1038,7 +1190,11 @@ def analyze_stream(
     retries: int = 1,
     retry_delay: int = 10,
     user_agent: str = 'VLC/3.0.14',
-    stream_startup_buffer: int = 10
+    stream_startup_buffer: int = 10,
+    blank_check_enabled: bool = False,
+    blank_check_min_duration: float = 2.0,
+    blank_check_pixel_threshold: float = 0.10,
+    blank_check_ratio_threshold: float = 0.80,
 ) -> Dict[str, Any]:
     """
     Perform complete stream analysis including codec, resolution, FPS, bitrate, and audio.
@@ -1058,6 +1214,10 @@ def analyze_stream(
         retry_delay: Delay in seconds between retries
         user_agent: User agent string to use for HTTP requests
         stream_startup_buffer: Buffer in seconds for stream startup (default: 10s)
+        blank_check_enabled: Run blank-screen detection in the same ffmpeg process
+        blank_check_min_duration: Minimum continuous black duration in seconds
+        blank_check_pixel_threshold: blackdetect pixel threshold
+        blank_check_ratio_threshold: Probe-window ratio required to flag blank
 
     Returns:
         Dictionary containing analysis results with keys:
@@ -1090,6 +1250,11 @@ def analyze_stream(
         'status': 'Error',
         'elapsed_time': 0,
         'ffmpeg_duration': ffmpeg_duration,
+        'blank_probe_ran': False,
+        'blank_detected': False,
+        'blank_duration_secs': None,
+        'blank_ratio': None,
+        'blank_segments': [],
     }
 
     try:
@@ -1111,7 +1276,11 @@ def analyze_stream(
                     duration=ffmpeg_duration,
                     timeout=timeout,
                     user_agent=user_agent,
-                    stream_startup_buffer=stream_startup_buffer
+                    stream_startup_buffer=stream_startup_buffer,
+                    blank_check_enabled=blank_check_enabled,
+                    blank_check_min_duration=blank_check_min_duration,
+                    blank_check_pixel_threshold=blank_check_pixel_threshold,
+                    blank_check_ratio_threshold=blank_check_ratio_threshold
                 )
 
                 result = {
@@ -1133,6 +1302,11 @@ def analyze_stream(
                     'status': result_data['status'],
                     'elapsed_time': result_data.get('elapsed_time', 0),
                     'ffmpeg_duration': ffmpeg_duration,
+                    'blank_probe_ran': result_data.get('blank_probe_ran', False),
+                    'blank_detected': result_data.get('blank_detected', False),
+                    'blank_duration_secs': result_data.get('blank_duration_secs'),
+                    'blank_ratio': result_data.get('blank_ratio'),
+                    'blank_segments': result_data.get('blank_segments', []),
                 }
 
                 if logger.isEnabledFor(logging.DEBUG):

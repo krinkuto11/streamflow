@@ -54,6 +54,7 @@ Profiles live in `automation_config.json` under `profiles`. A profile has three 
   "min_fps": 0,
   "min_bitrate": 0,
   "require_hdr": "any",
+  "blank_check_enabled": false,
   "m3u_priority": [],
   "m3u_priority_mode": "absolute",
   "grace_period": false
@@ -69,6 +70,7 @@ Profiles live in `automation_config.json` under `profiles`. A profile has three 
 | `min_fps`           | Discard streams below this FPS                                        |
 | `min_bitrate`       | Discard streams below this bitrate (kbps)                             |
 | `require_hdr`       | `"any"` / `"hdr"` / `"sdr"`                                           |
+| `blank_check_enabled` | Run blank-screen detection during the quality probe                 |
 | `m3u_priority`      | Ordered list of M3U account IDs — higher index = lower priority       |
 | `m3u_priority_mode` | `"absolute"` (strict ordering) or `"equal"` (quality score only)      |
 | `grace_period`      | If `true`, skip recently-checked streams within the grace window      |

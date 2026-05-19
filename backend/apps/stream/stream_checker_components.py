@@ -40,6 +40,9 @@ class StreamCheckConfig:
             'retries': 1,               # retry attempts
             'retry_delay': 10,          # seconds between retries
             'max_loop_duration': 120,   # maximum loop period to detect (seconds); probe runs for 3× this value
+            'blank_check_min_duration': 2.0,  # seconds of continuous black before blackdetect logs a segment
+            'blank_check_pixel_threshold': 0.10,  # blackdetect pix_th threshold
+            'blank_check_ratio_threshold': 0.80,  # probe-window ratio that marks a stream blank
             'user_agent': 'VLC/3.0.14'  # user agent for ffmpeg/ffprobe
         },
         'scoring': {
