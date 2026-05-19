@@ -129,15 +129,16 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
                 "blank_segments": [{"start": 0.0, "end": 30.0, "duration": 30.0}],
             }
 
-            result = analyze_stream(
-                stream_url="http://example.com/test.m3u8",
-                stream_id=42,
-                stream_name="Blank Test",
-                blank_check_enabled=True,
-                blank_check_min_duration=3.0,
-                blank_check_pixel_threshold=0.08,
-                blank_check_ratio_threshold=0.75,
-            )
+            with self.assertLogs(stream_check_utils.logger, level="INFO") as logs:
+                result = analyze_stream(
+                    stream_url="http://example.com/test.m3u8",
+                    stream_id=42,
+                    stream_name="Blank Test",
+                    blank_check_enabled=True,
+                    blank_check_min_duration=3.0,
+                    blank_check_pixel_threshold=0.08,
+                    blank_check_ratio_threshold=0.75,
+                )
 
         kwargs = mock_probe.call_args.kwargs
         self.assertTrue(kwargs["blank_check_enabled"])
@@ -148,6 +149,10 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
         self.assertTrue(result["blank_detected"])
         self.assertEqual(result["blank_duration_secs"], 30.0)
         self.assertEqual(result["blank_ratio"], 1.0)
+        self.assertTrue(any(
+            "[blank-detect] Blank Test (ID: 42)" in message and "ratio=1.000" in message
+            for message in logs.output
+        ))
 
     def test_blank_detection_marks_stream_dead(self):
         stream_data = {

@@ -604,6 +604,48 @@ class StreamCheckerService:
             Dictionary with avg_resolution, avg_bitrate, and avg_fps
         """
         return calculate_channel_averages(analyzed_streams, dead_stream_ids)
+
+    def _log_blank_detection_summary(
+        self,
+        channel_id: int,
+        channel_name: str,
+        analyzed_streams: List[Dict],
+    ) -> None:
+        """Log a URL-free blank-detection summary for post-run audits."""
+        probed_streams = [
+            stream for stream in analyzed_streams
+            if stream.get('blank_probe_ran') and stream.get('status') != 'cached'
+        ]
+        if not probed_streams:
+            return
+
+        blank_streams = [stream for stream in probed_streams if stream.get('blank_detected')]
+        clean_count = len(probed_streams) - len(blank_streams)
+
+        def _metric(stream: Dict, key: str) -> float:
+            try:
+                return float(stream.get(key) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        max_ratio_stream = max(probed_streams, key=lambda stream: _metric(stream, 'blank_ratio'))
+        logger.info(
+            f"[blank-detect] Channel {channel_name} (ID: {channel_id}): "
+            f"probed={len(probed_streams)}, clean={clean_count}, "
+            f"blank={len(blank_streams)}, "
+            f"max_ratio={_metric(max_ratio_stream, 'blank_ratio'):.3f}, "
+            f"max_blank_duration={_metric(max_ratio_stream, 'blank_duration_secs'):.1f}s"
+        )
+
+        for stream in blank_streams[:10]:
+            logger.warning(
+                f"[blank-detect] Blank candidate: channel_id={channel_id}, "
+                f"stream_id={stream.get('stream_id')}, "
+                f"name={stream.get('stream_name', 'Unknown')!r}, "
+                f"duration={_metric(stream, 'blank_duration_secs'):.1f}s, "
+                f"ratio={_metric(stream, 'blank_ratio'):.3f}, "
+                f"segments={len(stream.get('blank_segments') or [])}"
+            )
     
     def _get_m3u_account_name(self, stream_id: int, udi=None) -> Optional[str]:
         """Get the M3U account name for a stream.
@@ -1595,6 +1637,8 @@ class StreamCheckerService:
 
                 logger.info(f"Completed smart parallel analysis of {len(results)} streams with account-aware limits")
 
+            self._log_blank_detection_summary(channel_id, channel_name, analyzed_streams)
+
             # Run loop probes on eligible streams (top 25% scoring >= 0.5).
             # Called after all streams are scored and analyzed_streams is fully
             # assembled so the complete score distribution is available.
@@ -2380,6 +2424,8 @@ class StreamCheckerService:
                     score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode)
                     analyzed['score'] = score
                     analyzed_streams.append(analyzed)
+
+            self._log_blank_detection_summary(channel_id, channel_name, analyzed_streams)
 
             # Run loop probes on eligible streams — all streams scored, full
             # distribution known for top-percentile calculation.

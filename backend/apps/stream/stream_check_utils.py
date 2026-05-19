@@ -1309,6 +1309,18 @@ def analyze_stream(
                     'blank_segments': result_data.get('blank_segments', []),
                 }
 
+                if result.get('blank_probe_ran'):
+                    blank_duration = float(result.get('blank_duration_secs') or 0.0)
+                    blank_ratio = float(result.get('blank_ratio') or 0.0)
+                    blank_segments_count = len(result.get('blank_segments') or [])
+                    logger.info(
+                        f"  [blank-detect] {stream_name} (ID: {stream_id}): "
+                        f"detected={bool(result.get('blank_detected'))}, "
+                        f"blank_duration={blank_duration:.1f}s, "
+                        f"ratio={blank_ratio:.3f}, "
+                        f"segments={blank_segments_count}"
+                    )
+
                 if logger.isEnabledFor(logging.DEBUG):
                     if result['video_codec'] != 'N/A' or result['resolution'] != '0x0':
                         logger.info(f"    Video: {result['video_codec']}, {result['resolution']}, {result['fps']} FPS")
