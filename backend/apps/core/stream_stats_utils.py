@@ -418,7 +418,8 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     
     A stream is dead if:
     - It exited early on all attempts without completing the probe window (Reason: 'unstable')
-    - The quality probe identified a mostly blank video window (Reason: 'blank')
+    - The quality probe identified a mostly blank video window and blank-as-dead
+      handling is enabled (Reason: 'blank')
     - Resolution is '0x0' or contains 0 in width or height (Reason: 'offline')
     - Bitrate is 0 or None (Reason: 'offline')
     - Falls below configured minimum thresholds (Reason: 'low_quality')
@@ -430,6 +431,8 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
                 - min_resolution_height: Minimum height in pixels (default: 0 = no check)
                 - min_bitrate_kbps: Minimum bitrate in kbps (default: 0 = no check)
                 - min_score: Minimum score 0-100 (default: 0 = no check)
+                - treat_blank_as_dead: Whether detected blank screens count as dead
+                  (default: True for backwards compatibility)
         
     Returns:
         Tuple of (bool, str): (is_dead, reason)
@@ -469,7 +472,8 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
 
     blank_probe_ran = stream_data.get('blank_probe_ran', stream_stats.get('blank_probe_ran'))
     blank_detected = stream_data.get('blank_detected', stream_stats.get('blank_detected'))
-    if _coerce_bool(blank_probe_ran) and _coerce_bool(blank_detected):
+    treat_blank_as_dead = True if config is None else config.get('treat_blank_as_dead', True)
+    if _coerce_bool(treat_blank_as_dead) and _coerce_bool(blank_probe_ran) and _coerce_bool(blank_detected):
         return True, 'blank'
 
     # Extract normalized stats

@@ -40,10 +40,16 @@ def _normalize_profile_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     normalized = dict(data)
     normalized_stream_checking = dict(stream_checking)
 
-    if "remove_dead_streams" in normalized_stream_checking:
-        normalized_stream_checking["remove_dead_streams"] = _parse_bool(
-            normalized_stream_checking["remove_dead_streams"],
-            field_name="stream_checking.remove_dead_streams",
+    for bool_field in (
+        "remove_dead_streams",
+        "blank_check_enabled",
+        "treat_blank_as_dead",
+    ):
+        if bool_field not in normalized_stream_checking:
+            continue
+        normalized_stream_checking[bool_field] = _parse_bool(
+            normalized_stream_checking[bool_field],
+            field_name=f"stream_checking.{bool_field}",
         )
 
     normalized["stream_checking"] = normalized_stream_checking

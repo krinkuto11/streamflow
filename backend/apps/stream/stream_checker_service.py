@@ -475,6 +475,8 @@ class StreamCheckerService:
         if min_fps and min_fps > 0:
             config['min_fps'] = min_fps
 
+        config['treat_blank_as_dead'] = stream_checking.get('treat_blank_as_dead', True)
+
         return config
 
     @staticmethod

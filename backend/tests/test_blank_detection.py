@@ -164,6 +164,19 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
 
         self.assertEqual(is_stream_dead(stream_data), (True, "blank"))
 
+    def test_blank_detection_can_be_kept_out_of_dead_classification(self):
+        stream_data = {
+            "resolution": "1920x1080",
+            "bitrate_kbps": 3333.3,
+            "blank_probe_ran": True,
+            "blank_detected": True,
+        }
+
+        self.assertEqual(
+            is_stream_dead(stream_data, {"treat_blank_as_dead": False}),
+            (False, "none"),
+        )
+
     def test_persisted_blank_detection_marks_stream_dead(self):
         stream_data = {
             "stream_stats": {
