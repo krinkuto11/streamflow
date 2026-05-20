@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.core.stream_stats_utils import is_stream_dead
 from apps.stream import stream_check_utils
+from apps.stream.stream_checker_service import StreamCheckerService
 from apps.stream.stream_check_utils import (
     _parse_blank_detection,
     analyze_stream,
@@ -149,10 +150,14 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
         self.assertTrue(result["blank_detected"])
         self.assertEqual(result["blank_duration_secs"], 30.0)
         self.assertEqual(result["blank_ratio"], 1.0)
-        self.assertTrue(any(
-            "[blank-detect] Blank Test (ID: 42)" in message and "ratio=1.000" in message
-            for message in logs.output
-        ))
+        blank_log = "\n".join(
+            message for message in logs.output if "[blank-detect]" in message
+        )
+        self.assertIn("[blank-detect] stream_ref=", blank_log)
+        self.assertIn("detected=True", blank_log)
+        self.assertIn("ratio=1.000", blank_log)
+        self.assertNotIn("Blank Test", blank_log)
+        self.assertNotIn("ID: 42", blank_log)
 
     def test_blank_detection_marks_stream_dead(self):
         stream_data = {
@@ -188,6 +193,52 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
         }
 
         self.assertEqual(is_stream_dead(stream_data), (True, "blank"))
+
+    def test_blank_detection_audit_logs_all_candidates_without_names(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        streams = [
+            {
+                "stream_id": 1000 + index,
+                "stream_name": f"Sensitive Provider {index}",
+                "blank_probe_ran": True,
+                "blank_detected": True,
+                "blank_duration_secs": 30.0,
+                "blank_ratio": 1.0,
+                "blank_segments": [{"start": 0.0, "end": 30.0, "duration": 30.0}],
+                "dead_reason": "blank",
+            }
+            for index in range(12)
+        ]
+        streams.append({
+            "stream_id": 2000,
+            "stream_name": "Sensitive Clean Provider",
+            "blank_probe_ran": True,
+            "blank_detected": False,
+            "blank_duration_secs": 0.0,
+            "blank_ratio": 0.0,
+            "blank_segments": [],
+        })
+
+        with self.assertLogs("apps.stream.stream_checker_service", level="INFO") as logs:
+            service._log_blank_detection_summary(
+                777,
+                "Sensitive Channel",
+                streams,
+                dead_stream_ids={stream["stream_id"] for stream in streams[:12]},
+                dead_stream_removal_enabled=True,
+            )
+
+        audit_log = "\n".join(logs.output)
+        self.assertIn("blank=12", audit_log)
+        self.assertEqual(audit_log.count("Blank candidate"), 12)
+        self.assertIn("channel_ref=", audit_log)
+        self.assertIn("stream_ref=", audit_log)
+        self.assertIn("marked_dead=True", audit_log)
+        self.assertIn("reason=blank", audit_log)
+        self.assertIn("action=remove", audit_log)
+        self.assertNotIn("Sensitive", audit_log)
+        self.assertNotIn("stream_id=", audit_log)
+        self.assertNotIn("channel_id=", audit_log)
 
 
 if __name__ == "__main__":

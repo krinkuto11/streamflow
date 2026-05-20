@@ -19,6 +19,7 @@ updates and maintaining a queue of channels that need checking. It
 integrates with the stream_check_utils.py module for stream analysis.
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -85,6 +86,13 @@ logger = setup_logging(__name__)
 
 # Configuration directory
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
+
+
+def _audit_ref(kind: str, value: Any) -> str:
+    if value is None:
+        return f"{kind}-unknown"
+    digest = hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()[:12]
+    return f"{kind}-{digest}"
 
 
 from apps.stream.stream_checker_components import (
@@ -610,8 +618,10 @@ class StreamCheckerService:
     def _log_blank_detection_summary(
         self,
         channel_id: int,
-        channel_name: str,
+        _channel_name: str,
         analyzed_streams: List[Dict],
+        dead_stream_ids: Optional[Set[int]] = None,
+        dead_stream_removal_enabled: Optional[bool] = None,
     ) -> None:
         """Log a URL-free blank-detection summary for post-run audits."""
         probed_streams = [
@@ -631,22 +641,31 @@ class StreamCheckerService:
                 return 0.0
 
         max_ratio_stream = max(probed_streams, key=lambda stream: _metric(stream, 'blank_ratio'))
+        channel_ref = _audit_ref('channel', channel_id)
         logger.info(
-            f"[blank-detect] Channel {channel_name} (ID: {channel_id}): "
+            f"[blank-detect] Channel summary: channel_ref={channel_ref}, "
             f"probed={len(probed_streams)}, clean={clean_count}, "
             f"blank={len(blank_streams)}, "
             f"max_ratio={_metric(max_ratio_stream, 'blank_ratio'):.3f}, "
             f"max_blank_duration={_metric(max_ratio_stream, 'blank_duration_secs'):.1f}s"
         )
 
-        for stream in blank_streams[:10]:
+        dead_stream_ids = dead_stream_ids or set()
+        removal_enabled = bool(dead_stream_removal_enabled)
+
+        for stream in blank_streams:
+            stream_id = stream.get('stream_id')
+            marked_dead = stream_id in dead_stream_ids
+            dead_reason = stream.get('dead_reason') or ('blank' if marked_dead else 'none')
+            action = 'remove' if marked_dead and removal_enabled else 'retain'
             logger.warning(
-                f"[blank-detect] Blank candidate: channel_id={channel_id}, "
-                f"stream_id={stream.get('stream_id')}, "
-                f"name={stream.get('stream_name', 'Unknown')!r}, "
+                f"[blank-detect] Blank candidate: channel_ref={channel_ref}, "
+                f"stream_ref={_audit_ref('stream', stream_id)}, "
                 f"duration={_metric(stream, 'blank_duration_secs'):.1f}s, "
                 f"ratio={_metric(stream, 'blank_ratio'):.3f}, "
-                f"segments={len(stream.get('blank_segments') or [])}"
+                f"segments={len(stream.get('blank_segments') or [])}, "
+                f"marked_dead={marked_dead}, reason={dead_reason}, "
+                f"removal_enabled={removal_enabled}, action={action}"
             )
     
     def _get_m3u_account_name(self, stream_id: int, udi=None) -> Optional[str]:
@@ -1554,7 +1573,15 @@ class StreamCheckerService:
                     if is_dead and not was_dead:
                         if self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, channel_id, reason=dead_reason):
                             dead_stream_ids.add(stream_id)
-                            logger.warning(f"Stream {stream_id} detected as DEAD: {stream_name} (reason={dead_reason})")
+                            if analyzed.get('blank_detected'):
+                                logger.warning(
+                                    f"[blank-detect] Stream marked dead: "
+                                    f"channel_ref={_audit_ref('channel', channel_id)}, "
+                                    f"stream_ref={_audit_ref('stream', stream_id)}, "
+                                    f"reason={dead_reason}"
+                                )
+                            else:
+                                logger.warning(f"Stream {stream_id} detected as DEAD: {stream_name} (reason={dead_reason})")
                         else:
                             logger.error(f"Failed to mark stream {stream_id} as dead in tracker")
                     elif not is_dead and was_dead:
@@ -1639,7 +1666,13 @@ class StreamCheckerService:
 
                 logger.info(f"Completed smart parallel analysis of {len(results)} streams with account-aware limits")
 
-            self._log_blank_detection_summary(channel_id, channel_name, analyzed_streams)
+            self._log_blank_detection_summary(
+                channel_id,
+                channel_name,
+                analyzed_streams,
+                dead_stream_ids=dead_stream_ids,
+                dead_stream_removal_enabled=dead_stream_removal_enabled,
+            )
 
             # Run loop probes on eligible streams (top 25% scoring >= 0.5).
             # Called after all streams are scored and analyzed_streams is fully
@@ -2270,7 +2303,15 @@ class StreamCheckerService:
                     # Mark as dead in tracker
                     if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id, reason=dead_reason):
                         dead_stream_ids.add(stream['id'])
-                        logger.warning(f"Stream {stream['id']} detected as DEAD: {stream_name} (reason={dead_reason})")
+                        if analyzed.get('blank_detected'):
+                            logger.warning(
+                                f"[blank-detect] Stream marked dead: "
+                                f"channel_ref={_audit_ref('channel', channel_id)}, "
+                                f"stream_ref={_audit_ref('stream', stream['id'])}, "
+                                f"reason={dead_reason}"
+                            )
+                        else:
+                            logger.warning(f"Stream {stream['id']} detected as DEAD: {stream_name} (reason={dead_reason})")
                     else:
                         logger.error(f"Failed to mark stream {stream['id']} as DEAD, will not remove from channel")
                 elif not is_dead and was_dead:
@@ -2427,7 +2468,13 @@ class StreamCheckerService:
                     analyzed['score'] = score
                     analyzed_streams.append(analyzed)
 
-            self._log_blank_detection_summary(channel_id, channel_name, analyzed_streams)
+            self._log_blank_detection_summary(
+                channel_id,
+                channel_name,
+                analyzed_streams,
+                dead_stream_ids=dead_stream_ids,
+                dead_stream_removal_enabled=dead_stream_removal_enabled,
+            )
 
             # Run loop probes on eligible streams — all streams scored, full
             # distribution known for top-percentile calculation.

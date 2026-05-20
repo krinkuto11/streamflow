@@ -39,6 +39,7 @@ stats line is produced the stream is considered unanalyzable — a missing
 bitrate is a meaningful signal that the stream is dead or unresponsive.
 """
 
+import hashlib
 import io
 import json
 import logging
@@ -55,6 +56,13 @@ from PIL import Image
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
+
+
+def _audit_ref(kind: str, value: Any) -> str:
+    if value is None:
+        return f"{kind}-unknown"
+    digest = hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()[:12]
+    return f"{kind}-{digest}"
 
 # ── Loop probe constants ──────────────────────────────────────────────────────
 # Hamming tolerance for one-shot probes is tighter than the live sidecar value
@@ -1313,8 +1321,9 @@ def analyze_stream(
                     blank_duration = float(result.get('blank_duration_secs') or 0.0)
                     blank_ratio = float(result.get('blank_ratio') or 0.0)
                     blank_segments_count = len(result.get('blank_segments') or [])
-                    logger.info(
-                        f"  [blank-detect] {stream_name} (ID: {stream_id}): "
+                    log_method = logger.warning if result.get('blank_detected') else logger.info
+                    log_method(
+                        f"  [blank-detect] stream_ref={_audit_ref('stream', stream_id)}: "
                         f"detected={bool(result.get('blank_detected'))}, "
                         f"blank_duration={blank_duration:.1f}s, "
                         f"ratio={blank_ratio:.3f}, "
