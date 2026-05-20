@@ -372,6 +372,35 @@ export default function AutomationSettings() {
                 />
               </div>
 
+              <Separator />
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="stream-fetch-page-size">Stream fetch page size</Label>
+                  <Input
+                    id="stream-fetch-page-size"
+                    type="number"
+                    min="100"
+                    max="10000"
+                    step="100"
+                    value={dispatcharrConfig?.stream_fetch_page_size || 1000}
+                    onChange={(e) => handleDispatcharrConfigChange('stream_fetch_page_size', parseInt(e.target.value) || 1000)}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="stream-fetch-max-workers">Stream fetch max workers</Label>
+                  <Input
+                    id="stream-fetch-max-workers"
+                    type="number"
+                    min="1"
+                    max="20"
+                    value={dispatcharrConfig?.stream_fetch_max_workers || 10}
+                    onChange={(e) => handleDispatcharrConfigChange('stream_fetch_max_workers', parseInt(e.target.value) || 10)}
+                  />
+                </div>
+              </div>
+
               <div className="flex items-center gap-2 pt-2">
                 <Button
                   onClick={handleTestConnection}

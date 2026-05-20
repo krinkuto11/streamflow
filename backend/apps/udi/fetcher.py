@@ -282,7 +282,7 @@ class UDIFetcher:
             logger.error(f"Error POSTing to {url}: {e}")
             return None
 
-    def _fetch_paginated(self, base_url: str, page_size: int = 1000) -> FetchResult:
+    def _fetch_paginated(self, base_url: str, page_size: int = 1000, max_workers: int = 10) -> FetchResult:
         """Fetch paginated data from an API endpoint.
 
         Page 1 is fetched synchronously to capture the total ``count``.  All
@@ -292,11 +292,23 @@ class UDIFetcher:
         Args:
             base_url:  The base URL for the endpoint (no query string).
             page_size: Number of items per page.
+            max_workers: Maximum number of concurrent page requests.
 
         Returns:
             FetchResult with all collected items and the expected_count
             reported by the API on the first page (None if not present).
         """
+        try:
+            page_size = int(page_size or 1000)
+        except (TypeError, ValueError):
+            page_size = 1000
+        try:
+            max_workers = int(max_workers or 10)
+        except (TypeError, ValueError):
+            max_workers = 10
+        page_size = max(1, page_size)
+        max_workers = max(1, max_workers)
+
         # Include page=1 explicitly so ChannelPagination does not short-circuit
         # into bare-list mode (it disables pagination when no 'page' param is
         # present, which drops the DRF count/results envelope).
@@ -331,14 +343,13 @@ class UDIFetcher:
         remaining = range(2, total_pages + 1)
         logger.debug(
             f"Fetching {total_pages - 1} remaining pages of {base_url} concurrently "
-            f"(page_size={page_size}, expected={expected_count})"
+            f"(page_size={page_size}, max_workers={max_workers}, expected={expected_count})"
         )
 
-        # Fetch remaining pages concurrently.  Cap at 10 workers to avoid
-        # overwhelming Dispatcharr; auth retries inside _fetch_url are
+        # Fetch remaining pages concurrently. Auth retries inside _fetch_url are
         # serialised by _token_refresh_lock so 401 bursts are safe.
         page_results: Dict[int, List] = {}
-        with ThreadPoolExecutor(max_workers=min(10, len(remaining))) as executor:
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(remaining))) as executor:
             future_to_page = {
                 executor.submit(
                     self._fetch_url,
@@ -423,10 +434,14 @@ class UDIFetcher:
             return FetchResult()
         
         url = f"{self.base_url}/api/channels/streams/"
-        result = self._fetch_paginated(url)
+        config = get_dispatcharr_config()
+        page_size = config.get_stream_fetch_page_size()
+        max_workers = config.get_stream_fetch_max_workers()
+        result = self._fetch_paginated(url, page_size=page_size, max_workers=max_workers)
         logger.info(
             f"Fetched {len(result)} streams"
             + (f" (expected {result.expected_count})" if result.expected_count is not None else "")
+            + f" with page_size={page_size}, max_workers={max_workers}"
         )
         return result
     

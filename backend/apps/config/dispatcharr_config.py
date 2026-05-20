@@ -11,7 +11,7 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from apps.core.logging_config import setup_logging
 
@@ -20,6 +20,21 @@ logger = setup_logging(__name__)
 # Configuration directory
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
 DISPATCHARR_CONFIG_FILE = CONFIG_DIR / 'dispatcharr_config.json'
+DEFAULT_STREAM_FETCH_PAGE_SIZE = 1000
+DEFAULT_STREAM_FETCH_MAX_WORKERS = 10
+MIN_STREAM_FETCH_PAGE_SIZE = 100
+MAX_STREAM_FETCH_PAGE_SIZE = 10000
+MIN_STREAM_FETCH_MAX_WORKERS = 1
+MAX_STREAM_FETCH_MAX_WORKERS = 20
+
+
+def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    """Return a bounded integer for user-tunable fetch pressure settings."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(parsed, minimum), maximum)
 
 
 class DispatcharrConfig:
@@ -34,7 +49,7 @@ class DispatcharrConfig:
     def __init__(self):
         """Initialize the configuration manager."""
         self._lock = threading.RLock()
-        self._config: Dict[str, str] = {}
+        self._config: Dict[str, Any] = {}
         self._load_config()
         logger.info("Dispatcharr configuration manager initialized")
     
@@ -130,28 +145,56 @@ class DispatcharrConfig:
         from apps.database.manager import get_db_manager
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
         return db_config.get('password')
+
+    def get_stream_fetch_page_size(self) -> int:
+        """Get Dispatcharr stream page size for UDI stream refreshes."""
+        from apps.database.manager import get_db_manager
+        db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        return _coerce_int(
+            db_config.get('stream_fetch_page_size'),
+            DEFAULT_STREAM_FETCH_PAGE_SIZE,
+            MIN_STREAM_FETCH_PAGE_SIZE,
+            MAX_STREAM_FETCH_PAGE_SIZE,
+        )
+
+    def get_stream_fetch_max_workers(self) -> int:
+        """Get Dispatcharr stream page concurrency for UDI stream refreshes."""
+        from apps.database.manager import get_db_manager
+        db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        return _coerce_int(
+            db_config.get('stream_fetch_max_workers'),
+            DEFAULT_STREAM_FETCH_MAX_WORKERS,
+            MIN_STREAM_FETCH_MAX_WORKERS,
+            MAX_STREAM_FETCH_MAX_WORKERS,
+        )
     
-    def get_config(self) -> Dict[str, str]:
+    def get_config(self) -> Dict[str, Any]:
         """Get complete configuration (without password for security).
         
         Returns:
-            Dictionary with base_url, username, and has_password
+            Dictionary with base_url, username, password state, and fetch tuning.
         """
         return {
             'base_url': self.get_base_url() or '',
             'username': self.get_username() or '',
-            'has_password': bool(self.get_password())
+            'has_password': bool(self.get_password()),
+            'stream_fetch_page_size': self.get_stream_fetch_page_size(),
+            'stream_fetch_max_workers': self.get_stream_fetch_max_workers(),
         }
     
     def update_config(self, base_url: Optional[str] = None, 
                      username: Optional[str] = None,
-                     password: Optional[str] = None) -> bool:
+                     password: Optional[str] = None,
+                     stream_fetch_page_size: Optional[Any] = None,
+                     stream_fetch_max_workers: Optional[Any] = None) -> bool:
         """Update configuration and save to database.
         
         Args:
             base_url: Dispatcharr base URL
             username: Dispatcharr username
             password: Dispatcharr password
+            stream_fetch_page_size: Items per stream page during UDI stream refreshes
+            stream_fetch_max_workers: Concurrent stream page requests during UDI stream refreshes
             
         Returns:
             True if successful, False otherwise
@@ -170,6 +213,20 @@ class DispatcharrConfig:
                 self._config['username'] = username.strip()
             if password is not None:
                 self._config['password'] = password
+            if stream_fetch_page_size is not None:
+                self._config['stream_fetch_page_size'] = _coerce_int(
+                    stream_fetch_page_size,
+                    DEFAULT_STREAM_FETCH_PAGE_SIZE,
+                    MIN_STREAM_FETCH_PAGE_SIZE,
+                    MAX_STREAM_FETCH_PAGE_SIZE,
+                )
+            if stream_fetch_max_workers is not None:
+                self._config['stream_fetch_max_workers'] = _coerce_int(
+                    stream_fetch_max_workers,
+                    DEFAULT_STREAM_FETCH_MAX_WORKERS,
+                    MIN_STREAM_FETCH_MAX_WORKERS,
+                    MAX_STREAM_FETCH_MAX_WORKERS,
+                )
             
             return self._save_config()
     
