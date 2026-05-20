@@ -198,7 +198,6 @@ def convert_to_new_format(
                     "check_all_streams": False,
                     "loop_check_enabled": False,
                     "blank_check_enabled": False,
-                    "treat_blank_as_dead": True,
                     "m3u_priority": m3u_priority,
                     "m3u_priority_mode": m3u_priority_mode,
                     "min_resolution": "any",

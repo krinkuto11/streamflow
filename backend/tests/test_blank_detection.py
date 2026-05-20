@@ -182,6 +182,20 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
             (False, "none"),
         )
 
+    def test_profile_blank_check_ignores_legacy_blank_as_dead_false(self):
+        stream_data = {
+            "resolution": "1920x1080",
+            "bitrate_kbps": 3333.3,
+            "blank_probe_ran": True,
+            "blank_detected": True,
+        }
+        threshold_config = StreamCheckerService._build_threshold_config_from_profile(
+            None,
+            {"blank_check_enabled": True, "treat_blank_as_dead": False},
+        )
+
+        self.assertEqual(is_stream_dead(stream_data, threshold_config), (True, "blank"))
+
     def test_persisted_blank_detection_marks_stream_dead(self):
         stream_data = {
             "stream_stats": {

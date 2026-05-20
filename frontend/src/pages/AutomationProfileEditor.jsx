@@ -36,7 +36,6 @@ const DEFAULT_PROFILE = {
         check_all_streams: false,
         loop_check_enabled: false,
         blank_check_enabled: false,
-        treat_blank_as_dead: true,
         stream_limit: 0,
         min_resolution: 'any',
         min_fps: 0,
@@ -472,19 +471,7 @@ export default function AutomationProfileEditor() {
                                                 />
                                                 <div className="space-y-0.5">
                                                     <Label htmlFor="blank_check_enabled" className="cursor-pointer font-medium">Check streams for blank screens</Label>
-                                                    <p className="text-[10px] text-muted-foreground">Runs black-screen detection during the normal quality probe.</p>
-                                                </div>
-                                            </div>
-                                            <div className="flex items-center space-x-3 bg-muted/50 p-3 rounded-md">
-                                                <Switch
-                                                    id="treat_blank_as_dead"
-                                                    checked={profile.stream_checking.treat_blank_as_dead ?? true}
-                                                    disabled={!(profile.stream_checking.blank_check_enabled ?? false)}
-                                                    onCheckedChange={(checked) => updateProfile('stream_checking.treat_blank_as_dead', checked)}
-                                                />
-                                                <div className="space-y-0.5">
-                                                    <Label htmlFor="treat_blank_as_dead" className="cursor-pointer font-medium">Treat Blank Screens as Dead</Label>
-                                                    <p className="text-[10px] text-muted-foreground">When disabled, blank metrics are logged and saved without marking the stream dead.</p>
+                                                    <p className="text-[10px] text-muted-foreground">Detected blank streams are marked dead and follow this profile&apos;s dead stream removal setting.</p>
                                                 </div>
                                             </div>
 

@@ -483,7 +483,11 @@ class StreamCheckerService:
         if min_fps and min_fps > 0:
             config['min_fps'] = min_fps
 
-        config['treat_blank_as_dead'] = stream_checking.get('treat_blank_as_dead', True)
+        # A single profile switch controls blank handling: when blank checks run,
+        # detected blank streams are treated as dead. The legacy
+        # treat_blank_as_dead value is intentionally ignored so older profiles
+        # with it set to False do not silently keep blanks alive.
+        config['treat_blank_as_dead'] = stream_checking.get('blank_check_enabled') is True
 
         return config
 
