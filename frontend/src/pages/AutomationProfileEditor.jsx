@@ -35,6 +35,7 @@ const DEFAULT_PROFILE = {
         remove_dead_streams: true,
         check_all_streams: false,
         loop_check_enabled: false,
+        blank_check_enabled: false,
         stream_limit: 0,
         min_resolution: 'any',
         min_fps: 0,
@@ -460,6 +461,17 @@ export default function AutomationProfileEditor() {
                                                 <div className="space-y-0.5">
                                                     <Label htmlFor="loop_check_enabled" className="cursor-pointer font-medium">Check scored streams for looping?</Label>
                                                     <p className="text-[10px] text-muted-foreground">Checks top 25% of streams with a score greater than 0.50</p>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center space-x-3 bg-muted/50 p-3 rounded-md">
+                                                <Switch
+                                                    id="blank_check_enabled"
+                                                    checked={profile.stream_checking.blank_check_enabled ?? false}
+                                                    onCheckedChange={(checked) => updateProfile('stream_checking.blank_check_enabled', checked)}
+                                                />
+                                                <div className="space-y-0.5">
+                                                    <Label htmlFor="blank_check_enabled" className="cursor-pointer font-medium">Check streams for blank screens</Label>
+                                                    <p className="text-[10px] text-muted-foreground">Detected blank streams are marked dead and follow this profile&apos;s dead stream removal setting.</p>
                                                 </div>
                                             </div>
 

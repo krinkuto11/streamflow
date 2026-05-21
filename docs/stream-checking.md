@@ -15,6 +15,7 @@ Each stream is analyzed by spawning a short ffmpeg probe session. Extracted metr
 - FPS
 - Codec (H.264, H.265/HEVC, AV1, etc.)
 - HDR (detected from ffmpeg stderr: pixel format, color space, primaries, transfer function)
+- Blank-screen status (optional; parsed from ffmpeg `blackdetect` output)
 - Error presence (dropped frames, decode errors)
 
 ---
@@ -47,6 +48,12 @@ Before scoring, streams can be discarded based on minimum thresholds (set in `st
 | `min_resolution` | Skip streams below this resolution                          |
 | `min_fps`        | Skip streams below this FPS                                 |
 | `min_bitrate`    | Skip streams below this bitrate (kbps)                      |
+| `blank_check_enabled` | Mark streams dead when most of the probe window is blank |
+
+Blank detection is folded into the same ffmpeg process as the quality probe.
+It adds a second ffmpeg output from the already-open input instead of starting
+ffprobe or a second provider connection, so single-stream provider limits are
+respected.
 
 ---
 
