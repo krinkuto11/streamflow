@@ -254,6 +254,69 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
         self.assertNotIn("stream_id=", audit_log)
         self.assertNotIn("channel_id=", audit_log)
 
+    def test_blank_detection_refreshes_existing_dead_reason_without_sensitive_log(self):
+        class FakeDeadStreamsTracker:
+            def __init__(self):
+                self.updated = []
+
+            def get_dead_reason(self, stream_url):
+                return "low_quality"
+
+            def update_dead_reason(self, stream_url, reason, channel_id=None):
+                self.updated.append((stream_url, reason, channel_id))
+                return True
+
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.dead_streams_tracker = FakeDeadStreamsTracker()
+
+        with self.assertLogs("apps.stream.stream_checker_service", level="WARNING") as logs:
+            updated = service._refresh_dead_stream_reason_if_needed(
+                "http://sensitive.example/stream.m3u8",
+                12345,
+                "Sensitive Provider Stream",
+                777,
+                "blank",
+                blank_detected=True,
+            )
+
+        self.assertTrue(updated)
+        self.assertEqual(
+            service.dead_streams_tracker.updated,
+            [("http://sensitive.example/stream.m3u8", "blank", 777)],
+        )
+        audit_log = "\n".join(logs.output)
+        self.assertIn("[blank-detect] Stream dead reason updated", audit_log)
+        self.assertIn("reason=blank", audit_log)
+        self.assertNotIn("sensitive.example", audit_log)
+        self.assertNotIn("Sensitive Provider", audit_log)
+
+    def test_dead_reason_refresh_skips_when_reason_is_current(self):
+        class FakeDeadStreamsTracker:
+            def __init__(self):
+                self.updated = False
+
+            def get_dead_reason(self, stream_url):
+                return "blank"
+
+            def update_dead_reason(self, stream_url, reason, channel_id=None):
+                self.updated = True
+                return True
+
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.dead_streams_tracker = FakeDeadStreamsTracker()
+
+        updated = service._refresh_dead_stream_reason_if_needed(
+            "http://sensitive.example/stream.m3u8",
+            12345,
+            "Sensitive Provider Stream",
+            777,
+            "blank",
+            blank_detected=True,
+        )
+
+        self.assertFalse(updated)
+        self.assertFalse(service.dead_streams_tracker.updated)
+
 
 if __name__ == "__main__":
     unittest.main()

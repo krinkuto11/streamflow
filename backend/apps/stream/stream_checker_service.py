@@ -671,6 +671,43 @@ class StreamCheckerService:
                 f"marked_dead={marked_dead}, reason={dead_reason}, "
                 f"removal_enabled={removal_enabled}, action={action}"
             )
+
+    def _refresh_dead_stream_reason_if_needed(
+        self,
+        stream_url: str,
+        stream_id: int,
+        stream_name: str,
+        channel_id: int,
+        reason: str,
+        blank_detected: bool = False,
+    ) -> bool:
+        """Refresh stale dead-stream reasons after a checked stream gets a newer verdict."""
+        if not stream_url or not reason or reason == 'none':
+            return False
+
+        try:
+            current_reason = None
+            if hasattr(self.dead_streams_tracker, 'get_dead_reason'):
+                current_reason = self.dead_streams_tracker.get_dead_reason(stream_url)
+            if current_reason == reason:
+                return False
+
+            update_reason = getattr(self.dead_streams_tracker, 'update_dead_reason', None)
+            if not callable(update_reason):
+                return False
+            updated = update_reason(stream_url, reason, channel_id=channel_id)
+
+            if updated and blank_detected:
+                logger.warning(
+                    f"[blank-detect] Stream dead reason updated: "
+                    f"channel_ref={_audit_ref('channel', channel_id)}, "
+                    f"stream_ref={_audit_ref('stream', stream_id)}, "
+                    f"reason={reason}"
+                )
+            return bool(updated)
+        except Exception as exc:
+            logger.warning("Failed to refresh dead stream reason for stream %s: %s", stream_id, exc)
+            return False
     
     def _get_m3u_account_name(self, stream_id: int, udi=None) -> Optional[str]:
         """Get the M3U account name for a stream.
@@ -1603,6 +1640,14 @@ class StreamCheckerService:
                         # check pass. Unchecked streams must not be culled based on prior-run
                         # tracker state — their status will be re-evaluated in the next full check.
                         if stream_id in checked_stream_id_set:
+                            self._refresh_dead_stream_reason_if_needed(
+                                stream_url,
+                                stream_id,
+                                stream_name,
+                                channel_id,
+                                dead_reason,
+                                blank_detected=bool(analyzed.get('blank_detected')),
+                            )
                             dead_stream_ids.add(stream_id)
                         else:
                             logger.debug(
@@ -2333,6 +2378,14 @@ class StreamCheckerService:
                     # symmetry with the concurrent method and to make the scope
                     # constraint explicit at review time.
                     if stream['id'] in checked_stream_id_set:
+                        self._refresh_dead_stream_reason_if_needed(
+                            stream_url,
+                            stream['id'],
+                            stream_name,
+                            channel_id,
+                            dead_reason,
+                            blank_detected=bool(analyzed.get('blank_detected')),
+                        )
                         dead_stream_ids.add(stream['id'])
 
                 # Calculate score

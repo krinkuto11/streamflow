@@ -50,6 +50,14 @@ class DeadStreamsTracker:
             logger.error(f"❌ Error marking stream as dead: {e}")
             return False
     
+    def update_dead_reason(self, stream_url: str, reason: str, channel_id: int = None) -> bool:
+        """Update the reason for an already-dead stream without logging sensitive stream details."""
+        try:
+            return self.db.update_dead_stream_reason(stream_url, reason, channel_id)
+        except Exception as e:
+            logger.error(f"Error updating dead stream reason: {e}")
+            return False
+
     def mark_as_alive(self, stream_url: str) -> bool:
         """Mark a stream as alive (remove from dead streams)."""
         try:

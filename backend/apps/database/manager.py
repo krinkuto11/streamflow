@@ -180,6 +180,27 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def update_dead_stream_reason(self, url: str, reason: str, channel_id: Optional[int] = None) -> bool:
+        session = self._get_session()
+        try:
+            dead = session.query(DeadStream).filter(DeadStream.url == url).first()
+            if not dead:
+                return False
+
+            dead.reason = reason
+            if channel_id is not None:
+                dead.channel_id = channel_id
+            dead.marked_dead_at = datetime.utcnow()
+
+            session.commit()
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating dead stream reason {url}: {e}")
+            return False
+        finally:
+            session.close()
+
     def remove_dead_stream(self, url: str) -> bool:
         session = self._get_session()
         try:
