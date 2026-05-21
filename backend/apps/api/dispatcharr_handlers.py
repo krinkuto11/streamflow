@@ -40,8 +40,16 @@ def update_dispatcharr_config_response(
         base_url = data.get("base_url")
         username = data.get("username")
         password = data.get("password")
+        stream_fetch_page_size = data.get("stream_fetch_page_size")
+        stream_fetch_max_workers = data.get("stream_fetch_max_workers")
 
-        success = config_manager.update_config(base_url=base_url, username=username, password=password)
+        success = config_manager.update_config(
+            base_url=base_url,
+            username=username,
+            password=password,
+            stream_fetch_page_size=stream_fetch_page_size,
+            stream_fetch_max_workers=stream_fetch_max_workers,
+        )
 
         if not success:
             return jsonify({"error": "Failed to save configuration"}), 500
