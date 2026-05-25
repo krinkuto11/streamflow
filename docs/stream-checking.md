@@ -86,6 +86,7 @@ Set `grace_period: true` in the profile to enable the grace window for checked s
 
 ---
 
-## Parallel checker
+## Concurrent checking
 
-The `parallel_checker.py` module distributes channel check tasks across a configurable worker pool. Progress is logged periodically during large runs.
+Concurrent stream probes are handled inside the stream checker service with
+account-aware limits. Progress is logged periodically during large runs.
