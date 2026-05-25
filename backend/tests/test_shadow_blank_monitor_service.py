@@ -113,6 +113,23 @@ def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):
     assert status["cooldowns"][0]["channel_ref"] == status["recent_events"][0]["channel_ref"]
 
 
+def test_disabling_monitor_clears_watched_snapshot(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service.update_config({"enabled": False, "dry_run": True})
+
+    status = service.run_once(force=True)
+    assert status["watched_count"] == 1
+
+    service.stop()
+
+    assert service.get_status()["watched_count"] == 0
+    assert service.get_status()["watched_channels"] == []
+
+
 def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
     switch_calls = []
     udi = FakeUdi(

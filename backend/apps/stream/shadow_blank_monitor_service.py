@@ -227,6 +227,7 @@ class ShadowBlankMonitorService:
                 self._config["enabled"] = False
                 self._save_config()
             self._stop_event.set()
+            self._watched = {}
             thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=5)
