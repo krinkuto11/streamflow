@@ -35,6 +35,22 @@ class _RequestsOk:
         return _Response(204)
 
 
+class _RequestsAuthRefresh:
+    def __init__(self):
+        self.urls = []
+        self.dispatcharr_attempts = 0
+
+    def get(self, url, **kwargs):
+        self.urls.append(url)
+        if "channels/channels" not in url:
+            return _Response(204)
+
+        self.dispatcharr_attempts += 1
+        if self.dispatcharr_attempts == 1:
+            return _Response(401)
+        return _Response(200)
+
+
 def test_connectivity_guard_passes_when_internet_and_dispatcharr_are_reachable():
     requests_ok = _RequestsOk()
     guard = StreamConnectivityGuard(
@@ -55,6 +71,35 @@ def test_connectivity_guard_passes_when_internet_and_dispatcharr_are_reachable()
         "https://probe.example/generate_204",
         "http://dispatcharr.local/api/channels/channels/",
     ]
+
+
+def test_connectivity_guard_refreshes_auth_once_when_dispatcharr_token_is_stale():
+    requests_refresh = _RequestsAuthRefresh()
+    refresh = Mock(return_value=True)
+    headers = Mock(side_effect=[
+        {"Authorization": "Bearer stale"},
+        {"Authorization": "Bearer fresh"},
+    ])
+    guard = StreamConnectivityGuard(
+        requests_module=requests_refresh,
+        socket_module=_ResolvingSocket(),
+        default_internet_probe_urls=("https://probe.example/generate_204",),
+    )
+
+    result = guard.check(
+        config={"enabled": True, "timeout_seconds": 1},
+        dispatcharr_base_url="http://dispatcharr.local",
+        dispatcharr_headers_provider=headers,
+        dispatcharr_auth_refresh_provider=refresh,
+    )
+
+    assert result.ok is True
+    assert result.reason == "ok"
+    assert requests_refresh.dispatcharr_attempts == 2
+    refresh.assert_called_once()
+    assert headers.call_count == 2
+    assert result.details["dispatcharr_api"]["auth_refresh_attempted"] is True
+    assert result.details["dispatcharr_api"]["auth_refresh_ok"] is True
 
 
 def test_connectivity_guard_fails_closed_on_dns_failure():

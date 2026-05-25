@@ -46,6 +46,7 @@ from apps.udi import get_udi_manager
 # Import dead streams tracker
 from apps.stream.dead_streams_tracker import DeadStreamsTracker
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
+from apps.core.auth import _refresh_token
 
 # Import channel settings manager
 # Import channel settings manager - DEPRECATED/REMOVED
@@ -1143,6 +1144,7 @@ class StreamCheckerService:
                 config=self.config.get('connectivity_guard', {}),
                 dispatcharr_base_url=_get_base_url(),
                 dispatcharr_headers_provider=_get_auth_headers,
+                dispatcharr_auth_refresh_provider=_refresh_token,
             )
         except Exception as exc:
             logger.warning("Connectivity guard failed unexpectedly during %s: %s", phase, exc)

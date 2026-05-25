@@ -64,6 +64,7 @@ class StreamConnectivityGuard:
         config: Optional[Dict[str, Any]] = None,
         dispatcharr_base_url: Optional[str],
         dispatcharr_headers_provider: Optional[Callable[[], Dict[str, str]]] = None,
+        dispatcharr_auth_refresh_provider: Optional[Callable[[], bool]] = None,
     ) -> ConnectivityCheckResult:
         cfg = config or {}
         if cfg.get("enabled", True) is False:
@@ -125,6 +126,19 @@ class StreamConnectivityGuard:
                 headers=headers,
                 accept_unauthorized=False,
             )
+            if (
+                dispatcharr_result.reason == "dispatcharr_auth_failed"
+                and dispatcharr_headers_provider is not None
+                and dispatcharr_auth_refresh_provider is not None
+            ):
+                dispatcharr_result = self._retry_dispatcharr_probe_after_auth_refresh(
+                    dispatcharr_base_url=dispatcharr_base_url,
+                    dispatcharr_probe_url=dispatcharr_probe_url,
+                    dispatcharr_headers_provider=dispatcharr_headers_provider,
+                    dispatcharr_auth_refresh_provider=dispatcharr_auth_refresh_provider,
+                    timeout_seconds=timeout_seconds,
+                    previous_result=dispatcharr_result,
+                )
             checked["dispatcharr_api"] = dispatcharr_result.details
             if not dispatcharr_result.ok:
                 return dispatcharr_result
@@ -135,6 +149,66 @@ class StreamConnectivityGuard:
             message="Connectivity verified",
             details=checked,
         )
+
+    def _retry_dispatcharr_probe_after_auth_refresh(
+        self,
+        *,
+        dispatcharr_base_url: str,
+        dispatcharr_probe_url: str,
+        dispatcharr_headers_provider: Callable[[], Dict[str, str]],
+        dispatcharr_auth_refresh_provider: Callable[[], bool],
+        timeout_seconds: float,
+        previous_result: ConnectivityCheckResult,
+    ) -> ConnectivityCheckResult:
+        try:
+            refreshed = dispatcharr_auth_refresh_provider()
+        except Exception as exc:
+            logger.warning("Connectivity guard could not refresh Dispatcharr auth: %s", exc)
+            previous_result.details = {
+                **previous_result.details,
+                "auth_refresh_attempted": True,
+                "auth_refresh_ok": False,
+            }
+            return previous_result
+
+        if not refreshed:
+            previous_result.details = {
+                **previous_result.details,
+                "auth_refresh_attempted": True,
+                "auth_refresh_ok": False,
+            }
+            return previous_result
+
+        try:
+            refreshed_headers = dispatcharr_headers_provider()
+        except Exception as exc:
+            logger.warning("Connectivity guard could not prepare refreshed Dispatcharr auth headers: %s", exc)
+            return ConnectivityCheckResult(
+                ok=False,
+                reason="dispatcharr_auth_unavailable",
+                message="Dispatcharr API connectivity could not be verified because authentication is unavailable",
+                details={
+                    "dispatcharr_api": {
+                        "host": self._safe_host(dispatcharr_base_url),
+                        "auth_refresh_attempted": True,
+                        "auth_refresh_ok": True,
+                    }
+                },
+            )
+
+        retry_result = self._probe_http_endpoint(
+            url=dispatcharr_probe_url,
+            label="dispatcharr_api",
+            timeout_seconds=timeout_seconds,
+            headers=refreshed_headers,
+            accept_unauthorized=False,
+        )
+        retry_result.details = {
+            **retry_result.details,
+            "auth_refresh_attempted": True,
+            "auth_refresh_ok": True,
+        }
+        return retry_result
 
     def _probe_any_http_endpoint(
         self,
