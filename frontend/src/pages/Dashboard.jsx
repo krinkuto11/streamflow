@@ -24,8 +24,8 @@ import {
 import UpcomingAutomationEvents from '@/components/Dashboard/UpcomingAutomationEvents.jsx'
 
 const AUTOMATION_STAGES = [
-  { id: 'settings', label: 'Settings' },
-  { id: 'period_discovery', label: 'Periods' },
+  { id: 'settings', label: 'Preparing' },
+  { id: 'period_discovery', label: 'Schedule' },
   { id: 'm3u_refresh', label: 'M3U Refresh' },
   { id: 'udi_sync', label: 'Cache Sync' },
   { id: 'stream_matching', label: 'Matching' },

@@ -2906,8 +2906,8 @@ class AutomatedStreamManager:
             logger.info(f"Forcing automation cycle{' for period ' + forced_period_id if forced_period_id else ''}")
         self._update_run_status(
             stage="settings",
-            stage_label="Checking Settings",
-            message="Reading automation settings",
+            stage_label="Preparing Automation",
+            message="Reading automation configuration",
         )
             
         # 1. Check Global Automation Switch
@@ -2963,8 +2963,8 @@ class AutomatedStreamManager:
             # 2. Determine which playlists to update and group channels by period
             self._update_run_status(
                 stage="period_discovery",
-                stage_label="Finding Active Periods",
-                message="Loading channels and period assignments",
+                stage_label="Checking Schedule",
+                message="Loading scheduled windows and channel assignments",
             )
             udi = get_udi_manager()
             channels = udi.get_channels()
