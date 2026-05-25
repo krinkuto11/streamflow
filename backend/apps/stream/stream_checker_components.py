@@ -507,6 +507,8 @@ class StreamCheckQueue:
         import collections
         self.stream_processing_times = collections.deque(maxlen=100)
         self.channel_start_times = {}
+        self.last_cleared_at = None
+        self.last_clear_reason = None
         self.stats = {
             'total_queued': 0,
             'total_completed': 0,
@@ -518,28 +520,33 @@ class StreamCheckQueue:
     def add_channel(self, channel_id: int, priority: int = 0, stream_count: int = 1):
         """Add a channel to the checking queue."""
         with self.lock:
+            # Check if channel is already queued, in progress, or completed.
+            # Completed channels stay blocked until an explicit re-queue path
+            # removes them from the completed set.
+            if channel_id in self.queued or channel_id in self.in_progress or channel_id in self.completed:
+                return False
+
             # Check if this is a new "batch" starting (queue is completely empty and no workers are active)
             if self.queue.empty() and len(self.in_progress) == 0:
                 self.stats['total_queued'] = 0
                 self.stats['total_completed'] = 0
                 self.stats['total_failed'] = 0
                 self.queued.clear()
-                self.completed.clear()
                 self.failed.clear()
+                self.last_cleared_at = None
+                self.last_clear_reason = None
 
-            # Check if channel is already queued, in progress, or completed
-            if channel_id not in self.queued and channel_id not in self.in_progress and channel_id not in self.completed:
-                try:
-                    self.queue.put((priority, channel_id), block=False)
-                    # We default to 1 stream roughly if unknown, but add_channels will pass precise length 
-                    self.queued[channel_id] = stream_count
-                    self.stats['total_queued'] += 1
-                    self.stats['queue_size'] = self.queue.qsize()
-                    logger.debug(f"Added channel {channel_id} to queue (priority: {priority})")
-                    return True
-                except queue.Full:
-                    logger.warning(f"Queue is full, cannot add channel {channel_id}")
-                    return False
+            try:
+                self.queue.put((priority, channel_id), block=False)
+                # We default to 1 stream roughly if unknown, but add_channels will pass precise length
+                self.queued[channel_id] = stream_count
+                self.stats['total_queued'] += 1
+                self.stats['queue_size'] = self.queue.qsize()
+                logger.debug(f"Added channel {channel_id} to queue (priority: {priority})")
+                return True
+            except queue.Full:
+                logger.warning(f"Queue is full, cannot add channel {channel_id}")
+                return False
         return False
     
     def add_channels(self, channel_ids: List[int], priority: int = 0):
@@ -574,7 +581,14 @@ class StreamCheckQueue:
         try:
             priority, channel_id = self.queue.get(timeout=timeout)
             with self.lock:
-                stream_count = self.queued.pop(channel_id, 1)  # Remove from queued dict
+                if channel_id not in self.queued:
+                    logger.debug(
+                        f"Ignoring stale queued channel {channel_id}; queue entry was cleared"
+                    )
+                    self.stats['queue_size'] = self.queue.qsize()
+                    return None
+
+                stream_count = self.queued.pop(channel_id)  # Remove from queued dict
                 self.in_progress[channel_id] = stream_count
                 self.channel_start_times[channel_id] = datetime.now()
                 self.stats['current_channel'] = channel_id
@@ -583,9 +597,20 @@ class StreamCheckQueue:
         except queue.Empty:
             return None
     
-    def mark_completed(self, channel_id: int):
-        """Mark a channel check as completed."""
+    def mark_completed(self, channel_id: int) -> bool:
+        """Mark a channel check as completed.
+
+        Returns False when the channel is no longer registered as active. This
+        can happen when a queue clear aborts an in-flight check and the worker
+        exits slightly later.
+        """
         with self.lock:
+            if channel_id not in self.in_progress and channel_id not in self.channel_start_times:
+                logger.debug(
+                    f"Ignoring completion for channel {channel_id}; no active queue entry exists"
+                )
+                return False
+
             # Calculate stream processing duration
             if channel_id in self.channel_start_times:
                 duration_sec = (datetime.now() - self.channel_start_times[channel_id]).total_seconds()
@@ -602,10 +627,20 @@ class StreamCheckQueue:
             if self.stats['current_channel'] == channel_id:
                 self.stats['current_channel'] = None
             logger.debug(f"Marked channel {channel_id} as completed")
+            return True
     
-    def mark_failed(self, channel_id: int, error: str):
-        """Mark a channel check as failed."""
+    def mark_failed(self, channel_id: int, error: str) -> bool:
+        """Mark a channel check as failed.
+
+        Returns False when the channel is no longer registered as active.
+        """
         with self.lock:
+            if channel_id not in self.in_progress and channel_id not in self.channel_start_times:
+                logger.debug(
+                    f"Ignoring failure for channel {channel_id}; no active queue entry exists"
+                )
+                return False
+
             if channel_id in self.channel_start_times:
                 del self.channel_start_times[channel_id]
                 
@@ -619,6 +654,7 @@ class StreamCheckQueue:
             if self.stats['current_channel'] == channel_id:
                 self.stats['current_channel'] = None
             logger.warning(f"Marked channel {channel_id} as failed: {error}")
+            return True
     
     def get_status(self) -> Dict:
         """Get current queue status."""
@@ -638,12 +674,34 @@ class StreamCheckQueue:
                 'current_channel': self.stats['current_channel'],
                 'total_queued': self.stats['total_queued'],
                 'total_completed': self.stats['total_completed'],
-                'total_failed': self.stats['total_failed']
+                'total_failed': self.stats['total_failed'],
+                'state': self._state_locked(),
+                'last_cleared_at': self.last_cleared_at,
+                'last_clear_reason': self.last_clear_reason
             }
-    
-    def clear(self):
+
+    def _state_locked(self) -> str:
+        """Return the queue lifecycle state while self.lock is held."""
+        if self.in_progress:
+            return 'checking'
+        if not self.queue.empty() or self.queued:
+            return 'queued'
+        if self.completed or self.failed:
+            return 'completed'
+        if self.last_cleared_at:
+            return 'cleared'
+        return 'idle'
+
+    def clear(self, reason: str = 'manual') -> Dict:
         """Clear the queue and reset stats."""
         with self.lock:
+            cleared = {
+                'queued': len(self.queued),
+                'in_progress': len(self.in_progress),
+                'completed': len(self.completed),
+                'failed': len(self.failed),
+                'queue_size': self.queue.qsize()
+            }
             while not self.queue.empty():
                 try:
                     self.queue.get_nowait()
@@ -653,6 +711,7 @@ class StreamCheckQueue:
             self.in_progress.clear()
             self.completed.clear()
             self.failed.clear()
+            self.channel_start_times.clear()
             self.stats = {
                 'total_queued': 0,
                 'total_completed': 0,
@@ -660,7 +719,10 @@ class StreamCheckQueue:
                 'current_channel': None,
                 'queue_size': 0
             }
+            self.last_cleared_at = datetime.now().isoformat()
+            self.last_clear_reason = reason
         logger.info("Queue cleared")
+        return cleared
 
     def is_empty(self) -> bool:
         """Check if the queue is empty."""

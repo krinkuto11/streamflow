@@ -199,6 +199,7 @@ class StreamCheckerService:
         self.scheduler_thread = None
         self.lock = threading.Lock()
         self._cancel_queueing = False
+        self._sync_batch_generation = 0
         
         self.sync_batch_state = {
             'active': False,
@@ -274,6 +275,10 @@ class StreamCheckerService:
         
         while self.running:
             try:
+                # Clear stale aborts before waiting for the next queue item. Do
+                # not clear this after a channel is pulled: a manual queue clear
+                # can legitimately request abort in that narrow handoff window.
+                self.abort_current_check.clear()
                 logger.debug("Worker waiting for next channel from queue...")
                 channel_id = self.check_queue.get_next_channel(timeout=1.0)
                 if channel_id is None:
@@ -289,8 +294,6 @@ class StreamCheckerService:
                     self._start_batch_changelog()
                 
                 logger.debug(f"Worker processing channel {channel_id}")
-                # Clear abort flag before checking
-                self.abort_current_check.clear()
                 # Check this channel
                 self._check_channel(channel_id)
                 logger.debug(f"Worker completed channel {channel_id}")
@@ -1140,6 +1143,48 @@ class StreamCheckerService:
             return self._check_channel_concurrent(channel_id, skip_batch_changelog=skip_batch_changelog, forced_profile_id=forced_profile_id)
         else:
             return self._check_channel_sequential(channel_id, skip_batch_changelog=skip_batch_changelog, forced_profile_id=forced_profile_id)
+
+    def _complete_channel_check(self, channel_id: int, on_completed=None) -> bool:
+        """Complete a queued channel and run side effects only if it is still active."""
+        accepted = self.check_queue.mark_completed(channel_id)
+        if accepted or not self.abort_current_check.is_set():
+            if on_completed:
+                on_completed()
+            return accepted
+
+        logger.info(
+            f"Skipping completion side effects for channel {channel_id}; "
+            "the queue entry was already cleared or aborted"
+        )
+        return False
+
+    def _abort_channel_check(self, channel_id: int, channel_name: Optional[str] = None) -> Dict[str, Any]:
+        """Finish an aborted channel check without writing completion state."""
+        if channel_name:
+            logger.info(f"Channel check aborted for {channel_name} (channel {channel_id})")
+        else:
+            logger.info(f"Channel check aborted for channel {channel_id}")
+
+        self.check_queue.mark_failed(channel_id, 'aborted')
+        self.progress.clear()
+        return {
+            'dead_streams_count': 0,
+            'revived_streams_count': 0,
+            'checked_streams': [],
+            'skipped': True,
+            'skip_reason': 'aborted',
+            'aborted': True
+        }
+
+    def _abort_channel_check_if_requested(
+        self,
+        channel_id: int,
+        channel_name: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return an aborted result when a clear/abort request is pending."""
+        if self.abort_current_check.is_set():
+            return self._abort_channel_check(channel_id, channel_name)
+        return None
     
     def _check_channel_concurrent(self, channel_id: int, skip_batch_changelog: bool = False, target_stream_ids: Optional[List[str]] = None, forced_profile_id: Optional[str] = None):
         """Check and reorder streams for a specific channel using parallel thread pool.
@@ -1272,6 +1317,9 @@ class StreamCheckerService:
                 raise Exception(f"Could not fetch channel {channel_id}")
             
             channel_name = channel_data.get('name', f'Channel {channel_id}')
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
             
             # Get streams for this channel
             self.progress.update(
@@ -1285,10 +1333,16 @@ class StreamCheckerService:
             )
             
             streams = fetch_channel_streams(channel_id)
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
+
             if not streams or len(streams) == 0:
                 logger.info(f"No streams found for channel {channel_name}")
-                self.check_queue.mark_completed(channel_id)
-                self.update_tracker.mark_channel_checked(channel_id)
+                self._complete_channel_check(
+                    channel_id,
+                    lambda: self.update_tracker.mark_channel_checked(channel_id)
+                )
                 return {
                     'dead_streams_count': 0,
                     'revived_streams_count': 0
@@ -1299,8 +1353,10 @@ class StreamCheckerService:
             # Check if channel has active viewers or if its playlist has reached max concurrent streams
             limit_check_result = self._check_channel_limits(channel_id, channel_name, streams)
             if limit_check_result is not None:
-                self.check_queue.mark_completed(channel_id)
-                self.update_tracker.mark_channel_checked(channel_id)
+                self._complete_channel_check(
+                    channel_id,
+                    lambda: self.update_tracker.mark_channel_checked(channel_id)
+                )
                 return limit_check_result
             
             # Check if this is a force check (bypasses 2-hour immunity)
@@ -1371,12 +1427,14 @@ class StreamCheckerService:
                     if (current_stream_count == previous_stream_count and 
                         set(current_stream_ids) == set(checked_stream_ids)):
                         logger.info(f"Channel {channel_name} unchanged since last check - skipping reorder")
-                        self.check_queue.mark_completed(channel_id)
                         # Update timestamp but keep existing checked_stream_ids
-                        self.update_tracker.mark_channel_checked(
+                        self._complete_channel_check(
                             channel_id,
-                            stream_count=current_stream_count,
-                            checked_stream_ids=checked_stream_ids
+                            lambda: self.update_tracker.mark_channel_checked(
+                                channel_id,
+                                stream_count=current_stream_count,
+                                checked_stream_ids=checked_stream_ids
+                            )
                         )
                         # Best effort to reconstruct stats for skipped/cached streams
                         cached_stats = []
@@ -1465,6 +1523,9 @@ class StreamCheckerService:
             
             # Start callback for parallel checker
             def start_callback(stream):
+                if self.abort_current_check.is_set():
+                    return
+
                 stream_id = stream.get('id')
                 if stream_id in stream_statuses:
                     stream_statuses[stream_id]['status'] = 'checking'
@@ -1483,6 +1544,9 @@ class StreamCheckerService:
                     )
             
             def progress_callback(completed, total, result):
+                if self.abort_current_check.is_set():
+                    return
+
                 completed_count[0] = completed
                 stream_name = result.get('stream_name', 'Unknown')
                 stream_id = result.get('stream_id')
@@ -1544,7 +1608,7 @@ class StreamCheckerService:
                 _heartbeat_stop = threading.Event()
 
                 def _heartbeat():
-                    while not _heartbeat_stop.wait(2):
+                    while not self.abort_current_check.is_set() and not _heartbeat_stop.wait(2):
                         try:
                             self.progress.update(
                                 channel_id=channel_id,
@@ -1586,6 +1650,10 @@ class StreamCheckerService:
                 finally:
                     _heartbeat_stop.set()
                     _hb_thread.join(timeout=3)
+
+                abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+                if abort_result:
+                    return abort_result
                 
                 # Process results - ALL checks are complete at this point
                 # Collect stats for batch update to minimize API calls
@@ -1715,6 +1783,10 @@ class StreamCheckerService:
 
                 logger.info(f"Completed smart parallel analysis of {len(results)} streams with account-aware limits")
 
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
+
             self._log_blank_detection_summary(
                 channel_id,
                 channel_name,
@@ -1743,6 +1815,10 @@ class StreamCheckerService:
 
             # Batch stats write after probes so the persisted score and loop
             # fields reflect the penalised score from this run.
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
+
             if batch_enabled and batch_stats_list:
                 # Rebuild batch list with updated scores post-penalty
                 batch_stats_list = []
@@ -1789,6 +1865,10 @@ class StreamCheckerService:
             
             if revived_stream_ids:
                 logger.info(f"{len(revived_stream_ids)} streams were revived in channel {channel_name}")
+
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
             
             # Update channel with reordered streams
             self.progress.update(
@@ -1946,8 +2026,6 @@ class StreamCheckerService:
                 except Exception as e:
                     logger.warning(f"Failed to add to batch changelog: {e}")
             
-            # Mark as completed
-            self.check_queue.mark_completed(channel_id)
             # Update current_stream_ids to exclude dead streams that were removed
             # This prevents dead stream IDs from being saved in checked_stream_ids
             # which would cause them to be skipped by 2-hour immunity even after revival
@@ -1957,10 +2035,13 @@ class StreamCheckerService:
                 final_stream_ids = [sid for sid in current_stream_ids if sid not in dead_stream_ids]
             else:
                 final_stream_ids = current_stream_ids  # Keep all streams if removal is disabled
-            self.update_tracker.mark_channel_checked(
-                channel_id, 
-                stream_count=len(streams),
-                checked_stream_ids=final_stream_ids
+            self._complete_channel_check(
+                channel_id,
+                lambda: self.update_tracker.mark_channel_checked(
+                    channel_id,
+                    stream_count=len(streams),
+                    checked_stream_ids=final_stream_ids
+                )
             )
             
             # Return statistics for callers that need them
@@ -2147,6 +2228,9 @@ class StreamCheckerService:
                 raise Exception(f"Could not fetch channel {channel_id}")
             
             channel_name = channel_data.get('name', f'Channel {channel_id}')
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
             
             # Get streams for this channel
             self.progress.update(
@@ -2160,10 +2244,16 @@ class StreamCheckerService:
             )
             
             streams = fetch_channel_streams(channel_id)
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
+
             if not streams or len(streams) == 0:
                 logger.info(f"No streams found for channel {channel_name}")
-                self.check_queue.mark_completed(channel_id)
-                self.update_tracker.mark_channel_checked(channel_id)
+                self._complete_channel_check(
+                    channel_id,
+                    lambda: self.update_tracker.mark_channel_checked(channel_id)
+                )
                 return {
                     'dead_streams_count': 0,
                     'revived_streams_count': 0
@@ -2174,8 +2264,10 @@ class StreamCheckerService:
             # Check if channel has active viewers or if its playlist has reached max concurrent streams
             limit_check_result = self._check_channel_limits(channel_id, channel_name, streams)
             if limit_check_result is not None:
-                self.check_queue.mark_completed(channel_id)
-                self.update_tracker.mark_channel_checked(channel_id)
+                self._complete_channel_check(
+                    channel_id,
+                    lambda: self.update_tracker.mark_channel_checked(channel_id)
+                )
                 return limit_check_result
             
             # Check if this is a force check (bypasses 2-hour immunity)
@@ -2241,12 +2333,14 @@ class StreamCheckerService:
                     if (current_stream_count == previous_stream_count and 
                         set(current_stream_ids) == set(checked_stream_ids)):
                         logger.info(f"Channel {channel_name} unchanged since last check - skipping reorder")
-                        self.check_queue.mark_completed(channel_id)
                         # Update timestamp but keep existing checked_stream_ids
-                        self.update_tracker.mark_channel_checked(
+                        self._complete_channel_check(
                             channel_id,
-                            stream_count=current_stream_count,
-                            checked_stream_ids=checked_stream_ids
+                            lambda: self.update_tracker.mark_channel_checked(
+                                channel_id,
+                                stream_count=current_stream_count,
+                                checked_stream_ids=checked_stream_ids
+                            )
                         )
                         return
                     else:
@@ -2410,6 +2504,10 @@ class StreamCheckerService:
                         stream_statuses[stream['id']]['bitrate'] = analyzed.get('bitrate_kbps')
                 
                 logger.info(f"Stream {idx}/{total_streams}: {stream.get('name')} - Score: {score:.2f}")
+
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
             
             # For already-checked streams, retrieve their cached data from UDI
             for stream in streams_already_checked:
@@ -2525,6 +2623,10 @@ class StreamCheckerService:
                     analyzed['score'] = score
                     analyzed_streams.append(analyzed)
 
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
+
             self._log_blank_detection_summary(
                 channel_id,
                 channel_name,
@@ -2557,6 +2659,10 @@ class StreamCheckerService:
                         self._update_stream_stats(analyzed)
             else:
                 logger.debug("[loop-probe] Loop checking disabled by profile — skipping")
+
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
 
             # Sort streams by score (highest first)
             self.progress.update(
@@ -2597,6 +2703,10 @@ class StreamCheckerService:
             
             if revived_stream_ids:
                 logger.info(f"{len(revived_stream_ids)} streams were revived in channel {channel_name}")
+
+            abort_result = self._abort_channel_check_if_requested(channel_id, channel_name)
+            if abort_result:
+                return abort_result
             
             # Update channel with reordered streams
             self.progress.update(
@@ -2757,8 +2867,6 @@ class StreamCheckerService:
                 except Exception as e:
                     logger.warning(f"Failed to add to batch changelog: {e}")
             
-            # Mark as completed with stream count and checked stream IDs
-            self.check_queue.mark_completed(channel_id)
             # Update current_stream_ids to exclude dead streams that were removed
             # This prevents dead stream IDs from being saved in checked_stream_ids
             # which would cause them to be skipped by 2-hour immunity even after revival
@@ -2768,10 +2876,13 @@ class StreamCheckerService:
                 final_stream_ids = [sid for sid in current_stream_ids if sid not in dead_stream_ids]
             else:
                 final_stream_ids = current_stream_ids  # Keep all streams if removal is disabled
-            self.update_tracker.mark_channel_checked(
-                channel_id, 
-                stream_count=len(streams),
-                checked_stream_ids=final_stream_ids
+            self._complete_channel_check(
+                channel_id,
+                lambda: self.update_tracker.mark_channel_checked(
+                    channel_id,
+                    stream_count=len(streams),
+                    checked_stream_ids=final_stream_ids
+                )
             )
             
             # Return statistics for callers that need them
@@ -3287,14 +3398,29 @@ class StreamCheckerService:
         if sync_state.get('active'):
             # Override queue status with our synchronous batch status
             # When active, ONLY the sync batch progress should be displayed
+            queued_channels = max(
+                0,
+                sync_state['total_channels']
+                - sync_state['completed']
+                - sync_state['failed']
+                - sync_state['in_progress'],
+            )
             queue_status['in_progress'] = sync_state['in_progress']
             queue_status['completed'] = sync_state['completed']
             queue_status['failed'] = sync_state['failed']
-            queue_status['queued'] = sync_state['total_channels'] - sync_state['completed'] - sync_state['failed'] - sync_state['in_progress']
+            queue_status['queued'] = queued_channels
             queue_status['total_queued'] = sync_state['total_channels']
             queue_status['total_completed'] = sync_state['completed']
             queue_status['total_failed'] = sync_state['failed']
             queue_status['queue_size'] = queue_status['queued']
+            if queue_status['in_progress'] > 0:
+                queue_status['state'] = 'checking'
+            elif queue_status['queue_size'] > 0:
+                queue_status['state'] = 'queued'
+            elif queue_status['completed'] or queue_status['failed']:
+                queue_status['state'] = 'completed'
+            else:
+                queue_status['state'] = 'idle'
             
             # Map tracking stream properties back over queue_status for calculations
             queue_status['queued_streams_count'] = sync_state.get('queued_streams_count', 0)
@@ -3368,6 +3494,8 @@ class StreamCheckerService:
             self.update_tracker.mark_channel_for_force_check(channel_id)
             logger.info(f"Marked channel {channel_id} for force check (bypasses 2-hour immunity)")
             
+        self._cancel_queueing = False
+
         # Ensure we can re-queue if it was completed (manual check overrides completion state)
         self.check_queue.remove_from_completed(channel_id)
         
@@ -3400,6 +3528,11 @@ class StreamCheckerService:
             for channel_id in channel_ids:
                 self.update_tracker.mark_channel_for_force_check(channel_id)
             logger.info(f"Marked {len(channel_ids)} channels for force check (bypasses 2-hour immunity)")
+
+        self._cancel_queueing = False
+        for channel_id in channel_ids:
+            self.check_queue.remove_from_completed(channel_id)
+
         return self.check_queue.add_channels(channel_ids, priority)
     
     def check_channels_synchronously(self, channel_ids: List[int], force_check: bool = False, target_stream_ids: Optional[Dict[int, List[str]]] = None) -> Dict[int, Dict]:
@@ -3440,6 +3573,9 @@ class StreamCheckerService:
             total_streams += stream_count
                 
         with self.lock:
+            self.abort_current_check.clear()
+            self._sync_batch_generation = getattr(self, '_sync_batch_generation', 0) + 1
+            sync_generation = self._sync_batch_generation
             self.sync_batch_state = {
                 'active': True,
                 'total_channels': len(channel_ids),
@@ -3447,16 +3583,24 @@ class StreamCheckerService:
                 'failed': 0,
                 'in_progress': 0,
                 'queued_streams_count': total_streams,
-                'in_progress_streams_count': 0
+                'in_progress_streams_count': 0,
+                'generation': sync_generation,
             }
             self.checking = True
         
         try:
             # Process each channel
             for channel_id in channel_ids:
+                if self.abort_current_check.is_set():
+                    logger.info("Synchronous channel batch aborted before next channel")
+                    break
+
                 stream_count = channel_streams.get(channel_id, 1)
                 
                 with self.lock:
+                    if self.sync_batch_state.get('generation') != sync_generation or not self.sync_batch_state.get('active'):
+                        logger.info("Synchronous channel batch was cleared; stopping remaining checks")
+                        break
                     self.sync_batch_state['in_progress'] = 1
                     self.sync_batch_state['queued_streams_count'] = max(0, self.sync_batch_state['queued_streams_count'] - stream_count)
                     self.sync_batch_state['in_progress_streams_count'] = stream_count
@@ -3479,12 +3623,21 @@ class StreamCheckerService:
                         
                     results[channel_id] = channel_result
                     with self.lock:
-                        self.sync_batch_state['completed'] += 1
+                        if self.sync_batch_state.get('generation') == sync_generation and self.sync_batch_state.get('active'):
+                            if isinstance(channel_result, dict) and channel_result.get('aborted'):
+                                self.sync_batch_state['failed'] += 1
+                            else:
+                                self.sync_batch_state['completed'] += 1
+
+                    if isinstance(channel_result, dict) and channel_result.get('aborted'):
+                        logger.info("Synchronous channel batch aborted; stopping remaining checks")
+                        break
                 except Exception as e:
                     logger.error(f"Error checking channel {channel_id} synchronously: {e}")
                     results[channel_id] = {'error': str(e)}
                     with self.lock:
-                        self.sync_batch_state['failed'] += 1
+                        if self.sync_batch_state.get('generation') == sync_generation and self.sync_batch_state.get('active'):
+                            self.sync_batch_state['failed'] += 1
                 finally:
                     duration_sec = (datetime.now() - channel_start_time).total_seconds()
                     if stream_count > 0:
@@ -3493,14 +3646,16 @@ class StreamCheckerService:
                             self.check_queue.stream_processing_times.append(time_per_stream)
                             
                     with self.lock:
-                        self.sync_batch_state['in_progress'] = 0
-                        self.sync_batch_state['in_progress_streams_count'] = 0
+                        if self.sync_batch_state.get('generation') == sync_generation and self.sync_batch_state.get('active'):
+                            self.sync_batch_state['in_progress'] = 0
+                            self.sync_batch_state['in_progress_streams_count'] = 0
         finally:
             with self.lock:
-                self.sync_batch_state['active'] = False
-                queue_status = self.check_queue.get_status()
-                if queue_status.get('queue_size', 0) == 0 and queue_status.get('in_progress', 0) == 0:
-                    self.checking = False
+                if self.sync_batch_state.get('generation') == sync_generation:
+                    self.sync_batch_state['active'] = False
+                    queue_status = self.check_queue.get_status()
+                    if queue_status.get('queue_size', 0) == 0 and queue_status.get('in_progress', 0) == 0:
+                        self.checking = False
                 
         return results
 
@@ -3534,6 +3689,7 @@ class StreamCheckerService:
         """
         import time as time_module
         start_time = time_module.time()
+        self.abort_current_check.clear()
         
         try:
             logger.info(f"Starting single channel check for channel {channel_id}")
@@ -4136,10 +4292,46 @@ class StreamCheckerService:
     
     def clear_queue(self):
         """Clear the checking queue."""
-        self.check_queue.clear()
-        self.abort_current_check.set()
+        queue_status = self.check_queue.get_status()
+        with self.lock:
+            sync_active = self.sync_batch_state.get('active', False)
+
+        has_active_check = (
+            self.checking or
+            queue_status.get('in_progress', 0) > 0 or
+            sync_active
+        )
+
         self._cancel_queueing = True
-        logger.info("Checking queue cleared and current check aborted")
+        if has_active_check:
+            self.abort_current_check.set()
+        else:
+            self.abort_current_check.clear()
+
+        cleared = self.check_queue.clear(reason='manual_clear')
+        self.progress.clear()
+        with self.lock:
+            if sync_active:
+                self._sync_batch_generation = getattr(self, '_sync_batch_generation', 0) + 1
+                self.sync_batch_state = {
+                    'active': False,
+                    'total_channels': 0,
+                    'completed': 0,
+                    'failed': 0,
+                    'in_progress': 0,
+                    'queued_streams_count': 0,
+                    'in_progress_streams_count': 0,
+                    'generation': self._sync_batch_generation,
+                }
+                self.checking = False
+        logger.info(
+            "Checking queue cleared%s",
+            " and current check abort requested" if has_active_check else ""
+        )
+        return {
+            'abort_requested': has_active_check,
+            'cleared': cleared,
+        }
     
     def trigger_check_updated_channels(self):
         """Trigger immediate check of channels with M3U updates.
