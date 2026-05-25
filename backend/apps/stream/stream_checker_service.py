@@ -35,6 +35,7 @@ from apps.core.api_utils import (
     fetch_channel_streams,
     update_channel_streams,
     _get_base_url,
+    _get_auth_headers,
     patch_request,
     batch_update_stream_stats
 )
@@ -44,6 +45,7 @@ from apps.udi import get_udi_manager
 
 # Import dead streams tracker
 from apps.stream.dead_streams_tracker import DeadStreamsTracker
+from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
 
 # Import channel settings manager
 # Import channel settings manager - DEPRECATED/REMOVED
@@ -176,6 +178,15 @@ class StreamCheckerService:
         
         self.dead_streams_tracker = DeadStreamsTracker()
         logger.debug("Dead streams tracker initialized")
+
+        self.connectivity_guard = StreamConnectivityGuard()
+        self.connectivity_guard_status = {
+            'ok': True,
+            'reason': 'not_checked',
+            'message': 'Connectivity guard has not run yet',
+            'details': {},
+        }
+        logger.debug("Connectivity guard initialized")
         
         # Initialize changelog manager
         self.changelog = None
@@ -1124,6 +1135,96 @@ class StreamCheckerService:
         return 0
 
     # Removed _refine_sorted_streams in favor of lexicographical Sort Keys.
+
+    def _run_connectivity_guard(self, phase: str) -> ConnectivityCheckResult:
+        """Run and record the fail-closed connectivity guard."""
+        try:
+            result = self.connectivity_guard.check(
+                config=self.config.get('connectivity_guard', {}),
+                dispatcharr_base_url=_get_base_url(),
+                dispatcharr_headers_provider=_get_auth_headers,
+            )
+        except Exception as exc:
+            logger.warning("Connectivity guard failed unexpectedly during %s: %s", phase, exc)
+            result = ConnectivityCheckResult(
+                ok=False,
+                reason='connectivity_guard_error',
+                message='Connectivity could not be verified',
+                details={'phase': phase},
+            )
+
+        status = result.to_dict()
+        status['phase'] = phase
+        status['checked_at'] = datetime.now().isoformat()
+        self.connectivity_guard_status = status
+        return result
+
+    def _connectivity_abort_payload(
+        self,
+        result: ConnectivityCheckResult,
+        *,
+        channel_id: Optional[int] = None,
+        channel_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload = {
+            'success': False,
+            'error': 'connectivity_guard',
+            'message': result.message,
+            'connectivity_guard': result.to_dict(),
+        }
+        if channel_id is not None:
+            payload['channel_id'] = channel_id
+        if channel_name is not None:
+            payload['channel_name'] = channel_name
+        return payload
+
+    def _fail_channel_for_connectivity(
+        self,
+        result: ConnectivityCheckResult,
+        *,
+        channel_id: int,
+        channel_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        self.check_queue.mark_failed(channel_id, result.message)
+        return self._connectivity_abort_payload(
+            result,
+            channel_id=channel_id,
+            channel_name=channel_name,
+        )
+
+    def _require_quality_check_connectivity(
+        self,
+        *,
+        phase: str,
+        channel_id: Optional[int] = None,
+        channel_name: Optional[str] = None,
+        update_progress: bool = True,
+    ) -> Optional[ConnectivityCheckResult]:
+        """Return a failed result when destructive quality work must abort."""
+        result = self._run_connectivity_guard(phase)
+        if result.ok:
+            return None
+
+        self.abort_current_check.set()
+        self._cancel_queueing = True
+        safe_channel_name = channel_name or (f"Channel {channel_id}" if channel_id is not None else "Quality check")
+        logger.error("Aborting quality check at %s: %s", phase, result.message)
+
+        if update_progress and channel_id is not None:
+            try:
+                self.progress.update(
+                    channel_id=channel_id,
+                    channel_name=safe_channel_name,
+                    current=0,
+                    total=0,
+                    status='aborted',
+                    step='Connectivity check failed',
+                    step_detail=result.message,
+                )
+            except Exception as exc:
+                logger.debug("Failed to publish connectivity abort progress: %s", exc)
+
+        return result
     
     def _check_channel(self, channel_id: int, skip_batch_changelog: bool = False, forced_profile_id: Optional[str] = None):
         """Check and reorder streams for a specific channel.
@@ -1134,6 +1235,16 @@ class StreamCheckerService:
             channel_id: ID of the channel to check
             skip_batch_changelog: If True, don't add this check to the batch changelog
         """
+        failed_connectivity = self._require_quality_check_connectivity(
+            phase='quality_check_preflight',
+            channel_id=channel_id,
+        )
+        if failed_connectivity is not None:
+            return self._fail_channel_for_connectivity(
+                failed_connectivity,
+                channel_id=channel_id,
+            )
+
         concurrent_enabled = self.config.get('concurrent_streams.enabled', True)
         
         if concurrent_enabled:
@@ -1612,6 +1723,17 @@ class StreamCheckerService:
                         analyzed['dead_reason'] = dead_reason
                     
                     if is_dead and not was_dead:
+                        failed_connectivity = self._require_quality_check_connectivity(
+                            phase='mark_dead_stream',
+                            channel_id=channel_id,
+                            channel_name=channel_name,
+                        )
+                        if failed_connectivity is not None:
+                            return self._fail_channel_for_connectivity(
+                                failed_connectivity,
+                                channel_id=channel_id,
+                                channel_name=channel_name,
+                            )
                         if self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, channel_id, reason=dead_reason):
                             dead_stream_ids.add(stream_id)
                             if analyzed.get('blank_detected'):
@@ -1640,6 +1762,17 @@ class StreamCheckerService:
                         # check pass. Unchecked streams must not be culled based on prior-run
                         # tracker state — their status will be re-evaluated in the next full check.
                         if stream_id in checked_stream_id_set:
+                            failed_connectivity = self._require_quality_check_connectivity(
+                                phase='keep_dead_stream_marked',
+                                channel_id=channel_id,
+                                channel_name=channel_name,
+                            )
+                            if failed_connectivity is not None:
+                                return self._fail_channel_for_connectivity(
+                                    failed_connectivity,
+                                    channel_id=channel_id,
+                                    channel_name=channel_name,
+                                )
                             self._refresh_dead_stream_reason_if_needed(
                                 stream_url,
                                 stream_id,
@@ -1822,6 +1955,18 @@ class StreamCheckerService:
                     f"{_uncached_ids[:5]}{'...' if len(_uncached_ids) > 5 else ''}"
                 )
                 reordered_ids.extend(_uncached_ids)
+
+            failed_connectivity = self._require_quality_check_connectivity(
+                phase='channel_stream_update',
+                channel_id=channel_id,
+                channel_name=channel_name,
+            )
+            if failed_connectivity is not None:
+                return self._fail_channel_for_connectivity(
+                    failed_connectivity,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                )
 
             update_channel_streams(channel_id, reordered_ids, allow_dead_streams=(not dead_stream_removal_enabled))
             
@@ -2349,6 +2494,17 @@ class StreamCheckerService:
                     analyzed['dead_reason'] = dead_reason
                 
                 if is_dead and not was_dead:
+                    failed_connectivity = self._require_quality_check_connectivity(
+                        phase='mark_dead_stream',
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                    )
+                    if failed_connectivity is not None:
+                        return self._fail_channel_for_connectivity(
+                            failed_connectivity,
+                            channel_id=channel_id,
+                            channel_name=channel_name,
+                        )
                     # Mark as dead in tracker
                     if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id, reason=dead_reason):
                         dead_stream_ids.add(stream['id'])
@@ -2378,6 +2534,17 @@ class StreamCheckerService:
                     # symmetry with the concurrent method and to make the scope
                     # constraint explicit at review time.
                     if stream['id'] in checked_stream_id_set:
+                        failed_connectivity = self._require_quality_check_connectivity(
+                            phase='keep_dead_stream_marked',
+                            channel_id=channel_id,
+                            channel_name=channel_name,
+                        )
+                        if failed_connectivity is not None:
+                            return self._fail_channel_for_connectivity(
+                                failed_connectivity,
+                                channel_id=channel_id,
+                                channel_name=channel_name,
+                            )
                         self._refresh_dead_stream_reason_if_needed(
                             stream_url,
                             stream['id'],
@@ -2630,6 +2797,18 @@ class StreamCheckerService:
                     f"{_uncached_ids[:5]}{'...' if len(_uncached_ids) > 5 else ''}"
                 )
                 reordered_ids.extend(_uncached_ids)
+
+            failed_connectivity = self._require_quality_check_connectivity(
+                phase='channel_stream_update',
+                channel_id=channel_id,
+                channel_name=channel_name,
+            )
+            if failed_connectivity is not None:
+                return self._fail_channel_for_connectivity(
+                    failed_connectivity,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                )
 
             update_channel_streams(channel_id, reordered_ids, allow_dead_streams=(not dead_stream_removal_enabled))
             
@@ -3344,6 +3523,7 @@ class StreamCheckerService:
             'enabled': self.config.get('enabled', True),
             'queue': queue_status,
             'progress': progress,
+            'connectivity_guard': self.connectivity_guard_status,
             'last_global_check': self.update_tracker.get_last_global_check(),
             'config': {
                 'automation_controls': self.config.get('automation_controls', {}),
@@ -3421,6 +3601,19 @@ class StreamCheckerService:
             Dict mapping channel_id to result dict (containing dead/revived streams)
         """
         results = {}
+
+        failed_connectivity = self._require_quality_check_connectivity(
+            phase='sync_batch_preflight',
+            update_progress=False,
+        )
+        if failed_connectivity is not None:
+            return {
+                channel_id: self._connectivity_abort_payload(
+                    failed_connectivity,
+                    channel_id=channel_id,
+                )
+                for channel_id in channel_ids
+            }
         
         # Mark force check if requested
         if force_check:
@@ -3650,6 +3843,18 @@ class StreamCheckerService:
             )
             logger.info(f"UDI cache {udi.get_cache_age_description()}")
 
+            failed_connectivity = self._require_quality_check_connectivity(
+                phase='single_channel_preflight',
+                channel_id=channel_id,
+                channel_name=channel_name,
+            )
+            if failed_connectivity is not None:
+                return self._connectivity_abort_payload(
+                    failed_connectivity,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                )
+
             # Signal to the frontend that this is a single channel check so the
             # stale batch progress card from the previous automation run is suppressed.
             self.progress.update(
@@ -3823,6 +4028,17 @@ class StreamCheckerService:
             # Step 4: Validate existing streams against regex patterns (if matching is enabled)
             if matching_enabled:
                 logger.info(f"Step 4/6: Validating existing streams for channel {channel_name}...")
+                failed_connectivity = self._require_quality_check_connectivity(
+                    phase='single_channel_validation_removal',
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                )
+                if failed_connectivity is not None:
+                    return self._connectivity_abort_payload(
+                        failed_connectivity,
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                    )
                 try:
                     from apps.automation.automated_stream_manager import AutomatedStreamManager
                     automation_manager = AutomatedStreamManager()
@@ -3856,6 +4072,17 @@ class StreamCheckerService:
 
             if matching_enabled:
                 logger.info(f"Step 5/6: Re-matching streams for channel {channel_name}...")
+                failed_connectivity = self._require_quality_check_connectivity(
+                    phase='single_channel_matching_update',
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                )
+                if failed_connectivity is not None:
+                    return self._connectivity_abort_payload(
+                        failed_connectivity,
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                    )
                 try:
                     # Import here to allow better test mocking
                     from apps.automation.automated_stream_manager import AutomatedStreamManager

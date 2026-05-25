@@ -76,6 +76,16 @@ class StreamCheckConfig:
             'enabled': True,  # Enable batch stats updates to reduce API calls
             'batch_size': 10,  # Number of streams to update per batch
             'verify_updates': False  # Verify channel updates by refreshing UDI (adds API overhead)
+        },
+        'connectivity_guard': {
+            'enabled': True,
+            'require_internet': True,
+            'require_dispatcharr_api': True,
+            'timeout_seconds': 3.0,
+            'internet_probe_urls': [
+                'https://www.google.com/generate_204',
+                'https://cloudflare.com/cdn-cgi/trace',
+            ],
         }
     }
     

@@ -78,6 +78,30 @@ If `allow_revive: true` is set in the profile, dead streams are re-checked on ea
 
 ---
 
+## Connectivity guard
+
+Stream checking includes a fail-closed connectivity guard before destructive
+quality-check operations. By default, StreamFlow verifies both general internet
+reachability and the configured Dispatcharr API before a quality check can mark
+streams dead or write a changed stream list back to a channel.
+
+The guard also re-checks connectivity immediately before dead-stream marking and
+channel stream updates. If DNS, internet access, the gateway, or the Dispatcharr
+API cannot be verified, the quality-check step aborts and leaves channel stream
+assignments unchanged.
+
+The guard can be disabled from Stream Checker -> Safety or by setting:
+
+```json
+{
+  "connectivity_guard": {
+    "enabled": false
+  }
+}
+```
+
+---
+
 ## Stream protection (hysteresis)
 
 StreamFlow distinguishes between streams that are **currently in use** and streams that are idle. Currently active streams receive a longer grace period before being replaced — even if a higher-scoring stream is available — to avoid interrupting live playback. Idle streams are replaced aggressively.

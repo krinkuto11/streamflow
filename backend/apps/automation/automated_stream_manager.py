@@ -3046,6 +3046,30 @@ class AutomatedStreamManager:
                     refresh_success = False
             
             if refresh_success:
+                if channels_to_quality_check:
+                    try:
+                        from apps.stream.stream_checker_service import get_stream_checker_service
+                        stream_checker_for_guard = get_stream_checker_service()
+                        failed_connectivity = stream_checker_for_guard._require_quality_check_connectivity(
+                            phase='automation_quality_preflight',
+                            update_progress=False,
+                        )
+                        if failed_connectivity is not None:
+                            logger.error(
+                                "Automation quality-check connectivity guard failed. "
+                                "Skipping validation, assignment, and quality checks to preserve channel streams: %s",
+                                failed_connectivity.message,
+                            )
+                            refresh_success = False
+                    except Exception as guard_err:
+                        logger.error(
+                            "Automation quality-check connectivity guard could not prove connectivity. "
+                            "Skipping validation, assignment, and quality checks: %s",
+                            guard_err,
+                        )
+                        refresh_success = False
+
+            if refresh_success:
                 # Optional post-refresh delay for environments where provider updates
                 # are eventually consistent. Defaults to 0 to avoid fixed latency.
                 post_refresh_delay = self._get_post_refresh_delay_seconds()
