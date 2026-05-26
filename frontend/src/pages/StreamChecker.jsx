@@ -342,8 +342,8 @@ export default function StreamChecker() {
           </p>
         </div>
         <div className="flex flex-col sm:flex-row sm:items-end gap-2 min-w-0">
-          <div className="w-full sm:w-40 space-y-1">
-            <Label htmlFor="queue-start-mode" className="text-xs text-muted-foreground">Start</Label>
+          <div className="w-full sm:w-44 space-y-1">
+            <Label htmlFor="queue-start-mode" className="text-xs text-muted-foreground">Run Start</Label>
             <Select
               value={queueStartMode}
               onValueChange={setQueueStartMode}
@@ -395,7 +395,7 @@ export default function StreamChecker() {
         </div>
       </div>
       <div className="text-sm text-muted-foreground">
-        Next full check starts at <span className="font-medium text-foreground">{queueStartLabel}</span>
+        Next run starts at <span className="font-medium text-foreground">{queueStartLabel}</span>
       </div>
 
       {/* Status Overview */}
@@ -704,7 +704,7 @@ export default function StreamChecker() {
 
               {/* Tabs for Configuration Sections */}
               <Tabs defaultValue="analysis" className="w-full">
-                <TabsList className="grid w-full grid-cols-4">
+                <TabsList className="grid h-auto min-h-10 w-full grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-4">
                   <TabsTrigger value="analysis">Stream Analysis</TabsTrigger>
                   <TabsTrigger value="queue">Queue</TabsTrigger>
                   <TabsTrigger value="concurrent">Concurrent Checking</TabsTrigger>
@@ -712,7 +712,7 @@ export default function StreamChecker() {
                 </TabsList>
 
                 {/* Stream Analysis Tab */}
-                <TabsContent value="analysis" className="space-y-4">
+                <TabsContent value="analysis" className="mt-4 space-y-4">
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="ffmpeg_duration">FFmpeg Duration (seconds)</Label>
@@ -828,10 +828,10 @@ export default function StreamChecker() {
                 </TabsContent>
 
                 {/* Queue Tab */}
-                <TabsContent value="queue" className="space-y-4">
+                <TabsContent value="queue" className="mt-4 space-y-4">
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
-                      <Label htmlFor="default_queue_start_mode">Default Full Check Start</Label>
+                      <Label htmlFor="default_queue_start_mode">Default Run Start</Label>
                       <Select
                         value={editedConfig?.queue?.start_mode || 'first'}
                         onValueChange={(value) => {
@@ -852,7 +852,7 @@ export default function StreamChecker() {
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">
-                        Default start point for manual full checks when no per-run choice is supplied
+                        Default start point for manual quality-check runs when no per-run choice is supplied
                       </p>
                     </div>
 
@@ -897,7 +897,7 @@ export default function StreamChecker() {
                 </TabsContent>
 
                 {/* Concurrent Checking Tab */}
-                <TabsContent value="concurrent" className="space-y-4">
+                <TabsContent value="concurrent" className="mt-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
                       <Label htmlFor="concurrent_enabled">Enable Concurrent Checking</Label>
@@ -949,7 +949,7 @@ export default function StreamChecker() {
 
 
                 {/* Dead Streams Tab */}
-                <TabsContent value="dead-streams" className="space-y-4">
+                <TabsContent value="dead-streams" className="mt-4 space-y-4">
                   <p className="text-sm text-muted-foreground">
                     View and manage streams that have been marked as dead. Removal from channels during stream checks depends on each automation profile&apos;s Stream Checking settings.
                   </p>
