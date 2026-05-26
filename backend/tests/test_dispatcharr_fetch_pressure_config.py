@@ -69,8 +69,10 @@ def test_update_dispatcharr_config_accepts_fetch_pressure_fields():
     assert response.status_code == 200
     config_manager.update_config.assert_called_once_with(
         base_url="http://dispatcharr.test",
+        auth_mode=None,
         username="user",
         password=None,
+        api_key=None,
         stream_fetch_page_size=5000,
         stream_fetch_max_workers=2,
     )

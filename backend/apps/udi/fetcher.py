@@ -21,6 +21,7 @@ from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.auth import (
     _get_base_url,
     _get_auth_headers,
+    _validate_auth_headers,
     _validate_token,
     _refresh_token,
     _token_refresh_lock,
@@ -86,6 +87,8 @@ class UDIFetcher:
         try:
             # Uses 5 second timeout in _validate_token
             headers = _get_auth_headers()
+            if headers.get("X-API-Key") or headers.get("Authorization", "").startswith("ApiKey "):
+                return _validate_auth_headers(headers)
             token = headers.get("Authorization", "").replace("Bearer ", "")
             return _validate_token(token)
         except Exception:

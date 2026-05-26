@@ -52,26 +52,39 @@ def _get_base_url() -> Optional[str]:
 
 def _validate_token(token: str) -> bool:
     """Return True if token is accepted by Dispatcharr, using a TTL cache."""
-    base_url = _get_base_url()
-    if not base_url or not token:
+    if not token:
         return False
-
-    now = time.time()
-    cached_time = _token_validation_cache.get(token)
-    if cached_time is not None:
-        age = now - cached_time
-        if age < TOKEN_VALIDATION_TTL:
-            logger.debug(f"Token validation cached (age: {age:.1f}s)")
-            return True
-        logger.debug(f"Token validation cache expired (age: {age:.1f}s)")
-
-    try:
-        test_url = f"{base_url}/api/channels/channels/"
-        headers = {
+    return _validate_auth_headers(
+        {
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
             "Content-Type": "application/json",
-        }
+        },
+        cache_key=f"bearer:{token}",
+    )
+
+
+def _validate_auth_headers(headers: Dict[str, str], cache_key: Optional[str] = None) -> bool:
+    """Return True if Dispatcharr accepts the provided auth headers."""
+    base_url = _get_base_url()
+    if not base_url or not headers:
+        return False
+
+    cache_key = cache_key or headers.get("Authorization") or headers.get("X-API-Key") or ""
+    if not cache_key:
+        return False
+
+    now = time.time()
+    cached_time = _token_validation_cache.get(cache_key)
+    if cached_time is not None:
+        age = now - cached_time
+        if age < TOKEN_VALIDATION_TTL:
+            logger.debug(f"Dispatcharr auth validation cached (age: {age:.1f}s)")
+            return True
+        logger.debug(f"Dispatcharr auth validation cache expired (age: {age:.1f}s)")
+
+    try:
+        test_url = f"{base_url}/api/channels/channels/"
         log_api_request(logger, "GET", test_url, params={"page_size": 1})
         start = time.time()
         resp = requests.get(test_url, headers=headers, timeout=5, params={"page_size": 1})
@@ -79,13 +92,13 @@ def _validate_token(token: str) -> bool:
         log_api_response(logger, "GET", test_url, resp.status_code, elapsed)
 
         if resp.status_code == 200:
-            _token_validation_cache[token] = start
-            logger.debug(f"Token validated and cached for {TOKEN_VALIDATION_TTL}s")
+            _token_validation_cache[cache_key] = start
+            logger.debug(f"Dispatcharr auth validated and cached for {TOKEN_VALIDATION_TTL}s")
             return True
-        _token_validation_cache.pop(token, None)
+        _token_validation_cache.pop(cache_key, None)
         return False
     except Exception:
-        _token_validation_cache.pop(token, None)
+        _token_validation_cache.pop(cache_key, None)
         return False
 
 
@@ -100,6 +113,10 @@ def _login() -> bool:
     Returns True on success, False on any failure.
     """
     config = get_dispatcharr_config()
+    if config.get_auth_mode() == "api_key":
+        logger.info("Dispatcharr API key auth is configured; token login is not required.")
+        return bool(config.get_api_key())
+
     username = config.get_username()
     password = config.get_password()
     base_url = config.get_base_url()
@@ -158,6 +175,18 @@ def _get_auth_headers() -> Dict[str, str]:
 
     Raises RuntimeError if login fails or the token is missing after login.
     """
+    config = get_dispatcharr_config()
+    if config.get_auth_mode() == "api_key":
+        api_key = config.get_api_key()
+        if not api_key:
+            raise RuntimeError("Dispatcharr API key is not configured")
+        return {
+            "Authorization": f"ApiKey {api_key}",
+            "X-API-Key": api_key,
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+
     current_token = os.getenv("DISPATCHARR_TOKEN")
 
     if current_token:
@@ -187,6 +216,11 @@ def _get_auth_headers() -> Dict[str, str]:
 def _refresh_token() -> bool:
     """Refresh the token, serialised so only one thread runs login() at a time."""
     with _token_refresh_lock:
+        config = get_dispatcharr_config()
+        if config.get_auth_mode() == "api_key":
+            logger.info("Dispatcharr API key auth is configured; token refresh is not available.")
+            return False
+
         logger.info("Token expired or invalid — refreshing...")
         if _login():
             if env_path.exists():
