@@ -253,6 +253,18 @@ def fetch_channel_streams(channel_id: int) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def _dedupe_stream_ids(stream_ids: List[int]) -> List[int]:
+    """Return stream IDs once, preserving their first-seen order."""
+    deduped: List[int] = []
+    seen = set()
+    for stream_id in stream_ids:
+        if stream_id in seen:
+            continue
+        seen.add(stream_id)
+        deduped.append(stream_id)
+    return deduped
+
+
 def update_channel_streams(
     channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
     allow_dead_streams: bool = False
@@ -283,12 +295,18 @@ def update_channel_streams(
         valid_stream_ids = get_valid_stream_ids()
     
     original_count = len(stream_ids)
-    filtered_stream_ids = [sid for sid in stream_ids if sid in valid_stream_ids]
+    valid_filtered_stream_ids = [sid for sid in stream_ids if sid in valid_stream_ids]
+    filtered_stream_ids = _dedupe_stream_ids(valid_filtered_stream_ids)
     
-    non_existent_count = original_count - len(filtered_stream_ids)
+    non_existent_count = original_count - len(valid_filtered_stream_ids)
     if non_existent_count > 0:
         logger.warning(
             f"Filtered out {non_existent_count} non-existent stream(s) for channel {channel_id}"
+        )
+    duplicate_count = len(valid_filtered_stream_ids) - len(filtered_stream_ids)
+    if duplicate_count > 0:
+        logger.warning(
+            f"Filtered out {duplicate_count} duplicate stream assignment(s) for channel {channel_id}"
         )
     
     # Filter out dead streams unless allow_dead_streams is True (e.g., during global checks)
@@ -344,7 +362,9 @@ def update_channel_streams(
                 
                 # Re-validate stream IDs with fresh data
                 current_valid_ids = udi.get_valid_stream_ids()
-                revalidated_stream_ids = [sid for sid in filtered_stream_ids if sid in current_valid_ids]
+                revalidated_stream_ids = _dedupe_stream_ids(
+                    [sid for sid in filtered_stream_ids if sid in current_valid_ids]
+                )
                 
                 invalid_count = len(filtered_stream_ids) - len(revalidated_stream_ids)
                 if invalid_count > 0:
@@ -658,7 +678,7 @@ def add_streams_to_channel(
             f"{channel_id}"
         )
     
-    current_stream_ids = [s['id'] for s in current_streams]
+    current_stream_ids = _dedupe_stream_ids([s['id'] for s in current_streams])
 
     # Preserve any stream IDs that are assigned to the channel in Dispatcharr but were
     # not returned by fetch_channel_streams() due to a stale UDI stream cache.
@@ -675,16 +695,17 @@ def add_streams_to_channel(
                 f"stream ID(s) not in UDI stream cache — preserving to avoid accidental "
                 f"removal: {_uncached[:5]}{'...' if len(_uncached) > 5 else ''}"
             )
-            current_stream_ids.extend(_uncached)
+            current_stream_ids = _dedupe_stream_ids(current_stream_ids + _uncached)
     
     # Filter out stream IDs that no longer exist in Dispatcharr
     if valid_stream_ids is None:
         valid_stream_ids = get_valid_stream_ids()
     
-    valid_new_stream_ids = [
+    current_stream_id_set = set(current_stream_ids)
+    valid_new_stream_ids = _dedupe_stream_ids([
         sid for sid in stream_ids
-        if sid in valid_stream_ids and sid not in current_stream_ids
-    ]
+        if sid in valid_stream_ids and sid not in current_stream_id_set
+    ])
     
     # Log if any stream IDs were filtered out as non-existent
     non_existent_count = len([sid for sid in stream_ids if sid not in valid_stream_ids])
@@ -704,7 +725,7 @@ def add_streams_to_channel(
             )
     
     if valid_new_stream_ids:
-        updated_streams = current_stream_ids + valid_new_stream_ids
+        updated_streams = _dedupe_stream_ids(current_stream_ids + valid_new_stream_ids)
         update_channel_streams(channel_id, updated_streams, valid_stream_ids, allow_dead_streams)
         logger.info(
             f"Added {len(valid_new_stream_ids)} new streams to channel "
