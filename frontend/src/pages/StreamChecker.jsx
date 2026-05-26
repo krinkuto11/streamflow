@@ -346,8 +346,8 @@ export default function StreamChecker() {
           </p>
         </div>
         <div className="flex flex-col sm:flex-row sm:items-end gap-2 min-w-0">
-          <div className="w-full sm:w-40 space-y-1">
-            <Label htmlFor="queue-start-mode" className="text-xs text-muted-foreground">Start</Label>
+          <div className="w-full sm:w-44 space-y-1">
+            <Label htmlFor="queue-start-mode" className="text-xs text-muted-foreground">Run Start</Label>
             <Select
               value={queueStartMode}
               onValueChange={setQueueStartMode}
@@ -399,7 +399,7 @@ export default function StreamChecker() {
         </div>
       </div>
       <div className="text-sm text-muted-foreground">
-        Next full check starts at <span className="font-medium text-foreground">{queueStartLabel}</span>
+        Next run starts at <span className="font-medium text-foreground">{queueStartLabel}</span>
       </div>
 
       {/* Status Overview */}
@@ -843,7 +843,7 @@ export default function StreamChecker() {
                 <TabsContent value="queue" className="mt-4 space-y-4">
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
-                      <Label htmlFor="default_queue_start_mode">Default Full Check Start</Label>
+                      <Label htmlFor="default_queue_start_mode">Default Run Start</Label>
                       <Select
                         value={editedConfig?.queue?.start_mode || 'first'}
                         onValueChange={(value) => {
@@ -864,7 +864,7 @@ export default function StreamChecker() {
                         </SelectContent>
                       </Select>
                       <p className="text-xs text-muted-foreground">
-                        Default start point for manual full checks when no per-run choice is supplied
+                        Default start point for manual quality-check runs when no per-run choice is supplied
                       </p>
                     </div>
 
