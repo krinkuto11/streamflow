@@ -32,7 +32,9 @@ MAX_EVENTS = 100
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
     "dry_run": True,
+    "watch_mode": "periodic",
     "poll_interval_seconds": 30,
+    "watch_gap_seconds": 1,
     "probe_duration_seconds": 8,
     "blank_min_duration_seconds": 2.0,
     "blank_pixel_threshold": 0.10,
@@ -48,9 +50,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "excluded_channel_uuids": [],
 }
 CONFIG_KEYS = set(DEFAULT_CONFIG)
+WATCH_MODES = {"periodic", "continuous"}
 
 INT_BOUNDS = {
     "poll_interval_seconds": (5, 3600),
+    "watch_gap_seconds": (1, 300),
     "probe_duration_seconds": (3, 120),
     "confirmation_count": (1, 5),
     "channel_cooldown_seconds": (30, 86400),
@@ -110,6 +114,9 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
 
     config["enabled"] = bool(config.get("enabled"))
     config["dry_run"] = bool(config.get("dry_run"))
+    config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
+    if config["watch_mode"] not in WATCH_MODES:
+        config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
     config["skip_during_quality_check"] = bool(config.get("skip_during_quality_check"))
     config["watcher_user_agent"] = str(config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"]).strip()
     config["watcher_api_key"] = str(config.get("watcher_api_key") or "").strip()
@@ -264,7 +271,8 @@ class ShadowBlankMonitorService:
             try:
                 with self._lock:
                     enabled = bool(self._config.get("enabled"))
-                    interval = int(self._config.get("poll_interval_seconds", 30))
+                    config = dict(self._config)
+                    interval = self._next_scan_delay(config)
                 if enabled:
                     self.run_once()
                 self._stop_event.wait(interval)
@@ -273,6 +281,12 @@ class ShadowBlankMonitorService:
                 logger.error(f"Shadow blank monitor loop failed: {exc}", exc_info=True)
                 self._stop_event.wait(30)
         logger.info("Shadow blank monitor stopped")
+
+    @staticmethod
+    def _next_scan_delay(config: Dict[str, Any]) -> int:
+        if config.get("watch_mode") == "continuous":
+            return int(config.get("watch_gap_seconds") or DEFAULT_CONFIG["watch_gap_seconds"])
+        return int(config.get("poll_interval_seconds") or DEFAULT_CONFIG["poll_interval_seconds"])
 
     def run_once(self, *, force: bool = False) -> Dict[str, Any]:
         with self._lock:

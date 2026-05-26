@@ -23,6 +23,7 @@ import {
 
 const numberFields = [
   { key: 'poll_interval_seconds', label: 'Poll Interval', suffix: 'sec', min: 5, max: 3600 },
+  { key: 'watch_gap_seconds', label: 'Watch Gap', suffix: 'sec', min: 1, max: 300 },
   { key: 'probe_duration_seconds', label: 'Probe Duration', suffix: 'sec', min: 3, max: 120 },
   { key: 'confirmation_count', label: 'Confirmations', suffix: 'hits', min: 1, max: 5 },
   { key: 'channel_cooldown_seconds', label: 'Cooldown', suffix: 'sec', min: 30, max: 86400 },
@@ -184,6 +185,7 @@ export default function ShadowBlankMonitor() {
   const running = Boolean(status?.running)
   const enabled = Boolean(editedConfig?.enabled)
   const dryRun = Boolean(editedConfig?.dry_run)
+  const watchMode = editedConfig?.watch_mode || 'periodic'
   const hasKey = Boolean(config?.has_watcher_api_key)
 
   return (
@@ -319,6 +321,26 @@ export default function ShadowBlankMonitor() {
                   checked={Boolean(editedConfig.skip_during_quality_check)}
                   onCheckedChange={(value) => updateConfigValue('skip_during_quality_check', value)}
                 />
+              </div>
+
+              <div className="rounded-md border p-3 md:col-span-2">
+                <Label className="text-sm font-medium">Watch Mode</Label>
+                <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                  <Button
+                    type="button"
+                    variant={watchMode === 'periodic' ? 'default' : 'outline'}
+                    onClick={() => updateConfigValue('watch_mode', 'periodic')}
+                  >
+                    Periodic
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={watchMode === 'continuous' ? 'default' : 'outline'}
+                    onClick={() => updateConfigValue('watch_mode', 'continuous')}
+                  >
+                    Continuous
+                  </Button>
+                </div>
               </div>
             </div>
 

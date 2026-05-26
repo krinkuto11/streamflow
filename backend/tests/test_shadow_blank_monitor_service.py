@@ -60,6 +60,26 @@ def active_status(stream_id=10, clients=None):
     }
 
 
+def test_watch_mode_controls_scan_delay():
+    continuous = normalize_config({
+        "watch_mode": "continuous",
+        "watch_gap_seconds": 2,
+        "poll_interval_seconds": 90,
+    })
+    assert ShadowBlankMonitorService._next_scan_delay(continuous) == 2
+
+    periodic = normalize_config({
+        "watch_mode": "periodic",
+        "watch_gap_seconds": 2,
+        "poll_interval_seconds": 90,
+    })
+    assert ShadowBlankMonitorService._next_scan_delay(periodic) == 90
+
+    invalid = normalize_config({"watch_mode": "always-on", "watch_gap_seconds": 0})
+    assert invalid["watch_mode"] == "periodic"
+    assert invalid["watch_gap_seconds"] == 1
+
+
 def test_discovers_real_clients_and_hides_raw_channel_identifiers(tmp_path):
     udi = FakeUdi(
         statuses=[{
