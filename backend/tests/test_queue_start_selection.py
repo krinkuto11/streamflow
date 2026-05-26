@@ -31,6 +31,38 @@ class TestQueueStartSelection(unittest.TestCase):
         self.assertEqual(meta["start_channel_id"], 10)
         self.assertEqual(meta["start_channel_name"], "Alpha")
 
+    def test_first_start_uses_channel_number_order_when_available(self):
+        channels = [
+            {"id": 40, "name": "Delta", "channel_number": 4.0},
+            {"id": 10, "name": "Alpha", "channel_number": 1.0},
+            {"id": 30, "name": "Gamma", "channel_number": 3.0},
+            {"id": 20, "name": "Beta", "channel_number": 2.0},
+        ]
+
+        ordered, meta = order_channels_for_queue_start(
+            channels,
+            start_mode="first",
+        )
+
+        self.assertEqual([channel["id"] for channel in ordered], [10, 20, 30, 40])
+        self.assertEqual(meta["start_channel_id"], 10)
+
+    def test_last_start_uses_reverse_channel_number_order_when_available(self):
+        channels = [
+            {"id": 40, "name": "Delta", "channel_number": 4.0},
+            {"id": 10, "name": "Alpha", "channel_number": 1.0},
+            {"id": 30, "name": "Gamma", "channel_number": 3.0},
+            {"id": 20, "name": "Beta", "channel_number": 2.0},
+        ]
+
+        ordered, meta = order_channels_for_queue_start(
+            channels,
+            start_mode="last",
+        )
+
+        self.assertEqual([channel["id"] for channel in ordered], [40, 30, 20, 10])
+        self.assertEqual(meta["start_channel_id"], 40)
+
     def test_last_start_reverses_channel_order(self):
         ordered, meta = order_channels_for_queue_start(
             self.channels,

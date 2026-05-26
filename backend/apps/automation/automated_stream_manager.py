@@ -2803,6 +2803,11 @@ class AutomatedStreamManager:
             # 2. Determine which playlists to update and group channels by period
             udi = get_udi_manager()
             channels = udi.get_channels()
+            channels_by_id = {
+                int(channel.get('id')): channel
+                for channel in channels
+                if isinstance(channel, dict) and channel.get('id') is not None
+            }
             active_periods = {} # {(period_id, period_name): {profile_id, profile_name, channels: []}}
             active_profile_ids = set()
             
@@ -3124,6 +3129,36 @@ class AutomatedStreamManager:
                             f"{len(channels_to_check_sync) - len(_target_stream_ids)} full-check, "
                             f"{len(channels_to_quality_check) - len(channels_to_check_sync)} skipped)"
                         )
+                        if channels_to_check_sync:
+                            from apps.stream.queue_start import order_channels_for_queue_start
+
+                            start_mode = stream_checker.config.get('queue.start_mode', 'first')
+                            start_channel_id = stream_checker.config.get('queue.start_channel_id', None)
+                            channel_refs = [
+                                channels_by_id.get(ch_id, {'id': ch_id})
+                                for ch_id in channels_to_check_sync
+                            ]
+                            try:
+                                ordered_refs, start_meta = order_channels_for_queue_start(
+                                    channel_refs,
+                                    start_mode=start_mode,
+                                    start_channel_id=start_channel_id,
+                                )
+                            except ValueError as exc:
+                                logger.warning(
+                                    "Invalid saved quality-check start selection (%s); falling back to first channel",
+                                    exc,
+                                )
+                                ordered_refs, start_meta = order_channels_for_queue_start(
+                                    channel_refs,
+                                    start_mode='first',
+                                )
+                            channels_to_check_sync = [int(channel['id']) for channel in ordered_refs]
+                            logger.info(
+                                "Synchronous quality checks start at %s (mode=%s)",
+                                start_meta.get('start_channel_name', start_meta.get('start_channel_id')),
+                                start_meta.get('mode', 'first'),
+                            )
 
                         # Run checks synchronously and collect results
                         if channels_to_check_sync:
