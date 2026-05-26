@@ -152,6 +152,8 @@ def test_quality_check_startup_offline_aborts_before_channel_check():
     sequential.assert_not_called()
     assert result["success"] is False
     assert result["error"] == "connectivity_guard"
+    assert result["aborted"] is True
+    assert result["skip_reason"] == "connectivity_guard"
     assert service.connectivity_guard_status["ok"] is False
 
 
