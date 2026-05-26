@@ -52,6 +52,26 @@ class AutomationRunStatusTests(unittest.TestCase):
 
         self.assertNotIn("channels_with_periods", manager.get_run_status()["counts"])
 
+    def test_quality_summary_flags_connectivity_abort_and_incomplete_run(self):
+        summary = AutomatedStreamManager._summarize_quality_check_results(
+            {
+                101: {"success": True},
+                102: {
+                    "success": False,
+                    "error": "connectivity_guard",
+                    "aborted": True,
+                    "message": "dispatcharr_api connectivity probe timed out",
+                },
+            },
+            expected_count=5,
+        )
+
+        self.assertFalse(summary["ok"])
+        self.assertEqual(summary["checked_count"], 2)
+        self.assertEqual(summary["aborted_count"], 1)
+        self.assertEqual(summary["incomplete_count"], 3)
+        self.assertEqual(summary["abort_message"], "dispatcharr_api connectivity probe timed out")
+
 
 class FetcherTimingSummaryTests(unittest.TestCase):
     def test_api_timing_summary_is_sanitized_and_percentiled(self):

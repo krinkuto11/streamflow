@@ -1429,6 +1429,35 @@ class AutomatedStreamManager:
                 except (TypeError, ValueError):
                     pass
 
+    @staticmethod
+    def _summarize_quality_check_results(check_results, expected_count: int) -> Dict[str, Any]:
+        checked_count = len(check_results or {})
+        expected_count = max(0, int(expected_count or 0))
+        aborted_count = 0
+        failed_count = 0
+        first_abort_message = None
+
+        for result in (check_results or {}).values():
+            if not isinstance(result, dict):
+                continue
+            if result.get("aborted") or result.get("error") == "connectivity_guard":
+                aborted_count += 1
+                if first_abort_message is None:
+                    first_abort_message = result.get("message") or "Quality check was aborted"
+            elif result.get("success") is False or result.get("error"):
+                failed_count += 1
+
+        incomplete_count = max(0, expected_count - checked_count)
+        return {
+            "ok": aborted_count == 0 and incomplete_count == 0,
+            "checked_count": checked_count,
+            "expected_count": expected_count,
+            "aborted_count": aborted_count,
+            "failed_count": failed_count,
+            "incomplete_count": incomplete_count,
+            "abort_message": first_abort_message,
+        }
+
     def get_run_status(self) -> Dict[str, Any]:
         """Return the current or most recent automation-cycle status."""
         self._ensure_run_status_fields()
@@ -3147,6 +3176,7 @@ class AutomatedStreamManager:
 
             validation_details = []
             assignment_details = []
+            cycle_abort_message = None
 
             # Deduplicate while preserving order (channels may appear in multiple active period groups).
             channels_to_quality_check = list(dict.fromkeys(channels_to_quality_check))
@@ -3398,19 +3428,42 @@ class AutomatedStreamManager:
                         else:
                             logger.info("No channels require synchronous quality checks this cycle (no new assignments)")
                             check_results = {}
+                        quality_summary = self._summarize_quality_check_results(
+                            check_results,
+                            expected_count=len(channels_to_check_sync),
+                        )
+                        if not quality_summary["ok"]:
+                            cycle_abort_message = (
+                                quality_summary["abort_message"]
+                                or (
+                                    "Quality check stage stopped before completion "
+                                    f"({quality_summary['checked_count']}/"
+                                    f"{quality_summary['expected_count']} channels checked)"
+                                )
+                            )
+                            logger.error("Automation quality-check stage aborted: %s", cycle_abort_message)
                         self._update_run_status(
                             counts={
-                                "quality_checked": len(check_results),
+                                "quality_checked": quality_summary["checked_count"],
+                                "quality_aborted": quality_summary["aborted_count"],
+                                "quality_failed": quality_summary["failed_count"],
+                                "quality_incomplete": quality_summary["incomplete_count"],
                             },
                             durations={"quality_check_seconds": time.time() - quality_stage_started},
-                            message="Quality check stage completed",
+                            message=(
+                                "Quality check stage aborted"
+                                if cycle_abort_message
+                                else "Quality check stage completed"
+                            ),
+                            error=cycle_abort_message,
                         )
                     except Exception as e:
                         logger.error(f"✗ Failed to run quality checks: {e}")
+                        cycle_abort_message = f"Quality check stage failed: {e}"
                         check_results = {}
                         self._update_run_status(
                             durations={"quality_check_seconds": time.time() - quality_stage_started},
-                            error=str(e),
+                            error=cycle_abort_message,
                             message="Quality check stage failed",
                         )
             
@@ -3644,7 +3697,7 @@ class AutomatedStreamManager:
                 },
                 durations={"total_cycle_seconds": duration_sec},
             )
-            if refresh_success:
+            if refresh_success and not cycle_abort_message:
                 self._finish_run_status(
                     state="completed",
                     stage="completed",
@@ -3656,10 +3709,14 @@ class AutomatedStreamManager:
                     state="failed",
                     stage="aborted",
                     stage_label="Aborted",
-                    message="Automation cycle stopped before matching completed",
+                    message=cycle_abort_message or "Automation cycle stopped before matching completed",
+                    error=cycle_abort_message,
                 )
             
-            logger.info("Automation cycle completed")
+            if refresh_success and not cycle_abort_message:
+                logger.info("Automation cycle completed")
+            else:
+                logger.warning("Automation cycle aborted")
             _cycle_did_work = True
 
         except Exception as exc:
