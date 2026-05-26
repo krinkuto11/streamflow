@@ -127,6 +127,42 @@ export default function StreamChecker() {
     }
   }
 
+  const mergeQueueStartConfig = (queueUpdate) => {
+    const merge = (current) => current
+      ? { ...current, queue: { ...(current.queue || {}), ...queueUpdate } }
+      : current
+    setConfig(merge)
+    setEditedConfig(merge)
+  }
+
+  const persistQueueStart = async (nextMode, nextChannelId = queueStartChannelId) => {
+    const fallbackChannelId = nextChannelId || startChannels[0]?.id || null
+    const queueUpdate = {
+      start_mode: nextMode,
+      start_channel_id: fallbackChannelId != null ? Number(fallbackChannelId) : null
+    }
+
+    setQueueStartMode(nextMode)
+    if (queueUpdate.start_channel_id != null) {
+      setQueueStartChannelId(String(queueUpdate.start_channel_id))
+    }
+    mergeQueueStartConfig(queueUpdate)
+
+    try {
+      setActionLoading('queue-start')
+      await streamCheckerAPI.updateConfig({ queue: queueUpdate })
+      await loadData()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to save run start",
+        variant: "destructive"
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
 
   const handleClearQueue = async () => {
     try {
@@ -330,7 +366,7 @@ export default function StreamChecker() {
     : queueStartMode === 'channel'
       ? (selectedStartChannel?.name || 'Select a channel')
       : (firstStartChannel?.name || 'First channel')
-  const queueAllDisabled = isChecking || actionLoading === 'queue-all' || (queueStartMode === 'channel' && !queueStartChannelId)
+  const queueAllDisabled = isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || (queueStartMode === 'channel' && !queueStartChannelId)
 
   return (
     <div className="space-y-6">
@@ -346,8 +382,8 @@ export default function StreamChecker() {
             <Label htmlFor="queue-start-mode" className="text-xs text-muted-foreground">Run Start</Label>
             <Select
               value={queueStartMode}
-              onValueChange={setQueueStartMode}
-              disabled={isChecking || actionLoading === 'queue-all'}
+              onValueChange={(value) => persistQueueStart(value)}
+              disabled={isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start'}
             >
               <SelectTrigger id="queue-start-mode">
                 <SelectValue />
@@ -364,8 +400,8 @@ export default function StreamChecker() {
               <Label htmlFor="queue-start-channel" className="text-xs text-muted-foreground">Channel</Label>
               <Select
                 value={queueStartChannelId}
-                onValueChange={setQueueStartChannelId}
-                disabled={isChecking || actionLoading === 'queue-all' || startChannels.length === 0}
+                onValueChange={(value) => persistQueueStart('channel', value)}
+                disabled={isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || startChannels.length === 0}
               >
                 <SelectTrigger id="queue-start-channel">
                   <SelectValue placeholder="Select channel" />
@@ -396,6 +432,7 @@ export default function StreamChecker() {
       </div>
       <div className="text-sm text-muted-foreground">
         Next run starts at <span className="font-medium text-foreground">{queueStartLabel}</span>
+        {actionLoading === 'queue-start' && <span className="ml-2">Saving...</span>}
       </div>
 
       {/* Status Overview */}
