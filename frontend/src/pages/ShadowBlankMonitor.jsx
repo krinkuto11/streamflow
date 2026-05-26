@@ -403,6 +403,9 @@ export default function ShadowBlankMonitor() {
                   placeholder={hasKey ? 'Configured' : ''}
                   onChange={(event) => updateConfigValue('watcher_api_key', event.target.value)}
                 />
+                <p className="text-xs text-muted-foreground">
+                  Use a dedicated watcher or playback user key here, not an admin or primary account key.
+                </p>
               </div>
               <Button
                 variant="outline"
