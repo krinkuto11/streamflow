@@ -243,6 +243,35 @@ def test_viewer_left_guard_skips_switching(tmp_path):
     assert status["recent_events"][0]["type"] == "viewer_left"
 
 
+def test_viewer_left_after_probe_clears_watched_snapshot(tmp_path):
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {
+                "uuid-1": {
+                    "state": "active",
+                    "channel_id": "uuid-1",
+                    "stream_id": 10,
+                    "clients": [{"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"}],
+                },
+            },
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False},
+    )
+    service.update_config({"enabled": False, "dry_run": False})
+
+    status = service.run_once(force=True)
+
+    assert status["recent_events"][0]["type"] == "viewer_left"
+    assert status["watched_count"] == 0
+    assert status["watched_channels"] == []
+
+
 def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
     probe_urls = []
     udi = FakeUdi(

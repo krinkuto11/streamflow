@@ -376,6 +376,14 @@ class ShadowBlankMonitorService:
                     "blank_duration_secs": result.get("blank_duration_secs"),
                 }
 
+                fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                if self._real_client_count(fresh_status, config) <= 0:
+                    self._blank_counts[channel_uuid] = 0
+                    self._record_event("viewer_left", target, {})
+                    with self._lock:
+                        self._watched.pop(channel_uuid, None)
+                    continue
+
                 if not blank:
                     self._blank_counts[channel_uuid] = 0
                     self._record_event("probe_ok", target, target["last_probe"])
