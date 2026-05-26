@@ -429,7 +429,8 @@ def queue_all_channels_response(
                 start_channel_id=start_channel_id,
             )
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            logger.info("Invalid queue start selection: %s", exc)
+            return jsonify({"error": "Invalid queue start selection"}), 400
 
         channel_ids = [channel["id"] for channel in ordered_channels]
         if not channel_ids:
