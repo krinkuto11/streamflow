@@ -1290,6 +1290,7 @@ def mark_channels_updated():
 def queue_all_channels():
     """Queue all channels for checking (manual trigger for full check)."""
     return queue_all_channels_response(
+        payload=request.get_json(silent=True),
         get_stream_checker_service=get_stream_checker_service,
         get_udi_manager=get_udi_manager,
     )

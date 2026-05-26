@@ -198,7 +198,7 @@ export const streamCheckerAPI = {
     ...(profileId ? { profile_id: profileId } : {}),
   }, { timeout: 120000 }),
   markUpdated: (data) => api.post('/stream-checker/mark-updated', data),
-  queueAllChannels: () => api.post('/stream-checker/queue-all'),
+  queueAllChannels: (options = {}) => api.post('/stream-checker/queue-all', options),
   triggerGlobalAction: () => api.post('/stream-checker/global-action'),
 };
 

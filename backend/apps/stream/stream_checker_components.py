@@ -61,7 +61,9 @@ class StreamCheckConfig:
         'queue': {
             'max_size': 1000,
             'check_on_update': True,  # check channels when they receive M3U updates
-            'max_channels_per_run': 50  # limit channels per check cycle
+            'max_channels_per_run': 50,  # limit channels per check cycle
+            'start_mode': 'first',  # first, last, or channel for manual full checks
+            'start_channel_id': None
         },
         'concurrent_streams': {
             'global_limit': 10,  # Maximum concurrent stream checks globally (0 = unlimited)
@@ -115,12 +117,23 @@ class StreamCheckConfig:
         import copy
         log_function_call(logger, "_load_config")
         
+        def deep_merge(defaults: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+            for key, value in overrides.items():
+                if (
+                    isinstance(value, dict)
+                    and isinstance(defaults.get(key), dict)
+                ):
+                    defaults[key] = deep_merge(defaults[key], value)
+                else:
+                    defaults[key] = value
+            return defaults
+
         loaded = self.db.get_system_setting('stream_checker_config', {})
         if loaded:
             logger.debug(f"Loaded config from DB with {len(loaded)} top-level keys")
             # Deep copy defaults to avoid mutating DEFAULT_CONFIG
             config = copy.deepcopy(self.DEFAULT_CONFIG)
-            config.update(loaded)
+            config = deep_merge(config, loaded)
             return config
         
         logger.debug("No config in DB, creating default")

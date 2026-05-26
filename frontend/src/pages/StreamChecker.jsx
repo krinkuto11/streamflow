@@ -9,9 +9,10 @@ import { Input } from '@/components/ui/input.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from '@/components/ui/pagination.jsx'
 import { useToast } from '@/hooks/use-toast.js'
-import { streamCheckerAPI, deadStreamsAPI } from '@/services/api.js'
+import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import {
   Activity,
   CheckCircle2,
@@ -51,6 +52,10 @@ export default function StreamChecker() {
     has_prev: false
   })
   const [totalDeadStreams, setTotalDeadStreams] = useState(0)
+  const [startChannels, setStartChannels] = useState([])
+  const [queueStartMode, setQueueStartMode] = useState('first')
+  const [queueStartChannelId, setQueueStartChannelId] = useState('')
+  const [queueStartInitialized, setQueueStartInitialized] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
@@ -62,6 +67,10 @@ export default function StreamChecker() {
     }, pollInterval)
     return () => clearInterval(interval)
   }, [status?.checking, status?.queue?.queue_size])
+
+  useEffect(() => {
+    loadStartChannels()
+  }, [])
 
   // Tick every second to drive per-stream countdown cells
   // The tick value itself is never rendered — it triggers re-renders so
@@ -84,10 +93,39 @@ export default function StreamChecker() {
       if (!editedConfig && configResponse.data) {
         setEditedConfig(configResponse.data)
       }
+      if (!queueStartInitialized && configResponse.data?.queue) {
+        const savedMode = configResponse.data.queue.start_mode || 'first'
+        const savedChannelId = configResponse.data.queue.start_channel_id
+        setQueueStartMode(savedMode)
+        if (savedChannelId !== null && savedChannelId !== undefined) {
+          setQueueStartChannelId(String(savedChannelId))
+        }
+        setQueueStartInitialized(true)
+      }
     } catch (err) {
       console.error('Failed to load stream checker data:', err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadStartChannels = async () => {
+    try {
+      const response = await channelsAPI.getChannels({
+        sort_by: 'channel_number',
+        sort_dir: 'asc',
+        per_page: 500
+      })
+      const channelItems = Array.isArray(response.data)
+        ? response.data
+        : (response.data?.items || [])
+      const usableChannels = channelItems.filter(channel => channel?.id != null)
+      setStartChannels(usableChannels)
+      if (!queueStartChannelId && usableChannels.length > 0) {
+        setQueueStartChannelId(String(usableChannels[0].id))
+      }
+    } catch (err) {
+      console.error('Failed to load queue start channels:', err)
     }
   }
 
@@ -112,6 +150,33 @@ export default function StreamChecker() {
     }
   }
 
+  const handleQueueAllChannels = async () => {
+    try {
+      setActionLoading('queue-all')
+      const payload = { start_mode: queueStartMode }
+      if (queueStartMode === 'channel') {
+        payload.start_channel_id = queueStartChannelId
+      }
+      const response = await streamCheckerAPI.queueAllChannels(payload)
+      const startName = response.data?.start?.start_channel_name
+      toast({
+        title: "Success",
+        description: startName
+          ? `Queued full check starting at ${startName}`
+          : response.data?.message || "Queued full check"
+      })
+      await loadData()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to queue full check",
+        variant: "destructive"
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
   const handleSaveConfig = async () => {
     try {
       setActionLoading('save-config')
@@ -121,6 +186,10 @@ export default function StreamChecker() {
         description: "Configuration saved successfully"
       })
       setConfigEditing(false)
+      setQueueStartMode(editedConfig?.queue?.start_mode || 'first')
+      if (editedConfig?.queue?.start_channel_id !== null && editedConfig?.queue?.start_channel_id !== undefined) {
+        setQueueStartChannelId(String(editedConfig.queue.start_channel_id))
+      }
       await loadData()
     } catch (err) {
       toast({
@@ -256,6 +325,15 @@ export default function StreamChecker() {
   const totalBatch = queued + inProgress + completed + failed
   const batchProgress = totalBatch > 0 ? ((completed + failed) / totalBatch) * 100 : 0
   const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
+  const selectedStartChannel = startChannels.find(channel => String(channel.id) === String(queueStartChannelId))
+  const firstStartChannel = startChannels[0]
+  const lastStartChannel = startChannels[startChannels.length - 1]
+  const queueStartLabel = queueStartMode === 'last'
+    ? (lastStartChannel?.name || 'Last channel')
+    : queueStartMode === 'channel'
+      ? (selectedStartChannel?.name || 'Select a channel')
+      : (firstStartChannel?.name || 'First channel')
+  const queueAllDisabled = isChecking || actionLoading === 'queue-all' || (queueStartMode === 'channel' && !queueStartChannelId)
 
   return (
     <div className="space-y-6">
@@ -266,8 +344,61 @@ export default function StreamChecker() {
             Monitor and manage stream quality checking
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-end gap-2 min-w-0">
+          <div className="w-full sm:w-40 space-y-1">
+            <Label htmlFor="queue-start-mode" className="text-xs text-muted-foreground">Start</Label>
+            <Select
+              value={queueStartMode}
+              onValueChange={setQueueStartMode}
+              disabled={isChecking || actionLoading === 'queue-all'}
+            >
+              <SelectTrigger id="queue-start-mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="first">First channel</SelectItem>
+                <SelectItem value="last">Last channel</SelectItem>
+                <SelectItem value="channel">Selected channel</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {queueStartMode === 'channel' && (
+            <div className="w-full sm:w-64 space-y-1">
+              <Label htmlFor="queue-start-channel" className="text-xs text-muted-foreground">Channel</Label>
+              <Select
+                value={queueStartChannelId}
+                onValueChange={setQueueStartChannelId}
+                disabled={isChecking || actionLoading === 'queue-all' || startChannels.length === 0}
+              >
+                <SelectTrigger id="queue-start-channel">
+                  <SelectValue placeholder="Select channel" />
+                </SelectTrigger>
+                <SelectContent>
+                  {startChannels.map(channel => (
+                    <SelectItem key={channel.id} value={String(channel.id)}>
+                      {channel.name || `Channel ${channel.id}`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <Button
+            onClick={handleQueueAllChannels}
+            disabled={queueAllDisabled}
+            className="sm:min-w-44"
+          >
+            {actionLoading === 'queue-all' ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <PlayCircle className="mr-2 h-4 w-4" />
+            )}
+            Check All
+          </Button>
         </div>
+      </div>
+      <div className="text-sm text-muted-foreground">
+        Next full check starts at <span className="font-medium text-foreground">{queueStartLabel}</span>
       </div>
 
       {/* Status Overview */}
@@ -590,6 +721,7 @@ export default function StreamChecker() {
               <Tabs defaultValue="analysis" className="w-full">
                 <TabsList className="grid w-full grid-cols-4">
                   <TabsTrigger value="analysis">Stream Analysis</TabsTrigger>
+                  <TabsTrigger value="queue">Queue</TabsTrigger>
                   <TabsTrigger value="concurrent">Concurrent Checking</TabsTrigger>
                   <TabsTrigger value="safety">Safety</TabsTrigger>
                   <TabsTrigger value="dead-streams">Dead Streams</TabsTrigger>
@@ -707,6 +839,75 @@ export default function StreamChecker() {
                       <p className="text-xs text-muted-foreground">
                         User agent string for ffmpeg/ffprobe (for strict stream providers)
                       </p>
+                    </div>
+                  </div>
+                </TabsContent>
+
+                {/* Queue Tab */}
+                <TabsContent value="queue" className="space-y-4">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="default_queue_start_mode">Default Full Check Start</Label>
+                      <Select
+                        value={editedConfig?.queue?.start_mode || 'first'}
+                        onValueChange={(value) => {
+                          updateConfigValue('queue.start_mode', value)
+                          if (value === 'channel' && !editedConfig?.queue?.start_channel_id && startChannels[0]) {
+                            updateConfigValue('queue.start_channel_id', startChannels[0].id)
+                          }
+                        }}
+                        disabled={!configEditing}
+                      >
+                        <SelectTrigger id="default_queue_start_mode">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="first">First channel</SelectItem>
+                          <SelectItem value="last">Last channel</SelectItem>
+                          <SelectItem value="channel">Selected channel</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Default start point for manual full checks when no per-run choice is supplied
+                      </p>
+                    </div>
+
+                    {editedConfig?.queue?.start_mode === 'channel' && (
+                      <div className="space-y-2">
+                        <Label htmlFor="default_queue_start_channel">Default Start Channel</Label>
+                        <Select
+                          value={editedConfig?.queue?.start_channel_id != null ? String(editedConfig.queue.start_channel_id) : ''}
+                          onValueChange={(value) => updateConfigValue('queue.start_channel_id', parseInt(value))}
+                          disabled={!configEditing || startChannels.length === 0}
+                        >
+                          <SelectTrigger id="default_queue_start_channel">
+                            <SelectValue placeholder="Select channel" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {startChannels.map(channel => (
+                              <SelectItem key={channel.id} value={String(channel.id)}>
+                                {channel.name || `Channel ${channel.id}`}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          The queue rotates to this channel, then continues through the remaining channel order
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="space-y-2">
+                      <Label htmlFor="max_channels_per_run">Max Channels Per Run</Label>
+                      <Input
+                        id="max_channels_per_run"
+                        type="number"
+                        value={editedConfig?.queue?.max_channels_per_run || 50}
+                        onChange={(e) => updateConfigValue('queue.max_channels_per_run', parseInt(e.target.value))}
+                        disabled={!configEditing}
+                        min={1}
+                        max={1000}
+                      />
                     </div>
                   </div>
                 </TabsContent>
