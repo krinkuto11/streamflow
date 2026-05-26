@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Optional
 from urllib.parse import urlparse, urlunparse
@@ -75,7 +76,12 @@ class StreamConnectivityGuard:
                 details={"enabled": False},
             )
 
-        timeout_seconds = float(cfg.get("timeout_seconds", 3.0))
+        timeout_seconds = max(0.1, self._safe_float(cfg.get("timeout_seconds", 3.0), 3.0))
+        retry_attempts = max(0, min(10, self._safe_int(cfg.get("retry_attempts", 2), 2)))
+        retry_backoff_seconds = max(
+            0.0,
+            min(30.0, self._safe_float(cfg.get("retry_backoff_seconds", 1.0), 1.0)),
+        )
         require_internet = cfg.get("require_internet", True) is not False
         require_dispatcharr_api = cfg.get("require_dispatcharr_api", True) is not False
         checked: Dict[str, Any] = {}
@@ -91,6 +97,8 @@ class StreamConnectivityGuard:
                 urls=internet_urls,
                 label="internet",
                 timeout_seconds=timeout_seconds,
+                retry_attempts=retry_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
             )
             checked["internet"] = internet_result.details
             if not internet_result.ok:
@@ -123,6 +131,8 @@ class StreamConnectivityGuard:
                 url=dispatcharr_probe_url,
                 label="dispatcharr_api",
                 timeout_seconds=timeout_seconds,
+                retry_attempts=retry_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
                 headers=headers,
                 accept_unauthorized=False,
             )
@@ -137,6 +147,8 @@ class StreamConnectivityGuard:
                     dispatcharr_headers_provider=dispatcharr_headers_provider,
                     dispatcharr_auth_refresh_provider=dispatcharr_auth_refresh_provider,
                     timeout_seconds=timeout_seconds,
+                    retry_attempts=retry_attempts,
+                    retry_backoff_seconds=retry_backoff_seconds,
                     previous_result=dispatcharr_result,
                 )
             checked["dispatcharr_api"] = dispatcharr_result.details
@@ -158,6 +170,8 @@ class StreamConnectivityGuard:
         dispatcharr_headers_provider: Callable[[], Dict[str, str]],
         dispatcharr_auth_refresh_provider: Callable[[], bool],
         timeout_seconds: float,
+        retry_attempts: int,
+        retry_backoff_seconds: float,
         previous_result: ConnectivityCheckResult,
     ) -> ConnectivityCheckResult:
         try:
@@ -200,6 +214,8 @@ class StreamConnectivityGuard:
             url=dispatcharr_probe_url,
             label="dispatcharr_api",
             timeout_seconds=timeout_seconds,
+            retry_attempts=retry_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
             headers=refreshed_headers,
             accept_unauthorized=False,
         )
@@ -216,6 +232,8 @@ class StreamConnectivityGuard:
         urls: Iterable[str],
         label: str,
         timeout_seconds: float,
+        retry_attempts: int,
+        retry_backoff_seconds: float,
     ) -> ConnectivityCheckResult:
         last_result: Optional[ConnectivityCheckResult] = None
         attempts = []
@@ -225,6 +243,8 @@ class StreamConnectivityGuard:
                 url=url,
                 label=label,
                 timeout_seconds=timeout_seconds,
+                retry_attempts=retry_attempts,
+                retry_backoff_seconds=retry_backoff_seconds,
                 accept_unauthorized=True,
             )
             attempts.append(result.details)
@@ -254,6 +274,8 @@ class StreamConnectivityGuard:
         url: str,
         label: str,
         timeout_seconds: float,
+        retry_attempts: int,
+        retry_backoff_seconds: float,
         headers: Optional[Dict[str, str]] = None,
         accept_unauthorized: bool,
     ) -> ConnectivityCheckResult:
@@ -287,48 +309,69 @@ class StreamConnectivityGuard:
                 details=safe_details,
             )
 
-        try:
-            response = self._requests.get(
-                url,
-                headers=headers or {},
-                timeout=timeout_seconds,
-                allow_redirects=True,
-            )
-        except requests.exceptions.Timeout:
-            return ConnectivityCheckResult(
-                ok=False,
-                reason="connectivity_timeout",
-                message=f"{label} connectivity probe timed out",
-                details=safe_details,
-            )
-        except requests.exceptions.RequestException:
-            return ConnectivityCheckResult(
-                ok=False,
-                reason="network_unreachable",
-                message=f"{label} connectivity probe could not reach its endpoint",
-                details=safe_details,
-            )
+        max_attempts = retry_attempts + 1
+        last_result: Optional[ConnectivityCheckResult] = None
 
-        safe_details["status_code"] = response.status_code
+        for attempt in range(1, max_attempts + 1):
+            attempt_details = {
+                **safe_details,
+                "attempts": attempt,
+                "max_attempts": max_attempts,
+            }
+            try:
+                response = self._requests.get(
+                    url,
+                    headers=headers or {},
+                    timeout=timeout_seconds,
+                    allow_redirects=True,
+                )
+            except requests.exceptions.Timeout:
+                last_result = ConnectivityCheckResult(
+                    ok=False,
+                    reason="connectivity_timeout",
+                    message=f"{label} connectivity probe timed out after {attempt} attempt(s)",
+                    details=attempt_details,
+                )
+            except requests.exceptions.RequestException:
+                last_result = ConnectivityCheckResult(
+                    ok=False,
+                    reason="network_unreachable",
+                    message=f"{label} connectivity probe could not reach its endpoint after {attempt} attempt(s)",
+                    details=attempt_details,
+                )
+            else:
+                attempt_details["status_code"] = response.status_code
 
-        if 200 <= response.status_code < 400:
-            return ConnectivityCheckResult(True, "ok", f"{label} connectivity verified", safe_details)
-        if accept_unauthorized and response.status_code in {401, 403}:
-            return ConnectivityCheckResult(True, "ok", f"{label} connectivity verified", safe_details)
+                if 200 <= response.status_code < 400:
+                    return ConnectivityCheckResult(True, "ok", f"{label} connectivity verified", attempt_details)
+                if accept_unauthorized and response.status_code in {401, 403}:
+                    return ConnectivityCheckResult(True, "ok", f"{label} connectivity verified", attempt_details)
 
-        if response.status_code in {401, 403}:
-            return ConnectivityCheckResult(
-                ok=False,
-                reason="dispatcharr_auth_failed",
-                message="Dispatcharr API connectivity could not be verified because authentication failed",
-                details=safe_details,
-            )
+                if response.status_code in {401, 403}:
+                    return ConnectivityCheckResult(
+                        ok=False,
+                        reason="dispatcharr_auth_failed",
+                        message="Dispatcharr API connectivity could not be verified because authentication failed",
+                        details=attempt_details,
+                    )
 
-        return ConnectivityCheckResult(
+                last_result = ConnectivityCheckResult(
+                    ok=False,
+                    reason="endpoint_unhealthy",
+                    message=f"{label} connectivity probe returned HTTP {response.status_code} after {attempt} attempt(s)",
+                    details=attempt_details,
+                )
+                if not self._should_retry_status(response.status_code):
+                    return last_result
+
+            if attempt < max_attempts and retry_backoff_seconds > 0:
+                time.sleep(retry_backoff_seconds)
+
+        return last_result or ConnectivityCheckResult(
             ok=False,
-            reason="endpoint_unhealthy",
-            message=f"{label} connectivity probe returned HTTP {response.status_code}",
-            details=safe_details,
+            reason="network_unreachable",
+            message=f"{label} connectivity probe could not reach its endpoint",
+            details={**safe_details, "attempts": max_attempts, "max_attempts": max_attempts},
         )
 
     @staticmethod
@@ -339,6 +382,24 @@ class StreamConnectivityGuard:
     @staticmethod
     def _safe_host(url: str) -> Optional[str]:
         return urlparse(url).hostname
+
+    @staticmethod
+    def _should_retry_status(status_code: int) -> bool:
+        return status_code in {408, 425, 429} or status_code >= 500
+
+    @staticmethod
+    def _safe_float(value: Any, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
 
 
 def sanitize_probe_url(url: str) -> str:

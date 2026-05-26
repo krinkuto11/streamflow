@@ -778,21 +778,56 @@ export default function StreamChecker() {
                     />
                   </div>
 
-                  <div className="space-y-2">
-                    <Label htmlFor="connectivity_guard_timeout">Connectivity Timeout (seconds)</Label>
-                    <Input
-                      id="connectivity_guard_timeout"
-                      type="number"
-                      step="0.5"
-                      value={editedConfig?.connectivity_guard?.timeout_seconds ?? 3}
-                      onChange={(e) => updateConfigValue('connectivity_guard.timeout_seconds', parseFloat(e.target.value))}
-                      disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
-                      min={1}
-                      max={15}
-                    />
-                    <p className="text-xs text-muted-foreground">
-                      Probe timeout used by the fail-closed safety check
-                    </p>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_timeout">Connectivity Timeout (seconds)</Label>
+                      <Input
+                        id="connectivity_guard_timeout"
+                        type="number"
+                        step="0.5"
+                        value={editedConfig?.connectivity_guard?.timeout_seconds ?? 3}
+                        onChange={(e) => updateConfigValue('connectivity_guard.timeout_seconds', parseFloat(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={1}
+                        max={15}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Per-attempt probe timeout
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_retries">Connectivity Retries</Label>
+                      <Input
+                        id="connectivity_guard_retries"
+                        type="number"
+                        value={editedConfig?.connectivity_guard?.retry_attempts ?? 2}
+                        onChange={(e) => updateConfigValue('connectivity_guard.retry_attempts', parseInt(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={0}
+                        max={10}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Extra attempts before fail-closed abort
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_retry_backoff">Retry Backoff (seconds)</Label>
+                      <Input
+                        id="connectivity_guard_retry_backoff"
+                        type="number"
+                        step="0.5"
+                        value={editedConfig?.connectivity_guard?.retry_backoff_seconds ?? 1}
+                        onChange={(e) => updateConfigValue('connectivity_guard.retry_backoff_seconds', parseFloat(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={0}
+                        max={30}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Pause between transient retry attempts
+                      </p>
+                    </div>
                   </div>
 
                   <div className="flex items-center gap-2 rounded-md border p-3 text-sm">

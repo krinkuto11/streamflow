@@ -3,6 +3,8 @@ import socket
 import sys
 from unittest.mock import Mock, patch
 
+import requests
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
@@ -49,6 +51,34 @@ class _RequestsAuthRefresh:
         if self.dispatcharr_attempts == 1:
             return _Response(401)
         return _Response(200)
+
+
+class _RequestsDispatcharrTimeoutThenOk:
+    def __init__(self):
+        self.urls = []
+        self.dispatcharr_attempts = 0
+
+    def get(self, url, **kwargs):
+        self.urls.append(url)
+        if "channels/channels" not in url:
+            return _Response(204)
+
+        self.dispatcharr_attempts += 1
+        if self.dispatcharr_attempts == 1:
+            raise requests.exceptions.Timeout("temporary timeout")
+        return _Response(200)
+
+
+class _RequestsDispatcharrAlwaysTimeout:
+    def __init__(self):
+        self.dispatcharr_attempts = 0
+
+    def get(self, url, **kwargs):
+        if "channels/channels" not in url:
+            return _Response(204)
+
+        self.dispatcharr_attempts += 1
+        raise requests.exceptions.Timeout("persistent timeout")
 
 
 def test_connectivity_guard_passes_when_internet_and_dispatcharr_are_reachable():
@@ -100,6 +130,58 @@ def test_connectivity_guard_refreshes_auth_once_when_dispatcharr_token_is_stale(
     assert headers.call_count == 2
     assert result.details["dispatcharr_api"]["auth_refresh_attempted"] is True
     assert result.details["dispatcharr_api"]["auth_refresh_ok"] is True
+
+
+def test_connectivity_guard_retries_transient_dispatcharr_timeout():
+    requests_retry = _RequestsDispatcharrTimeoutThenOk()
+    guard = StreamConnectivityGuard(
+        requests_module=requests_retry,
+        socket_module=_ResolvingSocket(),
+        default_internet_probe_urls=("https://probe.example/generate_204",),
+    )
+
+    result = guard.check(
+        config={
+            "enabled": True,
+            "timeout_seconds": 1,
+            "retry_attempts": 1,
+            "retry_backoff_seconds": 0,
+        },
+        dispatcharr_base_url="http://dispatcharr.local",
+        dispatcharr_headers_provider=lambda: {"Authorization": "Bearer test"},
+    )
+
+    assert result.ok is True
+    assert result.reason == "ok"
+    assert requests_retry.dispatcharr_attempts == 2
+    assert result.details["dispatcharr_api"]["attempts"] == 2
+    assert result.details["dispatcharr_api"]["max_attempts"] == 2
+
+
+def test_connectivity_guard_fails_after_configured_dispatcharr_timeout_retries():
+    requests_timeout = _RequestsDispatcharrAlwaysTimeout()
+    guard = StreamConnectivityGuard(
+        requests_module=requests_timeout,
+        socket_module=_ResolvingSocket(),
+        default_internet_probe_urls=("https://probe.example/generate_204",),
+    )
+
+    result = guard.check(
+        config={
+            "enabled": True,
+            "timeout_seconds": 1,
+            "retry_attempts": 2,
+            "retry_backoff_seconds": 0,
+        },
+        dispatcharr_base_url="http://dispatcharr.local",
+        dispatcharr_headers_provider=lambda: {"Authorization": "Bearer test"},
+    )
+
+    assert result.ok is False
+    assert result.reason == "connectivity_timeout"
+    assert requests_timeout.dispatcharr_attempts == 3
+    assert result.details["attempts"] == 3
+    assert result.details["max_attempts"] == 3
 
 
 def test_connectivity_guard_fails_closed_on_dns_failure():

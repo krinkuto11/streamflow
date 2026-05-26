@@ -82,6 +82,8 @@ class StreamCheckConfig:
             'require_internet': True,
             'require_dispatcharr_api': True,
             'timeout_seconds': 3.0,
+            'retry_attempts': 2,
+            'retry_backoff_seconds': 1.0,
             'internet_probe_urls': [
                 'https://www.google.com/generate_204',
                 'https://cloudflare.com/cdn-cgi/trace',
