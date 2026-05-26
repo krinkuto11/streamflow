@@ -197,14 +197,17 @@ def _get_auth_headers() -> Dict[str, str]:
         }
 
     logger.info("DISPATCHARR_TOKEN not found — attempting login...")
-    if _login():
-        if env_path.exists():
-            load_dotenv(dotenv_path=env_path, override=True)
+    with _token_refresh_lock:
         current_token = os.getenv("DISPATCHARR_TOKEN")
         if not current_token:
-            raise RuntimeError("Login succeeded but DISPATCHARR_TOKEN not found in environment")
-    else:
-        raise RuntimeError("Dispatcharr login failed — check DISPATCHARR_USER / DISPATCHARR_PASS")
+            if _login():
+                if env_path.exists():
+                    load_dotenv(dotenv_path=env_path, override=True)
+                current_token = os.getenv("DISPATCHARR_TOKEN")
+                if not current_token:
+                    raise RuntimeError("Login succeeded but DISPATCHARR_TOKEN not found in environment")
+            else:
+                raise RuntimeError("Dispatcharr login failed — check DISPATCHARR_USER / DISPATCHARR_PASS")
 
     return {
         "Authorization": f"Bearer {current_token}",

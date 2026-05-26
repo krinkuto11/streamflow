@@ -1,3 +1,5 @@
+import threading
+import time
 from unittest.mock import Mock
 
 import pytest
@@ -95,6 +97,54 @@ def test_auth_headers_use_dispatcharr_api_key(monkeypatch):
 
     assert headers["Authorization"] == "ApiKey secret-key"
     assert headers["X-API-Key"] == "secret-key"
+
+
+def test_auth_headers_serializes_initial_credentials_login(monkeypatch):
+    from apps.core import auth
+
+    monkeypatch.delenv("DISPATCHARR_TOKEN", raising=False)
+
+    config = Mock()
+    config.get_auth_mode.return_value = "credentials"
+    monkeypatch.setattr(auth, "get_dispatcharr_config", lambda: config)
+
+    login_calls = 0
+    calls_lock = threading.Lock()
+
+    def fake_login():
+        nonlocal login_calls
+        with calls_lock:
+            login_calls += 1
+        time.sleep(0.05)
+        auth.os.environ["DISPATCHARR_TOKEN"] = "new-token"
+        return True
+
+    monkeypatch.setattr(auth, "_login", fake_login)
+
+    barrier = threading.Barrier(6)
+    results = []
+    errors = []
+    results_lock = threading.Lock()
+
+    def worker():
+        try:
+            barrier.wait(timeout=2)
+            headers = auth._get_auth_headers()
+            with results_lock:
+                results.append(headers["Authorization"])
+        except Exception as exc:
+            with results_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert not errors
+    assert results == ["Bearer new-token"] * 6
+    assert login_calls == 1
 
 
 def test_update_config_preserves_saved_secret_fields():
