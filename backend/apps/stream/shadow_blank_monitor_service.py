@@ -354,6 +354,7 @@ class ShadowBlankMonitorService:
         return targets
 
     def _probe_targets(self, udi: Any, targets: Iterable[Dict[str, Any]], config: Dict[str, Any]) -> None:
+        threads: List[threading.Thread] = []
         for target in targets:
             channel_uuid = target["channel_uuid"]
             if self._cooldown_remaining(channel_uuid) > 0:
@@ -362,58 +363,75 @@ class ShadowBlankMonitorService:
             if self._quality_checker_conflicts(target, config):
                 self._record_event("quality_check_active", target, {})
                 continue
-            if channel_uuid in self._active_probes:
-                continue
 
-            self._active_probes.add(channel_uuid)
-            try:
-                proxy_url = self._channel_proxy_url(channel_uuid)
-                result = self.blank_probe(proxy_url, config)
-                blank = bool(result.get("blank_detected"))
-                target["last_probe"] = {
-                    "blank_detected": blank,
-                    "blank_ratio": result.get("blank_ratio"),
-                    "blank_duration_secs": result.get("blank_duration_secs"),
-                }
-
-                fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                if self._real_client_count(fresh_status, config) <= 0:
-                    self._blank_counts[channel_uuid] = 0
-                    self._record_event("viewer_left", target, {})
-                    with self._lock:
-                        self._watched.pop(channel_uuid, None)
+            with self._lock:
+                if channel_uuid in self._active_probes:
                     continue
+                self._active_probes.add(channel_uuid)
 
-                if not blank:
-                    self._blank_counts[channel_uuid] = 0
-                    self._record_event("probe_ok", target, target["last_probe"])
-                    continue
+            thread = threading.Thread(
+                target=self._probe_target,
+                args=(udi, target, dict(config)),
+                name=f"ShadowBlankProbe-{channel_uuid[:8]}",
+                daemon=True,
+            )
+            thread.start()
+            threads.append(thread)
 
-                self._blank_counts[channel_uuid] += 1
-                confirmations = int(config.get("confirmation_count", 2))
-                if self._blank_counts[channel_uuid] < confirmations:
-                    self._record_event(
-                        "blank_pending",
-                        target,
-                        {"confirmations": self._blank_counts[channel_uuid], "required": confirmations},
-                    )
-                    continue
+        for thread in threads:
+            thread.join()
 
-                self._handle_confirmed_blank(udi, target, config)
-            finally:
+    def _probe_target(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> None:
+        channel_uuid = target["channel_uuid"]
+        try:
+            proxy_url = self._channel_proxy_url(channel_uuid)
+            result = self.blank_probe(proxy_url, config)
+            blank = bool(result.get("blank_detected"))
+            target["last_probe"] = {
+                "blank_detected": blank,
+                "blank_ratio": result.get("blank_ratio"),
+                "blank_duration_secs": result.get("blank_duration_secs"),
+            }
+
+            fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+            if self._real_client_count(fresh_status, config) <= 0:
+                self._reset_blank_count(channel_uuid)
+                self._record_event("viewer_left", target, {})
+                with self._lock:
+                    self._watched.pop(channel_uuid, None)
+                return
+
+            if not blank:
+                self._reset_blank_count(channel_uuid)
+                self._record_event("probe_ok", target, target["last_probe"])
+                return
+
+            blank_count = self._increment_blank_count(channel_uuid)
+            confirmations = int(config.get("confirmation_count", 2))
+            if blank_count < confirmations:
+                self._record_event(
+                    "blank_pending",
+                    target,
+                    {"confirmations": blank_count, "required": confirmations},
+                )
+                return
+
+            self._handle_confirmed_blank(udi, target, config)
+        finally:
+            with self._lock:
                 self._active_probes.discard(channel_uuid)
 
     def _handle_confirmed_blank(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> None:
         channel_uuid = target["channel_uuid"]
         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
         if self._real_client_count(fresh_status, config) <= 0:
-            self._blank_counts[channel_uuid] = 0
+            self._reset_blank_count(channel_uuid)
             self._record_event("viewer_left", target, {})
             return
 
         fresh_stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
         if target.get("stream_id") and fresh_stream_id != target.get("stream_id"):
-            self._blank_counts[channel_uuid] = 0
+            self._reset_blank_count(channel_uuid)
             self._record_event(
                 "stale_stream_guard",
                 target,
@@ -428,7 +446,7 @@ class ShadowBlankMonitorService:
         alternative = self._choose_alternative_stream(udi, target.get("channel_id"), fresh_stream_id)
         if not alternative:
             self._set_cooldown(channel_uuid, config)
-            self._blank_counts[channel_uuid] = 0
+            self._reset_blank_count(channel_uuid)
             self._record_event("no_alternative", target, {})
             return
 
@@ -443,9 +461,10 @@ class ShadowBlankMonitorService:
 
         success = bool(self.switch_stream(channel_uuid, stream_id=alternative))
         self._set_cooldown(channel_uuid, config)
-        self._blank_counts[channel_uuid] = 0
+        self._reset_blank_count(channel_uuid)
         if success:
-            self._switch_history[channel_uuid].append(self.clock())
+            with self._lock:
+                self._switch_history[channel_uuid].append(self.clock())
         self._record_event(
             "switch_success" if success else "switch_failed",
             target,
@@ -472,6 +491,15 @@ class ShadowBlankMonitorService:
         else:
             ordered = stream_ids
         return next((sid for sid in ordered if sid != current_stream_id), None)
+
+    def _reset_blank_count(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._blank_counts[channel_uuid] = 0
+
+    def _increment_blank_count(self, channel_uuid: str) -> int:
+        with self._lock:
+            self._blank_counts[channel_uuid] += 1
+            return self._blank_counts[channel_uuid]
 
     def _channel_proxy_url(self, channel_uuid: str) -> str:
         base_url = (self.base_url_provider() or "").rstrip("/")
@@ -627,17 +655,20 @@ class ShadowBlankMonitorService:
         return 1 if self._is_status_active(status) else 0
 
     def _cooldown_remaining(self, channel_uuid: str) -> int:
-        return max(0, int(self._cooldowns.get(channel_uuid, 0) - self.clock()))
+        with self._lock:
+            return max(0, int(self._cooldowns.get(channel_uuid, 0) - self.clock()))
 
     def _set_cooldown(self, channel_uuid: str, config: Dict[str, Any]) -> None:
-        self._cooldowns[channel_uuid] = self.clock() + int(config["channel_cooldown_seconds"])
+        with self._lock:
+            self._cooldowns[channel_uuid] = self.clock() + int(config["channel_cooldown_seconds"])
 
     def _switch_allowed(self, channel_uuid: str, config: Dict[str, Any]) -> bool:
         now = self.clock()
-        history = self._switch_history[channel_uuid]
-        while history and now - history[0] > 3600:
-            history.popleft()
-        return len(history) < int(config["max_switches_per_hour"])
+        with self._lock:
+            history = self._switch_history[channel_uuid]
+            while history and now - history[0] > 3600:
+                history.popleft()
+            return len(history) < int(config["max_switches_per_hour"])
 
     def _record_event(self, event_type: str, target: Dict[str, Any], details: Dict[str, Any]) -> None:
         event = {

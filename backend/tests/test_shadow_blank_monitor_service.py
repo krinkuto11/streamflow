@@ -1,3 +1,5 @@
+import threading
+
 from apps.stream.shadow_blank_monitor_service import (
     ShadowBlankMonitorService,
     normalize_config,
@@ -270,6 +272,45 @@ def test_viewer_left_after_probe_clears_watched_snapshot(tmp_path):
     assert status["recent_events"][0]["type"] == "viewer_left"
     assert status["watched_count"] == 0
     assert status["watched_channels"] == []
+
+
+def test_max_watchers_probe_targets_in_parallel(tmp_path):
+    probe_order = []
+    release = threading.Event()
+
+    def blank_probe(url, config):
+        probe_order.append(url)
+        if len(probe_order) == 3:
+            release.set()
+        assert release.wait(1)
+        return {"blank_detected": False}
+
+    statuses = {
+        f"uuid-{index}": {
+            "state": "active",
+            "channel_id": f"uuid-{index}",
+            "stream_id": index * 10,
+            "clients": [{"user_agent": f"Client {index}"}],
+        }
+        for index in range(1, 5)
+    }
+    channels = [
+        {"id": index, "uuid": f"uuid-{index}", "streams": [index * 10, index * 10 + 1]}
+        for index in range(1, 5)
+    ]
+    udi = FakeUdi(statuses=[statuses], channels=channels)
+    service = make_service(tmp_path, udi=udi, blank_probe=blank_probe)
+    service.update_config({"enabled": False, "dry_run": False, "max_concurrent_watchers": 3})
+
+    status = service.run_once(force=True)
+
+    assert len(probe_order) == 3
+    assert sorted(probe_order) == [
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-2",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-3",
+    ]
+    assert [event["type"] for event in status["recent_events"][:3]] == ["probe_ok"] * 3
 
 
 def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
