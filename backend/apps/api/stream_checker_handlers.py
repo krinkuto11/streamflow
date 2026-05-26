@@ -1,12 +1,78 @@
 """Stream checker API handler functions extracted from web_api."""
 
-from typing import Any, Callable
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from flask import jsonify
 
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
+
+QUEUE_START_MODES = {"first", "last", "channel"}
+
+
+def _coerce_channel_id(value: Any) -> Optional[int]:
+    """Return an integer channel ID when the payload value is usable."""
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _channel_display_name(channel: Dict[str, Any]) -> str:
+    return str(channel.get("name") or f"Channel {channel.get('id')}")
+
+
+def order_channels_for_queue_start(
+    channels: List[Dict[str, Any]],
+    *,
+    start_mode: str = "first",
+    start_channel_id: Any = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Order channels so the requested full-check start point is first.
+
+    ``first`` preserves the incoming channel order, ``last`` starts from the
+    end and walks backwards, and ``channel`` rotates the list to the selected
+    channel while preserving the remaining order.
+    """
+    usable_channels = [
+        channel for channel in channels
+        if isinstance(channel, dict) and channel.get("id") is not None
+    ]
+    mode = (start_mode or "first").strip().lower()
+    if mode not in QUEUE_START_MODES:
+        raise ValueError("Invalid start_mode")
+
+    if not usable_channels:
+        return [], {"mode": mode}
+
+    selected_id = _coerce_channel_id(start_channel_id)
+    if mode == "first":
+        ordered = usable_channels
+    elif mode == "last":
+        ordered = list(reversed(usable_channels))
+    else:
+        if selected_id is None:
+            raise ValueError("start_channel_id is required when start_mode is channel")
+        selected_index = next(
+            (idx for idx, channel in enumerate(usable_channels) if int(channel["id"]) == selected_id),
+            None,
+        )
+        if selected_index is None:
+            raise ValueError("Selected start channel was not found")
+        ordered = usable_channels[selected_index:] + usable_channels[:selected_index]
+
+    first_channel = ordered[0]
+    meta = {
+        "mode": mode,
+        "start_channel_id": first_channel.get("id"),
+        "start_channel_name": _channel_display_name(first_channel),
+    }
+    if mode == "channel":
+        meta["requested_channel_id"] = selected_id
+    return ordered, meta
 
 
 def start_stream_checker_response(*, get_stream_checker_service: Callable[[], Any]):
@@ -179,6 +245,19 @@ def update_stream_checker_config_response(
         if not data:
             return jsonify({"error": "No configuration data provided"}), 400
 
+        if isinstance(data.get("queue"), dict):
+            queue_config = data["queue"]
+            start_mode = queue_config.get("start_mode")
+            if start_mode is not None:
+                normalized_mode = str(start_mode).strip().lower()
+                if normalized_mode not in QUEUE_START_MODES:
+                    return jsonify({"error": "Invalid queue start mode"}), 400
+                queue_config["start_mode"] = normalized_mode
+            if "start_channel_id" in queue_config:
+                queue_config["start_channel_id"] = _coerce_channel_id(queue_config.get("start_channel_id"))
+            if queue_config.get("start_mode") == "channel" and queue_config.get("start_channel_id") is None:
+                return jsonify({"error": "Queue start channel is required for selected-channel mode"}), 400
+
         if "global_check_schedule" in data and "cron_expression" in data["global_check_schedule"]:
             cron_expr = data["global_check_schedule"]["cron_expression"]
             if cron_expr:
@@ -324,12 +403,18 @@ def mark_channels_updated_response(
 
 def queue_all_channels_response(
     *,
+    payload: Any = None,
     get_stream_checker_service: Callable[[], Any],
     get_udi_manager: Callable[[], Any],
 ):
     """Handle queueing all channels for a full stream check run."""
     try:
         service = get_stream_checker_service()
+        payload_data = payload if isinstance(payload, dict) else {}
+        default_mode = service.config.get("queue.start_mode", "first")
+        default_channel_id = service.config.get("queue.start_channel_id", None)
+        start_mode = payload_data.get("start_mode", default_mode)
+        start_channel_id = payload_data.get("start_channel_id", default_channel_id)
 
         udi = get_udi_manager()
         channels = udi.get_channels()
@@ -337,7 +422,16 @@ def queue_all_channels_response(
         if not channels:
             return jsonify({"error": "Could not fetch channels"}), 500
 
-        channel_ids = [channel["id"] for channel in channels if isinstance(channel, dict) and "id" in channel]
+        try:
+            ordered_channels, start_meta = order_channels_for_queue_start(
+                channels,
+                start_mode=start_mode,
+                start_channel_id=start_channel_id,
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+
+        channel_ids = [channel["id"] for channel in ordered_channels]
         if not channel_ids:
             return jsonify({"message": "No channels found to queue", "count": 0})
 
@@ -349,6 +443,7 @@ def queue_all_channels_response(
                 "message": f"Queued {added} channels for checking",
                 "total_channels": len(channel_ids),
                 "queued": added,
+                "start": start_meta,
             }
         )
     except Exception as exc:
