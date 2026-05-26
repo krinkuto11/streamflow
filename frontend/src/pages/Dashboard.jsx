@@ -323,6 +323,13 @@ export default function Dashboard() {
   const runStageLabel = runStatus.stage_label || 'Idle'
   const currentStageIndex = AUTOMATION_STAGES.findIndex((stage) => stage.id === runStage)
   const runProgress = runStatus.progress || {}
+  const queueSize     = streamCheckerStatus?.queue?.queue_size || 0
+  const completed     = streamCheckerStatus?.queue?.completed  || 0
+  const inProgress    = streamCheckerStatus?.queue?.in_progress || 0
+  const totalProcessed = completed
+  const batchTotal    = completed + inProgress + queueSize
+  const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
+  const isProcessing  = streamCheckerStatus?.stream_checking_mode || false
   const qualityStageActive = runStage === 'quality_checking' && batchTotal > 0
   const rawRunProgressPercent = Number(runProgress.percent)
   const runProgressPercent = qualityStageActive
@@ -347,13 +354,6 @@ export default function Dashboard() {
       : runningRun
         ? 'bg-blue-600 text-white border-transparent'
         : ''
-  const queueSize     = streamCheckerStatus?.queue?.queue_size || 0
-  const completed     = streamCheckerStatus?.queue?.completed  || 0
-  const inProgress    = streamCheckerStatus?.queue?.in_progress || 0
-  const totalProcessed = completed
-  const batchTotal    = completed + inProgress + queueSize
-  const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
-  const isProcessing  = streamCheckerStatus?.stream_checking_mode || false
   const shouldDisableActions = isProcessing || actionLoading !== ''
   const shadowWatchedCount = shadowMonitorStatus?.watched_count || shadowMonitorStatus?.watched_channels?.length || 0
   const shadowLastEvent = shadowMonitorStatus?.recent_events?.[0]

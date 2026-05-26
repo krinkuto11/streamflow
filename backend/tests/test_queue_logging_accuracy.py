@@ -40,6 +40,13 @@ class TestQueueLoggingAccuracy(unittest.TestCase):
         """Clean up test fixtures."""
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def _enabled_automation_config(self):
+        mock_config = MagicMock()
+        mock_config.get_effective_configuration.return_value = {
+            'profile': {'stream_checking': {'enabled': True}},
+        }
+        return mock_config
     
     def test_add_channels_returns_actual_count(self):
         """Test that add_channels returns the actual number of channels added."""
@@ -76,7 +83,7 @@ class TestQueueLoggingAccuracy(unittest.TestCase):
     
     def test_queue_all_channels_logs_actual_count(self):
         """Test that _queue_all_channels logs the actual number of channels added."""
-        with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
+        with patch('apps.stream.stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
             service = StreamCheckerService()
             
             # Mock the UDI manager
@@ -87,9 +94,12 @@ class TestQueueLoggingAccuracy(unittest.TestCase):
             ]
             
             mock_udi = MagicMock()
+            mock_udi.is_network_ready.return_value = True
             mock_udi.get_channels.return_value = mock_channels
             
-            with patch('stream_checker_service.get_udi_manager', return_value=mock_udi):
+            with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=mock_udi), \
+                 patch('apps.automation.automation_config_manager.get_automation_config_manager',
+                       return_value=self._enabled_automation_config()):
                 # Pre-queue one channel to simulate it being already in queue
                 service.check_queue.add_channel(1, priority=5)
                 
@@ -115,7 +125,7 @@ class TestQueueLoggingAccuracy(unittest.TestCase):
     
     def test_queue_all_channels_batching_tracks_total(self):
         """Test that _queue_all_channels correctly tracks total across batches."""
-        with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
+        with patch('apps.stream.stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
             service = StreamCheckerService()
             
             # Set max_channels_per_run to 2 to force batching
@@ -127,9 +137,12 @@ class TestQueueLoggingAccuracy(unittest.TestCase):
             ]
             
             mock_udi = MagicMock()
+            mock_udi.is_network_ready.return_value = True
             mock_udi.get_channels.return_value = mock_channels
             
-            with patch('stream_checker_service.get_udi_manager', return_value=mock_udi):
+            with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=mock_udi), \
+                 patch('apps.automation.automation_config_manager.get_automation_config_manager',
+                       return_value=self._enabled_automation_config()):
                 # Pre-queue channel 3 to test that it's skipped in batch 2
                 service.check_queue.add_channel(3, priority=5)
                 
@@ -152,7 +165,7 @@ class TestQueueLoggingAccuracy(unittest.TestCase):
     
     def test_queue_all_channels_removes_from_completed_set(self):
         """Test that _queue_all_channels removes channels from completed set before queueing."""
-        with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
+        with patch('apps.stream.stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
             service = StreamCheckerService()
             
             # Mock 3 channels
@@ -161,9 +174,12 @@ class TestQueueLoggingAccuracy(unittest.TestCase):
             ]
             
             mock_udi = MagicMock()
+            mock_udi.is_network_ready.return_value = True
             mock_udi.get_channels.return_value = mock_channels
             
-            with patch('stream_checker_service.get_udi_manager', return_value=mock_udi):
+            with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=mock_udi), \
+                 patch('apps.automation.automation_config_manager.get_automation_config_manager',
+                       return_value=self._enabled_automation_config()):
                 # Simulate channels being completed (fully processed through the queue)
                 for ch_id in [1, 2, 3]:
                     # Add to queue
@@ -194,6 +210,31 @@ class TestQueueLoggingAccuracy(unittest.TestCase):
                 # Should show 3/3 (all channels should be queued after removing from completed set)
                 self.assertIn('Queued 3/3', queue_log,
                             "Should queue all 3 channels after removing them from completed set")
+
+    def test_queue_all_channels_respects_saved_start_mode(self):
+        """Test that _queue_all_channels uses the saved start selection."""
+        with patch('apps.stream.stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
+            service = StreamCheckerService()
+            service.config.update({'queue': {'start_mode': 'last'}})
+
+            mock_channels = [
+                {'id': 1, 'name': 'Channel 1'},
+                {'id': 2, 'name': 'Channel 2'},
+                {'id': 3, 'name': 'Channel 3'},
+            ]
+
+            mock_udi = MagicMock()
+            mock_udi.is_network_ready.return_value = True
+            mock_udi.get_channels.return_value = mock_channels
+
+            with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=mock_udi), \
+                 patch('apps.automation.automation_config_manager.get_automation_config_manager',
+                       return_value=self._enabled_automation_config()):
+                with patch.object(service.check_queue, 'add_channels', return_value=3) as mock_add:
+                    service._queue_all_channels(force_check=False)
+
+            first_batch = mock_add.call_args_list[0].args[0]
+            self.assertEqual(first_batch, [3, 2, 1])
 
 
 if __name__ == '__main__':
