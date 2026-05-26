@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { formatDuration as formatDurationValue } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
   Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
@@ -36,13 +37,8 @@ const AUTOMATION_STAGES = [
 ]
 
 const formatDuration = (seconds) => {
-  const value = Number(seconds)
-  if (!Number.isFinite(value) || value < 0) return 'N/A'
-  if (value < 1) return `${Math.round(value * 1000)}ms`
-  if (value < 60) return `${value.toFixed(value >= 10 ? 0 : 1)}s`
-  const minutes = Math.floor(value / 60)
-  const remaining = Math.round(value % 60)
-  return `${minutes}m ${remaining}s`
+  const formatted = formatDurationValue(seconds)
+  return formatted || 'N/A'
 }
 
 const formatTime = (value) => {
@@ -756,9 +752,7 @@ export default function Dashboard() {
                     <Label className="text-xs text-muted-foreground block">Processing Progress</Label>
                     {streamCheckerStatus?.queue?.eta_seconds > 0 ? (
                       <span className="text-xs text-muted-foreground">
-                        ~{streamCheckerStatus.queue.eta_seconds > 60
-                          ? `${Math.floor(streamCheckerStatus.queue.eta_seconds / 60)}m ${streamCheckerStatus.queue.eta_seconds % 60}s`
-                          : `${streamCheckerStatus.queue.eta_seconds}s`} remaining
+                        ~{formatDuration(streamCheckerStatus.queue.eta_seconds)} remaining
                       </span>
                     ) : (
                       <span className="text-xs text-muted-foreground animate-pulse text-primary/70">
