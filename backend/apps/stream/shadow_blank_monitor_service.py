@@ -157,6 +157,7 @@ class ShadowBlankMonitorService:
         self.switch_stream = switch_stream
         self.base_url_provider = base_url_provider or (lambda: get_dispatcharr_config().get_base_url())
         self.blank_probe = blank_probe or self._run_blank_probe
+        self._uses_default_blank_probe = blank_probe is None
         self.stream_checker_provider = stream_checker_provider or self._default_stream_checker_provider
         self.clock = clock
 
@@ -395,7 +396,10 @@ class ShadowBlankMonitorService:
         channel_uuid = target["channel_uuid"]
         try:
             proxy_url = self._channel_proxy_url(channel_uuid)
-            result = self.blank_probe(proxy_url, config)
+            if config.get("watch_mode") == "continuous" and self._uses_default_blank_probe:
+                result = self._run_blank_probe_until_viewer_left(proxy_url, config, udi, target)
+            else:
+                result = self.blank_probe(proxy_url, config)
             blank = bool(result.get("blank_detected"))
             target["last_probe"] = {
                 "blank_detected": blank,
@@ -403,8 +407,11 @@ class ShadowBlankMonitorService:
                 "blank_duration_secs": result.get("blank_duration_secs"),
             }
 
-            fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-            if self._real_client_count(fresh_status, config) <= 0:
+            if result.get("viewer_left"):
+                fresh_status = {}
+            else:
+                fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+            if result.get("viewer_left") or self._real_client_count(fresh_status, config) <= 0:
                 self._reset_blank_count(channel_uuid)
                 self._record_event("viewer_left", target, {})
                 with self._lock:
@@ -517,7 +524,8 @@ class ShadowBlankMonitorService:
             raise RuntimeError("Dispatcharr base URL is not configured")
         return f"{base_url}/proxy/ts/stream/{channel_uuid}"
 
-    def _run_blank_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    @staticmethod
+    def _blank_probe_command(url: str, config: Dict[str, Any]) -> tuple[List[str], int]:
         duration = int(config["probe_duration_seconds"])
         headers = ""
         api_key = config.get("watcher_api_key")
@@ -552,7 +560,10 @@ class ShadowBlankMonitorService:
                 "-",
             ]
         )
+        return command, duration
 
+    def _run_blank_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        command, duration = self._blank_probe_command(url, config)
         try:
             completed = subprocess.run(
                 command,
@@ -578,6 +589,65 @@ class ShadowBlankMonitorService:
             )
             parsed["timeout"] = True
             return parsed
+
+    def _run_blank_probe_until_viewer_left(
+        self,
+        url: str,
+        config: Dict[str, Any],
+        udi: Any,
+        target: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        command, duration = self._blank_probe_command(url, config)
+        deadline = time.monotonic() + duration + 15
+        viewer_left = False
+        timed_out = False
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        try:
+            while process.poll() is None:
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    process.kill()
+                    break
+
+                try:
+                    fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                    if self._real_client_count(fresh_status, config) <= 0:
+                        viewer_left = True
+                        process.terminate()
+                        break
+                except Exception as exc:
+                    logger.warning(f"Shadow blank monitor viewer poll failed: {exc}")
+
+                time.sleep(1)
+
+            try:
+                _, stderr = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                _, stderr = process.communicate()
+                timed_out = True
+
+            output = stderr or ""
+            parsed = _parse_blank_detection(
+                output,
+                duration,
+                blank_ratio_threshold=float(config["blank_ratio_threshold"]),
+            )
+            parsed["returncode"] = process.returncode
+            if viewer_left:
+                parsed["viewer_left"] = True
+            if timed_out:
+                parsed["timeout"] = True
+            return parsed
+        finally:
+            if process.poll() is None:
+                process.kill()
 
     @staticmethod
     def _index_channels(channels: Iterable[Dict[str, Any]]) -> tuple[Dict[str, Dict[str, Any]], Dict[int, Dict[str, Any]]]:
