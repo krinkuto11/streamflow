@@ -219,6 +219,8 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             def __init__(self):
                 self.update_tracker = UpdateTracker()
                 self.queued = None
+                self.config = Mock()
+                self.config.get.side_effect = lambda key, default=None: default
 
             def queue_channels(self, channel_ids, priority=10, force_check=False):
                 self.queued = {

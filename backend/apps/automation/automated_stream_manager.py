@@ -1325,9 +1325,17 @@ class AutomatedStreamManager:
             "forced": forced,
             "forced_period_id": forced_period_id,
             "started_at": now if state == "running" else None,
+            "stage_started_at": now if state == "running" else None,
             "updated_at": now,
             "completed_at": None,
             "duration_seconds": None,
+            "stage_duration_seconds": None,
+            "progress": {
+                "current": 0,
+                "total": None,
+                "percent": 0,
+                "message": "",
+            },
             "counts": {},
             "durations": {},
             "last_error": None,
@@ -1370,6 +1378,7 @@ class AutomatedStreamManager:
         message: Optional[str] = None,
         counts: Optional[Dict[str, Any]] = None,
         durations: Optional[Dict[str, Any]] = None,
+        progress: Optional[Dict[str, Any]] = None,
         state: Optional[str] = None,
         error: Optional[str] = None,
     ) -> None:
@@ -1377,10 +1386,13 @@ class AutomatedStreamManager:
         with self._run_status_lock:
             status = self._run_status
             now = datetime.now()
+            previous_stage = status.get("stage")
             if state:
                 status["state"] = state
             if stage:
                 status["stage"] = stage
+                if stage != previous_stage:
+                    status["stage_started_at"] = now.isoformat()
             if stage_label:
                 status["stage_label"] = stage_label
             if message is not None:
@@ -1395,6 +1407,19 @@ class AutomatedStreamManager:
                     except (TypeError, ValueError):
                         normalized[key] = value
                 status.setdefault("durations", {}).update(normalized)
+            if progress:
+                current = progress.get("current")
+                total = progress.get("total")
+                try:
+                    percent = int((float(current) / float(total)) * 100) if total else progress.get("percent", 0)
+                except (TypeError, ValueError, ZeroDivisionError):
+                    percent = progress.get("percent", 0)
+                status["progress"] = {
+                    "current": current,
+                    "total": total,
+                    "percent": max(0, min(100, int(percent or 0))),
+                    "message": progress.get("message", status.get("message", "")),
+                }
             if error is not None:
                 status["last_error"] = error
             status["updated_at"] = now.isoformat()
@@ -1406,6 +1431,39 @@ class AutomatedStreamManager:
                     status["duration_seconds"] = round((now - started).total_seconds(), 3)
                 except (TypeError, ValueError):
                     pass
+            stage_started_at = status.get("stage_started_at")
+            if stage_started_at:
+                try:
+                    stage_started = datetime.fromisoformat(stage_started_at)
+                    status["stage_duration_seconds"] = round((now - stage_started).total_seconds(), 3)
+                except (TypeError, ValueError):
+                    pass
+
+    def _update_run_progress(
+        self,
+        *,
+        stage_key: Optional[str] = None,
+        current: Optional[int] = None,
+        total: Optional[int] = None,
+        message: Optional[str] = None,
+    ) -> None:
+        progress = {
+            "current": current,
+            "total": total,
+            "message": message,
+        }
+        counts = {}
+        if current is not None:
+            counts["stage_current"] = current
+        if total is not None:
+            counts["stage_total"] = total
+        self._update_run_status(
+            stage=stage_key,
+            stage_label=stage_key.replace("_", " ").title() if stage_key else None,
+            message=message,
+            counts=counts,
+            progress=progress,
+        )
 
     def _finish_run_status(self, *, state: str, stage: str, stage_label: str, message: str, error: Optional[str] = None) -> None:
         self._ensure_run_status_fields()
@@ -1426,6 +1484,13 @@ class AutomatedStreamManager:
                 try:
                     started = datetime.fromisoformat(started_at)
                     status["duration_seconds"] = round((now - started).total_seconds(), 3)
+                except (TypeError, ValueError):
+                    pass
+            stage_started_at = status.get("stage_started_at")
+            if stage_started_at:
+                try:
+                    stage_started = datetime.fromisoformat(stage_started_at)
+                    status["stage_duration_seconds"] = round((now - stage_started).total_seconds(), 3)
                 except (TypeError, ValueError):
                     pass
 
@@ -2290,6 +2355,12 @@ class AutomatedStreamManager:
                 batch_size = min(batch_size, 400)
             
             logger.info(f"Processing {total_streams} streams for pattern matching (Parallel, {max_workers} workers, {batch_size} streams per batch)...")
+            self._update_run_progress(
+                stage_key="stream_matching",
+                current=0,
+                total=total_streams,
+                message=f"Matching 0/{total_streams} streams",
+            )
             
             # Resolve dead stream removal setting.
             # When the caller provides allow_dead_streams explicitly (e.g. check_single_channel
@@ -2333,6 +2404,12 @@ class AutomatedStreamManager:
                         # Log every 5% for better visibility as requested
                         if current_pct >= last_log_pct + 5 or completed_count == total_streams:
                              logger.info(f"  Progress: {completed_count}/{total_streams} streams matched ({current_pct}%)")
+                             self._update_run_progress(
+                                 stage_key="stream_matching",
+                                 current=completed_count,
+                                 total=total_streams,
+                                 message=f"Matching {completed_count}/{total_streams} streams",
+                             )
                              last_log_pct = current_pct
                              
                     except Exception as e:
@@ -3441,6 +3518,11 @@ class AutomatedStreamManager:
                                 stage="quality_checking",
                                 stage_label="Quality Checking",
                                 message="Running synchronous quality checks",
+                                progress={
+                                    "current": 0,
+                                    "total": len(channels_to_check_sync),
+                                    "message": f"Checking {len(channels_to_check_sync)} selected channel(s)",
+                                },
                             )
                             target_stream_ids = _target_stream_ids if _target_stream_ids else None
                             check_results = stream_checker.check_channels_synchronously(
@@ -3448,10 +3530,22 @@ class AutomatedStreamManager:
                                 force_check=forced,
                                 target_stream_ids=target_stream_ids
                             )
+                            self._update_run_progress(
+                                stage_key="quality_checking",
+                                current=len(check_results),
+                                total=len(channels_to_check_sync),
+                                message="Quality checks completed",
+                            )
                             logger.info(f"Synchronous quality checks completed for {len(check_results)} channels")
                         else:
                             logger.info("No channels require synchronous quality checks this cycle (no new assignments)")
                             check_results = {}
+                            self._update_run_progress(
+                                stage_key="quality_checking",
+                                current=0,
+                                total=0,
+                                message="No channels required quality checks",
+                            )
                         quality_summary = self._summarize_quality_check_results(
                             check_results,
                             expected_count=len(channels_to_check_sync),

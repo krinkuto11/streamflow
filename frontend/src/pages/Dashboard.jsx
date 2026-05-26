@@ -322,6 +322,20 @@ export default function Dashboard() {
   const runStage = runStatus.stage || 'idle'
   const runStageLabel = runStatus.stage_label || 'Idle'
   const currentStageIndex = AUTOMATION_STAGES.findIndex((stage) => stage.id === runStage)
+  const runProgress = runStatus.progress || {}
+  const qualityStageActive = runStage === 'quality_checking' && batchTotal > 0
+  const rawRunProgressPercent = Number(runProgress.percent)
+  const runProgressPercent = qualityStageActive
+    ? queueProgress
+    : Number.isFinite(rawRunProgressPercent)
+      ? rawRunProgressPercent
+      : 0
+  const runProgressCurrent = qualityStageActive ? completed : runProgress.current
+  const runProgressTotal = qualityStageActive ? batchTotal : runProgress.total
+  const hasRunProgressTotal = runProgressTotal !== null && runProgressTotal !== undefined
+  const runProgressDetail = hasRunProgressTotal
+    ? `${runProgressCurrent ?? 0} of ${runProgressTotal}`
+    : runProgress.message || runStatus.message || 'Waiting for progress'
   const runningRun = runState === 'running'
   const failedRun = runState === 'failed'
   const completedRun = runState === 'completed'
@@ -392,7 +406,7 @@ export default function Dashboard() {
           </Badge>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
             <div className="rounded-md border bg-muted/30 p-3">
               <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
                 <Activity className="h-3.5 w-3.5" />
@@ -416,6 +430,20 @@ export default function Dashboard() {
             </div>
             <div className="rounded-md border bg-muted/30 p-3">
               <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                <Timer className="h-3.5 w-3.5" />
+                Stage Time
+              </div>
+              <div className="mt-1 text-lg font-semibold">{formatDuration(runStatus.stage_duration_seconds)}</div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                <Activity className="h-3.5 w-3.5" />
+                Progress
+              </div>
+              <div className="mt-1 text-lg font-semibold">{Math.round(runProgressPercent)}%</div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
                 <Database className="h-3.5 w-3.5" />
                 API p95 / p99
               </div>
@@ -425,6 +453,14 @@ export default function Dashboard() {
                 {apiTiming.p99_seconds != null ? formatDuration(apiTiming.p99_seconds) : 'N/A'}
               </div>
             </div>
+          </div>
+
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+              <span className="text-muted-foreground">{runProgressDetail}</span>
+              <span className="text-muted-foreground">{Math.round(runProgressPercent)}%</span>
+            </div>
+            <Progress value={runProgressPercent} className="h-2" />
           </div>
 
           <div className="grid gap-2 md:grid-cols-4 lg:grid-cols-8">

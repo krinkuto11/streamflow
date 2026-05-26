@@ -148,6 +148,7 @@ def get_automation_status_response(
             profile.get("stream_checking", {}).get("enabled", False) for profile in profiles
         )
         run_status = manager.get_run_status() if hasattr(manager, "get_run_status") else None
+        run_progress = run_status
         udi_status = None
         try:
             from apps.udi import get_udi_manager
@@ -169,6 +170,7 @@ def get_automation_status_response(
                     "profiles_count": profiles_count,
                     "stream_checking_enabled": stream_checking_enabled,
                     "run_status": run_status,
+                    "run_progress": run_progress,
                     "udi_status": udi_status,
                 }
             ),
