@@ -20,6 +20,43 @@ def _channel_display_name(channel: Dict[str, Any]) -> str:
     return str(channel.get("name") or f"Channel {channel.get('id')}")
 
 
+def _coerce_channel_number(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def sort_channels_by_display_order(channels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Sort channels by visible channel number when that metadata is available."""
+    sortable = []
+    has_number = False
+    for index, channel in enumerate(channels):
+        number = _coerce_channel_number(
+            channel.get("channel_number", channel.get("number"))
+        )
+        if number is not None:
+            has_number = True
+        sortable.append((index, number, channel))
+
+    if not has_number:
+        return list(channels)
+
+    return [
+        channel
+        for index, number, channel in sorted(
+            sortable,
+            key=lambda item: (
+                item[1] is None,
+                item[1] if item[1] is not None else 0,
+                item[0],
+            ),
+        )
+    ]
+
+
 def order_channels_for_queue_start(
     channels: List[Dict[str, Any]],
     *,
@@ -31,6 +68,7 @@ def order_channels_for_queue_start(
         channel for channel in channels
         if isinstance(channel, dict) and channel.get("id") is not None
     ]
+    usable_channels = sort_channels_by_display_order(usable_channels)
     mode = (start_mode or "first").strip().lower()
     if mode not in QUEUE_START_MODES:
         raise ValueError("Invalid start_mode")
