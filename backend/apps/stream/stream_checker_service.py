@@ -496,6 +496,7 @@ class StreamCheckerService:
         # treat_blank_as_dead value is intentionally ignored so older profiles
         # with it set to False do not silently keep blanks alive.
         config['treat_blank_as_dead'] = stream_checking.get('blank_check_enabled') is True
+        config['treat_freeze_as_dead'] = stream_checking.get('freeze_check_enabled') is True
 
         return config
 
@@ -680,6 +681,59 @@ class StreamCheckerService:
                 f"removal_enabled={removal_enabled}, action={action}"
             )
 
+    def _log_freeze_detection_summary(
+        self,
+        channel_id: int,
+        _channel_name: str,
+        analyzed_streams: List[Dict],
+        dead_stream_ids: Optional[Set[int]] = None,
+        dead_stream_removal_enabled: Optional[bool] = None,
+    ) -> None:
+        """Log a URL-free freeze-detection summary for post-run audits."""
+        probed_streams = [
+            stream for stream in analyzed_streams
+            if stream.get('freeze_probe_ran') and stream.get('status') != 'cached'
+        ]
+        if not probed_streams:
+            return
+
+        frozen_streams = [stream for stream in probed_streams if stream.get('freeze_detected')]
+        clean_count = len(probed_streams) - len(frozen_streams)
+
+        def _metric(stream: Dict, key: str) -> float:
+            try:
+                return float(stream.get(key) or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        max_ratio_stream = max(probed_streams, key=lambda stream: _metric(stream, 'freeze_ratio'))
+        channel_ref = _audit_ref('channel', channel_id)
+        logger.info(
+            f"[freeze-detect] Channel summary: channel_ref={channel_ref}, "
+            f"probed={len(probed_streams)}, clean={clean_count}, "
+            f"frozen={len(frozen_streams)}, "
+            f"max_ratio={_metric(max_ratio_stream, 'freeze_ratio'):.3f}, "
+            f"max_freeze_duration={_metric(max_ratio_stream, 'freeze_duration_secs'):.1f}s"
+        )
+
+        dead_stream_ids = dead_stream_ids or set()
+        removal_enabled = bool(dead_stream_removal_enabled)
+
+        for stream in frozen_streams:
+            stream_id = stream.get('stream_id')
+            marked_dead = stream_id in dead_stream_ids
+            dead_reason = stream.get('dead_reason') or ('freeze' if marked_dead else 'none')
+            action = 'remove' if marked_dead and removal_enabled else 'retain'
+            logger.warning(
+                f"[freeze-detect] Frozen candidate: channel_ref={channel_ref}, "
+                f"stream_ref={_audit_ref('stream', stream_id)}, "
+                f"duration={_metric(stream, 'freeze_duration_secs'):.1f}s, "
+                f"ratio={_metric(stream, 'freeze_ratio'):.3f}, "
+                f"segments={len(stream.get('freeze_segments') or [])}, "
+                f"marked_dead={marked_dead}, reason={dead_reason}, "
+                f"removal_enabled={removal_enabled}, action={action}"
+            )
+
     def _refresh_dead_stream_reason_if_needed(
         self,
         stream_url: str,
@@ -688,6 +742,7 @@ class StreamCheckerService:
         channel_id: int,
         reason: str,
         blank_detected: bool = False,
+        freeze_detected: bool = False,
     ) -> bool:
         """Refresh stale dead-stream reasons after a checked stream gets a newer verdict."""
         if not stream_url or not reason or reason == 'none':
@@ -705,9 +760,10 @@ class StreamCheckerService:
                 return False
             updated = update_reason(stream_url, reason, channel_id=channel_id)
 
-            if updated and blank_detected:
+            if updated and (blank_detected or freeze_detected):
+                detection_label = 'blank' if blank_detected else 'freeze'
                 logger.warning(
-                    f"[blank-detect] Stream dead reason updated: "
+                    f"[{detection_label}-detect] Stream dead reason updated: "
                     f"channel_ref={_audit_ref('channel', channel_id)}, "
                     f"stream_ref={_audit_ref('stream', stream_id)}, "
                     f"reason={reason}"
@@ -797,12 +853,23 @@ class StreamCheckerService:
             "blank_detected": stream_data.get("blank_detected") if stream_data.get("blank_probe_ran") else False,
             "blank_duration_secs": stream_data.get("blank_duration_secs") if stream_data.get("blank_probe_ran") else None,
             "blank_ratio": stream_data.get("blank_ratio") if stream_data.get("blank_probe_ran") else None,
+            "freeze_probe_ran": True if stream_data.get("freeze_probe_ran") else False,
+            "freeze_detected": stream_data.get("freeze_detected") if stream_data.get("freeze_probe_ran") else False,
+            "freeze_duration_secs": stream_data.get("freeze_duration_secs") if stream_data.get("freeze_probe_ran") else None,
+            "freeze_ratio": stream_data.get("freeze_ratio") if stream_data.get("freeze_probe_ran") else None,
         }
         
         # Clean up the payload, removing None and N/A values.
         # PRESERVE_FALSE: keep False values for boolean loop fields so they
         # explicitly clear stale True values in Dispatcharr on PATCH merge.
-        PRESERVE_FALSE = {"loop_probe_ran", "loop_detected", "blank_probe_ran", "blank_detected"}
+        PRESERVE_FALSE = {
+            "loop_probe_ran",
+            "loop_detected",
+            "blank_probe_ran",
+            "blank_detected",
+            "freeze_probe_ran",
+            "freeze_detected",
+        }
         stream_stats_payload = {
             k: v for k, v in stream_stats_payload.items()
             if v not in [None, "N/A"] or (v is None and k not in PRESERVE_FALSE)
@@ -900,12 +967,23 @@ class StreamCheckerService:
             "blank_detected": stream_data.get("blank_detected") if stream_data.get("blank_probe_ran") else False,
             "blank_duration_secs": stream_data.get("blank_duration_secs") if stream_data.get("blank_probe_ran") else None,
             "blank_ratio": stream_data.get("blank_ratio") if stream_data.get("blank_probe_ran") else None,
+            "freeze_probe_ran": True if stream_data.get("freeze_probe_ran") else False,
+            "freeze_detected": stream_data.get("freeze_detected") if stream_data.get("freeze_probe_ran") else False,
+            "freeze_duration_secs": stream_data.get("freeze_duration_secs") if stream_data.get("freeze_probe_ran") else None,
+            "freeze_ratio": stream_data.get("freeze_ratio") if stream_data.get("freeze_probe_ran") else None,
         }
         
         # Clean up the payload, removing None and N/A values.
         # PRESERVE_FALSE: keep False values for boolean loop fields so they
         # explicitly clear stale True values in Dispatcharr on PATCH merge.
-        PRESERVE_FALSE = {"loop_probe_ran", "loop_detected", "blank_probe_ran", "blank_detected"}
+        PRESERVE_FALSE = {
+            "loop_probe_ran",
+            "loop_detected",
+            "blank_probe_ran",
+            "blank_detected",
+            "freeze_probe_ran",
+            "freeze_detected",
+        }
         stream_stats_payload = {
             k: v for k, v in stream_stats_payload.items()
             if v not in [None, "N/A"] or (v is None and k not in PRESERVE_FALSE)
@@ -1326,6 +1404,7 @@ class StreamCheckerService:
         grace_period = False
         loop_check_enabled = False
         blank_check_enabled = False
+        freeze_check_enabled = False
         loop_penalty = 0.0
         priority_m3u_ids = []
         priority_mode = 'absolute'
@@ -1369,6 +1448,7 @@ class StreamCheckerService:
                 grace_period = profile_stream_checking.get('grace_period', False)
                 loop_check_enabled = profile_stream_checking.get('loop_check_enabled', False)
                 blank_check_enabled = profile_stream_checking.get('blank_check_enabled', False)
+                freeze_check_enabled = profile_stream_checking.get('freeze_check_enabled', False)
                 profile_remove_dead_streams = profile_stream_checking.get('remove_dead_streams')
                 if isinstance(profile_remove_dead_streams, bool):
                     dead_stream_removal_enabled = profile_remove_dead_streams
@@ -1670,7 +1750,7 @@ class StreamCheckerService:
                         stream_statuses[stream_id]['status'] = 'error'
                         stream_statuses[stream_id]['score'] = 0.0
                     elif is_dead:
-                        stream_statuses[stream_id]['status'] = _dead_reason if _dead_reason in ('low_quality', 'blank') else 'dead'
+                        stream_statuses[stream_id]['status'] = _dead_reason if _dead_reason in ('low_quality', 'blank', 'freeze') else 'dead'
                         stream_statuses[stream_id]['score'] = 0.0
                     else:
                         stream_statuses[stream_id]['status'] = 'completed'
@@ -1721,7 +1801,7 @@ class StreamCheckerService:
                             self.progress.update(
                                 channel_id=channel_id,
                                 channel_name=channel_name,
-                                current=sum(1 for s in stream_statuses.values() if s.get('status') in ('completed', 'dead', 'error', 'loop_detected', 'blank')),
+                                current=sum(1 for s in stream_statuses.values() if s.get('status') in ('completed', 'dead', 'error', 'loop_detected', 'blank', 'freeze')),
                                 total=total_streams,
                                 status='analyzing',
                                 step='Analyzing streams with account limits',
@@ -1753,7 +1833,11 @@ class StreamCheckerService:
                         blank_check_enabled=blank_check_enabled,
                         blank_check_min_duration=analysis_params.get('blank_check_min_duration', 2.0),
                         blank_check_pixel_threshold=analysis_params.get('blank_check_pixel_threshold', 0.10),
-                        blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80)
+                        blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80),
+                        freeze_check_enabled=freeze_check_enabled,
+                        freeze_check_min_duration=analysis_params.get('freeze_check_min_duration', 5.0),
+                        freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
+                        freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80)
                     )
                 finally:
                     _heartbeat_stop.set()
@@ -1801,9 +1885,10 @@ class StreamCheckerService:
                             )
                         if self.dead_streams_tracker.mark_as_dead(stream_url, stream_id, stream_name, channel_id, reason=dead_reason):
                             dead_stream_ids.add(stream_id)
-                            if analyzed.get('blank_detected'):
+                            if analyzed.get('blank_detected') or analyzed.get('freeze_detected'):
+                                detection_label = 'blank' if analyzed.get('blank_detected') else 'freeze'
                                 logger.warning(
-                                    f"[blank-detect] Stream marked dead: "
+                                    f"[{detection_label}-detect] Stream marked dead: "
                                     f"channel_ref={_audit_ref('channel', channel_id)}, "
                                     f"stream_ref={_audit_ref('stream', stream_id)}, "
                                     f"reason={dead_reason}"
@@ -1854,6 +1939,7 @@ class StreamCheckerService:
                                 channel_id,
                                 dead_reason,
                                 blank_detected=bool(analyzed.get('blank_detected')),
+                                freeze_detected=bool(analyzed.get('freeze_detected')),
                             )
                             dead_stream_ids.add(stream_id)
                         else:
@@ -1905,6 +1991,10 @@ class StreamCheckerService:
                             'blank_detected': stream_stats.get('blank_detected', False),
                             'blank_duration_secs': stream_stats.get('blank_duration_secs'),
                             'blank_ratio': stream_stats.get('blank_ratio'),
+                            'freeze_probe_ran': stream_stats.get('freeze_probe_ran', False),
+                            'freeze_detected': stream_stats.get('freeze_detected', False),
+                            'freeze_duration_secs': stream_stats.get('freeze_duration_secs'),
+                            'freeze_ratio': stream_stats.get('freeze_ratio'),
                             'status': 'cached',
                             'channel_id': channel_id,
                             'channel_name': channel_name,
@@ -1927,6 +2017,13 @@ class StreamCheckerService:
                 return abort_result
 
             self._log_blank_detection_summary(
+                channel_id,
+                channel_name,
+                analyzed_streams,
+                dead_stream_ids=dead_stream_ids,
+                dead_stream_removal_enabled=dead_stream_removal_enabled,
+            )
+            self._log_freeze_detection_summary(
                 channel_id,
                 channel_name,
                 analyzed_streams,
@@ -2123,7 +2220,7 @@ class StreamCheckerService:
                     
                     # Mark dead streams as "dead" instead of showing score:0
                     if is_dead:
-                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') == 'blank' else 'dead'
+                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') in ('blank', 'freeze') else 'dead'
                     elif is_revived:
                         stream_stat['status'] = 'revived'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
@@ -2140,6 +2237,11 @@ class StreamCheckerService:
                         stream_stat['blank_detected']      = analyzed.get('blank_detected')
                         stream_stat['blank_duration_secs'] = analyzed.get('blank_duration_secs')
                         stream_stat['blank_ratio']         = analyzed.get('blank_ratio')
+                    if analyzed.get('freeze_probe_ran'):
+                        stream_stat['freeze_probe_ran']     = True
+                        stream_stat['freeze_detected']      = analyzed.get('freeze_detected')
+                        stream_stat['freeze_duration_secs'] = analyzed.get('freeze_duration_secs')
+                        stream_stat['freeze_ratio']         = analyzed.get('freeze_ratio')
 
                     # Clean up N/A values for cleaner JSON
                     cleaned_stat = {k: v for k, v in stream_stat.items() if v not in [None]}
@@ -2287,6 +2389,7 @@ class StreamCheckerService:
         grace_period = False
         loop_check_enabled = False
         blank_check_enabled = False
+        freeze_check_enabled = False
         loop_penalty = 0.0
         priority_m3u_ids = []
         priority_mode = 'absolute'
@@ -2325,6 +2428,7 @@ class StreamCheckerService:
                 grace_period = profile_stream_checking.get('grace_period', False)
                 loop_check_enabled = profile_stream_checking.get('loop_check_enabled', False)
                 blank_check_enabled = profile_stream_checking.get('blank_check_enabled', False)
+                freeze_check_enabled = profile_stream_checking.get('freeze_check_enabled', False)
                 profile_remove_dead_streams = profile_stream_checking.get('remove_dead_streams')
                 if isinstance(profile_remove_dead_streams, bool):
                     dead_stream_removal_enabled = profile_remove_dead_streams
@@ -2579,7 +2683,11 @@ class StreamCheckerService:
                     blank_check_enabled=blank_check_enabled,
                     blank_check_min_duration=analysis_params.get('blank_check_min_duration', 2.0),
                     blank_check_pixel_threshold=analysis_params.get('blank_check_pixel_threshold', 0.10),
-                    blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80)
+                    blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80),
+                    freeze_check_enabled=freeze_check_enabled,
+                    freeze_check_min_duration=analysis_params.get('freeze_check_min_duration', 5.0),
+                    freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
+                    freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80)
                 )
                 
                 # Update stream stats on dispatcharr with ffmpeg-extracted data
@@ -2608,9 +2716,10 @@ class StreamCheckerService:
                     # Mark as dead in tracker
                     if self.dead_streams_tracker.mark_as_dead(stream_url, stream['id'], stream_name, channel_id, reason=dead_reason):
                         dead_stream_ids.add(stream['id'])
-                        if analyzed.get('blank_detected'):
+                        if analyzed.get('blank_detected') or analyzed.get('freeze_detected'):
+                            detection_label = 'blank' if analyzed.get('blank_detected') else 'freeze'
                             logger.warning(
-                                f"[blank-detect] Stream marked dead: "
+                                f"[{detection_label}-detect] Stream marked dead: "
                                 f"channel_ref={_audit_ref('channel', channel_id)}, "
                                 f"stream_ref={_audit_ref('stream', stream['id'])}, "
                                 f"reason={dead_reason}"
@@ -2661,6 +2770,7 @@ class StreamCheckerService:
                             channel_id,
                             dead_reason,
                             blank_detected=bool(analyzed.get('blank_detected')),
+                            freeze_detected=bool(analyzed.get('freeze_detected')),
                         )
                         dead_stream_ids.add(stream['id'])
 
@@ -2675,7 +2785,7 @@ class StreamCheckerService:
                         stream_statuses[stream['id']]['status'] = 'error'
                         stream_statuses[stream['id']]['score'] = 0.0
                     elif is_dead:
-                        stream_statuses[stream['id']]['status'] = dead_reason if dead_reason in ('low_quality', 'blank') else 'dead'
+                        stream_statuses[stream['id']]['status'] = dead_reason if dead_reason in ('low_quality', 'blank', 'freeze') else 'dead'
                         stream_statuses[stream['id']]['score'] = 0.0
                     else:
                         stream_statuses[stream['id']]['status'] = 'completed'
@@ -2726,6 +2836,10 @@ class StreamCheckerService:
                         'blank_detected': stream_stats.get('blank_detected', False),
                         'blank_duration_secs': stream_stats.get('blank_duration_secs'),
                         'blank_ratio': stream_stats.get('blank_ratio'),
+                        'freeze_probe_ran': stream_stats.get('freeze_probe_ran', False),
+                        'freeze_detected': stream_stats.get('freeze_detected', False),
+                        'freeze_duration_secs': stream_stats.get('freeze_duration_secs'),
+                        'freeze_ratio': stream_stats.get('freeze_ratio'),
                         'status': 'OK'  # Assume OK for previously checked streams
                     }
                     
@@ -2798,7 +2912,11 @@ class StreamCheckerService:
                         blank_check_enabled=blank_check_enabled,
                         blank_check_min_duration=analysis_params.get('blank_check_min_duration', 2.0),
                         blank_check_pixel_threshold=analysis_params.get('blank_check_pixel_threshold', 0.10),
-                        blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80)
+                        blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80),
+                        freeze_check_enabled=freeze_check_enabled,
+                        freeze_check_min_duration=analysis_params.get('freeze_check_min_duration', 5.0),
+                        freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
+                        freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80)
                     )
                     self._update_stream_stats(analyzed)
                     score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode)
@@ -2810,6 +2928,13 @@ class StreamCheckerService:
                 return abort_result
 
             self._log_blank_detection_summary(
+                channel_id,
+                channel_name,
+                analyzed_streams,
+                dead_stream_ids=dead_stream_ids,
+                dead_stream_removal_enabled=dead_stream_removal_enabled,
+            )
+            self._log_freeze_detection_summary(
                 channel_id,
                 channel_name,
                 analyzed_streams,
@@ -3005,7 +3130,7 @@ class StreamCheckerService:
                     }
 
                     if is_dead:
-                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') == 'blank' else 'dead'
+                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') in ('blank', 'freeze') else 'dead'
                     elif is_revived:
                         stream_stat['status'] = 'revived'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
@@ -3024,6 +3149,11 @@ class StreamCheckerService:
                         stream_stat['blank_detected']      = analyzed.get('blank_detected')
                         stream_stat['blank_duration_secs'] = analyzed.get('blank_duration_secs')
                         stream_stat['blank_ratio']         = analyzed.get('blank_ratio')
+                    if analyzed.get('freeze_probe_ran'):
+                        stream_stat['freeze_probe_ran']     = True
+                        stream_stat['freeze_detected']      = analyzed.get('freeze_detected')
+                        stream_stat['freeze_duration_secs'] = analyzed.get('freeze_duration_secs')
+                        stream_stat['freeze_ratio']         = analyzed.get('freeze_ratio')
 
                     stream_stat = {k: v for k, v in stream_stat.items() if v not in [None, "N/A"]}
                     stream_stats.append(stream_stat)
@@ -4390,7 +4520,9 @@ class StreamCheckerService:
                     'video_codec': stream_stats.get('video_codec', 'N/A'),
                     'bitrate_kbps': stream_stats.get('ffmpeg_output_bitrate', 0),
                     'blank_probe_ran': stream_stats.get('blank_probe_ran', False),
-                    'blank_detected': stream_stats.get('blank_detected', False)
+                    'blank_detected': stream_stats.get('blank_detected', False),
+                    'freeze_probe_ran': stream_stats.get('freeze_probe_ran', False),
+                    'freeze_detected': stream_stats.get('freeze_detected', False),
                 }
                 
                 # Calculate score — prefer the in-memory score from the check run
@@ -4447,6 +4579,16 @@ class StreamCheckerService:
                     stream_detail['blank_detected']      = stream_stats.get('blank_detected')
                     stream_detail['blank_duration_secs'] = stream_stats.get('blank_duration_secs')
                     stream_detail['blank_ratio']         = stream_stats.get('blank_ratio')
+                if analyzed and analyzed.get('freeze_probe_ran'):
+                    stream_detail['freeze_probe_ran']     = True
+                    stream_detail['freeze_detected']      = analyzed.get('freeze_detected')
+                    stream_detail['freeze_duration_secs'] = analyzed.get('freeze_duration_secs')
+                    stream_detail['freeze_ratio']         = analyzed.get('freeze_ratio')
+                elif stream_stats.get('freeze_probe_ran'):
+                    stream_detail['freeze_probe_ran']     = True
+                    stream_detail['freeze_detected']      = stream_stats.get('freeze_detected')
+                    stream_detail['freeze_duration_secs'] = stream_stats.get('freeze_duration_secs')
+                    stream_detail['freeze_ratio']         = stream_stats.get('freeze_ratio')
 
                 check_stats['stream_details'].append(stream_detail)
             

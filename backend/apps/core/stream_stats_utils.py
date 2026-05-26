@@ -420,6 +420,8 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     - It exited early on all attempts without completing the probe window (Reason: 'unstable')
     - The quality probe identified a mostly blank video window and blank-as-dead
       handling is enabled (Reason: 'blank')
+    - The quality probe identified a mostly frozen video window and freeze-as-dead
+      handling is enabled (Reason: 'freeze')
     - Resolution is '0x0' or contains 0 in width or height (Reason: 'offline')
     - Bitrate is 0 or None (Reason: 'offline')
     - Falls below configured minimum thresholds (Reason: 'low_quality')
@@ -433,12 +435,14 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
                 - min_score: Minimum score 0-100 (default: 0 = no check)
                 - treat_blank_as_dead: Whether detected blank screens count as dead
                   (default: True for backwards compatibility)
+                - treat_freeze_as_dead: Whether detected frozen pictures count as dead
+                  (default: True for backwards compatibility)
         
     Returns:
         Tuple of (bool, str): (is_dead, reason)
         Reasons: 'unstable' (exited early), 'blank' (blank screen),
-                 'offline' (truly dead), 'low_quality' (below thresholds),
-                 'none' (not dead)
+                 'freeze' (frozen picture), 'offline' (truly dead),
+                 'low_quality' (below thresholds), 'none' (not dead)
     """
     # ── Early-exit / instability check ───────────────────────────────────────
     # A stream that never completed the probe window on any attempt is
@@ -475,6 +479,12 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     treat_blank_as_dead = True if config is None else config.get('treat_blank_as_dead', True)
     if _coerce_bool(treat_blank_as_dead) and _coerce_bool(blank_probe_ran) and _coerce_bool(blank_detected):
         return True, 'blank'
+
+    freeze_probe_ran = stream_data.get('freeze_probe_ran', stream_stats.get('freeze_probe_ran'))
+    freeze_detected = stream_data.get('freeze_detected', stream_stats.get('freeze_detected'))
+    treat_freeze_as_dead = True if config is None else config.get('treat_freeze_as_dead', True)
+    if _coerce_bool(treat_freeze_as_dead) and _coerce_bool(freeze_probe_ran) and _coerce_bool(freeze_detected):
+        return True, 'freeze'
 
     # Extract normalized stats
     stats = extract_stream_stats(stream_data)

@@ -35,11 +35,15 @@ const thresholdFields = [
   { key: 'blank_min_duration_seconds', label: 'Blank Duration', step: '0.5', min: 0.5, max: 30 },
   { key: 'blank_pixel_threshold', label: 'Pixel Threshold', step: '0.01', min: 0, max: 1 },
   { key: 'blank_ratio_threshold', label: 'Blank Ratio', step: '0.01', min: 0.1, max: 1 },
+  { key: 'freeze_min_duration_seconds', label: 'Freeze Duration', step: '0.5', min: 1, max: 120 },
+  { key: 'freeze_noise_threshold', label: 'Freeze Noise', step: '0.001', min: 0, max: 1 },
+  { key: 'freeze_ratio_threshold', label: 'Freeze Ratio', step: '0.01', min: 0.1, max: 1 },
 ]
 
 const eventLabels = {
   probe_ok: 'Probe OK',
   blank_pending: 'Blank Pending',
+  freeze_pending: 'Freeze Pending',
   dry_run_switch: 'Dry Run Switch',
   switch_success: 'Switch Success',
   switch_failed: 'Switch Failed',
@@ -323,6 +327,17 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
+              <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
+                <div>
+                  <Label className="text-sm font-medium">Freeze Detection</Label>
+                  <p className="text-xs text-muted-foreground">Switch when the active picture is stuck but not black</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.freeze_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('freeze_detection_enabled', value)}
+                />
+              </div>
+
               <div className="rounded-md border p-3 md:col-span-2">
                 <Label className="text-sm font-medium">Watch Mode</Label>
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -457,6 +472,8 @@ export default function ShadowBlankMonitor() {
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         <span>{channel.stream_ref}</span>
                         {channel.last_event && <Badge variant="secondary">{formatEvent(channel.last_event)}</Badge>}
+                        {channel.last_probe?.freeze_detected && <Badge variant="outline">Frozen</Badge>}
+                        {channel.last_probe?.blank_detected && <Badge variant="outline">Blank</Badge>}
                       </div>
                     </div>
                   ))}
