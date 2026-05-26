@@ -358,12 +358,10 @@ class ShadowBlankMonitorService:
 
     def _probe_targets(self, udi: Any, targets: Iterable[Dict[str, Any]], config: Dict[str, Any]) -> None:
         targets = list(targets)
-        if config.get("watch_mode") == "continuous" and any(
-            int(target.get("watcher_client_count") or 0) > 0 for target in targets
-        ):
-            return
-
         threads: List[threading.Thread] = []
+        wait_for_probes = not (
+            config.get("watch_mode") == "continuous" and self._uses_default_blank_probe
+        )
         for target in targets:
             channel_uuid = target["channel_uuid"]
             if self._cooldown_remaining(channel_uuid) > 0:
@@ -389,10 +387,47 @@ class ShadowBlankMonitorService:
             thread.start()
             threads.append(thread)
 
-        for thread in threads:
-            thread.join()
+        if wait_for_probes:
+            for thread in threads:
+                thread.join()
 
     def _probe_target(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> None:
+        channel_uuid = target["channel_uuid"]
+        try:
+            first_probe = True
+            while first_probe or not self._stop_event.is_set():
+                first_probe = False
+                should_continue = self._probe_target_once(udi, target, config)
+                if not (
+                    should_continue
+                    and config.get("watch_mode") == "continuous"
+                    and self._uses_default_blank_probe
+                ):
+                    break
+                if self._stop_event.is_set():
+                    break
+
+                fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                if self._real_client_count(fresh_status, config) <= 0:
+                    self._reset_blank_count(channel_uuid)
+                    self._record_event("viewer_left", target, {})
+                    with self._lock:
+                        self._watched.pop(channel_uuid, None)
+                    break
+
+                target = dict(target)
+                target["real_client_count"] = self._real_client_count(fresh_status, config)
+                target["watcher_client_count"] = self._watcher_client_count(fresh_status, config)
+                stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
+                target["stream_id"] = stream_id
+                target["stream_ref"] = _ref("stream", stream_id)
+                with self._lock:
+                    self._watched[channel_uuid] = dict(target)
+        finally:
+            with self._lock:
+                self._active_probes.discard(channel_uuid)
+
+    def _probe_target_once(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> bool:
         channel_uuid = target["channel_uuid"]
         try:
             proxy_url = self._channel_proxy_url(channel_uuid)
@@ -416,12 +451,12 @@ class ShadowBlankMonitorService:
                 self._record_event("viewer_left", target, {})
                 with self._lock:
                     self._watched.pop(channel_uuid, None)
-                return
+                return False
 
             if not blank:
                 self._reset_blank_count(channel_uuid)
                 self._record_event("probe_ok", target, target["last_probe"])
-                return
+                return True
 
             blank_count = self._increment_blank_count(channel_uuid)
             confirmations = int(config.get("confirmation_count", 2))
@@ -431,12 +466,16 @@ class ShadowBlankMonitorService:
                     target,
                     {"confirmations": blank_count, "required": confirmations},
                 )
-                return
+                return True
 
             self._handle_confirmed_blank(udi, target, config)
-        finally:
-            with self._lock:
-                self._active_probes.discard(channel_uuid)
+            return False
+        except Exception:
+            logger.error(
+                f"Shadow blank monitor probe failed for {_ref('channel', channel_uuid)}",
+                exc_info=True,
+            )
+            return False
 
     def _handle_confirmed_blank(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> None:
         channel_uuid = target["channel_uuid"]

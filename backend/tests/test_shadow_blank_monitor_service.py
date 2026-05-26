@@ -1,4 +1,5 @@
 import threading
+import time
 
 from apps.stream.shadow_blank_monitor_service import (
     ShadowBlankMonitorService,
@@ -350,7 +351,7 @@ def test_existing_watcher_client_prevents_duplicate_probe(tmp_path):
     assert status["recent_events"][0]["type"] == "probe_ok"
 
 
-def test_continuous_mode_defers_batch_when_any_selected_target_has_watcher(tmp_path):
+def test_continuous_mode_starts_uncovered_target_when_another_has_watcher(tmp_path):
     probe_urls = []
     udi = FakeUdi(
         statuses=[{
@@ -387,9 +388,54 @@ def test_continuous_mode_defers_batch_when_any_selected_target_has_watcher(tmp_p
 
     status = service.run_once(force=True)
 
-    assert probe_urls == []
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-2"]
     assert status["watched_count"] == 2
-    assert status["recent_events"] == []
+    assert status["recent_events"][0]["type"] == "probe_ok"
+
+
+def test_continuous_default_probe_does_not_block_new_scans(tmp_path):
+    started = threading.Event()
+    release = threading.Event()
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=lambda *args, **kwargs: True,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+
+    def fake_continuous_probe(url, config, probe_udi, target):
+        started.set()
+        assert release.wait(1)
+        return {"blank_detected": False, "viewer_left": True}
+
+    service._run_blank_probe_until_viewer_left = fake_continuous_probe
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+    })
+
+    status = service.run_once(force=True)
+
+    assert status["watched_count"] == 1
+    assert started.wait(0.5)
+    with service._lock:
+        assert service._active_probes == {"uuid-1"}
+
+    release.set()
+    for _ in range(20):
+        with service._lock:
+            if not service._active_probes:
+                break
+        time.sleep(0.05)
+
+    assert service.get_status()["recent_events"][0]["type"] == "viewer_left"
 
 
 def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
