@@ -586,7 +586,7 @@ export default function StreamChecker() {
 
               {/* Tabs for Configuration Sections */}
               <Tabs defaultValue="analysis" className="w-full">
-                <TabsList className="grid w-full grid-cols-4">
+                <TabsList className="grid h-auto min-h-10 w-full grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-4">
                   <TabsTrigger value="analysis">Stream Analysis</TabsTrigger>
                   <TabsTrigger value="concurrent">Concurrent Checking</TabsTrigger>
                   <TabsTrigger value="safety">Safety</TabsTrigger>
@@ -594,7 +594,7 @@ export default function StreamChecker() {
                 </TabsList>
 
                 {/* Stream Analysis Tab */}
-                <TabsContent value="analysis" className="space-y-4">
+                <TabsContent value="analysis" className="mt-4 space-y-4">
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="ffmpeg_duration">FFmpeg Duration (seconds)</Label>
@@ -710,7 +710,7 @@ export default function StreamChecker() {
                 </TabsContent>
 
                 {/* Concurrent Checking Tab */}
-                <TabsContent value="concurrent" className="space-y-4">
+                <TabsContent value="concurrent" className="mt-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
                       <Label htmlFor="concurrent_enabled">Enable Concurrent Checking</Label>
@@ -762,7 +762,7 @@ export default function StreamChecker() {
 
 
                 {/* Safety Tab */}
-                <TabsContent value="safety" className="space-y-4">
+                <TabsContent value="safety" className="mt-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
                       <Label htmlFor="connectivity_guard_enabled">Connectivity Guard</Label>
@@ -846,7 +846,7 @@ export default function StreamChecker() {
 
 
                 {/* Dead Streams Tab */}
-                <TabsContent value="dead-streams" className="space-y-4">
+                <TabsContent value="dead-streams" className="mt-4 space-y-4">
                   <p className="text-sm text-muted-foreground">
                     View and manage streams that have been marked as dead. Removal from channels during stream checks depends on each automation profile&apos;s Stream Checking settings.
                   </p>
