@@ -350,6 +350,48 @@ def test_existing_watcher_client_prevents_duplicate_probe(tmp_path):
     assert status["recent_events"][0]["type"] == "probe_ok"
 
 
+def test_continuous_mode_defers_batch_when_any_selected_target_has_watcher(tmp_path):
+    probe_urls = []
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[
+                    {"user_agent": "VLC"},
+                    {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"},
+                ],
+            ),
+            "uuid-2": {
+                "state": "active",
+                "channel_id": "uuid-2",
+                "stream_id": 20,
+                "clients": [{"user_agent": "VLC"}],
+            },
+        }],
+        channels=[
+            {"id": 1, "uuid": "uuid-1", "streams": [10, 11]},
+            {"id": 2, "uuid": "uuid-2", "streams": [20, 21]},
+        ],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "max_concurrent_watchers": 2,
+    })
+
+    status = service.run_once(force=True)
+
+    assert probe_urls == []
+    assert status["watched_count"] == 2
+    assert status["recent_events"] == []
+
+
 def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
     probe_urls = []
     udi = FakeUdi(

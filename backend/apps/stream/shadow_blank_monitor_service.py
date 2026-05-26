@@ -356,6 +356,12 @@ class ShadowBlankMonitorService:
         return targets
 
     def _probe_targets(self, udi: Any, targets: Iterable[Dict[str, Any]], config: Dict[str, Any]) -> None:
+        targets = list(targets)
+        if config.get("watch_mode") == "continuous" and any(
+            int(target.get("watcher_client_count") or 0) > 0 for target in targets
+        ):
+            return
+
         threads: List[threading.Thread] = []
         for target in targets:
             channel_uuid = target["channel_uuid"]
