@@ -150,8 +150,9 @@ def test_dispatcharr_connection_response(
                 if exc.response.status_code == 401:
                     return jsonify({"success": False, "error": "Invalid API key"}), 401
                 return jsonify({"success": False, "error": f"HTTP error: {exc.response.status_code}"}), 400
-            except Exception as exc:
-                return jsonify({"success": False, "error": f"Connection failed: {str(exc)}"}), 400
+            except Exception:
+                logger.warning("Dispatcharr API key connection test failed unexpectedly", exc_info=True)
+                return jsonify({"success": False, "error": "Connection failed. Please check the URL and credentials."}), 400
 
         if not all([test_base_url, test_username, test_password]):
             return (
@@ -215,8 +216,9 @@ def test_dispatcharr_connection_response(
             if exc.response.status_code == 401:
                 return jsonify({"success": False, "error": "Invalid username or password"}), 401
             return jsonify({"success": False, "error": f"HTTP error: {exc.response.status_code}"}), 400
-        except Exception as exc:
-            return jsonify({"success": False, "error": f"Connection failed: {str(exc)}"}), 400
+        except Exception:
+            logger.warning("Dispatcharr credential connection test failed unexpectedly", exc_info=True)
+            return jsonify({"success": False, "error": "Connection failed. Please check the URL and credentials."}), 400
     except Exception as exc:
         logger.error(f"Error testing Dispatcharr connection: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500

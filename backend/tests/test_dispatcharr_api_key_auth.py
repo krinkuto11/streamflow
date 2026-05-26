@@ -226,6 +226,67 @@ def test_connection_test_accepts_api_key(monkeypatch):
     assert captured["params"] == {"page_size": 1}
 
 
+def test_connection_test_does_not_expose_unexpected_api_key_exception(monkeypatch):
+    flask = pytest.importorskip("flask")
+    from apps.api import dispatcharr_handlers
+
+    def fake_get(*args, **kwargs):
+        raise RuntimeError("internal stack detail with sensitive path")
+
+    monkeypatch.setattr(dispatcharr_handlers.requests, "get", fake_get)
+
+    config_manager = Mock()
+
+    app = flask.Flask(__name__)
+    with app.app_context():
+        response = dispatcharr_handlers.test_dispatcharr_connection_response(
+            payload={
+                "base_url": "http://dispatcharr.test",
+                "auth_mode": "api_key",
+                "api_key": "secret-key",
+            },
+            get_dispatcharr_config=lambda: config_manager,
+        )
+
+    response_obj, status_code = response
+    assert status_code == 400
+    body = response_obj.get_json()
+    assert body["success"] is False
+    assert body["error"] == "Connection failed. Please check the URL and credentials."
+    assert "internal stack detail" not in body["error"]
+
+
+def test_connection_test_does_not_expose_unexpected_credential_exception(monkeypatch):
+    flask = pytest.importorskip("flask")
+    from apps.api import dispatcharr_handlers
+
+    def fake_post(*args, **kwargs):
+        raise RuntimeError("internal login detail with sensitive path")
+
+    monkeypatch.setattr(dispatcharr_handlers.requests, "post", fake_post)
+
+    config_manager = Mock()
+
+    app = flask.Flask(__name__)
+    with app.app_context():
+        response = dispatcharr_handlers.test_dispatcharr_connection_response(
+            payload={
+                "base_url": "http://dispatcharr.test",
+                "auth_mode": "credentials",
+                "username": "admin",
+                "password": "secret",
+            },
+            get_dispatcharr_config=lambda: config_manager,
+        )
+
+    response_obj, status_code = response
+    assert status_code == 400
+    body = response_obj.get_json()
+    assert body["success"] is False
+    assert body["error"] == "Connection failed. Please check the URL and credentials."
+    assert "internal login detail" not in body["error"]
+
+
 def test_udi_connection_test_validates_api_key_headers(monkeypatch):
     from apps.udi import fetcher
 
