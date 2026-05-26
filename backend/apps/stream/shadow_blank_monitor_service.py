@@ -334,6 +334,7 @@ class ShadowBlankMonitorService:
             real_clients = self._real_client_count(raw_status, config)
             if real_clients <= 0:
                 continue
+            watcher_clients = self._watcher_client_count(raw_status, config)
 
             stream_id = self._extract_stream_id(raw_status)
             target = {
@@ -343,6 +344,7 @@ class ShadowBlankMonitorService:
                 "stream_id": stream_id,
                 "stream_ref": _ref("stream", stream_id),
                 "real_client_count": real_clients,
+                "watcher_client_count": watcher_clients,
                 "state": raw_status.get("state") or "active",
                 "cooldown_seconds": self._cooldown_remaining(channel_uuid),
             }
@@ -362,6 +364,8 @@ class ShadowBlankMonitorService:
                 continue
             if self._quality_checker_conflicts(target, config):
                 self._record_event("quality_check_active", target, {})
+                continue
+            if int(target.get("watcher_client_count") or 0) > 0:
                 continue
 
             with self._lock:
@@ -653,6 +657,17 @@ class ShadowBlankMonitorService:
             except (TypeError, ValueError):
                 continue
         return 1 if self._is_status_active(status) else 0
+
+    def _watcher_client_count(self, status: Dict[str, Any], config: Dict[str, Any]) -> int:
+        marker = str(config.get("watcher_user_agent") or "").lower()
+        if not marker:
+            return 0
+        clients = status.get("clients")
+        if isinstance(clients, dict):
+            clients = list(clients.values())
+        if not isinstance(clients, list):
+            return 0
+        return sum(1 for client in clients if marker in self._client_text(client).lower())
 
     def _cooldown_remaining(self, channel_uuid: str) -> int:
         with self._lock:
