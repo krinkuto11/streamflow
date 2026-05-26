@@ -155,6 +155,40 @@ def test_quality_check_startup_offline_aborts_before_channel_check():
     assert service.connectivity_guard_status["ok"] is False
 
 
+def test_idle_status_marks_previous_connectivity_failure_as_stale():
+    service = StreamCheckerService()
+    service.checking = False
+    service.connectivity_guard_status = {
+        "ok": False,
+        "reason": "connectivity_timeout",
+        "message": "internet connectivity probe timed out",
+    }
+
+    with patch.object(service.progress, "get", return_value=None):
+        status = service.get_status()
+
+    assert status["stream_checking_mode"] is False
+    assert status["connectivity_guard"]["active_failure"] is False
+    assert status["connectivity_guard"]["stale_failure"] is True
+
+
+def test_active_status_marks_current_connectivity_failure_as_active():
+    service = StreamCheckerService()
+    service.checking = True
+    service.connectivity_guard_status = {
+        "ok": False,
+        "reason": "connectivity_timeout",
+        "message": "internet connectivity probe timed out",
+    }
+
+    with patch.object(service.progress, "get", return_value=None):
+        status = service.get_status()
+
+    assert status["stream_checking_mode"] is True
+    assert status["connectivity_guard"]["active_failure"] is True
+    assert status["connectivity_guard"]["stale_failure"] is False
+
+
 def test_mid_run_outage_does_not_mark_dead_or_update_channel():
     service = StreamCheckerService()
     service.config.config["concurrent_streams"]["enabled"] = False

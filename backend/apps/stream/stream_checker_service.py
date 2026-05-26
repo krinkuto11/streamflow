@@ -3517,6 +3517,11 @@ class StreamCheckerService:
             queue_status.get('in_progress', 0) > 0 or
             sync_state.get('active', False)
         )
+
+        connectivity_guard_status = dict(self.connectivity_guard_status or {})
+        guard_failed = connectivity_guard_status.get('ok') is False
+        connectivity_guard_status['active_failure'] = bool(guard_failed and stream_checking_mode)
+        connectivity_guard_status['stale_failure'] = bool(guard_failed and not stream_checking_mode)
         
         return {
             'running': self.running,
@@ -3525,7 +3530,7 @@ class StreamCheckerService:
             'enabled': self.config.get('enabled', True),
             'queue': queue_status,
             'progress': progress,
-            'connectivity_guard': self.connectivity_guard_status,
+            'connectivity_guard': connectivity_guard_status,
             'last_global_check': self.update_tracker.get_last_global_check(),
             'config': {
                 'automation_controls': self.config.get('automation_controls', {}),

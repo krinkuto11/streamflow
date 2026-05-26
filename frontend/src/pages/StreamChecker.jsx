@@ -255,7 +255,7 @@ export default function StreamChecker() {
   const queued = status?.queue?.queued || 0
   const totalBatch = queued + inProgress + completed + failed
   const batchProgress = totalBatch > 0 ? ((completed + failed) / totalBatch) * 100 : 0
-  const connectivityGuardFailed = status?.connectivity_guard?.ok === false
+  const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
 
   return (
     <div className="space-y-6">
