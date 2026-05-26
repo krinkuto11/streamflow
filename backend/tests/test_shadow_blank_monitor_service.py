@@ -83,6 +83,25 @@ def test_watch_mode_controls_scan_delay():
     assert invalid["watch_gap_seconds"] == 1
 
 
+def test_freeze_detection_config_and_probe_command():
+    config = normalize_config({
+        "freeze_detection_enabled": True,
+        "freeze_min_duration_seconds": 7,
+        "freeze_noise_threshold": 0.002,
+        "freeze_ratio_threshold": 0.9,
+    })
+
+    command, duration = ShadowBlankMonitorService._blank_probe_command(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+    )
+
+    assert duration == config["probe_duration_seconds"]
+    assert any("freezedetect=n=0.002:d=7.0" in arg for arg in command)
+    assert config["freeze_detection_enabled"] is True
+    assert config["freeze_ratio_threshold"] == 0.9
+
+
 def test_discovers_real_clients_and_hides_raw_channel_identifiers(tmp_path):
     udi = FakeUdi(
         statuses=[{
@@ -171,6 +190,32 @@ def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
 
     assert switch_calls == [("uuid-1", 11, None)]
     assert status["recent_events"][0]["type"] == "switch_success"
+
+
+def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False, "freeze_detected": True},
+        switch_calls=switch_calls,
+    )
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "freeze_detection_enabled": True,
+    })
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["reason"] == "freeze"
 
 
 def test_single_stream_channel_records_no_alternative_without_switching(tmp_path):

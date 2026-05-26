@@ -128,6 +128,8 @@ def test_automation_profile_schema_normalizes_remove_dead_streams_flag():
                 "remove_dead_streams": "false",
                 "blank_check_enabled": "true",
                 "treat_blank_as_dead": "false",
+                "freeze_check_enabled": "true",
+                "treat_freeze_as_dead": "false",
             },
         }
     )
@@ -135,6 +137,8 @@ def test_automation_profile_schema_normalizes_remove_dead_streams_flag():
     assert parsed.profile_data["stream_checking"]["remove_dead_streams"] is False
     assert parsed.profile_data["stream_checking"]["blank_check_enabled"] is True
     assert parsed.profile_data["stream_checking"]["treat_blank_as_dead"] is False
+    assert parsed.profile_data["stream_checking"]["freeze_check_enabled"] is True
+    assert parsed.profile_data["stream_checking"]["treat_freeze_as_dead"] is False
 
 
 def test_automation_profile_schema_rejects_invalid_remove_dead_streams_flag():
@@ -161,3 +165,16 @@ def test_automation_profile_schema_rejects_invalid_treat_blank_as_dead_flag():
         )
 
     assert "stream_checking.treat_blank_as_dead must be a boolean" in str(exc.value)
+
+
+def test_automation_profile_schema_rejects_invalid_freeze_check_flag():
+    with pytest.raises(ValidationError) as exc:
+        AutomationProfileUpdateSchema.from_payload(
+            {
+                "stream_checking": {
+                    "freeze_check_enabled": "maybe",
+                },
+            }
+        )
+
+    assert "stream_checking.freeze_check_enabled must be a boolean" in str(exc.value)

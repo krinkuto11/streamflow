@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.api_utils import change_channel_stream
 from apps.core.logging_config import setup_logging
-from apps.stream.stream_check_utils import _parse_blank_detection
+from apps.stream.stream_check_utils import _parse_blank_detection, _parse_freeze_detection
 from apps.udi import get_udi_manager
 
 logger = setup_logging(__name__)
@@ -39,6 +39,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "blank_min_duration_seconds": 2.0,
     "blank_pixel_threshold": 0.10,
     "blank_ratio_threshold": 0.80,
+    "freeze_detection_enabled": False,
+    "freeze_min_duration_seconds": 5.0,
+    "freeze_noise_threshold": 0.001,
+    "freeze_ratio_threshold": 0.80,
     "confirmation_count": 2,
     "channel_cooldown_seconds": 300,
     "max_switches_per_hour": 3,
@@ -66,6 +70,9 @@ FLOAT_BOUNDS = {
     "blank_min_duration_seconds": (0.5, 30.0),
     "blank_pixel_threshold": (0.0, 1.0),
     "blank_ratio_threshold": (0.1, 1.0),
+    "freeze_min_duration_seconds": (1.0, 120.0),
+    "freeze_noise_threshold": (0.0, 1.0),
+    "freeze_ratio_threshold": (0.1, 1.0),
 }
 
 
@@ -114,6 +121,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
 
     config["enabled"] = bool(config.get("enabled"))
     config["dry_run"] = bool(config.get("dry_run"))
+    config["freeze_detection_enabled"] = bool(config.get("freeze_detection_enabled"))
     config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
     if config["watch_mode"] not in WATCH_MODES:
         config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
@@ -436,10 +444,15 @@ class ShadowBlankMonitorService:
             else:
                 result = self.blank_probe(proxy_url, config)
             blank = bool(result.get("blank_detected"))
+            freeze = bool(result.get("freeze_detected"))
+            detection_reason = "blank" if blank else ("freeze" if freeze else "")
             target["last_probe"] = {
                 "blank_detected": blank,
                 "blank_ratio": result.get("blank_ratio"),
                 "blank_duration_secs": result.get("blank_duration_secs"),
+                "freeze_detected": freeze,
+                "freeze_ratio": result.get("freeze_ratio"),
+                "freeze_duration_secs": result.get("freeze_duration_secs"),
             }
 
             if result.get("viewer_left"):
@@ -453,22 +466,22 @@ class ShadowBlankMonitorService:
                     self._watched.pop(channel_uuid, None)
                 return False
 
-            if not blank:
+            if not detection_reason:
                 self._reset_blank_count(channel_uuid)
                 self._record_event("probe_ok", target, target["last_probe"])
                 return True
 
-            blank_count = self._increment_blank_count(channel_uuid)
+            blank_count = self._increment_blank_count(channel_uuid, detection_reason)
             confirmations = int(config.get("confirmation_count", 2))
             if blank_count < confirmations:
                 self._record_event(
-                    "blank_pending",
+                    f"{detection_reason}_pending",
                     target,
-                    {"confirmations": blank_count, "required": confirmations},
+                    {"confirmations": blank_count, "required": confirmations, "reason": detection_reason},
                 )
                 return True
 
-            self._handle_confirmed_blank(udi, target, config)
+            self._handle_confirmed_blank(udi, target, config, reason=detection_reason)
             return False
         except Exception:
             logger.error(
@@ -477,7 +490,7 @@ class ShadowBlankMonitorService:
             )
             return False
 
-    def _handle_confirmed_blank(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> None:
+    def _handle_confirmed_blank(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any], *, reason: str = "blank") -> None:
         channel_uuid = target["channel_uuid"]
         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
         if self._real_client_count(fresh_status, config) <= 0:
@@ -496,14 +509,14 @@ class ShadowBlankMonitorService:
             return
 
         if not self._switch_allowed(channel_uuid, config):
-            self._record_event("switch_rate_limited", target, {})
+            self._record_event("switch_rate_limited", target, {"reason": reason})
             return
 
         alternative = self._choose_alternative_stream(udi, target.get("channel_id"), fresh_stream_id)
         if not alternative:
             self._set_cooldown(channel_uuid, config)
             self._reset_blank_count(channel_uuid)
-            self._record_event("no_alternative", target, {})
+            self._record_event("no_alternative", target, {"reason": reason})
             return
 
         if config.get("dry_run"):
@@ -511,7 +524,7 @@ class ShadowBlankMonitorService:
             self._record_event(
                 "dry_run_switch",
                 target,
-                {"target_stream_ref": _ref("stream", alternative)},
+                {"target_stream_ref": _ref("stream", alternative), "reason": reason},
             )
             return
 
@@ -524,7 +537,7 @@ class ShadowBlankMonitorService:
         self._record_event(
             "switch_success" if success else "switch_failed",
             target,
-            {"target_stream_ref": _ref("stream", alternative)},
+            {"target_stream_ref": _ref("stream", alternative), "reason": reason},
         )
 
     def _choose_alternative_stream(self, udi: Any, channel_id: Optional[int], current_stream_id: Optional[int]) -> Optional[int]:
@@ -548,14 +561,21 @@ class ShadowBlankMonitorService:
             ordered = stream_ids
         return next((sid for sid in ordered if sid != current_stream_id), None)
 
+    @staticmethod
+    def _detection_count_key(channel_uuid: str, reason: str) -> str:
+        return f"{channel_uuid}:{reason or 'blank'}"
+
     def _reset_blank_count(self, channel_uuid: str) -> None:
         with self._lock:
-            self._blank_counts[channel_uuid] = 0
+            self._blank_counts.pop(channel_uuid, None)
+            self._blank_counts.pop(self._detection_count_key(channel_uuid, "blank"), None)
+            self._blank_counts.pop(self._detection_count_key(channel_uuid, "freeze"), None)
 
-    def _increment_blank_count(self, channel_uuid: str) -> int:
+    def _increment_blank_count(self, channel_uuid: str, reason: str = "blank") -> int:
+        key = self._detection_count_key(channel_uuid, reason)
         with self._lock:
-            self._blank_counts[channel_uuid] += 1
-            return self._blank_counts[channel_uuid]
+            self._blank_counts[key] += 1
+            return self._blank_counts[key]
 
     def _channel_proxy_url(self, channel_uuid: str) -> str:
         base_url = (self.base_url_provider() or "").rstrip("/")
@@ -582,6 +602,17 @@ class ShadowBlankMonitorService:
         ]
         if headers:
             command.extend(["-headers", headers])
+        video_filters = [
+            (
+                f"blackdetect=d={float(config['blank_min_duration_seconds'])}:"
+                f"pix_th={float(config['blank_pixel_threshold'])}"
+            )
+        ]
+        if config.get("freeze_detection_enabled"):
+            video_filters.append(
+                f"freezedetect=n={float(config['freeze_noise_threshold'])}:"
+                f"d={float(config['freeze_min_duration_seconds'])}"
+            )
         command.extend(
             [
                 "-i",
@@ -589,10 +620,7 @@ class ShadowBlankMonitorService:
                 "-t",
                 str(duration),
                 "-vf",
-                (
-                    f"blackdetect=d={float(config['blank_min_duration_seconds'])}:"
-                    f"pix_th={float(config['blank_pixel_threshold'])}"
-                ),
+                ",".join(video_filters),
                 "-an",
                 "-f",
                 "null",
@@ -617,6 +645,12 @@ class ShadowBlankMonitorService:
                 duration,
                 blank_ratio_threshold=float(config["blank_ratio_threshold"]),
             )
+            if config.get("freeze_detection_enabled"):
+                parsed.update(_parse_freeze_detection(
+                    output,
+                    duration,
+                    freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
+                ))
             parsed["returncode"] = completed.returncode
             return parsed
         except subprocess.TimeoutExpired as exc:
@@ -626,6 +660,12 @@ class ShadowBlankMonitorService:
                 duration,
                 blank_ratio_threshold=float(config["blank_ratio_threshold"]),
             )
+            if config.get("freeze_detection_enabled"):
+                parsed.update(_parse_freeze_detection(
+                    output,
+                    duration,
+                    freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
+                ))
             parsed["timeout"] = True
             return parsed
 
@@ -678,6 +718,12 @@ class ShadowBlankMonitorService:
                 duration,
                 blank_ratio_threshold=float(config["blank_ratio_threshold"]),
             )
+            if config.get("freeze_detection_enabled"):
+                parsed.update(_parse_freeze_detection(
+                    output,
+                    duration,
+                    freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
+                ))
             parsed["returncode"] = process.returncode
             if viewer_left:
                 parsed["viewer_left"] = True
