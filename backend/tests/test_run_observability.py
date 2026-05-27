@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import threading
 import unittest
 
@@ -51,6 +52,23 @@ class AutomationRunStatusTests(unittest.TestCase):
         status["counts"]["channels_with_periods"] = 99
 
         self.assertNotIn("channels_with_periods", manager.get_run_status()["counts"])
+
+    def test_running_run_status_elapsed_fields_are_live(self):
+        manager = self._manager()
+        manager._start_run_status(forced=False, forced_period_id=None)
+        now = datetime.now()
+        with manager._run_status_lock:
+            manager._run_status["started_at"] = (now - timedelta(seconds=120)).isoformat()
+            manager._run_status["stage_started_at"] = (now - timedelta(seconds=45)).isoformat()
+            manager._run_status["updated_at"] = (now - timedelta(seconds=60)).isoformat()
+            manager._run_status["duration_seconds"] = 0
+            manager._run_status["stage_duration_seconds"] = 0
+
+        status = manager.get_run_status()
+
+        self.assertGreaterEqual(status["duration_seconds"], 119)
+        self.assertGreaterEqual(status["stage_duration_seconds"], 44)
+        self.assertNotEqual(status["updated_at"], manager._run_status["updated_at"])
 
     def test_quality_summary_flags_connectivity_abort_and_incomplete_run(self):
         summary = AutomatedStreamManager._summarize_quality_check_results(

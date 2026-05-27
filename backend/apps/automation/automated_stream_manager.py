@@ -1527,7 +1527,27 @@ class AutomatedStreamManager:
         """Return the current or most recent automation-cycle status."""
         self._ensure_run_status_fields()
         with self._run_status_lock:
-            return copy.deepcopy(self._run_status)
+            status = copy.deepcopy(self._run_status)
+
+        if status.get("state") == "running":
+            now = datetime.now()
+            started_at = status.get("started_at")
+            if started_at:
+                try:
+                    started = datetime.fromisoformat(started_at)
+                    status["duration_seconds"] = round((now - started).total_seconds(), 3)
+                except (TypeError, ValueError):
+                    pass
+            stage_started_at = status.get("stage_started_at")
+            if stage_started_at:
+                try:
+                    stage_started = datetime.fromisoformat(stage_started_at)
+                    status["stage_duration_seconds"] = round((now - stage_started).total_seconds(), 3)
+                except (TypeError, ValueError):
+                    pass
+            status["updated_at"] = now.isoformat()
+
+        return status
     
     def _is_dead_stream_removal_enabled(self) -> bool:
         """Check if dead stream removal is enabled in stream checker config.

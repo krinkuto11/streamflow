@@ -48,6 +48,13 @@ const formatTime = (value) => {
   return date.toLocaleTimeString()
 }
 
+const elapsedSecondsSince = (value) => {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return Math.max(0, (Date.now() - date.getTime()) / 1000)
+}
+
 const formatShadowEvent = (eventType) => {
   if (!eventType) return ''
   return eventType
@@ -347,6 +354,15 @@ export default function Dashboard() {
   const failedRun = runState === 'failed'
   const completedRun = runState === 'completed'
   const skippedRun = runState === 'skipped'
+  const liveRunDurationSeconds = runningRun
+    ? elapsedSecondsSince(runStatus.started_at) ?? runStatus.duration_seconds
+    : runStatus.duration_seconds
+  const liveStageDurationSeconds = runningRun
+    ? elapsedSecondsSince(runStatus.stage_started_at) ?? runStatus.stage_duration_seconds
+    : runStatus.stage_duration_seconds
+  const qualityCheckedCount = qualityStageActive
+    ? completed
+    : (runCounts.quality_checked ?? 0)
   const runBadgeClass = failedRun
     ? 'bg-destructive text-destructive-foreground border-transparent'
     : completedRun
@@ -426,14 +442,14 @@ export default function Dashboard() {
                 <Timer className="h-3.5 w-3.5" />
                 Duration
               </div>
-              <div className="mt-1 text-lg font-semibold">{formatDuration(runStatus.duration_seconds)}</div>
+              <div className="mt-1 text-lg font-semibold">{formatDuration(liveRunDurationSeconds)}</div>
             </div>
             <div className="rounded-md border bg-muted/30 p-3">
               <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
                 <Timer className="h-3.5 w-3.5" />
                 Stage Time
               </div>
-              <div className="mt-1 text-lg font-semibold">{formatDuration(runStatus.stage_duration_seconds)}</div>
+              <div className="mt-1 text-lg font-semibold">{formatDuration(liveStageDurationSeconds)}</div>
             </div>
             <div className="rounded-md border bg-muted/30 p-3">
               <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
@@ -504,7 +520,7 @@ export default function Dashboard() {
             </div>
             <div className="rounded-md border p-3">
               <div className="text-xs text-muted-foreground">Checked</div>
-              <div className="text-xl font-semibold">{runCounts.quality_checked ?? 0}</div>
+              <div className="text-xl font-semibold">{qualityCheckedCount}</div>
             </div>
             <div className="rounded-md border p-3">
               <div className="text-xs text-muted-foreground">Dead</div>
