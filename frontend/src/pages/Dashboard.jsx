@@ -332,6 +332,10 @@ export default function Dashboard() {
   const batchTotal    = completed + inProgress + queueSize
   const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
   const isProcessing  = streamCheckerStatus?.stream_checking_mode || false
+  const qualityStageActive = runStage === 'quality_checking' && batchTotal > 0
+  const qualityCheckedCount = qualityStageActive
+    ? completed
+    : (runCounts.quality_checked ?? 0)
   const shouldDisableActions = isProcessing || actionLoading !== ''
 
   const syncStatus = udiStats?.syncStatus
@@ -458,7 +462,7 @@ export default function Dashboard() {
             </div>
             <div className="rounded-md border p-3">
               <div className="text-xs text-muted-foreground">Checked</div>
-              <div className="text-xl font-semibold">{runCounts.quality_checked ?? 0}</div>
+              <div className="text-xl font-semibold">{qualityCheckedCount}</div>
             </div>
             <div className="rounded-md border p-3">
               <div className="text-xs text-muted-foreground">Dead</div>
