@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Routes, Route, useNavigate } from 'react-router-dom'
+import { Navigate, Routes, Route, useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils.js'
 import { Sidebar } from '@/components/layout/Sidebar.jsx'
 import { Toaster } from '@/components/ui/toaster.jsx'
@@ -100,6 +100,7 @@ function App() {
           <AppErrorBoundary>
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/stream-checker" element={<StreamChecker />} />
               <Route path="/stream-monitoring" element={<StreamMonitoring />} />
               <Route path="/channels" element={<ChannelConfiguration />} />
@@ -108,6 +109,7 @@ function App() {
               <Route path="/scheduling" element={<Scheduling />} />
               <Route path="/stats" element={<StatsDashboard />} />
               <Route path="/changelog" element={<Changelog />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </AppErrorBoundary>
         </div>
