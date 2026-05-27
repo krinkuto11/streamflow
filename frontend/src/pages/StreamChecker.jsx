@@ -24,7 +24,8 @@ import {
   Trash2,
   AlertCircle,
   RefreshCw,
-  List
+  List,
+  Save
 } from 'lucide-react'
 
 // Pagination constants
@@ -136,14 +137,16 @@ export default function StreamChecker() {
   }
 
   const persistQueueStart = async (nextMode, nextChannelId = queueStartChannelId) => {
-    const fallbackChannelId = nextChannelId || startChannels[0]?.id || null
+    const selectedChannelId = nextMode === 'channel'
+      ? (nextChannelId || startChannels[0]?.id || null)
+      : null
     const queueUpdate = {
       start_mode: nextMode,
-      start_channel_id: fallbackChannelId != null ? Number(fallbackChannelId) : null
+      start_channel_id: selectedChannelId != null ? Number(selectedChannelId) : null
     }
 
     setQueueStartMode(nextMode)
-    if (queueUpdate.start_channel_id != null) {
+    if (nextMode === 'channel' && queueUpdate.start_channel_id != null) {
       setQueueStartChannelId(String(queueUpdate.start_channel_id))
     }
     mergeQueueStartConfig(queueUpdate)
@@ -416,6 +419,20 @@ export default function StreamChecker() {
               </Select>
             </div>
           )}
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => persistQueueStart(queueStartMode, queueStartChannelId)}
+            disabled={isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start'}
+            className="gap-2"
+          >
+            {actionLoading === 'queue-start' ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4" />
+            )}
+            Save Start
+          </Button>
           <Button
             onClick={handleQueueAllChannels}
             disabled={queueAllDisabled}
