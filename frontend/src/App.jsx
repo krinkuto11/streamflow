@@ -5,6 +5,7 @@ import { Sidebar } from '@/components/layout/Sidebar.jsx'
 import { Toaster } from '@/components/ui/toaster.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { api } from '@/services/api.js'
+import { AppErrorBoundary } from '@/components/AppErrorBoundary.jsx'
 
 // Page imports
 import Dashboard from '@/pages/Dashboard'
@@ -96,17 +97,19 @@ function App() {
         isCollapsed ? "lg:ml-20" : "lg:ml-64"
       )}>
         <div className="max-w-7xl mx-auto pt-12 lg:pt-0">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/stream-checker" element={<StreamChecker />} />
-            <Route path="/stream-monitoring" element={<StreamMonitoring />} />
-            <Route path="/channels" element={<ChannelConfiguration />} />
-            <Route path="/settings" element={<AutomationSettings />} />
-            <Route path="/automation/profiles/:profileId" element={<AutomationProfileEditor />} />
-            <Route path="/scheduling" element={<Scheduling />} />
-            <Route path="/stats" element={<StatsDashboard />} />
-            <Route path="/changelog" element={<Changelog />} />
-          </Routes>
+          <AppErrorBoundary>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/stream-checker" element={<StreamChecker />} />
+              <Route path="/stream-monitoring" element={<StreamMonitoring />} />
+              <Route path="/channels" element={<ChannelConfiguration />} />
+              <Route path="/settings" element={<AutomationSettings />} />
+              <Route path="/automation/profiles/:profileId" element={<AutomationProfileEditor />} />
+              <Route path="/scheduling" element={<Scheduling />} />
+              <Route path="/stats" element={<StatsDashboard />} />
+              <Route path="/changelog" element={<Changelog />} />
+            </Routes>
+          </AppErrorBoundary>
         </div>
       </main>
 
