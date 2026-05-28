@@ -126,7 +126,7 @@ class TestDeadStreamTagging(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
     
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_mark_stream_as_dead(self):
         """Test marking a stream as dead in tracker."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
@@ -138,7 +138,7 @@ class TestDeadStreamTagging(unittest.TestCase):
         self.assertTrue(result)
         self.assertTrue(tracker.is_dead(stream_url))
     
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_mark_already_dead_stream(self):
         """Test that already marked streams can be marked again."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
@@ -151,7 +151,7 @@ class TestDeadStreamTagging(unittest.TestCase):
         self.assertTrue(result)
         self.assertTrue(tracker.is_dead(stream_url))
     
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_mark_stream_as_alive(self):
         """Test marking a revived stream as alive."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
@@ -164,7 +164,7 @@ class TestDeadStreamTagging(unittest.TestCase):
         self.assertTrue(result)
         self.assertFalse(tracker.is_dead(stream_url))
     
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_mark_healthy_stream_as_alive(self):
         """Test that marking a healthy stream as alive succeeds."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
@@ -231,8 +231,39 @@ class TestDeadStreamRevival(unittest.TestCase):
 
 class TestDeadStreamCleanup(unittest.TestCase):
     """Test cleanup of dead streams that are no longer in playlist."""
-    
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+
+    def test_cleanup_removed_streams_can_be_scoped_to_one_channel(self):
+        """Single-channel cleanup must not remove dead markers from other channels."""
+        from apps.stream.dead_streams_tracker import DeadStreamsTracker
+
+        tracker = DeadStreamsTracker()
+        tracker.db = Mock()
+        tracker.db.get_dead_streams_for_channel.return_value = {
+            'http://example.com/ch16/old.m3u8': {
+                'stream_id': 1,
+                'stream_name': 'Channel 16 Old',
+                'channel_id': 16,
+                'reason': 'offline',
+            },
+            'http://example.com/ch16/current.m3u8': {
+                'stream_id': 2,
+                'stream_name': 'Channel 16 Current',
+                'channel_id': 16,
+                'reason': 'offline',
+            },
+        }
+
+        removed_count = tracker.cleanup_removed_streams(
+            {'http://example.com/ch16/current.m3u8'},
+            channel_id=16,
+        )
+
+        self.assertEqual(removed_count, 1)
+        tracker.db.get_dead_streams_for_channel.assert_called_once_with(16, as_dict=True)
+        tracker.db.get_dead_streams.assert_not_called()
+        tracker.db.remove_dead_stream.assert_called_once_with('http://example.com/ch16/old.m3u8')
+
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_cleanup_removed_streams(self):
         """Test that dead streams no longer in playlist are cleaned up."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
@@ -257,7 +288,7 @@ class TestDeadStreamCleanup(unittest.TestCase):
         self.assertTrue(tracker.is_dead('http://example.com/stream2.m3u8'))
         self.assertTrue(tracker.is_dead('http://example.com/stream3.m3u8'))
     
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_cleanup_all_removed_streams(self):
         """Test cleanup when all dead streams are removed from playlist."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
@@ -275,7 +306,7 @@ class TestDeadStreamCleanup(unittest.TestCase):
         self.assertEqual(removed_count, 2)
         self.assertEqual(len(tracker.get_dead_streams()), 0)
     
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_cleanup_no_removals_needed(self):
         """Test cleanup when all dead streams are still in playlist."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
@@ -301,7 +332,7 @@ class TestDeadStreamCleanup(unittest.TestCase):
 class TestRemoveDeadStreamsForChannel(unittest.TestCase):
     """Test removal of dead streams for a specific channel."""
     
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_remove_dead_streams_for_channel(self):
         """Test that dead streams for a specific channel are removed."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
@@ -337,7 +368,7 @@ class TestRemoveDeadStreamsForChannel(unittest.TestCase):
         # Channel 99's dead stream should remain
         self.assertTrue(tracker.is_dead('http://example.com/ch99/stream1.m3u8'))
     
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_remove_dead_streams_for_channel_no_dead_streams(self):
         """Test removal when channel has no dead streams."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker
@@ -360,7 +391,7 @@ class TestRemoveDeadStreamsForChannel(unittest.TestCase):
         # Other channel's dead stream should remain
         self.assertTrue(tracker.is_dead('http://example.com/ch99/stream1.m3u8'))
     
-    @patch('dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
+    @patch('apps.stream.dead_streams_tracker.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_remove_dead_streams_for_empty_channel(self):
         """Test removal for a channel with no streams."""
         from apps.stream.dead_streams_tracker import DeadStreamsTracker

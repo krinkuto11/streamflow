@@ -4434,7 +4434,10 @@ class StreamCheckerService:
                 }
                 current_stream_urls_step3.discard('')
 
-                cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls_step3)
+                cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(
+                    current_stream_urls_step3,
+                    channel_id=channel_id,
+                )
                 if cleaned_count > 0:
                     logger.info(
                         f"✓ Removed {cleaned_count} stale dead stream URL(s) no longer in playlist — "

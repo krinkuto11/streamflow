@@ -137,8 +137,12 @@ class DeadStreamsTracker:
             logger.error(f"Error removing dead streams for channel: {scrub_urls(e)}")
             return 0
     
-    def cleanup_removed_streams(self, current_stream_urls: set) -> int:
+    def cleanup_removed_streams(self, current_stream_urls: set, channel_id: Optional[int] = None) -> int:
         """Remove tracker entries for streams no longer in the provider's playlist.
+
+        When ``channel_id`` is supplied, cleanup is scoped to that channel's
+        tracker entries. Global playlist refreshes intentionally omit it so
+        entries for streams missing from the full refreshed playlist are cleaned.
 
         Only 'offline' and 'unstable' entries are eligible for cleanup.
         'low_quality' streams are intentionally absent from the channel because
@@ -151,7 +155,11 @@ class DeadStreamsTracker:
         removed_count = 0
         skipped_low_quality = 0
         try:
-            dead_streams = self.get_dead_streams()
+            dead_streams = (
+                self.get_dead_streams_for_channel(channel_id)
+                if channel_id is not None
+                else self.get_dead_streams()
+            )
             for url, stream_info in dead_streams.items():
                 if url not in current_stream_urls:
                     reason = stream_info.get('reason', 'unknown')
@@ -164,13 +172,20 @@ class DeadStreamsTracker:
                         continue
                     self.db.remove_dead_stream(url)
                     removed_count += 1
-                    logger.info(
-                        f"Removed dead stream no longer in playlist: "
-                        f"{stream_ref(stream_info.get('stream_id'), url)}"
-                    )
+                    if channel_id is not None:
+                        logger.info(
+                            f"Removed dead stream no longer in channel playlist: "
+                            f"{stream_context(stream_id=stream_info.get('stream_id'), stream_url=url, channel_id=channel_id)}"
+                        )
+                    else:
+                        logger.info(
+                            f"Removed dead stream no longer in playlist: "
+                            f"{stream_ref(stream_info.get('stream_id'), url)}"
+                        )
             if skipped_low_quality:
+                scope = f" for {channel_ref(channel_id)}" if channel_id is not None else ""
                 logger.debug(
-                    f"Skipped cleanup of {skipped_low_quality} low_quality stream(s) "
+                    f"Skipped cleanup of {skipped_low_quality} low_quality stream(s){scope} "
                     f"— still present in M3U source, excluded from channel by quality threshold"
                 )
             return removed_count
