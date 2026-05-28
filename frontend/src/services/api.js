@@ -211,6 +211,15 @@ export const shadowBlankMonitorAPI = {
   runOnce: () => api.post('/shadow-blank-monitor/run-once'),
 };
 
+export const teamarrPreflightAPI = {
+  getConfig: () => api.get('/teamarr-preflight/config'),
+  updateConfig: (config) => api.put('/teamarr-preflight/config', config),
+  getStatus: () => api.get('/teamarr-preflight/status'),
+  start: () => api.post('/teamarr-preflight/start'),
+  stop: () => api.post('/teamarr-preflight/stop'),
+  runOnce: () => api.post('/teamarr-preflight/run-once'),
+};
+
 export const changelogAPI = {
   getChangelog: (days = 7, page = 1, limit = 10) => api.get(`/changelog`, { params: { days, page, limit } }),
 };

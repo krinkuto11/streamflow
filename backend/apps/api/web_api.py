@@ -29,6 +29,7 @@ from apps.automation.regex_validation import is_dangerous_regex
 from apps.core.api_utils import _get_base_url
 from apps.stream.stream_checker_service import get_stream_checker_service
 from apps.stream.shadow_blank_monitor_service import get_shadow_blank_monitor_service
+from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
 from apps.automation.scheduling_service import get_scheduling_service
 from apps.background.scheduling_workers import (
     epg_refresh_processor_loop,
@@ -148,6 +149,14 @@ from apps.api.shadow_blank_monitor_handlers import (
     start_shadow_blank_monitor_response,
     stop_shadow_blank_monitor_response,
     update_shadow_blank_monitor_config_response,
+)
+from apps.api.teamarr_preflight_handlers import (
+    get_teamarr_preflight_config_response,
+    get_teamarr_preflight_status_response,
+    run_teamarr_preflight_once_response,
+    start_teamarr_preflight_response,
+    stop_teamarr_preflight_response,
+    update_teamarr_preflight_config_response,
 )
 from apps.api.scheduling_handlers import (
     create_auto_create_rule_response,
@@ -1339,6 +1348,52 @@ def run_shadow_blank_monitor_once():
     """Run one active-viewer shadow blank monitor scan."""
     return run_shadow_blank_monitor_once_response(
         get_service=get_shadow_blank_monitor_service,
+    )
+
+
+# ===== Teamarr Event Preflight Endpoints =====
+
+@app.route('/api/teamarr-preflight/config', methods=['GET'])
+def get_teamarr_preflight_config():
+    """Get Teamarr managed-event preflight configuration."""
+    return get_teamarr_preflight_config_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/config', methods=['PUT'])
+def update_teamarr_preflight_config():
+    """Update Teamarr managed-event preflight configuration."""
+    return update_teamarr_preflight_config_response(
+        payload=request.get_json(silent=True),
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/status', methods=['GET'])
+def get_teamarr_preflight_status():
+    """Get Teamarr managed-event preflight status."""
+    return get_teamarr_preflight_status_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/start', methods=['POST'])
+def start_teamarr_preflight():
+    """Start the Teamarr managed-event preflight service."""
+    return start_teamarr_preflight_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/stop', methods=['POST'])
+def stop_teamarr_preflight():
+    """Stop the Teamarr managed-event preflight service."""
+    return stop_teamarr_preflight_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/run-once', methods=['POST'])
+def run_teamarr_preflight_once():
+    """Run one Teamarr managed-event preflight scan."""
+    return run_teamarr_preflight_once_response(
+        get_service=get_teamarr_preflight_service,
     )
 
 
@@ -2613,6 +2668,15 @@ if __name__ == '__main__':
                         shadow_monitor.stop(persist=False)
                 except Exception as e:
                     logger.error(f"Error stopping shadow blank monitor service: {e}")
+
+                try:
+                    from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+                    teamarr_preflight = get_teamarr_preflight_service()
+                    if teamarr_preflight:
+                        logger.info("Stopping Teamarr Preflight Service...")
+                        teamarr_preflight.stop(persist=False)
+                except Exception as e:
+                    logger.error(f"Error stopping Teamarr preflight service: {e}")
                     
                 try:
                     stop_scheduled_event_processor()
@@ -2696,6 +2760,19 @@ if __name__ == '__main__':
                     logger.info("Shadow blank monitor is disabled in configuration")
         except Exception as e:
             logger.error(f"Failed to auto-start shadow blank monitor: {e}")
+
+        try:
+            if not check_wizard_complete():
+                logger.info("Teamarr preflight will not start - setup wizard has not been completed")
+            else:
+                teamarr_preflight = get_teamarr_preflight_service()
+                if teamarr_preflight.get_config().get("enabled"):
+                    teamarr_preflight.start(persist=False)
+                    logger.info("Teamarr preflight auto-started")
+                else:
+                    logger.info("Teamarr preflight is disabled in configuration")
+        except Exception as e:
+            logger.error(f"Failed to auto-start Teamarr preflight: {e}")
             
         try:
             if check_wizard_complete():

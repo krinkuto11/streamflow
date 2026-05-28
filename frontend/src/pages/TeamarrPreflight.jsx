@@ -1,0 +1,487 @@
+import { useEffect, useMemo, useState } from 'react'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
+import { Button } from '@/components/ui/button.jsx'
+import { Badge } from '@/components/ui/badge.jsx'
+import { Input } from '@/components/ui/input.jsx'
+import { Label } from '@/components/ui/label.jsx'
+import { Switch } from '@/components/ui/switch.jsx'
+import { Separator } from '@/components/ui/separator.jsx'
+import { useToast } from '@/hooks/use-toast.js'
+import { teamarrPreflightAPI } from '@/services/api.js'
+import {
+  Activity,
+  CalendarCheck,
+  CheckCircle2,
+  Clock,
+  Loader2,
+  PlayCircle,
+  RefreshCw,
+  Save,
+  StopCircle,
+} from 'lucide-react'
+
+const numberFields = [
+  { key: 'poll_interval_seconds', label: 'Poll Interval', suffix: 'sec', min: 15, max: 3600 },
+  { key: 'preflight_offset_minutes', label: 'Preflight Offset', suffix: 'min', min: 1, max: 360 },
+  { key: 'post_start_grace_minutes', label: 'Post Start Grace', suffix: 'min', min: 0, max: 120 },
+  { key: 'max_concurrent_checks', label: 'Concurrent Checks', suffix: 'max', min: 1, max: 10 },
+  { key: 'event_cooldown_minutes', label: 'Event Cooldown', suffix: 'min', min: 1, max: 10080 },
+]
+
+const eventLabels = {
+  preflight_started: 'Started',
+  preflight_completed: 'Completed',
+  preflight_failed: 'Failed',
+  no_streams_yet: 'No Streams',
+  deferred_quality_check_active: 'Deferred',
+  concurrency_limit: 'Limit',
+  scan_failed: 'Scan Failed',
+}
+
+const stateLabels = {
+  due: 'Due',
+  scheduled: 'Scheduled',
+  already_attempted: 'Attempted',
+  no_dispatcharr_channel: 'No Channel',
+  waiting_for_channel_sync: 'Syncing',
+  filtered: 'Filtered',
+  past: 'Past',
+}
+
+const parseCsv = (value) => (
+  String(value || '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean)
+)
+
+const formatTimestamp = (timestamp) => {
+  if (!timestamp) return 'Never'
+  return new Date(timestamp * 1000).toLocaleTimeString()
+}
+
+const formatDateTime = (value) => {
+  if (!value) return 'N/A'
+  return new Date(value).toLocaleString()
+}
+
+const formatOffset = (seconds) => {
+  if (seconds === null || seconds === undefined) return 'N/A'
+  const sign = seconds < 0 ? '-' : ''
+  const abs = Math.abs(Number(seconds))
+  const hours = Math.floor(abs / 3600)
+  const minutes = Math.floor((abs % 3600) / 60)
+  const secs = Math.floor(abs % 60)
+  if (hours) return `${sign}${hours}h ${minutes}m`
+  if (minutes) return `${sign}${minutes}m ${secs}s`
+  return `${sign}${secs}s`
+}
+
+const eventLabel = (type) => eventLabels[type] || type || 'Unknown'
+const stateLabel = (state) => stateLabels[state] || state || 'Unknown'
+
+export default function TeamarrPreflight() {
+  const [config, setConfig] = useState(null)
+  const [editedConfig, setEditedConfig] = useState(null)
+  const [status, setStatus] = useState(null)
+  const [retryOffsets, setRetryOffsets] = useState('')
+  const [includeSports, setIncludeSports] = useState('')
+  const [excludeSports, setExcludeSports] = useState('')
+  const [includeLeagues, setIncludeLeagues] = useState('')
+  const [excludeLeagues, setExcludeLeagues] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [actionLoading, setActionLoading] = useState('')
+  const { toast } = useToast()
+
+  useEffect(() => {
+    loadData()
+    const interval = setInterval(loadStatus, 5000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const upcomingEvents = status?.upcoming_events || []
+  const recentEvents = status?.recent_events || []
+  const activeChecks = status?.active_checks || []
+  const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
+
+  const hydrateInputs = (nextConfig) => {
+    setRetryOffsets((nextConfig.retry_offsets_minutes || []).join(', '))
+    setIncludeSports((nextConfig.include_sports || []).join(', '))
+    setExcludeSports((nextConfig.exclude_sports || []).join(', '))
+    setIncludeLeagues((nextConfig.include_leagues || []).join(', '))
+    setExcludeLeagues((nextConfig.exclude_leagues || []).join(', '))
+  }
+
+  const loadData = async () => {
+    try {
+      const [configResponse, statusResponse] = await Promise.all([
+        teamarrPreflightAPI.getConfig(),
+        teamarrPreflightAPI.getStatus(),
+      ])
+      const nextConfig = configResponse.data || {}
+      setConfig(nextConfig)
+      setEditedConfig(nextConfig)
+      hydrateInputs(nextConfig)
+      setStatus(statusResponse.data || {})
+    } catch (err) {
+      console.error('Failed to load Teamarr preflight data:', err)
+      toast({
+        title: 'Error',
+        description: 'Failed to load Teamarr preflight status',
+        variant: 'destructive',
+      })
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadStatus = async () => {
+    try {
+      const response = await teamarrPreflightAPI.getStatus()
+      setStatus(response.data || {})
+    } catch (err) {
+      console.error('Failed to load Teamarr preflight status:', err)
+    }
+  }
+
+  const updateConfigValue = (field, value) => {
+    setEditedConfig(prev => ({
+      ...(prev || {}),
+      [field]: value,
+    }))
+  }
+
+  const saveConfig = async (extra = {}) => {
+    try {
+      setActionLoading('save')
+      const payload = {
+        ...(editedConfig || {}),
+        retry_offsets_minutes: parseCsv(retryOffsets).map(item => Number(item)).filter(Number.isFinite),
+        include_sports: parseCsv(includeSports),
+        exclude_sports: parseCsv(excludeSports),
+        include_leagues: parseCsv(includeLeagues),
+        exclude_leagues: parseCsv(excludeLeagues),
+        ...extra,
+      }
+      const response = await teamarrPreflightAPI.updateConfig(payload)
+      const nextConfig = response.data || {}
+      setConfig(nextConfig)
+      setEditedConfig(nextConfig)
+      hydrateInputs(nextConfig)
+      await loadStatus()
+      toast({ title: 'Saved', description: 'Teamarr preflight configuration updated' })
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Failed to save Teamarr preflight configuration',
+        variant: 'destructive',
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
+  const runAction = async (name, action, success) => {
+    try {
+      setActionLoading(name)
+      await action()
+      await loadData()
+      toast({ title: 'Success', description: success })
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Teamarr preflight action failed',
+        variant: 'destructive',
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
+  if (loading || !editedConfig) {
+    return (
+      <div className="flex h-64 items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  const running = Boolean(status?.running)
+  const enabled = Boolean(editedConfig?.enabled)
+  const hasKey = Boolean(config?.has_api_key)
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Teamarr Preflight</h1>
+          <p className="text-muted-foreground">Managed event quality checks</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            onClick={() => saveConfig()}
+            disabled={actionLoading !== ''}
+          >
+            {actionLoading === 'save' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+            Save
+          </Button>
+          {running ? (
+            <Button
+              variant="outline"
+              onClick={() => runAction('stop', teamarrPreflightAPI.stop, 'Teamarr preflight stopped')}
+              disabled={actionLoading !== ''}
+            >
+              {actionLoading === 'stop' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
+              Stop
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              onClick={() => runAction('start', teamarrPreflightAPI.start, 'Teamarr preflight started')}
+              disabled={actionLoading !== ''}
+            >
+              {actionLoading === 'start' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlayCircle className="mr-2 h-4 w-4" />}
+              Start
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            onClick={() => runAction('scan', teamarrPreflightAPI.runOnce, 'Teamarr preflight scan completed')}
+            disabled={actionLoading !== ''}
+          >
+            {actionLoading === 'scan' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+            Scan Now
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Service</CardTitle>
+            <Activity className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <Badge variant={running ? 'default' : 'secondary'} className={running ? 'bg-green-500' : ''}>
+              {running ? <CheckCircle2 className="mr-1 h-3 w-3" /> : null}
+              {running ? 'Running' : 'Stopped'}
+            </Badge>
+            <p className="mt-2 text-xs text-muted-foreground">{enabled ? 'Enabled' : 'Disabled'}</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Upcoming</CardTitle>
+            <CalendarCheck className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{upcomingEvents.length}</div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {nextEvent ? formatOffset(nextEvent.seconds_to_start) : 'No events'}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Active Checks</CardTitle>
+            <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{activeChecks.length}</div>
+            <p className="mt-2 text-xs text-muted-foreground">Limit {editedConfig.max_concurrent_checks}</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Last Scan</CardTitle>
+            <Clock className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{formatTimestamp(status?.last_scan_at)}</div>
+            <p className="mt-2 text-xs text-muted-foreground">{status?.last_error || 'No errors'}</p>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
+        <Card>
+          <CardHeader>
+            <CardTitle>Configuration</CardTitle>
+            <CardDescription>Connector, timing, profile, and filters</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="flex items-center justify-between rounded-md border border-border p-4">
+                <div>
+                  <Label className="text-base">Enabled</Label>
+                  <p className="text-sm text-muted-foreground">Auto-starts with the backend</p>
+                </div>
+                <Switch checked={enabled} onCheckedChange={(value) => updateConfigValue('enabled', value)} />
+              </div>
+              <div className="flex items-center justify-between rounded-md border border-border p-4">
+                <div>
+                  <Label className="text-base">Quality Check Guard</Label>
+                  <p className="text-sm text-muted-foreground">Defers while Stream Checker is busy</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.skip_during_quality_check)}
+                  onCheckedChange={(value) => updateConfigValue('skip_during_quality_check', value)}
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2 md:col-span-2">
+                <Label>Teamarr Base URL</Label>
+                <Input
+                  value={editedConfig.teamarr_base_url || ''}
+                  onChange={(event) => updateConfigValue('teamarr_base_url', event.target.value)}
+                  placeholder="http://teamarr:9195"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>API Key Header</Label>
+                <Input
+                  value={editedConfig.api_key_header || ''}
+                  onChange={(event) => updateConfigValue('api_key_header', event.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Profile ID</Label>
+                <Input
+                  value={editedConfig.forced_profile_id || ''}
+                  onChange={(event) => updateConfigValue('forced_profile_id', event.target.value)}
+                />
+              </div>
+              <div className="space-y-2 md:col-span-2">
+                <Label>API Key {hasKey ? '(saved)' : ''}</Label>
+                <div className="flex gap-2">
+                  <Input
+                    type="password"
+                    value={editedConfig.api_key || ''}
+                    onChange={(event) => updateConfigValue('api_key', event.target.value)}
+                  />
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => saveConfig({ clear_api_key: true })}
+                    disabled={!hasKey || actionLoading !== ''}
+                  >
+                    Clear Key
+                  </Button>
+                </div>
+              </div>
+            </div>
+
+            <Separator />
+
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              {numberFields.map(field => (
+                <div key={field.key} className="space-y-2">
+                  <Label>{field.label}</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      min={field.min}
+                      max={field.max}
+                      value={editedConfig[field.key] ?? ''}
+                      onChange={(event) => updateConfigValue(field.key, Number(event.target.value))}
+                    />
+                    <span className="w-14 text-sm text-muted-foreground">{field.suffix}</span>
+                  </div>
+                </div>
+              ))}
+              <div className="space-y-2">
+                <Label>Retry Offsets</Label>
+                <Input value={retryOffsets} onChange={(event) => setRetryOffsets(event.target.value)} />
+              </div>
+            </div>
+
+            <Separator />
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label>Include Sports</Label>
+                <Input value={includeSports} onChange={(event) => setIncludeSports(event.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>Exclude Sports</Label>
+                <Input value={excludeSports} onChange={(event) => setExcludeSports(event.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>Include Leagues</Label>
+                <Input value={includeLeagues} onChange={(event) => setIncludeLeagues(event.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>Exclude Leagues</Label>
+                <Input value={excludeLeagues} onChange={(event) => setExcludeLeagues(event.target.value)} />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Managed Events</CardTitle>
+              <CardDescription>Upcoming Teamarr event channels</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {upcomingEvents.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No events found</p>
+              ) : (
+                <div className="space-y-3">
+                  {upcomingEvents.slice(0, 12).map(event => (
+                    <div key={`${event.identity}-${event.trigger_bucket || 'none'}`} className="rounded-md border border-border p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{event.event_name}</p>
+                          <p className="text-sm text-muted-foreground">{formatDateTime(event.event_date)}</p>
+                        </div>
+                        <Badge variant={event.state === 'due' ? 'default' : 'secondary'}>
+                          {stateLabel(event.state)}
+                        </Badge>
+                      </div>
+                      <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
+                        <span>{event.channel_name || `Channel ${event.dispatcharr_channel_id || 'N/A'}`}</span>
+                        <span>{event.sport || 'Sport N/A'}</span>
+                        <span>{event.league || 'League N/A'}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Recent Events</CardTitle>
+              <CardDescription>Latest connector decisions</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {recentEvents.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No events recorded</p>
+              ) : (
+                <div className="space-y-3">
+                  {recentEvents.slice(0, 10).map((event, index) => (
+                    <div key={`${event.timestamp}-${index}`} className="flex items-start justify-between gap-4 border-b border-border pb-3 last:border-b-0 last:pb-0">
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{eventLabel(event.type)}</p>
+                        <p className="truncate text-sm text-muted-foreground">{event.event_name || event.channel_name || 'Managed Event'}</p>
+                      </div>
+                      <span className="shrink-0 text-sm text-muted-foreground">{formatTimestamp(event.timestamp)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  )
+}
