@@ -1765,29 +1765,34 @@ class StreamCheckerService:
                 completed_count[0] = completed
                 stream_name = result.get('stream_name', 'Unknown')
                 stream_id = result.get('stream_id')
-                
-                # Calculate temp score for UI display
-                temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights)
-                
-                # Update stream status based on result
-                is_dead, _dead_reason = self._is_stream_dead(result, channel_id, threshold_config=_threshold_config)
-                
+
                 if stream_id in stream_statuses:
-                    if result.get('status') == 'ERROR':
+                    if result.get('provider_limit_skipped'):
+                        stream_statuses[stream_id]['status'] = 'provider_limit_wait_timeout'
+                        stream_statuses[stream_id]['reason_detail'] = result.get('reason_detail')
+                        stream_statuses[stream_id]['score'] = None
+                    elif result.get('status') == 'ERROR':
                         stream_statuses[stream_id]['status'] = 'error'
                         stream_statuses[stream_id]['score'] = 0.0
-                    elif is_dead:
-                        stream_statuses[stream_id]['status'] = _dead_reason if _dead_reason in ('low_quality', 'blank', 'freeze') else 'dead'
-                        stream_statuses[stream_id]['score'] = 0.0
                     else:
-                        stream_statuses[stream_id]['status'] = 'completed'
-                        # Optional: record score or resolution
-                        stream_statuses[stream_id]['score'] = temp_score
-                        stream_statuses[stream_id]['resolution'] = result.get('resolution', '0x0')
-                        stream_statuses[stream_id]['video_codec'] = result.get('video_codec', 'N/A')
-                        stream_statuses[stream_id]['fps'] = result.get('fps', 0)
-                        stream_statuses[stream_id]['bitrate'] = result.get('bitrate_kbps')
-                        stream_statuses[stream_id]['hdr_format'] = result.get('hdr_format')
+                        # Calculate temp score for UI display
+                        temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights)
+
+                        # Update stream status based on result
+                        is_dead, _dead_reason = self._is_stream_dead(result, channel_id, threshold_config=_threshold_config)
+
+                        if is_dead:
+                            stream_statuses[stream_id]['status'] = _dead_reason if _dead_reason in ('low_quality', 'blank', 'freeze') else 'dead'
+                            stream_statuses[stream_id]['score'] = 0.0
+                        else:
+                            stream_statuses[stream_id]['status'] = 'completed'
+                            # Optional: record score or resolution
+                            stream_statuses[stream_id]['score'] = temp_score
+                            stream_statuses[stream_id]['resolution'] = result.get('resolution', '0x0')
+                            stream_statuses[stream_id]['video_codec'] = result.get('video_codec', 'N/A')
+                            stream_statuses[stream_id]['fps'] = result.get('fps', 0)
+                            stream_statuses[stream_id]['bitrate'] = result.get('bitrate_kbps')
+                            stream_statuses[stream_id]['hdr_format'] = result.get('hdr_format')
                 
                 # Update progress
                 self.progress.update(
@@ -1802,6 +1807,27 @@ class StreamCheckerService:
                     streams_detail=list(stream_statuses.values()),
                     stream_duration=analysis_params.get('ffmpeg_duration', 30)
                 )
+
+            def defer_callback(stream, reason):
+                if self.abort_current_check.is_set():
+                    return
+
+                stream_id = stream.get('id')
+                if stream_id in stream_statuses:
+                    stream_statuses[stream_id]['status'] = 'waiting_provider_limit'
+                    stream_statuses[stream_id]['reason_detail'] = reason
+                    self.progress.update(
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                        current=completed_count[0],
+                        total=total_streams,
+                        current_stream=stream.get('name', 'Unknown'),
+                        status='analyzing',
+                        step='Analyzing streams with account limits',
+                        step_detail=f'Waiting for provider capacity: {stream.get("name", "Unknown")}',
+                        streams_detail=list(stream_statuses.values()),
+                        stream_duration=analysis_params.get('ffmpeg_duration', 30)
+                    )
             
             if streams_to_check:
                 logger.info(f"Starting smart parallel analysis of {total_streams} streams with {global_limit} global workers")
@@ -1849,8 +1875,10 @@ class StreamCheckerService:
                         check_function=analyze_stream,
                         progress_callback=progress_callback,
                         start_callback=start_callback,
+                        defer_callback=defer_callback,
                         stagger_delay=stagger_delay,
                         abort_event=self.abort_current_check,
+                        provider_wait_timeout=self.config.get('concurrent_streams.provider_wait_timeout', 300),
                         ffmpeg_duration=analysis_params.get('ffmpeg_duration', 30),
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),
@@ -1879,6 +1907,18 @@ class StreamCheckerService:
                 batch_stats_list = []
                 
                 for analyzed in results:
+                    if analyzed.get('provider_limit_skipped'):
+                        logger.warning(
+                            "Stream check deferred until provider capacity timed out; preserving existing stream state: "
+                            f"{stream_context(stream_id=analyzed.get('stream_id'), stream_url=analyzed.get('stream_url'), channel_id=channel_id)}"
+                        )
+                        score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
+                        analyzed['score'] = score
+                        analyzed['channel_id'] = channel_id
+                        analyzed['channel_name'] = channel_name
+                        analyzed_streams.append(analyzed)
+                        continue
+
                     # Prepare stats for batch update
                     if batch_enabled:
                         stats_item = self._prepare_stream_stats_for_batch(analyzed)

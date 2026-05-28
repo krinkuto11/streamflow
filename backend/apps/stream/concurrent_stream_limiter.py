@@ -176,6 +176,8 @@ class AccountStreamLimiter:
         wait_time = 0.1  # Start with 100ms
         max_wait = 2.0  # Max 2 seconds between checks
         
+        last_wait_reason = 'timeout'
+
         while True:
             # Get active streams from UDI if available
             active_count = 0
@@ -190,7 +192,7 @@ class AccountStreamLimiter:
             with self.lock:
                 checking_count = self.account_checking_counts.get(account_id, 0)
                 total_in_use = active_count + checking_count
-                
+
                 if total_in_use < limit:
                     # We have a slot available, increment checking count
                     self.account_checking_counts[account_id] = checking_count + 1
@@ -200,6 +202,11 @@ class AccountStreamLimiter:
                         f"{total_in_use + 1}/{limit})"
                     )
                     return (True, 'acquired')
+
+                if active_count >= limit:
+                    last_wait_reason = 'active_viewers'
+                else:
+                    last_wait_reason = 'timeout'
             
             # No slot available, check timeout
             if timeout is not None:
@@ -209,7 +216,7 @@ class AccountStreamLimiter:
                         f"Timeout acquiring slot for account {account_id} after {elapsed:.1f}s "
                         f"({active_count} active + {checking_count} checking = {total_in_use}/{limit})"
                     )
-                    return (False, 'timeout')
+                    return (False, last_wait_reason)
             
             # Wait before retrying (exponential backoff)
             time.sleep(wait_time)
@@ -281,8 +288,10 @@ class SmartStreamScheduler:
         check_function: Callable,
         progress_callback: Optional[Callable] = None,
         start_callback: Optional[Callable] = None,
+        defer_callback: Optional[Callable] = None,
         stagger_delay: float = 0.0,
         abort_event: Optional[threading.Event] = None,
+        provider_wait_timeout: Optional[float] = 300.0,
         **check_params
     ) -> List[Dict[str, Any]]:
         """
@@ -297,7 +306,11 @@ class SmartStreamScheduler:
             check_function: Function to call for each stream
             progress_callback: Optional callback after each stream completes
             start_callback: Optional callback right before a stream starts checking
+            defer_callback: Optional callback when a stream is waiting for provider capacity
             stagger_delay: Delay between starting tasks (default: 0.0)
+            provider_wait_timeout: Maximum time a stream may wait for provider capacity.
+                None waits indefinitely, matching the fail-safe "do not mark bad while
+                waiting for capacity" behavior.
             **check_params: Additional parameters for check_function
             
         Returns:
@@ -321,84 +334,139 @@ class SmartStreamScheduler:
             limit = self.account_limiter.get_account_limit(account_id) if account_id else 0
             limit_str = "unlimited" if limit == 0 else str(limit)
             logger.info(f"  Account {account_id}: {len(account_streams)} streams, limit={limit_str}")
+
+        # Account-wise round-robin keeps the scheduler from filling every
+        # coordination worker with the same saturated provider before reaching
+        # streams from providers that still have free capacity.
+        scheduled_streams = []
+        round_robin_groups = {account_id: list(account_streams) for account_id, account_streams in account_groups.items()}
+        while round_robin_groups:
+            for account_id in list(round_robin_groups.keys()):
+                account_streams = round_robin_groups[account_id]
+                if account_streams:
+                    scheduled_streams.append(account_streams.pop(0))
+                if not account_streams:
+                    del round_robin_groups[account_id]
         
         results = []
         completed_count = 0
         lock = threading.Lock()
         
-        # Use ThreadPoolExecutor with global limit
-        with ThreadPoolExecutor(max_workers=self.global_limit) as executor:
+        # Submit all stream coordination tasks so a saturated account cannot block
+        # the scheduling thread from reaching later streams on providers with free
+        # capacity. The semaphore below enforces the real global FFmpeg probe limit.
+        worker_count = min(
+            total_streams,
+            max(self.global_limit * 2, self.global_limit + len(account_groups), 16),
+            64,
+        )
+        global_probe_slots = threading.Semaphore(max(1, self.global_limit))
+        logger.info(
+            "Using %s coordination workers for %s streams with %s global probe slots",
+            worker_count,
+            total_streams,
+            self.global_limit,
+        )
+
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures: Dict[Future, Dict[str, Any]] = {}
             
             def submit_stream_check(stream: Dict[str, Any]):
-                """Submit a stream check with profile-aware limit enforcement."""
+                """Submit a stream check with provider-aware limit enforcement."""
                 account_id = stream.get('m3u_account')
-                
-                # Check if stream can run using profile-aware checking
-                # This replaces the old account-level acquire/release with per-profile awareness
-                if account_id and self.account_limiter.udi_manager:
-                    can_run, reason = self.account_limiter.udi_manager.check_stream_can_run(stream)
-                    
-                    if not can_run:
-                        logger.info(f"Skipping check for stream {stream['id']}: {reason}, using cached stats")
-                        
-                        # Get cached stream stats from UDI
+
+                def provider_wait_result(reason_detail: str) -> Dict[str, Any]:
+                    cached_stats = {}
+                    if self.account_limiter.udi_manager:
                         try:
                             cached_stream = self.account_limiter.udi_manager.get_stream_by_id(stream['id'])
-                            if cached_stream and cached_stream.get('stream_stats'):
-                                # Return a result with cached stats
-                                return {
-                                    'stream_id': stream['id'],
-                                    'stream_name': stream.get('name', 'Unknown'),
-                                    'stream_url': stream.get('url', ''),
-                                    'cached': True,
-                                    'skipped_reason': 'no_available_profile',
-                                    'reason_detail': reason,
-                                    **cached_stream.get('stream_stats', {})
-                                }
-                            else:
-                                logger.warning(f"No cached stats available for stream {stream['id']}, skipping")
+                            if cached_stream and isinstance(cached_stream.get('stream_stats'), dict):
+                                cached_stats = cached_stream.get('stream_stats') or {}
                         except Exception as e:
                             logger.error(f"Error retrieving cached stats for stream {stream['id']}: {e}")
-                        return None
-                
-                # Acquire account slot before submitting to executor
-                # This ensures we don't exceed per-account limits at a global level
-                acquired, reason = self.account_limiter.acquire(account_id, timeout=300)
-                
-                if not acquired:
-                    if reason == 'active_viewers':
-                        # Quota fully consumed by active viewers - use cached stats
-                        logger.info(f"Skipping check for stream {stream['id']} - quota consumed by active viewers, using cached stats")
-                        
-                        # Get cached stream stats from UDI
-                        if self.account_limiter.udi_manager:
-                            try:
-                                cached_stream = self.account_limiter.udi_manager.get_stream_by_id(stream['id'])
-                                if cached_stream and cached_stream.get('stream_stats'):
-                                    # Return a result with cached stats
-                                    return {
-                                        'stream_id': stream['id'],
-                                        'stream_name': stream.get('name', 'Unknown'),
-                                        'stream_url': stream.get('url', ''),
-                                        'cached': True,
-                                        'skipped_reason': 'quota_consumed_by_active_viewers',
-                                        **cached_stream.get('stream_stats', {})
-                                    }
-                                else:
-                                    logger.warning(f"No cached stats available for stream {stream['id']}, skipping")
-                            except Exception as e:
-                                logger.error(f"Error retrieving cached stats for stream {stream['id']}: {e}")
-                        return None
-                    else:
-                        # Timeout - skip stream
-                        logger.error(f"Timeout acquiring slot for account {account_id}, skipping stream {stream['id']}")
-                        return None
-                
-                def wrapped_check():
-                    """Wrapper that ensures semaphore is released and progress fires immediately."""
-                    result = None
+
+                    skipped_reason = (
+                        'quota_consumed_by_active_viewers'
+                        if reason_detail == 'active_viewers'
+                        else 'provider_capacity_unavailable'
+                    )
+                    return {
+                        'stream_id': stream['id'],
+                        'stream_name': stream.get('name', 'Unknown'),
+                        'stream_url': stream.get('url', ''),
+                        'status': 'SKIPPED_PROVIDER_LIMIT',
+                        'cached': bool(cached_stats),
+                        'provider_limit_skipped': True,
+                        'skipped_reason': skipped_reason,
+                        'reason_detail': reason_detail,
+                        **cached_stats,
+                    }
+
+                def check_stream_can_run() -> tuple[bool, Optional[str]]:
+                    if not account_id or not self.account_limiter.udi_manager:
+                        return (True, None)
+
+                    checker = getattr(self.account_limiter.udi_manager, 'check_stream_can_run', None)
+                    if not callable(checker):
+                        return (True, None)
+
                     try:
+                        result = checker(stream)
+                    except Exception as e:
+                        logger.warning(f"Could not check provider profile capacity for stream {stream['id']}: {e}")
+                        return (True, None)
+
+                    if isinstance(result, tuple) and len(result) >= 2:
+                        return (bool(result[0]), result[1])
+
+                    return (True, None)
+
+                def wrapped_check():
+                    """Wrapper that waits for provider capacity without consuming probe slots."""
+                    result = None
+                    acquired_account = False
+                    acquired_global = False
+                    wait_started = time.time()
+                    wait_reason = None
+
+                    try:
+                        while True:
+                            if abort_event and abort_event.is_set():
+                                logger.info("Abort requested while waiting for provider capacity")
+                                return None
+
+                            can_run, reason = check_stream_can_run()
+
+                            if can_run:
+                                acquired_account, reason = self.account_limiter.acquire(account_id, timeout=0)
+                                if acquired_account:
+                                    acquired_global = global_probe_slots.acquire(blocking=False)
+                                    if acquired_global:
+                                        break
+                                    self.account_limiter.release(account_id)
+                                    acquired_account = False
+                                    reason = 'global_worker_limit'
+
+                            wait_reason = reason or 'provider_capacity'
+                            if defer_callback:
+                                try:
+                                    with lock:
+                                        defer_callback(stream, wait_reason)
+                                except Exception as e:
+                                    logger.error(f"Error in defer_callback for stream {stream['id']}: {e}")
+
+                            if provider_wait_timeout is not None:
+                                elapsed = time.time() - wait_started
+                                if elapsed >= provider_wait_timeout:
+                                    logger.warning(
+                                        f"Provider capacity wait timed out for stream {stream['id']} "
+                                        f"after {elapsed:.1f}s: {wait_reason}"
+                                    )
+                                    result = provider_wait_result(wait_reason)
+                                    return result
+
+                            time.sleep(0.5)
+
                         # Apply URL transformation if using M3U profile with search/replace patterns
                         stream_url = stream.get('url', '')
                         if self.account_limiter.udi_manager:
@@ -422,7 +490,10 @@ class SmartStreamScheduler:
                         return result
                     finally:
                         # Release account slot immediately when stream finishes
-                        self.account_limiter.release(account_id)
+                        if acquired_global:
+                            global_probe_slots.release()
+                        if acquired_account:
+                            self.account_limiter.release(account_id)
 
                         # Fire progress callback from the worker thread the instant the
                         # stream completes — before the submission loop has finished
@@ -431,7 +502,7 @@ class SmartStreamScheduler:
                         with lock:
                             if result is not None:
                                 results.append(result)
-                            else:
+                            elif not (abort_event and abort_event.is_set()):
                                 results.append({
                                     'stream_id': stream['id'],
                                     'stream_name': stream.get('name', 'Unknown'),
@@ -443,9 +514,12 @@ class SmartStreamScheduler:
                                     'video_codec': 'N/A',
                                     'audio_codec': 'N/A'
                                 })
-                            nonlocal completed_count
-                            completed_count += 1
-                            current_completed = completed_count
+                            if result is not None or not (abort_event and abort_event.is_set()):
+                                nonlocal completed_count
+                                completed_count += 1
+                                current_completed = completed_count
+                            else:
+                                current_completed = completed_count
 
                         logger.debug(
                             f"Completed {current_completed}/{total_streams}: "
@@ -464,7 +538,7 @@ class SmartStreamScheduler:
 
             # Submit all streams with stagger delay — runs concurrently with
             # wrapped_check completions since progress now fires from worker threads
-            for stream in streams:
+            for stream in scheduled_streams:
                 if abort_event and abort_event.is_set():
                     logger.info("Abort requested, stopping stream submission")
                     break

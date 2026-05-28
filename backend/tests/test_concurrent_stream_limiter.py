@@ -359,6 +359,126 @@ class TestSmartStreamScheduler(unittest.TestCase):
         # (1 active + 1 checking = 2/2 limit)
         self.assertEqual(max_concurrent[0], 1, 
                         "Should only check 1 stream at a time when 1 active viewer exists")
+
+    def test_saturated_provider_does_not_block_free_provider(self):
+        """A waiting provider must not prevent a later free provider from running."""
+        self.limiter.set_account_limit(1, 1)
+        self.limiter.set_account_limit(2, 1)
+        acquired, _ = self.limiter.acquire(1, timeout=0)
+        self.assertTrue(acquired)
+
+        checked_ids = []
+        defer_calls = []
+        lock = threading.Lock()
+
+        def mock_check(**kwargs):
+            with lock:
+                checked_ids.append(kwargs['stream_id'])
+            return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+        streams = [
+            {'id': 1, 'name': 'Blocked A', 'url': 'http://test.com/a', 'm3u_account': 1},
+            {'id': 2, 'name': 'Free B', 'url': 'http://test.com/b', 'm3u_account': 2},
+        ]
+
+        try:
+            results = self.scheduler.check_streams_with_limits(
+                streams=streams,
+                check_function=mock_check,
+                defer_callback=lambda stream, reason: defer_calls.append((stream['id'], reason)),
+                provider_wait_timeout=0.2,
+            )
+        finally:
+            self.limiter.release(1)
+
+        self.assertIn(2, checked_ids)
+        self.assertNotIn(1, checked_ids)
+        self.assertTrue(any(stream_id == 1 for stream_id, _reason in defer_calls))
+        skipped = [r for r in results if r.get('stream_id') == 1]
+        self.assertEqual(len(skipped), 1)
+        self.assertTrue(skipped[0].get('provider_limit_skipped'))
+
+    def test_saturated_provider_batch_does_not_hide_later_free_provider(self):
+        """Round-robin scheduling must reach a free provider after many blocked streams."""
+        self.limiter.set_account_limit(1, 1)
+        self.limiter.set_account_limit(2, 1)
+        acquired, _ = self.limiter.acquire(1, timeout=0)
+        self.assertTrue(acquired)
+
+        checked_ids = []
+
+        def mock_check(**kwargs):
+            checked_ids.append(kwargs['stream_id'])
+            return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+        blocked_streams = [
+            {'id': i, 'name': f'Blocked A{i}', 'url': f'http://test.com/a{i}', 'm3u_account': 1}
+            for i in range(1, 41)
+        ]
+        free_stream = {'id': 100, 'name': 'Free B', 'url': 'http://test.com/b', 'm3u_account': 2}
+
+        try:
+            results = self.scheduler.check_streams_with_limits(
+                streams=blocked_streams + [free_stream],
+                check_function=mock_check,
+                provider_wait_timeout=0.1,
+            )
+        finally:
+            self.limiter.release(1)
+
+        self.assertIn(100, checked_ids)
+        free_result = [r for r in results if r.get('stream_id') == 100]
+        self.assertEqual(len(free_result), 1)
+        self.assertEqual(free_result[0]['status'], 'OK')
+
+    def test_deferred_provider_stream_runs_after_capacity_frees(self):
+        """A deferred stream should run once provider capacity becomes available."""
+        self.limiter.set_account_limit(1, 1)
+        acquired, _ = self.limiter.acquire(1, timeout=0)
+        self.assertTrue(acquired)
+
+        checked_ids = []
+
+        def release_later():
+            time.sleep(0.1)
+            self.limiter.release(1)
+
+        def mock_check(**kwargs):
+            checked_ids.append(kwargs['stream_id'])
+            return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+        releaser = threading.Thread(target=release_later)
+        releaser.start()
+        results = self.scheduler.check_streams_with_limits(
+            streams=[{'id': 1, 'name': 'Deferred A', 'url': 'http://test.com/a', 'm3u_account': 1}],
+            check_function=mock_check,
+            provider_wait_timeout=1.0,
+        )
+        releaser.join()
+
+        self.assertEqual(checked_ids, [1])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['status'], 'OK')
+
+    def test_provider_wait_timeout_returns_skip_result_not_error(self):
+        """Provider capacity timeout should preserve state instead of creating an error."""
+        self.limiter.set_account_limit(1, 1)
+        acquired, _ = self.limiter.acquire(1, timeout=0)
+        self.assertTrue(acquired)
+
+        try:
+            results = self.scheduler.check_streams_with_limits(
+                streams=[{'id': 1, 'name': 'Blocked A', 'url': 'http://test.com/a', 'm3u_account': 1}],
+                check_function=lambda **_kwargs: self.fail("check_function should not run"),
+                provider_wait_timeout=0.1,
+            )
+        finally:
+            self.limiter.release(1)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['status'], 'SKIPPED_PROVIDER_LIMIT')
+        self.assertTrue(results[0]['provider_limit_skipped'])
+        self.assertEqual(results[0]['skipped_reason'], 'provider_capacity_unavailable')
     
     def test_progress_callback(self):
         """Test that progress callback is called correctly."""
@@ -515,6 +635,12 @@ class TestInitializeAccountLimits(unittest.TestCase):
 
 class TestProfileAwareStreamChecking(unittest.TestCase):
     """Test cases for profile-aware stream checking via UDI."""
+
+    def _seed_m3u_accounts(self, udi, accounts):
+        """Seed the UDI singleton account cache and rebuild lookup indexes."""
+        udi._m3u_accounts_cache = accounts
+        udi._initialized = True
+        udi._build_indexes()
     
     def test_find_available_profile_with_free_slots(self):
         """Test finding an available profile when one has free slots."""
@@ -522,7 +648,7 @@ class TestProfileAwareStreamChecking(unittest.TestCase):
         udi = get_udi_manager()
         
         # Mock the UDI data
-        udi._m3u_accounts_cache = [
+        self._seed_m3u_accounts(udi, [
             {
                 'id': 1,
                 'name': 'Test Account',
@@ -531,7 +657,7 @@ class TestProfileAwareStreamChecking(unittest.TestCase):
                     {'id': 11, 'name': 'Profile 2', 'max_streams': 1, 'is_active': True}
                 ]
             }
-        ]
+        ])
         
         # Mock profile usage (Profile 1 has 1/2 slots used, Profile 2 has 0/1)
         def mock_get_usage(account_id):
@@ -556,7 +682,7 @@ class TestProfileAwareStreamChecking(unittest.TestCase):
         udi = get_udi_manager()
         
         # Mock the UDI data
-        udi._m3u_accounts_cache = [
+        self._seed_m3u_accounts(udi, [
             {
                 'id': 1,
                 'name': 'Test Account',
@@ -565,7 +691,7 @@ class TestProfileAwareStreamChecking(unittest.TestCase):
                     {'id': 11, 'name': 'Profile 2', 'max_streams': 1, 'is_active': True}
                 ]
             }
-        ]
+        ])
         
         # Mock profile usage (both profiles at capacity)
         def mock_get_usage(account_id):
@@ -589,7 +715,7 @@ class TestProfileAwareStreamChecking(unittest.TestCase):
         udi = get_udi_manager()
         
         # Mock the UDI data
-        udi._m3u_accounts_cache = [
+        self._seed_m3u_accounts(udi, [
             {
                 'id': 1,
                 'name': 'Test Account',
@@ -597,7 +723,7 @@ class TestProfileAwareStreamChecking(unittest.TestCase):
                     {'id': 10, 'name': 'Profile 1', 'max_streams': 2, 'is_active': True}
                 ]
             }
-        ]
+        ])
         
         # Mock profile usage
         def mock_get_usage(account_id):
@@ -619,7 +745,7 @@ class TestProfileAwareStreamChecking(unittest.TestCase):
         udi = get_udi_manager()
         
         # Mock the UDI data
-        udi._m3u_accounts_cache = [
+        self._seed_m3u_accounts(udi, [
             {
                 'id': 1,
                 'name': 'Test Account',
@@ -627,7 +753,7 @@ class TestProfileAwareStreamChecking(unittest.TestCase):
                     {'id': 10, 'name': 'Profile 1', 'max_streams': 1, 'is_active': True}
                 ]
             }
-        ]
+        ])
         
         # Mock profile usage (at capacity)
         def mock_get_usage(account_id):
