@@ -90,6 +90,7 @@ class StreamCheckConfig:
             'timeout_seconds': 3.0,
             'retry_attempts': 2,
             'retry_backoff_seconds': 1.0,
+            'stale_recheck_interval_seconds': 60,
             'internet_probe_urls': [
                 'https://www.google.com/generate_204',
                 'https://cloudflare.com/cdn-cgi/trace',

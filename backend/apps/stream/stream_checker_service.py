@@ -181,6 +181,7 @@ class StreamCheckerService:
             'message': 'Connectivity guard has not run yet',
             'details': {},
         }
+        self._last_connectivity_guard_recovery_probe_at = 0.0
         logger.debug("Connectivity guard initialized")
         
         # Initialize changelog manager
@@ -1261,6 +1262,53 @@ class StreamCheckerService:
         status['checked_at'] = datetime.now().isoformat()
         self.connectivity_guard_status = status
         return result
+
+    def _maybe_refresh_stale_connectivity_guard(self, stream_checking_mode: bool) -> None:
+        """Recheck old idle guard failures so recovered systems stop showing stale errors."""
+        if stream_checking_mode:
+            return
+
+        current_status = self.connectivity_guard_status or {}
+        if current_status.get('ok') is not False:
+            return
+
+        config = self.config.get('connectivity_guard', {}) or {}
+        if config.get('enabled', True) is False:
+            return
+
+        checked_at = current_status.get('checked_at')
+        if not checked_at:
+            return
+
+        try:
+            last_checked = datetime.fromisoformat(checked_at)
+        except (TypeError, ValueError):
+            return
+
+        interval = self._bounded_float(
+            config.get('stale_recheck_interval_seconds', 60),
+            default=60.0,
+            minimum=10.0,
+            maximum=3600.0,
+        )
+        if (datetime.now() - last_checked).total_seconds() < interval:
+            return
+
+        now = time.time()
+        if now - self._last_connectivity_guard_recovery_probe_at < interval:
+            return
+
+        self._last_connectivity_guard_recovery_probe_at = now
+        logger.info("Rechecking stale connectivity guard failure after %.0fs", interval)
+        self._run_connectivity_guard('stale_failure_recovery')
+
+    @staticmethod
+    def _bounded_float(value: Any, *, default: float, minimum: float, maximum: float) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            numeric = default
+        return max(minimum, min(maximum, numeric))
 
     def _connectivity_abort_payload(
         self,
@@ -3849,6 +3897,7 @@ class StreamCheckerService:
             sync_state.get('active', False)
         )
 
+        self._maybe_refresh_stale_connectivity_guard(stream_checking_mode)
         connectivity_guard_status = dict(self.connectivity_guard_status or {})
         guard_failed = connectivity_guard_status.get('ok') is False
         connectivity_guard_status['active_failure'] = bool(guard_failed and stream_checking_mode)

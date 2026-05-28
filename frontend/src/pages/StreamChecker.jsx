@@ -1101,7 +1101,7 @@ export default function StreamChecker() {
                     />
                   </div>
 
-                  <div className="grid gap-4 md:grid-cols-3">
+                  <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                     <div className="space-y-2">
                       <Label htmlFor="connectivity_guard_timeout">Connectivity Timeout (seconds)</Label>
                       <Input
@@ -1149,6 +1149,22 @@ export default function StreamChecker() {
                       />
                       <p className="text-xs text-muted-foreground">
                         Pause between transient retry attempts
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_stale_recheck">Recovery Recheck (seconds)</Label>
+                      <Input
+                        id="connectivity_guard_stale_recheck"
+                        type="number"
+                        value={editedConfig?.connectivity_guard?.stale_recheck_interval_seconds ?? 60}
+                        onChange={(e) => updateConfigValue('connectivity_guard.stale_recheck_interval_seconds', parseInt(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={10}
+                        max={3600}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        How often an idle stale failure is rechecked
                       </p>
                     </div>
                   </div>
