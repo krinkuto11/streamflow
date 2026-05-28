@@ -3684,7 +3684,7 @@ class StreamCheckerService:
             score += fps_score * weights.get('fps', 0.15)
         
         # Codec score (0-1)
-        codec = stream_data.get('video_codec', '').lower()
+        codec = str(stream_data.get('video_codec') or '').lower()
         codec_score = 0.0
         if codec:
             if 'h265' in codec or 'hevc' in codec:

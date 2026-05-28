@@ -487,7 +487,7 @@ class TeamarrPreflightService:
                 event,
                 {
                     "bucket": event.get("trigger_bucket"),
-                    "error": result.get("error"),
+                    "error": "Preflight check failed" if result.get("error") else None,
                     "reason": result.get("reason"),
                     "stats": result.get("stats"),
                 },
