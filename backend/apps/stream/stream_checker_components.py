@@ -3,6 +3,7 @@
 import copy
 import queue
 import threading
+from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -762,10 +763,96 @@ class StreamCheckerProgress:
     
     def __init__(self):
         self.lock = threading.Lock()
+
+    @staticmethod
+    def _build_provider_progress(streams_detail: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """Build compact per-account progress counters from per-stream rows."""
+        if not streams_detail:
+            return []
+
+        failed_statuses = {'error', 'dead', 'blank', 'freeze', 'low_quality', 'loop_detected'}
+        grouped: Dict[str, Dict[str, Any]] = {}
+
+        for stream in streams_detail:
+            account_name = stream.get('m3u_account') or 'Unknown'
+            status = stream.get('status') or 'pending'
+            provider = grouped.setdefault(
+                account_name,
+                {
+                    'name': account_name,
+                    'total': 0,
+                    'status_counts': Counter(),
+                },
+            )
+            provider['total'] += 1
+            provider['status_counts'][status] += 1
+
+        provider_progress: List[Dict[str, Any]] = []
+        for provider in grouped.values():
+            counts = provider['status_counts']
+            checking = counts.get('checking', 0) + counts.get('probing', 0)
+            waiting = counts.get('waiting_provider_limit', 0)
+            pending = counts.get('pending', 0)
+            completed = counts.get('completed', 0)
+            skipped = counts.get('provider_limit_wait_timeout', 0)
+            failed = sum(counts.get(status, 0) for status in failed_statuses)
+            finished = completed + skipped + failed
+
+            if waiting:
+                state = 'waiting_provider_limit'
+            elif checking:
+                state = 'checking'
+            elif pending:
+                state = 'pending'
+            elif failed:
+                state = 'attention'
+            elif finished >= provider['total']:
+                state = 'complete'
+            else:
+                state = 'idle'
+
+            provider_progress.append({
+                'name': provider['name'],
+                'total': provider['total'],
+                'checking': checking,
+                'waiting': waiting,
+                'pending': pending,
+                'completed': completed,
+                'skipped': skipped,
+                'failed': failed,
+                'finished': finished,
+                'state': state,
+                'status_counts': dict(sorted(counts.items())),
+            })
+
+        return sorted(
+            provider_progress,
+            key=lambda item: (
+                0 if item['checking'] or item['waiting'] else 1,
+                -item['waiting'],
+                -item['checking'],
+                item['name'].lower(),
+            ),
+        )
+
+    @staticmethod
+    def _build_provider_summary(provider_progress: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Build aggregate provider scheduling counters for the progress API."""
+        return {
+            'total_providers': len(provider_progress),
+            'active_providers': sum(1 for item in provider_progress if item.get('checking', 0) > 0),
+            'waiting_providers': sum(1 for item in provider_progress if item.get('waiting', 0) > 0),
+            'checking_streams': sum(item.get('checking', 0) for item in provider_progress),
+            'waiting_streams': sum(item.get('waiting', 0) for item in provider_progress),
+            'pending_streams': sum(item.get('pending', 0) for item in provider_progress),
+            'completed_streams': sum(item.get('completed', 0) for item in provider_progress),
+            'skipped_streams': sum(item.get('skipped', 0) for item in provider_progress),
+            'failed_streams': sum(item.get('failed', 0) for item in provider_progress),
+        }
     
     def update(self, channel_id: int, channel_name: str, current: int, total: int,
                current_stream: str = '', status: str = 'checking', step: str = '', step_detail: str = '',
-               streams_detail: Optional[Dict] = None, stream_duration: Optional[int] = None,
+               streams_detail: Optional[List[Dict[str, Any]]] = None, stream_duration: Optional[int] = None,
                is_single_channel_check: bool = False):
         """Update progress information."""
         from apps.database.manager import get_db_manager
@@ -786,6 +873,10 @@ class StreamCheckerProgress:
             }
             if streams_detail is not None:
                 progress_data['streams_detail'] = streams_detail
+                provider_progress = self._build_provider_progress(streams_detail)
+                if provider_progress:
+                    progress_data['provider_progress'] = provider_progress
+                    progress_data['provider_summary'] = self._build_provider_summary(provider_progress)
             
             try:
                 db = get_db_manager()

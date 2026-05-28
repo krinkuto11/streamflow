@@ -364,6 +364,8 @@ export default function StreamChecker() {
   const queued = status?.queue?.queued || 0
   const totalBatch = queued + inProgress + completed + failed
   const batchProgress = totalBatch > 0 ? ((completed + failed) / totalBatch) * 100 : 0
+  const providerProgress = progress?.provider_progress || []
+  const providerSummary = progress?.provider_summary || {}
   const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
   const selectedStartChannel = startChannels.find(channel => String(channel.id) === String(queueStartChannelId))
   const firstStartChannel = startChannels[0]
@@ -584,6 +586,67 @@ export default function StreamChecker() {
               )}
             </div>
 
+            {providerProgress.length > 0 && (
+              <div className="space-y-3">
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Accounts</div>
+                    <div className="text-lg font-semibold">{providerSummary.total_providers || providerProgress.length}</div>
+                  </div>
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Checking</div>
+                    <div className="text-lg font-semibold">{providerSummary.checking_streams || 0}</div>
+                  </div>
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Waiting</div>
+                    <div className="text-lg font-semibold text-amber-600 dark:text-amber-400">{providerSummary.waiting_streams || 0}</div>
+                  </div>
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Skipped</div>
+                    <div className="text-lg font-semibold">{providerSummary.skipped_streams || 0}</div>
+                  </div>
+                </div>
+                <div className="rounded-md border overflow-hidden">
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground">
+                    <span>Account</span>
+                    <span className="text-right">Checking</span>
+                    <span className="text-right">Waiting</span>
+                    <span className="text-right">Done</span>
+                  </div>
+                  <div className="divide-y">
+                    {providerProgress.map((provider) => {
+                      const finishedPercent = provider.total > 0 ? Math.round((provider.finished / provider.total) * 100) : 0
+                      return (
+                        <div key={provider.name} className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 px-3 py-2 text-sm">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="truncate font-medium" title={provider.name}>{provider.name}</span>
+                              {provider.state === 'waiting_provider_limit' && (
+                                <Badge variant="outline" className="border-amber-500/40 bg-amber-100 text-[10px] text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+                                  Waiting
+                                </Badge>
+                              )}
+                              {provider.state === 'checking' && (
+                                <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">
+                                  Active
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="mt-1 h-1.5 rounded-full bg-muted">
+                              <div className="h-1.5 rounded-full bg-primary" style={{ width: `${finishedPercent}%` }} />
+                            </div>
+                          </div>
+                          <span className="text-right font-mono">{provider.checking}</span>
+                          <span className="text-right font-mono text-amber-600 dark:text-amber-400">{provider.waiting}</span>
+                          <span className="text-right font-mono">{provider.finished}/{provider.total}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Streams Detail Progress List */}
             {progress.streams_detail && progress.streams_detail.length > 0 && (() => {
               // Phase-aware sort: loop testing phase floats probing streams to top;
@@ -591,7 +654,7 @@ export default function StreamChecker() {
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
                 ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
-                : { completed: 0, checking: 1, pending: 2, error: 3, low_quality: 4, blank: 5, freeze: 6, dead: 7 }
+                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, provider_limit_wait_timeout: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -650,6 +713,11 @@ export default function StreamChecker() {
                                 <div className="font-medium max-w-[200px] truncate" title={stream.name}>
                                   {stream.name}
                                 </div>
+                                {stream.reason_detail && (
+                                  <div className="max-w-[200px] truncate text-[10px] text-muted-foreground" title={stream.reason_detail}>
+                                    {stream.reason_detail}
+                                  </div>
+                                )}
                               </td>
                               <td className="px-3 py-1.5 align-middle">
                                 <div className="text-xs text-muted-foreground max-w-[150px] truncate" title={stream.m3u_account}>
@@ -659,6 +727,8 @@ export default function StreamChecker() {
                               <td className="px-3 py-1.5 align-middle text-center">
                                 {stream.status === 'pending' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Pending</Badge>}
                                 {stream.status === 'checking' && <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">Checking</Badge>}
+                                {stream.status === 'waiting_provider_limit' && <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Waiting</Badge>}
+                                {stream.status === 'provider_limit_wait_timeout' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Skipped</Badge>}
                                 {stream.status === 'completed' && <Badge variant="outline" className="text-[10px] bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Completed</Badge>}
                                 {stream.status === 'error' && <Badge variant="destructive" className="text-[10px]">Error</Badge>}
                                 {stream.status === 'dead' && <Badge variant="destructive" className="text-[10px]">Dead</Badge>}
