@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { formatDuration as formatDurationValue } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
   Loader2, ChevronDown, Tv, Radio, Database, WifiOff, Eye
@@ -22,6 +23,22 @@ import {
   DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu.jsx'
 import UpcomingAutomationEvents from '@/components/Dashboard/UpcomingAutomationEvents.jsx'
+
+const AUTOMATION_STAGES = [
+  { id: 'settings', label: 'Preparing' },
+  { id: 'period_discovery', label: 'Schedule' },
+  { id: 'm3u_refresh', label: 'M3U Refresh' },
+  { id: 'udi_sync', label: 'Cache Sync' },
+  { id: 'stream_matching', label: 'Matching' },
+  { id: 'quality_queueing', label: 'Queueing' },
+  { id: 'quality_checking', label: 'Quality Check' },
+  { id: 'finalizing', label: 'Finalizing' },
+]
+
+const formatDuration = (seconds) => {
+  const formatted = formatDurationValue(seconds)
+  return formatted || 'N/A'
+}
 
 const formatShadowEvent = (eventType) => {
   if (!eventType) return ''
@@ -297,6 +314,7 @@ export default function Dashboard() {
   const runStage = runStatus.stage || 'idle'
   const runStageLabel = runStatus.stage_label || 'Idle'
   const currentStageIndex = AUTOMATION_STAGES.findIndex((stage) => stage.id === runStage)
+  const runProgress = runStatus.progress || {}
   const runningRun = runState === 'running'
   const failedRun = runState === 'failed'
   const completedRun = runState === 'completed'
@@ -316,6 +334,19 @@ export default function Dashboard() {
   const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
   const isProcessing  = streamCheckerStatus?.stream_checking_mode || false
   const qualityStageActive = runStage === 'quality_checking' && batchTotal > 0
+  const rawRunProgressPercent = Number(runProgress.percent)
+  const runStageProgress = qualityStageActive
+    ? queueProgress
+    : Number.isFinite(rawRunProgressPercent)
+      ? rawRunProgressPercent
+      : 0
+  const runProgressCurrent = qualityStageActive ? completed : runProgress.current
+  const runProgressTotal = qualityStageActive ? batchTotal : runProgress.total
+  const hasRunProgressTotal = runProgressTotal !== null && runProgressTotal !== undefined
+  const runProgressDetail = hasRunProgressTotal
+    ? `${runProgressCurrent ?? 0} of ${runProgressTotal}`
+    : runProgress.message || runStatus.message || 'Waiting for progress'
+  const showRunProgress = runState !== 'idle' || Object.keys(runProgress).length > 0
   const qualityCheckedCount = qualityStageActive
     ? completed
     : (runCounts.quality_checked ?? 0)
@@ -391,7 +422,7 @@ export default function Dashboard() {
             <div>
               <div className="mb-2 flex items-center justify-between gap-3 text-sm">
                 <span className="text-muted-foreground">{runProgressDetail}</span>
-                {runStage === 'quality_check' && batchTotal > 0 && (
+                {runStage === 'quality_checking' && batchTotal > 0 && (
                   <span className="text-muted-foreground">
                     {completed} of {batchTotal} quality checks
                   </span>

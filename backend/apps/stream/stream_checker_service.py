@@ -45,6 +45,7 @@ from apps.udi import get_udi_manager
 
 # Import dead streams tracker
 from apps.stream.dead_streams_tracker import DeadStreamsTracker
+from apps.stream.queue_start import order_channels_for_queue_start
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
 from apps.core.auth import _refresh_token
 
@@ -408,7 +409,7 @@ class StreamCheckerService:
                 from apps.automation.automation_config_manager import get_automation_config_manager
                 automation_config = get_automation_config_manager()
                 
-                filtered_channel_ids = []
+                filtered_channels = []
                 
                 for ch in channels:
                     if not isinstance(ch, dict) or 'id' not in ch:
@@ -424,7 +425,9 @@ class StreamCheckerService:
                     
                     # Check if stream checking is enabled in the profile
                     if profile and profile.get('stream_checking', {}).get('enabled', False):
-                        filtered_channel_ids.append(cid)
+                        filtered_channels.append(ch)
+
+                filtered_channel_ids = [ch['id'] for ch in filtered_channels]
                 
                 excluded_count = len(channel_ids) - len(filtered_channel_ids)
                 
@@ -434,7 +437,31 @@ class StreamCheckerService:
                 if not filtered_channel_ids:
                     logger.info("No channels with checking enabled to queue for global check")
                     return
-                
+
+                start_mode = self.config.get('queue.start_mode', 'first')
+                start_channel_id = self.config.get('queue.start_channel_id', None)
+                try:
+                    ordered_channels, start_meta = order_channels_for_queue_start(
+                        filtered_channels,
+                        start_mode=start_mode,
+                        start_channel_id=start_channel_id,
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "Invalid saved queue start selection for global check (%s); falling back to first channel",
+                        exc,
+                    )
+                    ordered_channels, start_meta = order_channels_for_queue_start(
+                        filtered_channels,
+                        start_mode='first',
+                    )
+                filtered_channel_ids = [ch['id'] for ch in ordered_channels]
+                logger.info(
+                    "Global check starts at %s (mode=%s)",
+                    start_meta.get('start_channel_name', start_meta.get('start_channel_id')),
+                    start_meta.get('mode', 'first'),
+                )
+
                 if force_check:
                     # Mark all enabled channels for force check (bypasses immunity)
                     for channel_id in filtered_channel_ids:
