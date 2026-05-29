@@ -2,6 +2,7 @@
 """Tests for optional ffmpeg hardware acceleration settings."""
 
 import os
+import subprocess
 import sys
 import unittest
 from unittest.mock import Mock, patch
@@ -11,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from apps.stream import stream_check_utils
 from apps.stream.stream_check_utils import (
     analyze_stream,
+    collect_hardware_acceleration_diagnostics,
     get_stream_info_and_bitrate,
     normalize_hardware_acceleration_config,
 )
@@ -53,6 +55,43 @@ class TestHardwareAccelerationConfig(unittest.TestCase):
         self.assertTrue(config["enabled"])
         self.assertEqual(config["mode"], "vaapi")
         self.assertEqual(config["device"], "")
+
+    def test_startup_diagnostics_reports_supported_cuda(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            if command[0] == "ffmpeg":
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout="Hardware acceleration methods:\ncuda\nvaapi\n",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(command, 0, stdout="NVIDIA Test GPU\n", stderr="")
+
+        diagnostics = collect_hardware_acceleration_diagnostics(
+            {"enabled": True, "mode": "cuda", "allow_fallback": True},
+            command_runner=runner,
+        )
+
+        self.assertTrue(diagnostics["ffmpeg_available"])
+        self.assertTrue(diagnostics["mode_supported"])
+        self.assertTrue(diagnostics["nvidia_smi_ok"])
+        self.assertEqual(diagnostics["nvidia_gpus"], ["NVIDIA Test GPU"])
+        self.assertEqual(calls[0][0], "ffmpeg")
+        self.assertEqual(calls[1][0], "nvidia-smi")
+
+    def test_startup_diagnostics_does_not_probe_when_disabled(self):
+        calls = []
+
+        diagnostics = collect_hardware_acceleration_diagnostics(
+            {"enabled": False, "mode": "cuda"},
+            command_runner=lambda command, timeout: calls.append(command),
+        )
+
+        self.assertFalse(diagnostics["config"]["enabled"])
+        self.assertEqual(calls, [])
 
 
 class TestHardwareAccelerationFfmpegCommand(unittest.TestCase):

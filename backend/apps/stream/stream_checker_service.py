@@ -159,6 +159,13 @@ class StreamCheckerService:
         
         self.config = StreamCheckConfig()
         logger.debug("Config loaded")
+        try:
+            from apps.stream.stream_check_utils import log_hardware_acceleration_startup_diagnostics
+            log_hardware_acceleration_startup_diagnostics(
+                self.config.get('stream_analysis.hardware_acceleration', {})
+            )
+        except Exception as e:
+            logger.warning(f"Unable to log hardware acceleration startup diagnostics: {e}")
         
         self.update_tracker = ChannelUpdateTracker()
         logger.debug("Update tracker initialized")

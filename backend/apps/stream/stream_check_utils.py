@@ -49,7 +49,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Dict, Optional, Tuple, Any, List
+from typing import Callable, Dict, Optional, Tuple, Any, List
 
 from PIL import Image
 from apps.core.logging_config import setup_logging
@@ -166,6 +166,138 @@ def normalize_hardware_acceleration_config(config: Optional[Dict[str, Any]]) -> 
         'device': device[:200],
         'allow_fallback': bool(config.get('allow_fallback', True)),
     }
+
+
+def _parse_ffmpeg_hwaccels(output: str) -> List[str]:
+    """Parse ffmpeg -hwaccels output into normalized method names."""
+    methods = []
+    for line in (output or '').splitlines():
+        value = line.strip().lower()
+        if not value or value.startswith('hardware acceleration'):
+            continue
+        if re.match(r'^[a-z0-9_]+$', value):
+            methods.append(value)
+    return sorted(set(methods))
+
+
+def collect_hardware_acceleration_diagnostics(
+    config: Optional[Dict[str, Any]],
+    *,
+    command_runner: Optional[Callable[[List[str], float], subprocess.CompletedProcess]] = None,
+) -> Dict[str, Any]:
+    """Collect non-fatal startup diagnostics for optional ffmpeg hwaccel."""
+    hwaccel = normalize_hardware_acceleration_config(config)
+    diagnostics: Dict[str, Any] = {
+        'config': hwaccel,
+        'ffmpeg_available': False,
+        'ffmpeg_hwaccels': [],
+        'mode_supported': False,
+        'ffmpeg_error': '',
+        'nvidia_checked': False,
+        'nvidia_visible_devices_set': bool(os.getenv('NVIDIA_VISIBLE_DEVICES')),
+        'nvidia_smi_available': False,
+        'nvidia_smi_ok': False,
+        'nvidia_gpus': [],
+        'nvidia_error': '',
+    }
+    if not hwaccel['enabled']:
+        return diagnostics
+
+    def _run(command: List[str], timeout: float) -> subprocess.CompletedProcess:
+        if command_runner:
+            return command_runner(command, timeout)
+        return subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            text=True,
+        )
+
+    try:
+        ffmpeg_result = _run(['ffmpeg', '-hide_banner', '-hwaccels'], 5.0)
+        diagnostics['ffmpeg_available'] = ffmpeg_result.returncode == 0
+        diagnostics['ffmpeg_hwaccels'] = _parse_ffmpeg_hwaccels(
+            f"{ffmpeg_result.stdout or ''}\n{ffmpeg_result.stderr or ''}"
+        )
+        mode = hwaccel['mode']
+        diagnostics['mode_supported'] = (
+            mode == 'auto' and bool(diagnostics['ffmpeg_hwaccels'])
+        ) or mode in diagnostics['ffmpeg_hwaccels']
+        if ffmpeg_result.returncode != 0:
+            diagnostics['ffmpeg_error'] = (ffmpeg_result.stderr or ffmpeg_result.stdout or '').strip()[:300]
+    except FileNotFoundError:
+        diagnostics['ffmpeg_error'] = 'ffmpeg executable not found'
+    except subprocess.TimeoutExpired:
+        diagnostics['ffmpeg_error'] = 'ffmpeg -hwaccels timed out'
+    except Exception as exc:
+        diagnostics['ffmpeg_error'] = str(exc)[:300]
+
+    should_check_nvidia = hwaccel['mode'] in {'auto', 'cuda'} or diagnostics['nvidia_visible_devices_set']
+    if should_check_nvidia:
+        diagnostics['nvidia_checked'] = True
+        try:
+            nvidia_result = _run(
+                ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                5.0,
+            )
+            diagnostics['nvidia_smi_available'] = True
+            diagnostics['nvidia_smi_ok'] = nvidia_result.returncode == 0
+            if nvidia_result.returncode == 0:
+                diagnostics['nvidia_gpus'] = [
+                    line.strip()
+                    for line in (nvidia_result.stdout or '').splitlines()
+                    if line.strip()
+                ]
+            else:
+                diagnostics['nvidia_error'] = (nvidia_result.stderr or nvidia_result.stdout or '').strip()[:300]
+        except FileNotFoundError:
+            diagnostics['nvidia_error'] = 'nvidia-smi executable not found'
+        except subprocess.TimeoutExpired:
+            diagnostics['nvidia_error'] = 'nvidia-smi timed out'
+        except Exception as exc:
+            diagnostics['nvidia_error'] = str(exc)[:300]
+    return diagnostics
+
+
+def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Log a concise startup readiness summary for optional ffmpeg hwaccel."""
+    diagnostics = collect_hardware_acceleration_diagnostics(config)
+    hwaccel = diagnostics['config']
+    if not hwaccel['enabled']:
+        logger.info("FFmpeg hardware acceleration disabled; CPU stream analysis path is active")
+        return diagnostics
+
+    logger.info(
+        "FFmpeg hardware acceleration configured: mode=%s device=%s cpu_fallback=%s",
+        hwaccel['mode'],
+        hwaccel['device'] or 'default',
+        hwaccel['allow_fallback'],
+    )
+    if diagnostics['ffmpeg_available']:
+        methods = ', '.join(diagnostics['ffmpeg_hwaccels']) or 'none reported'
+        logger.info("FFmpeg hardware acceleration methods available: %s", methods)
+        if diagnostics['mode_supported']:
+            logger.info("FFmpeg hardware acceleration mode %s appears available", hwaccel['mode'])
+        else:
+            logger.warning("FFmpeg hardware acceleration mode %s is not reported by ffmpeg", hwaccel['mode'])
+    else:
+        logger.warning("FFmpeg hardware acceleration readiness unknown: %s", diagnostics['ffmpeg_error'])
+
+    if diagnostics['nvidia_checked']:
+        if diagnostics['nvidia_smi_ok'] and diagnostics['nvidia_gpus']:
+            logger.info(
+                "NVIDIA runtime visible: NVIDIA_VISIBLE_DEVICES=%s; GPUs=%s",
+                'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+                ', '.join(diagnostics['nvidia_gpus']),
+            )
+        else:
+            logger.warning(
+                "NVIDIA runtime not ready: NVIDIA_VISIBLE_DEVICES=%s; nvidia-smi=%s",
+                'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+                diagnostics['nvidia_error'] or 'no GPU reported',
+            )
+    return diagnostics
 
 
 def _get_ffmpeg_hwaccel_args(config: Optional[Dict[str, Any]]) -> list:

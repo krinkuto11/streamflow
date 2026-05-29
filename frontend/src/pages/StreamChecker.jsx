@@ -999,6 +999,9 @@ export default function StreamChecker() {
                               <SelectItem value="videotoolbox">VideoToolbox</SelectItem>
                             </SelectContent>
                           </Select>
+                          <p className="text-xs text-muted-foreground">
+                            Use CUDA for NVIDIA containers when available
+                          </p>
                         </div>
 
                         <div className="space-y-2">
@@ -1010,7 +1013,11 @@ export default function StreamChecker() {
                             onChange={(e) => updateConfigValue('stream_analysis.hardware_acceleration.device', e.target.value)}
                             disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
                             maxLength={200}
+                            placeholder="Default"
                           />
+                          <p className="text-xs text-muted-foreground">
+                            Optional ffmpeg device path or index
+                          </p>
                         </div>
 
                         <div className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2">
