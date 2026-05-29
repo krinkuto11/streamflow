@@ -1,3 +1,4 @@
+import threading
 from unittest.mock import Mock
 
 import pytest
@@ -69,8 +70,10 @@ def test_update_dispatcharr_config_accepts_fetch_pressure_fields():
     assert response.status_code == 200
     config_manager.update_config.assert_called_once_with(
         base_url="http://dispatcharr.test",
+        auth_mode=None,
         username="user",
         password=None,
+        api_key=None,
         stream_fetch_page_size=5000,
         stream_fetch_max_workers=2,
     )
@@ -105,3 +108,47 @@ def test_fetch_streams_uses_configured_fetch_pressure(monkeypatch):
         "page_size": 5000,
         "max_workers": 2,
     }
+
+
+def test_fetch_url_retries_transient_timeout(monkeypatch):
+    from apps.udi import fetcher as fetcher_module
+
+    fetcher = fetcher_module.UDIFetcher.__new__(fetcher_module.UDIFetcher)
+    fetcher.base_url = "http://dispatcharr.test"
+    fetcher._request_timings = []
+    fetcher._timing_lock = threading.Lock()
+
+    class Response:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    calls = {"count": 0}
+
+    def fake_get(url, headers=None, timeout=None):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise fetcher_module.requests.exceptions.ReadTimeout("slow page")
+        return Response()
+
+    monkeypatch.setattr(fetcher_module.requests, "get", fake_get)
+    monkeypatch.setattr(fetcher_module, "_get_auth_headers", lambda: {"Authorization": "Bearer token"})
+    monkeypatch.setattr(fetcher_module.time, "sleep", lambda seconds: None)
+
+    result = fetcher._fetch_url("http://dispatcharr.test/api/channels/streams/?page=42")
+
+    assert result == {"ok": True}
+    assert calls["count"] == 2
+
+
+def test_udi_integrity_fails_when_expected_count_is_missing():
+    from apps.udi.fetcher import FetchResult
+    from apps.udi.manager import _check_fetch_integrity
+
+    result = FetchResult(items=[{"id": i} for i in range(95)], expected_count=100)
+
+    assert _check_fetch_integrity("streams", result) is False

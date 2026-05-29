@@ -8,9 +8,11 @@ import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { formatDuration } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
-  Loader2, ChevronDown, Tv, Radio, Database, WifiOff
+  Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
+  Clock3, AlertCircle, ListChecks, Timer
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -21,6 +23,17 @@ import {
   DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu.jsx'
 import UpcomingAutomationEvents from '@/components/Dashboard/UpcomingAutomationEvents.jsx'
+
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const remainingSeconds = total % 60
+
+  if (hours > 0) return `${hours}h ${minutes}m ${remainingSeconds}s`
+  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`
+  return `${remainingSeconds}s`
+}
 
 export default function Dashboard() {
   const [status, setStatus] = useState(null)
@@ -276,6 +289,26 @@ export default function Dashboard() {
   }
 
   const isAutomationRunning = status?.running || false
+  const runStatus = status?.run_status || {}
+  const runCounts = runStatus.counts || {}
+  const runDurations = runStatus.durations || {}
+  const udiStatus = status?.udi_status || {}
+  const apiTiming = udiStatus?.api_timing || {}
+  const runState = runStatus.state || 'idle'
+  const runStage = runStatus.stage || 'idle'
+  const runStageLabel = runStatus.stage_label || 'Idle'
+  const currentStageIndex = AUTOMATION_STAGES.findIndex((stage) => stage.id === runStage)
+  const runningRun = runState === 'running'
+  const failedRun = runState === 'failed'
+  const completedRun = runState === 'completed'
+  const skippedRun = runState === 'skipped'
+  const runBadgeClass = failedRun
+    ? 'bg-destructive text-destructive-foreground border-transparent'
+    : completedRun
+      ? 'bg-green-600 text-white border-transparent'
+      : runningRun
+        ? 'bg-blue-600 text-white border-transparent'
+        : ''
   const queueSize     = streamCheckerStatus?.queue?.queue_size || 0
   const completed     = streamCheckerStatus?.queue?.completed  || 0
   const inProgress    = streamCheckerStatus?.queue?.in_progress || 0
@@ -283,7 +316,20 @@ export default function Dashboard() {
   const batchTotal    = completed + inProgress + queueSize
   const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
   const isProcessing  = streamCheckerStatus?.stream_checking_mode || false
+  const qualityStageActive = runStage === 'quality_checking' && batchTotal > 0
+  const qualityCheckedCount = qualityStageActive
+    ? completed
+    : (runCounts.quality_checked ?? 0)
   const shouldDisableActions = isProcessing || actionLoading !== ''
+  const runProgress = status?.run_progress || {}
+  const showRunProgress = runProgress?.status && runProgress.status !== 'idle'
+  const runStage = runProgress?.stage || 'idle'
+  const runStageProgress = runStage === 'quality_check' && batchTotal > 0
+    ? queueProgress
+    : Number(runProgress?.percent || 0)
+  const runProgressDetail = runProgress?.total
+    ? `${runProgress.current || 0} of ${runProgress.total}`
+    : runProgress?.message || 'Waiting for progress'
 
   const syncStatus = udiStats?.syncStatus
   const syncBadgeClass =
@@ -312,6 +358,83 @@ export default function Dashboard() {
             <div className="text-xs mt-1 text-muted-foreground">Quick actions are temporarily disabled</div>
           </AlertDescription>
         </Alert>
+      )}
+
+      {showRunProgress && (
+        <Card>
+          <CardHeader className="space-y-1">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <CardTitle>Automation Run</CardTitle>
+                <CardDescription>{runProgress.message || 'Automation run status'}</CardDescription>
+              </div>
+              <Badge
+                variant={runProgress.status === 'completed' ? 'default' : runProgress.status === 'failed' ? 'destructive' : 'outline'}
+                className="w-fit"
+              >
+                {runProgress.status}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 md:grid-cols-4">
+              <div className="rounded-md border p-3">
+                <Label className="text-xs text-muted-foreground">Current Stage</Label>
+                <div className="mt-1 text-xl font-semibold">{runProgress.stage_label || 'Idle'}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <Label className="text-xs text-muted-foreground">Elapsed</Label>
+                <div className="mt-1 text-xl font-semibold">{formatDuration(runProgress.elapsed_seconds)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <Label className="text-xs text-muted-foreground">Stage Time</Label>
+                <div className="mt-1 text-xl font-semibold">{formatDuration(runProgress.stage_elapsed_seconds)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <Label className="text-xs text-muted-foreground">Progress</Label>
+                <div className="mt-1 text-xl font-semibold">{Math.round(runStageProgress)}%</div>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+                <span className="text-muted-foreground">{runProgressDetail}</span>
+                {runStage === 'quality_check' && batchTotal > 0 && (
+                  <span className="text-muted-foreground">
+                    {completed} of {batchTotal} quality checks
+                  </span>
+                )}
+              </div>
+              <Progress value={runStageProgress} className="h-2" />
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-7">
+              {(runProgress.stages || []).map(stage => (
+                <div
+                  key={stage.key}
+                  className={`rounded-md border px-3 py-2 ${
+                    stage.status === 'running'
+                      ? 'border-primary bg-primary/10'
+                      : stage.status === 'completed'
+                        ? 'border-green-500/60 bg-green-500/10'
+                        : stage.status === 'failed'
+                          ? 'border-destructive/70 bg-destructive/10'
+                          : ''
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium">{stage.label}</span>
+                    {stage.status === 'running' && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+                    {stage.status === 'completed' && <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />}
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {stage.total ? `${stage.current || 0}/${stage.total}` : stage.status}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Status Cards */}
@@ -538,9 +661,7 @@ export default function Dashboard() {
                     <Label className="text-xs text-muted-foreground block">Processing Progress</Label>
                     {streamCheckerStatus?.queue?.eta_seconds > 0 ? (
                       <span className="text-xs text-muted-foreground">
-                        ~{streamCheckerStatus.queue.eta_seconds > 60
-                          ? `${Math.floor(streamCheckerStatus.queue.eta_seconds / 60)}m ${streamCheckerStatus.queue.eta_seconds % 60}s`
-                          : `${streamCheckerStatus.queue.eta_seconds}s`} remaining
+                        ~{formatDuration(streamCheckerStatus.queue.eta_seconds)} remaining
                       </span>
                     ) : (
                       <span className="text-xs text-muted-foreground animate-pulse text-primary/70">
