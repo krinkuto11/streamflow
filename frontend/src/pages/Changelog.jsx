@@ -136,6 +136,9 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                     {item.stats.stream_details.some(s => s.loop_probe_ran) && (
                       <TableHead>Loop</TableHead>
                     )}
+                    {item.stats.stream_details.some(s => s.freeze_probe_ran) && (
+                      <TableHead>Freeze</TableHead>
+                    )}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -179,6 +182,23 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                               )
                             ) : (
                               <span className="text-muted-foreground text-xs">—</span>
+                            )}
+                          </TableCell>
+                        )}
+                        {item.stats.stream_details.some(s => s.freeze_probe_ran) && (
+                          <TableCell>
+                            {streamDetail.freeze_probe_ran ? (
+                              streamDetail.freeze_detected === true ? (
+                                <span className="text-red-500 font-medium text-xs">
+                                  {streamDetail.freeze_duration_secs ? `${streamDetail.freeze_duration_secs.toFixed(1)}s` : 'Frozen'}
+                                </span>
+                              ) : streamDetail.freeze_detected === false ? (
+                                <span className="text-muted-foreground text-xs">OK</span>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">-</span>
+                              )
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
                             )}
                           </TableCell>
                         )}
@@ -369,6 +389,9 @@ function StepContent({ step }) {
                       {details.checked_streams.some(s => s.loop_probe_ran) && (
                         <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Loop</TableHead>
                       )}
+                      {details.checked_streams.some(s => s.freeze_probe_ran) && (
+                        <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Freeze</TableHead>
+                      )}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -414,6 +437,23 @@ function StepContent({ step }) {
                               )
                             ) : (
                               <span className="text-muted-foreground text-xs">—</span>
+                            )}
+                          </TableCell>
+                        )}
+                        {details.checked_streams.some(s => s.freeze_probe_ran) && (
+                          <TableCell className="py-1 text-right">
+                            {s.freeze_probe_ran ? (
+                              s.freeze_detected === true ? (
+                                <span className="text-red-500 font-medium text-xs">
+                                  {s.freeze_duration_secs ? `${s.freeze_duration_secs.toFixed(1)}s` : 'Frozen'}
+                                </span>
+                              ) : s.freeze_detected === false ? (
+                                <span className="text-muted-foreground text-xs">OK</span>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">-</span>
+                              )
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
                             )}
                           </TableCell>
                         )}

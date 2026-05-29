@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
@@ -7,12 +8,10 @@ import { Alert, AlertDescription } from '@/components/ui/alert.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
-import { automationAPI, streamCheckerAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
-import { formatDuration } from '@/lib/time-format.js'
+import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
-  Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
-  Clock3, AlertCircle, ListChecks, Timer
+  Loader2, ChevronDown, Tv, Radio, Database, WifiOff, Eye
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -24,21 +23,19 @@ import {
 } from '@/components/ui/dropdown-menu.jsx'
 import UpcomingAutomationEvents from '@/components/Dashboard/UpcomingAutomationEvents.jsx'
 
-function formatDuration(seconds) {
-  const total = Math.max(0, Math.floor(Number(seconds) || 0))
-  const hours = Math.floor(total / 3600)
-  const minutes = Math.floor((total % 3600) / 60)
-  const remainingSeconds = total % 60
-
-  if (hours > 0) return `${hours}h ${minutes}m ${remainingSeconds}s`
-  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`
-  return `${remainingSeconds}s`
+const formatShadowEvent = (eventType) => {
+  if (!eventType) return ''
+  return eventType
+    .split('_')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
 }
 
 export default function Dashboard() {
   const [status, setStatus] = useState(null)
   const [automationConfig, setAutomationConfig] = useState(null)
   const [streamCheckerStatus, setStreamCheckerStatus] = useState(null)
+  const [shadowMonitorStatus, setShadowMonitorStatus] = useState(null)
   const [playlists, setPlaylists] = useState([])
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
@@ -64,14 +61,16 @@ export default function Dashboard() {
 
   const loadStatus = async () => {
     try {
-      const [automationResponse, streamCheckerResponse, automationConfigResponse] = await Promise.all([
+      const [automationResponse, streamCheckerResponse, automationConfigResponse, shadowMonitorResponse] = await Promise.all([
         automationAPI.getStatus(),
         streamCheckerAPI.getStatus(),
         automationAPI.getConfig(),
+        shadowBlankMonitorAPI.getStatus().catch(() => ({ data: null })),
       ])
       setStatus(automationResponse.data)
       setStreamCheckerStatus(streamCheckerResponse.data)
       setAutomationConfig(automationConfigResponse.data || {})
+      setShadowMonitorStatus(shadowMonitorResponse.data)
     } catch (err) {
       console.error('Failed to load status:', err)
       toast({
@@ -321,15 +320,8 @@ export default function Dashboard() {
     ? completed
     : (runCounts.quality_checked ?? 0)
   const shouldDisableActions = isProcessing || actionLoading !== ''
-  const runProgress = status?.run_progress || {}
-  const showRunProgress = runProgress?.status && runProgress.status !== 'idle'
-  const runStage = runProgress?.stage || 'idle'
-  const runStageProgress = runStage === 'quality_check' && batchTotal > 0
-    ? queueProgress
-    : Number(runProgress?.percent || 0)
-  const runProgressDetail = runProgress?.total
-    ? `${runProgress.current || 0} of ${runProgress.total}`
-    : runProgress?.message || 'Waiting for progress'
+  const shadowWatchedCount = shadowMonitorStatus?.watched_count || shadowMonitorStatus?.watched_channels?.length || 0
+  const shadowLastEvent = shadowMonitorStatus?.recent_events?.[0]
 
   const syncStatus = udiStats?.syncStatus
   const syncBadgeClass =
@@ -438,7 +430,7 @@ export default function Dashboard() {
       )}
 
       {/* Status Cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Automation Status</CardTitle>
@@ -474,6 +466,33 @@ export default function Dashboard() {
               )}
             </div>
             <p className="text-xs text-muted-foreground mt-2">Quality checking service</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Shadow Monitor</CardTitle>
+            <Eye className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap items-center gap-2">
+              {shadowMonitorStatus?.running ? (
+                <Badge variant="default" className="bg-green-500">
+                  <CheckCircle2 className="h-3 w-3 mr-1" />Watching
+                </Badge>
+              ) : shadowMonitorStatus?.enabled ? (
+                <Badge variant="outline">Enabled</Badge>
+              ) : (
+                <Badge variant="secondary">Disabled</Badge>
+              )}
+              {shadowMonitorStatus?.dry_run && <Badge variant="outline">Dry Run</Badge>}
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              <Link to="/shadow-monitor" className="hover:underline">
+                {shadowWatchedCount} active channels
+                {shadowLastEvent ? `, last ${formatShadowEvent(shadowLastEvent.type)}` : ''}
+              </Link>
+            </p>
           </CardContent>
         </Card>
 

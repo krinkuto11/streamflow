@@ -405,8 +405,8 @@ export default function StreamChecker() {
               // normal analysis phase floats completed streams to top by score.
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
-                ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, low_quality: 6, dead: 7 }
-                : { completed: 0, checking: 1, pending: 2, error: 3, low_quality: 4, dead: 5 }
+                ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
+                : { completed: 0, checking: 1, pending: 2, error: 3, low_quality: 4, blank: 5, freeze: 6, dead: 7 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -477,6 +477,8 @@ export default function StreamChecker() {
                                 {stream.status === 'completed' && <Badge variant="outline" className="text-[10px] bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Completed</Badge>}
                                 {stream.status === 'error' && <Badge variant="destructive" className="text-[10px]">Error</Badge>}
                                 {stream.status === 'dead' && <Badge variant="destructive" className="text-[10px]">Dead</Badge>}
+                                {stream.status === 'blank' && <Badge variant="destructive" className="text-[10px]">Blank</Badge>}
+                                {stream.status === 'freeze' && <Badge variant="destructive" className="text-[10px]">Frozen</Badge>}
                                 {stream.status === 'probing' && <Badge variant="outline" className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse">Probing</Badge>}
                                 {stream.status === 'loop_detected' && <Badge variant="outline" className="text-[10px] bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">⚠ {stream.loop_duration_secs ? formatDuration(stream.loop_duration_secs) : ''} Loop Found</Badge>}
                                 {stream.status === 'low_quality' && (

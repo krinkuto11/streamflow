@@ -36,6 +36,7 @@ const DEFAULT_PROFILE = {
         check_all_streams: false,
         loop_check_enabled: false,
         blank_check_enabled: false,
+        freeze_check_enabled: false,
         stream_limit: 0,
         min_resolution: 'any',
         min_fps: 0,
@@ -472,6 +473,17 @@ export default function AutomationProfileEditor() {
                                                 <div className="space-y-0.5">
                                                     <Label htmlFor="blank_check_enabled" className="cursor-pointer font-medium">Check streams for blank screens</Label>
                                                     <p className="text-[10px] text-muted-foreground">Detected blank streams are marked dead and follow this profile&apos;s dead stream removal setting.</p>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center space-x-3 bg-muted/50 p-3 rounded-md">
+                                                <Switch
+                                                    id="freeze_check_enabled"
+                                                    checked={profile.stream_checking.freeze_check_enabled ?? false}
+                                                    onCheckedChange={(checked) => updateProfile('stream_checking.freeze_check_enabled', checked)}
+                                                />
+                                                <div className="space-y-0.5">
+                                                    <Label htmlFor="freeze_check_enabled" className="cursor-pointer font-medium">Check streams for frozen pictures</Label>
+                                                    <p className="text-[10px] text-muted-foreground">Detected stuck-picture streams are marked dead and follow this profile&apos;s dead stream removal setting.</p>
                                                 </div>
                                             </div>
 

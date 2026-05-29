@@ -10,6 +10,7 @@ import { api } from '@/services/api.js'
 import Dashboard from '@/pages/Dashboard'
 import StreamChecker from '@/pages/StreamChecker'
 import StreamMonitoring from '@/pages/StreamMonitoring'
+import ShadowBlankMonitor from '@/pages/ShadowBlankMonitor'
 import ChannelConfiguration from '@/pages/ChannelConfiguration'
 import AutomationSettings from '@/pages/AutomationSettings'
 import Changelog from '@/pages/Changelog'
@@ -100,6 +101,7 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/stream-checker" element={<StreamChecker />} />
             <Route path="/stream-monitoring" element={<StreamMonitoring />} />
+            <Route path="/shadow-monitor" element={<ShadowBlankMonitor />} />
             <Route path="/channels" element={<ChannelConfiguration />} />
             <Route path="/settings" element={<AutomationSettings />} />
             <Route path="/automation/profiles/:profileId" element={<AutomationProfileEditor />} />
