@@ -1,3 +1,6 @@
+import ast
+from pathlib import Path
+
 from apps.automation.automated_stream_manager import AutomatedStreamManager
 
 
@@ -51,3 +54,52 @@ def test_stage_duration_updates_when_stage_changes():
     status = manager.get_run_status()
     assert status["state"] == "completed"
     assert status["stage_duration_seconds"] is not None
+
+
+def test_automation_duration_start_variables_are_defined_before_use():
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "apps"
+        / "automation"
+        / "automated_stream_manager.py"
+    )
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    manager_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AutomatedStreamManager"
+    )
+    run_cycle = next(
+        node
+        for node in manager_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "run_automation_cycle"
+    )
+
+    assignments = {}
+    usages = []
+
+    for node in ast.walk(run_cycle):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id.endswith("_started"):
+                    assignments.setdefault(target.id, []).append(node.lineno)
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+            if isinstance(target, ast.Name) and target.id.endswith("_started"):
+                assignments.setdefault(target.id, []).append(node.lineno)
+        elif (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Sub)
+            and isinstance(node.right, ast.Name)
+            and node.right.id.endswith("_started")
+        ):
+            usages.append((node.right.id, node.lineno))
+
+    missing = [
+        f"{name} used at line {line}"
+        for name, line in usages
+        if not any(assigned_line < line for assigned_line in assignments.get(name, []))
+    ]
+
+    assert missing == []
