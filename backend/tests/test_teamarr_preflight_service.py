@@ -52,6 +52,18 @@ class FakeChecker:
         }
 
 
+class SequencedChecker(FakeChecker):
+    def __init__(self, results):
+        super().__init__()
+        self.results = list(results)
+
+    def check_single_channel(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if self.results:
+            return self.results.pop(0)
+        return super().check_single_channel(*args, **kwargs)
+
+
 class FakeUdi:
     def __init__(self, streams=None):
         self.streams = streams if streams is not None else [{"id": 1}, {"id": 2}]
@@ -216,6 +228,51 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(public_stats["total_streams"], 2)
         self.assertEqual(public_stats["duration_seconds"], 12)
         self.assertNotIn("stream_details", public_stats)
+
+    def test_controlled_guard_skip_defers_preflight_bucket_for_retry(self):
+        checker = SequencedChecker([
+            {
+                "success": True,
+                "skipped": True,
+                "reason": "active_viewers",
+                "details": {"skip_reason": "active_viewers"},
+            },
+            {
+                "success": True,
+                "stats": {"total_streams": 1, "duration_seconds": 8},
+            },
+        ])
+        service, _, _ = self.make_service([make_event()], checker=checker)
+
+        first_result = service.run_once(force=True)
+        self.assertTrue(first_result["success"])
+        self.assertEqual(first_result["launched"], 1)
+
+        deadline = time.time() + 2
+        recent = []
+        while time.time() < deadline:
+            recent = service.get_status()["recent_events"]
+            if recent and recent[0]["type"] == "preflight_deferred":
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(recent[0]["type"], "preflight_deferred")
+        self.assertEqual(recent[0]["details"]["reason"], "active_viewers")
+
+        second_result = service.run_once(force=True)
+        self.assertTrue(second_result["success"])
+        self.assertEqual(second_result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            recent = service.get_status()["recent_events"]
+            if recent and recent[0]["type"] == "preflight_completed":
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(len(checker.calls), 2)
+        self.assertEqual(recent[0]["type"], "preflight_completed")
+        self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 1)
 
     def test_no_streams_records_no_streams_without_launching_check(self):
         checker = FakeChecker()

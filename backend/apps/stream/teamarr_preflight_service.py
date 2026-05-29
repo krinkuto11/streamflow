@@ -31,6 +31,11 @@ MAX_EVENTS = 120
 
 READY_SYNC_STATES = {"in_sync", "synced", "ready"}
 DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME = "Teamarr Event Preflight"
+CONTROLLED_CHECK_DEFERRAL_REASONS = {
+    "active_viewers",
+    "max_streams_reached",
+    "connectivity_guard",
+}
 DEFAULT_TEAMARR_PREFLIGHT_PROFILE: Dict[str, Any] = {
     "name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
     "description": (
@@ -587,6 +592,20 @@ class TeamarrPreflightService:
                 is_epg_scheduled=True,
                 forced_profile_id=forced_profile_id,
             )
+            deferral_reason = self._controlled_deferral_reason(result)
+            if deferral_reason:
+                self._clear_attempted(key)
+                self._record_event(
+                    "preflight_deferred",
+                    event,
+                    {
+                        "bucket": event.get("trigger_bucket"),
+                        "reason": deferral_reason,
+                        "stats": self._public_check_stats(result.get("stats")),
+                    },
+                )
+                return
+
             event_type = "preflight_completed" if result.get("success") else "preflight_failed"
             self._record_event(
                 event_type,
@@ -658,6 +677,10 @@ class TeamarrPreflightService:
         with self._lock:
             self._attempted_buckets[attempted_key] = self.clock()
 
+    def _clear_attempted(self, key: str) -> None:
+        with self._lock:
+            self._attempted_buckets.pop(key, None)
+
     def _purge_old_attempts(self) -> None:
         cutoff = self.clock() - int(self._config.get("event_cooldown_minutes", 720)) * 60
         for key, timestamp in list(self._attempted_buckets.items()):
@@ -685,6 +708,23 @@ class TeamarrPreflightService:
             payload.get("dispatcharr_channel_id"),
             payload.get("identity"),
         )
+
+    @staticmethod
+    def _controlled_deferral_reason(result: Any) -> Optional[str]:
+        if not isinstance(result, dict):
+            return None
+
+        details = result.get("details") if isinstance(result.get("details"), dict) else {}
+        reason = (
+            result.get("reason")
+            or result.get("skip_reason")
+            or result.get("error")
+            or details.get("skip_reason")
+            or details.get("reason")
+        )
+        if reason in CONTROLLED_CHECK_DEFERRAL_REASONS:
+            return str(reason)
+        return None
 
     @staticmethod
     def _public_check_stats(stats: Any) -> Optional[Dict[str, Any]]:
