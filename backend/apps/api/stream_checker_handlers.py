@@ -305,7 +305,7 @@ def check_single_channel_now_response(
         service = get_stream_checker_service()
         result = service.check_single_channel(channel_id, forced_profile_id=forced_profile_id)
 
-        if result.get("success"):
+        if result.get("success") or result.get("skipped"):
             return jsonify(result), 200
 
         # no_profile: user configuration error — channel has no automation profile.

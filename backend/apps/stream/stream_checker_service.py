@@ -47,6 +47,8 @@ from apps.udi import get_udi_manager
 from apps.stream.dead_streams_tracker import DeadStreamsTracker
 from apps.stream.queue_start import order_channels_for_queue_start
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
+from apps.stream.stream_session_manager import get_session_manager
+from apps.automation.automation_config_manager import get_automation_config_manager
 from apps.core.auth import _refresh_token
 
 # Import channel settings manager
@@ -1495,7 +1497,6 @@ class StreamCheckerService:
         _threshold_config: Dict[str, Any] = {}
 
         try:
-            from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
 
             # Fetch channel data to get group_id (might be fetched already but just in case)
@@ -2524,7 +2525,6 @@ class StreamCheckerService:
         _threshold_config: Dict[str, Any] = {}
 
         try:
-            from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
 
             # Fetch channel data to get group_id (might be fetched already but just in case)
@@ -4181,7 +4181,6 @@ class StreamCheckerService:
             channel_name = channel.get('name', f'Channel {channel_id}')
             
             # Check if channel is in active monitoring session (coordination with monitoring system)
-            from apps.stream.stream_session_manager import get_session_manager
             session_manager = get_session_manager()
             channels_in_monitoring = session_manager.get_channels_in_active_sessions()
             
@@ -4198,7 +4197,6 @@ class StreamCheckerService:
             
             # Check channel settings for matching and checking modes
             # Check channel settings for matching and checking modes via Automation Profiles
-            from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
             
             # channel dict is available in local scope
@@ -4312,11 +4310,16 @@ class StreamCheckerService:
             if current_streams:
                 limit_check_result = self._check_channel_limits(channel_id, channel_name, current_streams)
                 if limit_check_result is not None:
-                    # Convert the internal result format to the single channel check format
+                    # A limit guard skip is an intentional no-op, not a failed
+                    # single-channel check. Returning success keeps callers such
+                    # as the dashboard and managed-event preflight from treating
+                    # viewer/provider protection as an internal error.
+                    skip_reason = limit_check_result.get('skip_reason', 'limits reached')
                     return {
-                        'success': False,
-                        'error': f"Channel check skipped: {limit_check_result.get('skip_reason', 'limits reached')}",
-                        'reason': limit_check_result.get('skip_reason'),
+                        'success': True,
+                        'skipped': True,
+                        'message': f"Channel check skipped: {skip_reason}",
+                        'reason': skip_reason,
                         'channel_id': channel_id,
                         'channel_name': channel_name,
                         'details': limit_check_result

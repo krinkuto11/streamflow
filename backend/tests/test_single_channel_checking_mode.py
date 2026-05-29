@@ -354,6 +354,7 @@ class TestSingleChannelProfileRespected(unittest.TestCase):
 
         with patch('stream_checker_service.fetch_channel_streams', return_value=mock_streams), \
              patch('api_utils.refresh_m3u_playlists'), \
+             patch.object(service, '_require_quality_check_connectivity', return_value=None), \
              patch('automated_stream_manager.AutomatedStreamManager') as mock_asm:
             mock_asm.return_value.discover_and_assign_streams = Mock(return_value={})
             result = service.check_single_channel(channel_id=201)
@@ -367,6 +368,7 @@ class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
 
     def test_handler_returns_400_for_no_profile(self):
         """Handler must return 400 (not 500) when backend signals no_profile."""
+        from flask import Flask
         from apps.api.stream_checker_handlers import check_single_channel_now_response
 
         mock_service = Mock()
@@ -378,10 +380,12 @@ class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
             'channel_name': 'ESPN',
         }
 
-        result = check_single_channel_now_response(
-            payload={'channel_id': 1},
-            get_stream_checker_service=lambda: mock_service,
-        )
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_channel_now_response(
+                payload={'channel_id': 1},
+                get_stream_checker_service=lambda: mock_service,
+            )
 
         # check_single_channel_now_response returns a tuple (response, status_code)
         response, status_code = result if isinstance(result, tuple) else (result, 200)
@@ -390,6 +394,40 @@ class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
         import json as json_mod
         data = json_mod.loads(response.get_data(as_text=True))
         self.assertEqual(data.get('error'), 'no_profile')
+
+    def test_handler_returns_200_for_guard_skip(self):
+        """Handler must not surface intentional guard skips as HTTP 500."""
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_channel_now_response
+
+        mock_service = Mock()
+        mock_service.check_single_channel.return_value = {
+            'success': True,
+            'skipped': True,
+            'reason': 'active_viewers',
+            'message': 'Channel check skipped: active_viewers',
+            'channel_id': 1,
+            'channel_name': 'Das Erste HD',
+            'details': {
+                'skipped': True,
+                'skip_reason': 'active_viewers',
+            },
+        }
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_channel_now_response(
+                payload={'channel_id': 1},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 200)
+
+        import json as json_mod
+        data = json_mod.loads(response.get_data(as_text=True))
+        self.assertTrue(data.get('skipped'))
+        self.assertEqual(data.get('reason'), 'active_viewers')
 
 
 
