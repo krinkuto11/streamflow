@@ -1100,6 +1100,16 @@ class RegexChannelMatcher:
 
 class AutomatedStreamManager:
     """Main automated stream management system."""
+
+    RUN_STAGES = [
+        ("preparing", "Preparing"),
+        ("schedule", "Schedule"),
+        ("m3u_refresh", "M3U Refresh"),
+        ("cache_sync", "Cache Sync"),
+        ("matching", "Matching"),
+        ("quality_check", "Quality Check"),
+        ("finalizing", "Finalizing"),
+    ]
     
     def __init__(self, config_file=None):
         if config_file is None:
@@ -1319,6 +1329,8 @@ class AutomatedStreamManager:
         return {
             "run_id": run_id,
             "state": state,
+            "status": state,
+            "active": state == "running",
             "stage": stage,
             "stage_label": stage_label,
             "message": message,
@@ -1330,16 +1342,36 @@ class AutomatedStreamManager:
             "completed_at": None,
             "duration_seconds": None,
             "stage_duration_seconds": None,
+            "elapsed_seconds": 0,
+            "stage_elapsed_seconds": 0,
+            "current": 0,
+            "total": None,
+            "percent": 0,
             "progress": {
                 "current": 0,
                 "total": None,
                 "percent": 0,
                 "message": "",
             },
+            "stages": [
+                {
+                    "key": key,
+                    "label": label,
+                    "status": "running" if key == stage and state == "running" else "pending",
+                    "current": 0,
+                    "total": None,
+                    "percent": 0,
+                    "message": message if key == stage else "",
+                }
+                for key, label in self.RUN_STAGES
+            ],
             "counts": {},
             "durations": {},
             "last_error": None,
         }
+
+    def _stage_label(self, stage_key: str) -> str:
+        return dict(self.RUN_STAGES).get(stage_key, stage_key.replace("_", " ").title())
 
     def _ensure_run_status_fields(self) -> None:
         if not hasattr(self, "_run_status_lock"):
@@ -1355,7 +1387,7 @@ class AutomatedStreamManager:
                 message="No automation cycle has run yet",
             )
 
-    def _start_run_status(self, *, forced: bool, forced_period_id: Optional[str]) -> None:
+    def _start_run_status(self, *, forced: bool = False, forced_period_id: Optional[str] = None) -> None:
         self._ensure_run_status_fields()
         with self._run_status_lock:
             self._run_sequence += 1
@@ -1389,6 +1421,8 @@ class AutomatedStreamManager:
             previous_stage = status.get("stage")
             if state:
                 status["state"] = state
+                status["status"] = state
+                status["active"] = state == "running"
             if stage:
                 status["stage"] = stage
                 if stage != previous_stage:
@@ -1429,6 +1463,7 @@ class AutomatedStreamManager:
                 try:
                     started = datetime.fromisoformat(started_at)
                     status["duration_seconds"] = round((now - started).total_seconds(), 3)
+                    status["elapsed_seconds"] = int((now - started).total_seconds())
                 except (TypeError, ValueError):
                     pass
             stage_started_at = status.get("stage_started_at")
@@ -1436,8 +1471,54 @@ class AutomatedStreamManager:
                 try:
                     stage_started = datetime.fromisoformat(stage_started_at)
                     status["stage_duration_seconds"] = round((now - stage_started).total_seconds(), 3)
+                    status["stage_elapsed_seconds"] = int((now - stage_started).total_seconds())
                 except (TypeError, ValueError):
                     pass
+    def _update_run_stage(
+        self,
+        stage_key: str,
+        *,
+        message: str = "",
+        current: int = 0,
+        total: Optional[int] = None,
+        status: str = "running",
+    ) -> None:
+        stage_keys = [key for key, _label in self.RUN_STAGES]
+        stage_index = stage_keys.index(stage_key) if stage_key in stage_keys else -1
+        percent = int((current / total) * 100) if total else 0
+        percent = max(0, min(100, percent))
+        state = status if status not in {"running", "completed", "skipped"} else "running"
+
+        self._update_run_status(
+            stage=stage_key,
+            stage_label=self._stage_label(stage_key),
+            message=message,
+            state=state,
+        )
+
+        with self._run_status_lock:
+            self._run_status["current"] = current
+            self._run_status["total"] = total
+            self._run_status["percent"] = percent
+            self._run_status["progress"] = {
+                "current": current,
+                "total": total,
+                "percent": percent,
+                "message": message,
+            }
+            for idx, stage in enumerate(self._run_status.get("stages", [])):
+                if stage_index >= 0 and idx < stage_index and stage["status"] in {"pending", "running"}:
+                    stage.update({"status": "completed", "percent": 100})
+                elif idx == stage_index:
+                    stage.update(
+                        {
+                            "status": status,
+                            "current": current,
+                            "total": total,
+                            "percent": percent,
+                            "message": message,
+                        }
+                    )
 
     def _update_run_progress(
         self,
@@ -1447,52 +1528,98 @@ class AutomatedStreamManager:
         total: Optional[int] = None,
         message: Optional[str] = None,
     ) -> None:
-        progress = {
-            "current": current,
-            "total": total,
-            "message": message,
-        }
-        counts = {}
-        if current is not None:
-            counts["stage_current"] = current
-        if total is not None:
-            counts["stage_total"] = total
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            key = stage_key or self._run_status.get("stage")
+            current_value = self._run_status.get("current", 0) if current is None else current
+            total_value = self._run_status.get("total") if total is None else total
+            percent = int((current_value / total_value) * 100) if total_value else self._run_status.get("percent", 0)
+            percent = max(0, min(100, int(percent or 0)))
+
         self._update_run_status(
-            stage=stage_key,
-            stage_label=stage_key.replace("_", " ").title() if stage_key else None,
+            stage=key,
+            stage_label=self._stage_label(key),
             message=message,
-            counts=counts,
-            progress=progress,
         )
 
-    def _finish_run_status(self, *, state: str, stage: str, stage_label: str, message: str, error: Optional[str] = None) -> None:
+        with self._run_status_lock:
+            self._run_status["current"] = current_value
+            self._run_status["total"] = total_value
+            self._run_status["percent"] = percent
+            if message is not None:
+                self._run_status["message"] = message
+            self._run_status["progress"] = {
+                "current": current_value,
+                "total": total_value,
+                "percent": percent,
+                "message": message or self._run_status.get("message", ""),
+            }
+            for stage in self._run_status.get("stages", []):
+                if stage["key"] == key:
+                    stage.update(
+                        {
+                            "status": "running",
+                            "current": current_value,
+                            "total": total_value,
+                            "percent": percent,
+                        }
+                    )
+                    if message is not None:
+                        stage["message"] = message
+                    break
+
+    def _finish_run_status(
+        self,
+        status: Optional[str] = None,
+        message: str = "",
+        *,
+        state: Optional[str] = None,
+        stage: Optional[str] = None,
+        stage_label: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
         self._ensure_run_status_fields()
         now = datetime.now()
+        final_state = state or status or "completed"
+        final_stage = stage or final_state
+        final_stage_label = stage_label or self._stage_label(final_stage)
         with self._run_status_lock:
-            status = self._run_status
-            status["state"] = state
-            status["stage"] = stage
-            status["stage_label"] = stage_label
-            status["message"] = message
-            status["updated_at"] = now.isoformat()
-            status["completed_at"] = now.isoformat()
+            status_data = self._run_status
+            active_stage = status_data.get("stage")
+            status_data["state"] = final_state
+            status_data["status"] = final_state
+            status_data["active"] = False
+            status_data["stage"] = final_stage
+            status_data["stage_label"] = final_stage_label
+            status_data["message"] = message
+            status_data["updated_at"] = now.isoformat()
+            status_data["completed_at"] = now.isoformat()
             if error is not None:
-                status["last_error"] = error
+                status_data["last_error"] = error
 
-            started_at = status.get("started_at")
+            started_at = status_data.get("started_at")
             if started_at:
                 try:
                     started = datetime.fromisoformat(started_at)
-                    status["duration_seconds"] = round((now - started).total_seconds(), 3)
+                    duration = (now - started).total_seconds()
+                    status_data["duration_seconds"] = round(duration, 3)
+                    status_data["elapsed_seconds"] = int(duration)
                 except (TypeError, ValueError):
                     pass
-            stage_started_at = status.get("stage_started_at")
+            stage_started_at = status_data.get("stage_started_at")
             if stage_started_at:
                 try:
                     stage_started = datetime.fromisoformat(stage_started_at)
-                    status["stage_duration_seconds"] = round((now - stage_started).total_seconds(), 3)
+                    stage_duration = (now - stage_started).total_seconds()
+                    status_data["stage_duration_seconds"] = round(stage_duration, 3)
+                    status_data["stage_elapsed_seconds"] = int(stage_duration)
                 except (TypeError, ValueError):
                     pass
+            for stage_item in status_data.get("stages", []):
+                if final_state == "completed" and stage_item["status"] == "pending":
+                    stage_item["status"] = "skipped"
+                if stage_item["key"] == active_stage and stage_item["status"] == "running":
+                    stage_item["status"] = "completed" if final_state == "completed" else final_state
 
     @staticmethod
     def _summarize_quality_check_results(check_results, expected_count: int) -> Dict[str, Any]:

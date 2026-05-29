@@ -204,22 +204,26 @@ class UDIManager:
             True if initialization successful
         """
         # 1. State check with lock
+        wait_for_existing_init = False
         with self._lock:
             if self._initialized and not force_refresh:
                 logger.debug("UDI Manager already initialized")
                 return True
 
             if self._init_in_progress:
-                logger.debug("UDI Manager initialization already in progress in another thread")
-                return True
+                logger.info("UDI Manager initialization already in progress; waiting for completion")
+                wait_for_existing_init = True
+            else:
+                config = get_dispatcharr_config()
+                if not config.is_configured():
+                    logger.warning("Cannot initialize UDI: Dispatcharr credentials not configured")
+                    self._initialized = True
+                    return False
 
-            config = get_dispatcharr_config()
-            if not config.is_configured():
-                logger.warning("Cannot initialize UDI: Dispatcharr credentials not configured")
-                self._initialized = True
-                return False
+                self._init_in_progress = True
 
-            self._init_in_progress = True
+        if wait_for_existing_init:
+            return self._wait_for_initialization_completion(force_refresh=force_refresh)
 
         # 2. Fetch fresh data from API (OUTSIDE Lock)
         logger.debug("Fetching fresh data from API...")
@@ -235,6 +239,24 @@ class UDIManager:
         finally:
             with self._lock:
                 self._init_in_progress = False
+
+    def _wait_for_initialization_completion(self, *, force_refresh: bool, timeout_seconds: int = 300) -> bool:
+        """Wait for a concurrent initialization instead of reporting success early."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            with self._lock:
+                if not self._init_in_progress:
+                    if force_refresh:
+                        return bool(
+                            self._initialized
+                            and self._network_ready
+                            and self._init_progress.get("status") == "completed"
+                        )
+                    return bool(self._initialized)
+            time.sleep(0.25)
+
+        logger.warning("Timed out waiting for concurrent UDI initialization to complete")
+        return False
     
     def _build_indexes(self) -> None:
         """Build index caches for fast lookups."""
