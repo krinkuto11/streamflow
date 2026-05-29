@@ -147,16 +147,7 @@ def get_automation_status_response(
         stream_checking_enabled = any(
             profile.get("stream_checking", {}).get("enabled", False) for profile in profiles
         )
-        run_status = manager.get_run_status() if hasattr(manager, "get_run_status") else None
-        udi_status = None
-        try:
-            from apps.udi import get_udi_manager
-
-            udi = get_udi_manager()
-            if hasattr(udi, "get_observability_status"):
-                udi_status = udi.get_observability_status()
-        except Exception as exc:
-            logger.debug(f"Could not collect UDI observability status: {exc}")
+        run_progress = manager.get_run_status() if hasattr(manager, "get_run_status") else None
 
         return (
             jsonify(
@@ -168,8 +159,7 @@ def get_automation_status_response(
                     ),
                     "profiles_count": profiles_count,
                     "stream_checking_enabled": stream_checking_enabled,
-                    "run_status": run_status,
-                    "udi_status": udi_status,
+                    "run_progress": run_progress,
                 }
             ),
             200,

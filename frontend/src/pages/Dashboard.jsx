@@ -24,32 +24,15 @@ import {
 } from '@/components/ui/dropdown-menu.jsx'
 import UpcomingAutomationEvents from '@/components/Dashboard/UpcomingAutomationEvents.jsx'
 
-const AUTOMATION_STAGES = [
-  { id: 'settings', label: 'Preparing' },
-  { id: 'period_discovery', label: 'Schedule' },
-  { id: 'm3u_refresh', label: 'M3U Refresh' },
-  { id: 'udi_sync', label: 'Cache Sync' },
-  { id: 'stream_matching', label: 'Matching' },
-  { id: 'quality_queueing', label: 'Queueing' },
-  { id: 'quality_checking', label: 'Quality Check' },
-  { id: 'finalizing', label: 'Finalizing' },
-]
+function formatDuration(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const remainingSeconds = total % 60
 
-const formatDuration = (seconds) => {
-  const value = Number(seconds)
-  if (!Number.isFinite(value) || value < 0) return 'N/A'
-  if (value < 1) return `${Math.round(value * 1000)}ms`
-  if (value < 60) return `${value.toFixed(value >= 10 ? 0 : 1)}s`
-  const minutes = Math.floor(value / 60)
-  const remaining = Math.round(value % 60)
-  return `${minutes}m ${remaining}s`
-}
-
-const formatTime = (value) => {
-  if (!value) return 'N/A'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return 'N/A'
-  return date.toLocaleTimeString()
+  if (hours > 0) return `${hours}h ${minutes}m ${remainingSeconds}s`
+  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`
+  return `${remainingSeconds}s`
 }
 
 export default function Dashboard() {
@@ -338,6 +321,15 @@ export default function Dashboard() {
     ? completed
     : (runCounts.quality_checked ?? 0)
   const shouldDisableActions = isProcessing || actionLoading !== ''
+  const runProgress = status?.run_progress || {}
+  const showRunProgress = runProgress?.status && runProgress.status !== 'idle'
+  const runStage = runProgress?.stage || 'idle'
+  const runStageProgress = runStage === 'quality_check' && batchTotal > 0
+    ? queueProgress
+    : Number(runProgress?.percent || 0)
+  const runProgressDetail = runProgress?.total
+    ? `${runProgress.current || 0} of ${runProgress.total}`
+    : runProgress?.message || 'Waiting for progress'
 
   const syncStatus = udiStats?.syncStatus
   const syncBadgeClass =
@@ -368,133 +360,82 @@ export default function Dashboard() {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1">
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <ListChecks className="h-5 w-5 text-muted-foreground" />
-              Automation Run
-            </CardTitle>
-            <CardDescription>
-              {runStatus.message || 'Waiting for automation activity'}
-            </CardDescription>
-          </div>
-          <Badge variant="outline" className={`w-fit gap-1 ${runBadgeClass}`}>
-            {runningRun && <Loader2 className="h-3 w-3 animate-spin" />}
-            {failedRun && <AlertCircle className="h-3 w-3" />}
-            {completedRun && <CheckCircle2 className="h-3 w-3" />}
-            {skippedRun ? 'Skipped' : runningRun ? 'Running' : completedRun ? 'Completed' : failedRun ? 'Failed' : 'Idle'}
-          </Badge>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Activity className="h-3.5 w-3.5" />
-                Current Stage
+      {showRunProgress && (
+        <Card>
+          <CardHeader className="space-y-1">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <CardTitle>Automation Run</CardTitle>
+                <CardDescription>{runProgress.message || 'Automation run status'}</CardDescription>
               </div>
-              <div className="mt-1 truncate text-lg font-semibold">{runStageLabel}</div>
+              <Badge
+                variant={runProgress.status === 'completed' ? 'default' : runProgress.status === 'failed' ? 'destructive' : 'outline'}
+                className="w-fit"
+              >
+                {runProgress.status}
+              </Badge>
             </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Clock3 className="h-3.5 w-3.5" />
-                Updated
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 md:grid-cols-4">
+              <div className="rounded-md border p-3">
+                <Label className="text-xs text-muted-foreground">Current Stage</Label>
+                <div className="mt-1 text-xl font-semibold">{runProgress.stage_label || 'Idle'}</div>
               </div>
-              <div className="mt-1 text-lg font-semibold">{formatTime(runStatus.updated_at)}</div>
-            </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Timer className="h-3.5 w-3.5" />
-                Duration
+              <div className="rounded-md border p-3">
+                <Label className="text-xs text-muted-foreground">Elapsed</Label>
+                <div className="mt-1 text-xl font-semibold">{formatDuration(runProgress.elapsed_seconds)}</div>
               </div>
-              <div className="mt-1 text-lg font-semibold">{formatDuration(runStatus.duration_seconds)}</div>
-            </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Database className="h-3.5 w-3.5" />
-                API p95 / p99
+              <div className="rounded-md border p-3">
+                <Label className="text-xs text-muted-foreground">Stage Time</Label>
+                <div className="mt-1 text-xl font-semibold">{formatDuration(runProgress.stage_elapsed_seconds)}</div>
               </div>
-              <div className="mt-1 text-lg font-semibold">
-                {apiTiming.p95_seconds != null ? formatDuration(apiTiming.p95_seconds) : 'N/A'}
-                <span className="mx-1 text-muted-foreground">/</span>
-                {apiTiming.p99_seconds != null ? formatDuration(apiTiming.p99_seconds) : 'N/A'}
+              <div className="rounded-md border p-3">
+                <Label className="text-xs text-muted-foreground">Progress</Label>
+                <div className="mt-1 text-xl font-semibold">{Math.round(runStageProgress)}%</div>
               </div>
             </div>
-          </div>
 
-          <div className="grid gap-2 md:grid-cols-4 lg:grid-cols-8">
-            {AUTOMATION_STAGES.map((stage, index) => {
-              const isCurrent = stage.id === runStage
-              const isDone = completedRun || (runningRun && currentStageIndex >= 0 && index < currentStageIndex)
-              const stageClass = isCurrent
-                ? 'border-primary bg-primary/10 text-primary'
-                : isDone
-                  ? 'border-green-500/50 bg-green-500/10 text-green-600 dark:text-green-400'
-                  : 'border-border bg-background text-muted-foreground'
-              return (
-                <div key={stage.id} className={`rounded-md border px-3 py-2 text-xs font-medium ${stageClass}`}>
-                  <div className="flex items-center gap-2">
-                    {isCurrent && runningRun ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : isDone ? (
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                    ) : (
-                      <Activity className="h-3.5 w-3.5" />
-                    )}
-                    <span className="truncate">{stage.label}</span>
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+                <span className="text-muted-foreground">{runProgressDetail}</span>
+                {runStage === 'quality_check' && batchTotal > 0 && (
+                  <span className="text-muted-foreground">
+                    {completed} of {batchTotal} quality checks
+                  </span>
+                )}
+              </div>
+              <Progress value={runStageProgress} className="h-2" />
+            </div>
+
+            <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-7">
+              {(runProgress.stages || []).map(stage => (
+                <div
+                  key={stage.key}
+                  className={`rounded-md border px-3 py-2 ${
+                    stage.status === 'running'
+                      ? 'border-primary bg-primary/10'
+                      : stage.status === 'completed'
+                        ? 'border-green-500/60 bg-green-500/10'
+                        : stage.status === 'failed'
+                          ? 'border-destructive/70 bg-destructive/10'
+                          : ''
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-sm font-medium">{stage.label}</span>
+                    {stage.status === 'running' && <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />}
+                    {stage.status === 'completed' && <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />}
+                  </div>
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {stage.total ? `${stage.current || 0}/${stage.total}` : stage.status}
                   </div>
                 </div>
-              )
-            })}
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Channels</div>
-              <div className="text-xl font-semibold">{runCounts.channels_with_periods ?? 0}</div>
+              ))}
             </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Playlists</div>
-              <div className="text-xl font-semibold">{runCounts.refreshed_playlists ?? 0}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Matched</div>
-              <div className="text-xl font-semibold">{runCounts.assigned_channels ?? 0}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Checked</div>
-              <div className="text-xl font-semibold">{qualityCheckedCount}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Dead</div>
-              <div className="text-xl font-semibold">{runCounts.dead_streams ?? 0}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Blank</div>
-              <div className="text-xl font-semibold">{runCounts.blank_streams ?? 0}</div>
-            </div>
-          </div>
-
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">M3U Refresh</div>
-              <div className="text-base font-semibold">{formatDuration(runDurations.m3u_refresh_seconds)}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Cache Sync</div>
-              <div className="text-base font-semibold">{formatDuration(runDurations.udi_sync_seconds)}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Stream Matching</div>
-              <div className="text-base font-semibold">{formatDuration(runDurations.stream_matching_seconds)}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Quality Check</div>
-              <div className="text-base font-semibold">{formatDuration(runDurations.quality_check_seconds)}</div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Status Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
