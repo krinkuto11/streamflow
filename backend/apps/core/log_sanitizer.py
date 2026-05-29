@@ -1,17 +1,25 @@
 """Small helpers for URL/name-safe operational logging."""
 
 import hashlib
+import os
 import re
 from typing import Any, Optional
 
 
 _URL_RE = re.compile(r"(?i)\b(?:https?|rtmps?|rtsp|rtp|udp|tcp|acestream)://[^\s'\"<>]+")
+_TRUE_VALUES = {"true", "1", "yes", "on"}
+
+
+def debug_mode_enabled() -> bool:
+    return os.getenv("DEBUG_MODE", "false").strip().lower() in _TRUE_VALUES
 
 
 def audit_ref(kind: str, value: Any) -> str:
     """Return a stable, non-reversible reference for a logged object."""
     if value is None or value == "":
         return f"{kind}-unknown"
+    if debug_mode_enabled():
+        return f"{kind}-{value}"
     digest = hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()[:12]
     return f"{kind}-{digest}"
 
@@ -35,6 +43,8 @@ def url_ref(url: Optional[str]) -> str:
 def scrub_urls(message: Any) -> str:
     """Replace raw stream/API URLs inside a log message with stable URL refs."""
     text = str(message)
+    if debug_mode_enabled():
+        return text
 
     def _replace(match: re.Match) -> str:
         return f"<{url_ref(match.group(0))}>"
