@@ -51,7 +51,7 @@ class TestProxyStatusIntegration(unittest.TestCase):
         
         # Test channels
         self.udi._channels_cache = [
-            {'id': 100, 'name': 'Channel 100', 'streams': [1, 2]},
+            {'id': 100, 'uuid': 'channel-100-uuid', 'name': 'Channel 100', 'streams': [1, 2]},
             {'id': 101, 'name': 'Channel 101', 'streams': [3]},
             {'id': 102, 'name': 'Channel 102', 'streams': [4]},
             {'id': 103, 'name': 'Channel 103', 'streams': [5, 6]},
@@ -74,6 +74,7 @@ class TestProxyStatusIntegration(unittest.TestCase):
         
         # Build stream index
         self.udi._streams_by_id = {s['id']: s for s in self.udi._streams_cache}
+        self.udi._build_indexes()
     
     def test_count_active_streams_with_proxy_status(self):
         """Test counting active streams using proxy status."""
@@ -83,12 +84,14 @@ class TestProxyStatusIntegration(unittest.TestCase):
                 'channel_id': 100,
                 'current_stream': 'http://example.com/stream1',
                 'active': True,
+                'm3u_profile_id': 101,
                 'clients': [{'id': 'client1'}]
             },
             '102': {
                 'channel_id': 102,
                 'current_stream': 'http://example.com/stream4',
                 'active': True,
+                'm3u_profile_id': 201,
                 'clients': [{'id': 'client2'}]
             }
         }
@@ -119,10 +122,10 @@ class TestProxyStatusIntegration(unittest.TestCase):
         """Test counting when all channels are active."""
         # Mock proxy status showing all channels active
         mock_proxy_status = {
-            '100': {'channel_id': 100, 'active': True},
-            '101': {'channel_id': 101, 'active': True},
-            '102': {'channel_id': 102, 'active': True},
-            '103': {'channel_id': 103, 'active': True},
+            '100': {'channel_id': 100, 'active': True, 'm3u_profile_id': 101},
+            '101': {'channel_id': 101, 'active': True, 'm3u_profile_id': 101},
+            '102': {'channel_id': 102, 'active': True, 'm3u_profile_id': 201},
+            '103': {'channel_id': 103, 'active': True, 'm3u_profile_id': 201},
         }
         
         with patch.object(self.udi.fetcher, 'fetch_proxy_status', return_value=mock_proxy_status):
@@ -202,6 +205,7 @@ class TestProxyStatusIntegration(unittest.TestCase):
         mock_proxy_status = {
             '100': {
                 'channel_id': 100,
+                'm3u_profile_id': 101,
                 'clients': [
                     {'id': 'client1', 'connected': True},
                     {'id': 'client2', 'connected': True}
@@ -307,6 +311,42 @@ class TestProxyStatusIntegration(unittest.TestCase):
         with patch.object(self.udi.fetcher, 'fetch_proxy_status', return_value=mock_proxy_status):
             is_active = self.udi.is_channel_active(100)
             self.assertFalse(is_active, "Channel 100 should not be active when state is not 'active'")
+
+    def test_is_channel_active_with_uuid_keyed_proxy_status(self):
+        """Test UUID-keyed Dispatcharr proxy status still protects numeric channel IDs."""
+        mock_proxy_status = {
+            'channel-100-uuid': {
+                'channel_id': 'channel-100-uuid',
+                'state': 'active',
+                'clients': [{'id': 'client1'}],
+            }
+        }
+
+        with patch.object(self.udi.fetcher, 'fetch_proxy_status', return_value=mock_proxy_status):
+            self.assertTrue(
+                self.udi.is_channel_active(100),
+                "Channel 100 should be active when proxy status is keyed by channel UUID",
+            )
+            self.assertFalse(
+                self.udi.is_channel_active(101),
+                "Channel 101 should not be active when UUID belongs to channel 100",
+            )
+
+    def test_is_channel_active_with_uuid_value_under_unrelated_key(self):
+        """Test matching by status payload UUID when the proxy key is not numeric."""
+        mock_proxy_status = {
+            'proxy-entry-1': {
+                'channel_uuid': 'channel-100-uuid',
+                'state': 'active',
+                'client_count': 1,
+            }
+        }
+
+        with patch.object(self.udi.fetcher, 'fetch_proxy_status', return_value=mock_proxy_status):
+            self.assertTrue(
+                self.udi.is_channel_active(100),
+                "Channel 100 should be active when proxy payload contains its UUID",
+            )
 
 
 if __name__ == '__main__':

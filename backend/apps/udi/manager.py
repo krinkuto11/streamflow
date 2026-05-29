@@ -1738,13 +1738,52 @@ class UDIManager:
         # Get real-time proxy status
         proxy_status = self._get_proxy_status()
         
-        # Check if this channel is in the proxy status
+        # Dispatcharr proxy status has existed in both numeric-ID keyed and
+        # UUID-keyed shapes. Match both so active viewers reliably protect the
+        # channel from quality checks.
         channel_id_str = str(channel_id)
-        if channel_id_str in proxy_status:
-            status = proxy_status[channel_id_str]
+        channel = self._channels_by_id.get(channel_id)
+        channel_uuid = None
+        if isinstance(channel, dict):
+            channel_uuid = channel.get('uuid') or channel.get('channel_uuid')
+            if channel_uuid is not None:
+                channel_uuid = str(channel_uuid)
+
+        candidate_keys = {channel_id_str}
+        if channel_uuid:
+            candidate_keys.add(channel_uuid)
+
+        for key in candidate_keys:
+            if key not in proxy_status:
+                continue
+            status = proxy_status[key]
             is_active = self._is_channel_status_active(status)
-            logger.debug(f"Channel {channel_id} is {'active' if is_active else 'inactive'} (from proxy status)")
+            logger.debug(
+                f"Channel {channel_id} is {'active' if is_active else 'inactive'} "
+                f"(from proxy status key {key})"
+            )
             return is_active
+
+        for key, status in proxy_status.items():
+            if not isinstance(status, dict):
+                continue
+            status_identifiers = {
+                str(value)
+                for value in (
+                    status.get('channel_id'),
+                    status.get('channel_uuid'),
+                    status.get('uuid'),
+                    status.get('id'),
+                )
+                if value not in (None, '')
+            }
+            if channel_id_str in status_identifiers or (channel_uuid and channel_uuid in status_identifiers):
+                is_active = self._is_channel_status_active(status)
+                logger.debug(
+                    f"Channel {channel_id} is {'active' if is_active else 'inactive'} "
+                    f"(from proxy status entry {key})"
+                )
+                return is_active
         
         logger.debug(f"Channel {channel_id} is not in proxy status, assuming inactive")
         return False

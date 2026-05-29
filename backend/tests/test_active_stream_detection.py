@@ -43,6 +43,7 @@ class TestActiveStreamDetection(unittest.TestCase):
                 ]
             }
         ]
+        self.manager._build_indexes()
     
     def test_count_active_streams_with_profile_correlation(self):
         """Test counting active streams using m3u_profile_id from proxy status."""
