@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { getDashboardRunCounts } from '@/lib/dashboard-run-counts.js'
 import { getStreamCheckerRunDisplay } from '@/lib/dashboard-run-display.js'
 import { formatDuration as formatDurationValue } from '@/lib/time-format.js'
 import {
@@ -431,17 +432,13 @@ export default function Dashboard() {
   const displayRunStageElapsedSeconds = streamRunActive
     ? streamCheckerElapsedSeconds
     : (runStatus.stage_elapsed_seconds ?? runProgress.stage_elapsed_seconds ?? liveStageDurationSeconds)
-  const qualityCheckedCount = streamQueueActive
-    ? completed
-    : (runCounts.quality_checked ?? 0)
-  const displayRunCounts = {
-    channels: streamQueueActive ? batchTotal : (runCounts.channels_with_periods ?? 0),
-    playlists: runCounts.refreshed_playlists ?? 0,
-    matched: runCounts.assigned_channels ?? 0,
-    checked: qualityCheckedCount,
-    dead: runCounts.dead_streams ?? 0,
-    blank: runCounts.blank_streams ?? 0,
-  }
+  const displayRunCounts = getDashboardRunCounts({
+    streamCheckerStatus,
+    streamQueueActive,
+    batchTotal,
+    completed,
+    runCounts,
+  })
   const runBadgeClass = failedRun
     ? 'bg-destructive text-destructive-foreground border-transparent'
     : completedRun
@@ -590,7 +587,7 @@ export default function Dashboard() {
               })}
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">Channels</div>
                 <div className="text-xl font-semibold">{displayRunCounts.channels}</div>
@@ -614,6 +611,10 @@ export default function Dashboard() {
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">Blank</div>
                 <div className="text-xl font-semibold">{displayRunCounts.blank}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Freeze</div>
+                <div className="text-xl font-semibold">{displayRunCounts.freeze}</div>
               </div>
             </div>
 

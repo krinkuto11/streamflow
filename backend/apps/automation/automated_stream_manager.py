@@ -3785,6 +3785,7 @@ class AutomatedStreamManager:
                 'streams_analyzed': 0,
                 'dead_streams': 0,
                 'blank_streams': 0,
+                'freeze_streams': 0,
                 'streams_revived': 0,
                 'added_streams': 0,
                 'removed_streams': 0,
@@ -3801,6 +3802,7 @@ class AutomatedStreamManager:
             streams_analyzed_count = 0
             dead_streams_count = 0
             blank_streams_count = 0
+            freeze_streams_count = 0
             revived_streams_count = 0
             added_streams_count = 0
             removed_streams_count = 0
@@ -3877,9 +3879,14 @@ class AutomatedStreamManager:
                             1 for stream in c_result.get('checked_streams', [])
                             if stream.get('blank_detected') is True
                         )
+                        ch_freeze = sum(
+                            1 for stream in c_result.get('checked_streams', [])
+                            if stream.get('freeze_detected') is True
+                        )
                         
                         dead_streams_count += ch_dead
                         blank_streams_count += ch_blank
+                        freeze_streams_count += ch_freeze
                         revived_streams_count += ch_revived
                         streams_analyzed_count += ch_analyzed
                         
@@ -3901,6 +3908,7 @@ class AutomatedStreamManager:
                             'details': {
                                 'dead_streams_count': ch_dead,
                                 'blank_streams_count': ch_blank,
+                                'freeze_streams_count': ch_freeze,
                                 'revived_streams_count': ch_revived,
                                 'skipped_streams_count': len(c_result.get('skipped_streams', [])),
                                 'dead_streams': c_result.get('dead_streams', []),
@@ -3934,7 +3942,8 @@ class AutomatedStreamManager:
                                 if not cs.get('from_cache', False):
                                     active_checks += 1
                                     
-                            if d.get('dead_streams_count', 0) > 0 or d.get('revived_streams_count', 0) > 0 \
+                            if d.get('dead_streams_count', 0) > 0 or d.get('blank_streams_count', 0) > 0 \
+                               or d.get('freeze_streams_count', 0) > 0 or d.get('revived_streams_count', 0) > 0 \
                                or active_checks > 0:
                                 has_impact = True
 
@@ -3956,6 +3965,7 @@ class AutomatedStreamManager:
             run_results['streams_analyzed'] = streams_analyzed_count
             run_results['dead_streams'] = dead_streams_count
             run_results['blank_streams'] = blank_streams_count
+            run_results['freeze_streams'] = freeze_streams_count
             run_results['streams_revived'] = revived_streams_count
             run_results['added_streams'] = added_streams_count
             run_results['removed_streams'] = removed_streams_count
@@ -3991,6 +4001,7 @@ class AutomatedStreamManager:
                     "streams_analyzed": streams_analyzed_count,
                     "dead_streams": dead_streams_count,
                     "blank_streams": blank_streams_count,
+                    "freeze_streams": freeze_streams_count,
                     "streams_revived": revived_streams_count,
                     "added_streams": added_streams_count,
                     "removed_streams": removed_streams_count,

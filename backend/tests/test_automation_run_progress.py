@@ -106,3 +106,18 @@ def test_automation_duration_start_variables_are_defined_before_use():
     ]
 
     assert missing == []
+
+
+def test_automation_run_status_tracks_freeze_stream_counts():
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "apps"
+        / "automation"
+        / "automated_stream_manager.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "'freeze_streams': 0" in source
+    assert "freeze_streams_count += ch_freeze" in source
+    assert "'freeze_streams_count': ch_freeze" in source
+    assert '"freeze_streams": freeze_streams_count' in source
