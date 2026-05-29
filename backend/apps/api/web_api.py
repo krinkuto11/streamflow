@@ -158,6 +158,7 @@ from apps.api.teamarr_preflight_handlers import (
     stop_teamarr_preflight_response,
     update_teamarr_preflight_config_response,
 )
+from apps.api.viewer_activity_handlers import get_viewer_activity_status_response
 from apps.api.scheduling_handlers import (
     create_auto_create_rule_response,
     create_scheduled_event_response,
@@ -1348,6 +1349,17 @@ def run_shadow_blank_monitor_once():
     """Run one active-viewer shadow blank monitor scan."""
     return run_shadow_blank_monitor_once_response(
         get_service=get_shadow_blank_monitor_service,
+    )
+
+
+# ===== Viewer Activity Endpoints =====
+
+@app.route('/api/viewer-activity/status', methods=['GET'])
+def get_viewer_activity_status():
+    """Get active real-client and watcher-client playback status."""
+    return get_viewer_activity_status_response(
+        get_udi_manager=get_udi_manager,
+        get_shadow_monitor_service=get_shadow_blank_monitor_service,
     )
 
 

@@ -8,12 +8,12 @@ import { Alert, AlertDescription } from '@/components/ui/alert.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
-import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
 import { formatDuration as formatDurationValue } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
   Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
-  Clock3, AlertCircle, ListChecks, Timer, Eye
+  Clock3, AlertCircle, ListChecks, Timer, Eye, Users
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -68,6 +68,7 @@ export default function Dashboard() {
   const [automationConfig, setAutomationConfig] = useState(null)
   const [streamCheckerStatus, setStreamCheckerStatus] = useState(null)
   const [shadowMonitorStatus, setShadowMonitorStatus] = useState(null)
+  const [viewerActivityStatus, setViewerActivityStatus] = useState(null)
   const [playlists, setPlaylists] = useState([])
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
@@ -93,16 +94,18 @@ export default function Dashboard() {
 
   const loadStatus = async () => {
     try {
-      const [automationResponse, streamCheckerResponse, automationConfigResponse, shadowMonitorResponse] = await Promise.all([
+      const [automationResponse, streamCheckerResponse, automationConfigResponse, shadowMonitorResponse, viewerActivityResponse] = await Promise.all([
         automationAPI.getStatus(),
         streamCheckerAPI.getStatus(),
         automationAPI.getConfig(),
         shadowBlankMonitorAPI.getStatus().catch(() => ({ data: null })),
+        viewerActivityAPI.getStatus().catch(() => ({ data: null })),
       ])
       setStatus(automationResponse.data)
       setStreamCheckerStatus(streamCheckerResponse.data)
       setAutomationConfig(automationConfigResponse.data || {})
       setShadowMonitorStatus(shadowMonitorResponse.data)
+      setViewerActivityStatus(viewerActivityResponse.data)
     } catch (err) {
       console.error('Failed to load status:', err)
       toast({
@@ -373,6 +376,13 @@ export default function Dashboard() {
   const shouldDisableActions = isProcessing || actionLoading !== ''
   const shadowWatchedCount = shadowMonitorStatus?.watched_count || shadowMonitorStatus?.watched_channels?.length || 0
   const shadowLastEvent = shadowMonitorStatus?.recent_events?.[0]
+  const viewerChannels = viewerActivityStatus?.channels || []
+  const realWatchedCount = viewerActivityStatus?.real_watched_count || 0
+  const watcherOnlyCount = viewerActivityStatus?.watcher_only_count || 0
+  const totalRealClients = viewerActivityStatus?.total_real_clients || 0
+  const totalWatcherClients = viewerActivityStatus?.total_watcher_clients || 0
+  const visibleViewerChannels = viewerChannels.slice(0, 6)
+  const hiddenViewerChannelCount = Math.max(0, viewerChannels.length - visibleViewerChannels.length)
 
   const syncStatus = udiStats?.syncStatus
   const syncBadgeClass =
@@ -635,6 +645,91 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-1">
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Users className="h-5 w-5 text-muted-foreground" />
+              Watched Channels
+            </CardTitle>
+            <CardDescription>Current real-client and watcher playback</CardDescription>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant={realWatchedCount > 0 ? 'default' : 'secondary'}>
+              {realWatchedCount} real
+            </Badge>
+            <Badge variant={watcherOnlyCount > 0 ? 'outline' : 'secondary'}>
+              {watcherOnlyCount} watcher only
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Real Clients</div>
+              <div className="mt-1 text-2xl font-semibold">{totalRealClients}</div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Watcher Clients</div>
+              <div className="mt-1 text-2xl font-semibold">{totalWatcherClients}</div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Active Channels</div>
+              <div className="mt-1 text-2xl font-semibold">{viewerChannels.length}</div>
+            </div>
+          </div>
+
+          {viewerChannels.length === 0 ? (
+            <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+              No active channel playback detected
+            </div>
+          ) : (
+            <div className="grid gap-2 lg:grid-cols-2 xl:grid-cols-3">
+              {visibleViewerChannels.map((channel) => (
+                <div
+                  key={`${channel.channel_uuid || channel.channel_id}-${channel.stream_id || 'stream'}`}
+                  className="rounded-md border bg-background p-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{channel.channel_name || 'Unknown Channel'}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {channel.state || 'active'}
+                        {channel.stream_id ? ` · Stream ${channel.stream_id}` : ''}
+                      </div>
+                    </div>
+                    {channel.has_real_clients ? (
+                      <Badge className="shrink-0 bg-green-600 text-white">Watched</Badge>
+                    ) : (
+                      <Badge variant="outline" className="shrink-0">Watcher</Badge>
+                    )}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                    <Badge variant="secondary">{channel.real_client_count || 0} real</Badge>
+                    <Badge variant="outline">{channel.watcher_client_count || 0} watcher</Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {hiddenViewerChannelCount > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {hiddenViewerChannelCount} more active channels are not shown in this summary
+            </p>
+          )}
+
+          {viewerChannels.length > 0 && realWatchedCount === 0 && shadowMonitorStatus?.running && (
+            <Alert>
+              <Eye className="h-4 w-4" />
+              <AlertDescription>
+                Only watcher clients are active; no real viewer clients are currently detected.
+              </AlertDescription>
+            </Alert>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Quick Actions */}
       <Card>

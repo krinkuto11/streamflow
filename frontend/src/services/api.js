@@ -211,6 +211,10 @@ export const shadowBlankMonitorAPI = {
   runOnce: () => api.post('/shadow-blank-monitor/run-once'),
 };
 
+export const viewerActivityAPI = {
+  getStatus: () => api.get('/viewer-activity/status'),
+};
+
 export const teamarrPreflightAPI = {
   getConfig: () => api.get('/teamarr-preflight/config'),
   updateConfig: (config) => api.put('/teamarr-preflight/config', config),
