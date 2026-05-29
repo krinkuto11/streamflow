@@ -208,8 +208,6 @@ export default function TeamarrPreflight() {
 
   const running = Boolean(status?.running)
   const enabled = Boolean(editedConfig?.enabled)
-  const hasKey = Boolean(config?.has_api_key)
-
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -343,36 +341,11 @@ export default function TeamarrPreflight() {
                 />
               </div>
               <div className="space-y-2">
-                <Label>API Key Header</Label>
-                <Input
-                  value={editedConfig.api_key_header || ''}
-                  onChange={(event) => updateConfigValue('api_key_header', event.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
                 <Label>Profile ID</Label>
                 <Input
                   value={editedConfig.forced_profile_id || ''}
                   onChange={(event) => updateConfigValue('forced_profile_id', event.target.value)}
                 />
-              </div>
-              <div className="space-y-2 md:col-span-2">
-                <Label>API Key {hasKey ? '(saved)' : ''}</Label>
-                <div className="flex gap-2">
-                  <Input
-                    type="password"
-                    value={editedConfig.api_key || ''}
-                    onChange={(event) => updateConfigValue('api_key', event.target.value)}
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => saveConfig({ clear_api_key: true })}
-                    disabled={!hasKey || actionLoading !== ''}
-                  >
-                    Clear Key
-                  </Button>
-                </div>
               </div>
             </div>
 

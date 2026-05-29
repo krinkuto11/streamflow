@@ -181,7 +181,8 @@ Key rules:
 
 - Teamarr remains the source of truth for event channel matching.
 - StreamFlow should not run regex matching for the event preflight path.
-- The connector needs a Teamarr base URL and, when required, an API key/header.
+- The connector needs the Teamarr base URL. Current Teamarr APIs are expected
+  to be reachable without a StreamFlow-side API key.
 - Include/exclude sport and league filters can restrict which managed events are
   preflighted.
 - The safest default is scoring/reorder only.
@@ -196,7 +197,8 @@ Hardware acceleration is optional and disabled by default. CPU probing remains
 the default behavior for compatibility.
 
 Supported modes depend on the ffmpeg build and container runtime. StreamFlow can
-save a preferred mode, optional device path, and CPU fallback preference.
+save a preferred mode, optional device path, and CPU fallback preference from the
+Stream Checker configuration.
 
 Recommended setup:
 
@@ -210,6 +212,13 @@ Recommended setup:
 If hardware initialization fails and fallback is enabled, StreamFlow should retry
 the analysis on CPU. If fallback is disabled, unavailable hardware can make the
 stream check fail.
+
+The same hardware acceleration setting is passed into the ffmpeg probes used for
+stream analysis, blank detection, freeze detection, and loop probing. Some
+detection filters still run as software filters, but hardware decode can be used
+when ffmpeg supports the selected mode. CPU fallback only retries failures that
+look like hardware/device initialization errors; normal dead streams, HTTP
+failures, and timeouts are still handled as stream results.
 
 ## Dashboard, Changelog, And Logs
 
