@@ -3590,6 +3590,7 @@ class AutomatedStreamManager:
             # profiles), the existing cache is used as-is. The background UDI sync
             # in the finally block handles cache accuracy for the next cycle.
             if playlists_refreshed and refresh_success:
+                udi_sync_started = time.time()
                 self._update_run_stage("cache_sync", message="Syncing cache after playlist refresh", total=1)
                 logger.info(
                     "Syncing UDI cache after provider refresh — "
@@ -3691,7 +3692,7 @@ class AutomatedStreamManager:
                         if refresh_success
                         else "Safety gate stopped matching after playlist refresh"
                     ),
-                    stage="udi_sync" if refresh_success else "aborted",
+                    stage="cache_sync" if refresh_success else "aborted",
                     stage_label="Syncing Cache" if refresh_success else "Aborted",
                 )
             
