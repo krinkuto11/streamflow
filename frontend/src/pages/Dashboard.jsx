@@ -85,9 +85,11 @@ export default function Dashboard() {
     loadPlaylists()
     loadPeriods()
     loadEnvironment()
+    loadUdiStats()
     const interval = setInterval(() => {
       loadStatus()
       loadPlaylists()
+      loadUdiStats()
     }, 30000)
     return () => clearInterval(interval)
   }, [])
@@ -113,6 +115,29 @@ export default function Dashboard() {
       })
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadUdiStats = async () => {
+    try {
+      const response = await dispatcharrAPI.getInitializationStatus()
+      const data = response.data || {}
+      const ec = data.entity_counts || {}
+      const counts = {
+        channels_count: ec.channels?.received ?? null,
+        streams_count: ec.streams?.received ?? null,
+        m3u_accounts_count: ec.m3u_accounts?.received ?? null,
+      }
+      const hasCounts = Object.values(counts).some(value => value != null)
+
+      if (hasCounts || data.status === 'completed' || data.status === 'failed') {
+        setUdiStats({
+          syncStatus: data.status || 'unknown',
+          ...counts,
+        })
+      }
+    } catch (err) {
+      console.error('UDI status poll error:', err)
     }
   }
 
@@ -162,16 +187,20 @@ export default function Dashboard() {
         const res = await dispatcharrAPI.getInitializationStatus()
         const data = res.data || {}
         const ec = data.entity_counts || {}
+        const counts = {
+          channels_count: ec.channels?.received ?? null,
+          streams_count: ec.streams?.received ?? null,
+          m3u_accounts_count: ec.m3u_accounts?.received ?? null,
+        }
+        const hasCounts = Object.values(counts).some(value => value != null)
 
-        if (data.status === 'completed' || data.status === 'failed') {
+        if (hasCounts || data.status === 'completed' || data.status === 'failed') {
           clearInterval(udiPollInterval)
           setUdiStats(prev => {
             if (prev !== null) return prev
             return {
-              syncStatus:         data.status,
-              channels_count:     ec.channels?.received     ?? null,
-              streams_count:      ec.streams?.received      ?? null,
-              m3u_accounts_count: ec.m3u_accounts?.received ?? null,
+              syncStatus: data.status || 'unknown',
+              ...counts,
             }
           })
         }
