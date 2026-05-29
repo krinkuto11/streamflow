@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.j
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from '@/components/ui/pagination.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI } from '@/services/api.js'
+import { formatDuration } from '@/lib/time-format.js'
 import {
   Activity,
   CheckCircle2,
@@ -348,9 +349,7 @@ export default function StreamChecker() {
               <CardTitle>Batch Progress</CardTitle>
               {status?.queue?.eta_seconds > 0 ? (
                 <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md">
-                  ~{status.queue.eta_seconds > 60
-                    ? `${Math.floor(status.queue.eta_seconds / 60)}m ${status.queue.eta_seconds % 60}s`
-                    : `${status.queue.eta_seconds}s`} remaining
+                  ~{formatDuration(status.queue.eta_seconds)} remaining
                 </span>
               ) : (
                 <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md animate-pulse">
@@ -452,12 +451,9 @@ export default function StreamChecker() {
                             if (remaining === 0) {
                               countdownCell = <span className="text-muted-foreground/50">--</span>
                             } else {
-                              const m = Math.floor(remaining / 60)
-                              const s = remaining % 60
-                              const timeStr = m > 0 ? `${m}m ${String(s).padStart(2, '0')}s` : `${s}s`
                               countdownCell = (
                                 <span className={remaining <= 10 ? 'text-amber-500 font-mono text-xs' : 'text-muted-foreground font-mono text-xs'}>
-                                  {timeStr}
+                                  {formatDuration(remaining)}
                                 </span>
                               )
                             }
@@ -482,7 +478,7 @@ export default function StreamChecker() {
                                 {stream.status === 'error' && <Badge variant="destructive" className="text-[10px]">Error</Badge>}
                                 {stream.status === 'dead' && <Badge variant="destructive" className="text-[10px]">Dead</Badge>}
                                 {stream.status === 'probing' && <Badge variant="outline" className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse">Probing</Badge>}
-                                {stream.status === 'loop_detected' && <Badge variant="outline" className="text-[10px] bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">⚠ {stream.loop_duration_secs ? `${stream.loop_duration_secs.toFixed(1)}s` : ''} Loop Found</Badge>}
+                                {stream.status === 'loop_detected' && <Badge variant="outline" className="text-[10px] bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">⚠ {stream.loop_duration_secs ? formatDuration(stream.loop_duration_secs) : ''} Loop Found</Badge>}
                                 {stream.status === 'low_quality' && (
                                   <Badge variant="outline" className="text-[10px] bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
                                     Low Quality

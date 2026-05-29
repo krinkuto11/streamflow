@@ -8,6 +8,7 @@ import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { formatDuration } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
   Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
@@ -719,9 +720,7 @@ export default function Dashboard() {
                     <Label className="text-xs text-muted-foreground block">Processing Progress</Label>
                     {streamCheckerStatus?.queue?.eta_seconds > 0 ? (
                       <span className="text-xs text-muted-foreground">
-                        ~{streamCheckerStatus.queue.eta_seconds > 60
-                          ? `${Math.floor(streamCheckerStatus.queue.eta_seconds / 60)}m ${streamCheckerStatus.queue.eta_seconds % 60}s`
-                          : `${streamCheckerStatus.queue.eta_seconds}s`} remaining
+                        ~{formatDuration(streamCheckerStatus.queue.eta_seconds)} remaining
                       </span>
                     ) : (
                       <span className="text-xs text-muted-foreground animate-pulse text-primary/70">
