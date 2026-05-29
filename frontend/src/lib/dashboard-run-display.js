@@ -23,7 +23,7 @@ export const getStreamCheckerRunDisplay = ({
 } = {}) => {
   const isProcessing = Boolean(streamCheckerStatus?.stream_checking_mode)
   const qualityStageActive = runStage === 'quality_checking' && batchTotal > 0
-  const streamCheckerOnlyActive = isProcessing && runState === 'idle'
+  const streamCheckerOnlyActive = isProcessing && runState !== 'running'
   const streamQueueActive = (qualityStageActive || streamCheckerOnlyActive) && batchTotal > 0
   const queueStartedAt = parseTimestamp(streamCheckerStatus?.queue?.started_at)
   const currentStreamStartedAt = earliestStreamStart(streamCheckerStatus?.progress?.streams_detail || [])
