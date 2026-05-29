@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
-import { AlertCircle, CheckCircle2, Loader2 } from 'lucide-react'
+import { AlertCircle, CheckCircle2, KeyRound, Loader2, UserRound } from 'lucide-react'
 import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, dispatcharrAPI, sessionSettingsAPI, schedulingAPI, aceStreamOrchestratorAPI } from '@/services/api.js'
@@ -43,7 +43,12 @@ export default function AutomationSettings() {
       ])
       setConfig(automationResponse.data)
       setStreamCheckerConfig(streamCheckerResponse.data)
-      setDispatcharrConfig(dispatcharrResponse.data)
+      setDispatcharrConfig({
+        ...dispatcharrResponse.data,
+        auth_mode: dispatcharrResponse.data?.auth_mode || 'credentials',
+        api_key: '',
+        password: '',
+      })
       setSessionConfig(sessionResponse.data)
       setSchedulingConfig(schedulingResponse.data)
       setOrchestratorConfig({
@@ -351,16 +356,54 @@ export default function AutomationSettings() {
               </div>
 
               <div className="space-y-2">
-                <Label htmlFor="username">Username</Label>
-                <Input
-                  id="username"
-                  type="text"
-                  value={dispatcharrConfig?.username || ''}
-                  onChange={(e) => handleDispatcharrConfigChange('username', e.target.value)}
-                  placeholder="admin"
-                />
+                <Label>Authentication</Label>
+                <div className="grid grid-cols-2 rounded-md border bg-muted/30 p-1">
+                  <Button
+                    type="button"
+                    variant={(dispatcharrConfig?.auth_mode || 'credentials') === 'credentials' ? 'default' : 'ghost'}
+                    className="h-9"
+                    onClick={() => handleDispatcharrConfigChange('auth_mode', 'credentials')}
+                  >
+                    <UserRound className="mr-2 h-4 w-4" />
+                    User / Pass
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={dispatcharrConfig?.auth_mode === 'api_key' ? 'default' : 'ghost'}
+                    className="h-9"
+                    onClick={() => handleDispatcharrConfigChange('auth_mode', 'api_key')}
+                  >
+                    <KeyRound className="mr-2 h-4 w-4" />
+                    API Key
+                  </Button>
+                </div>
               </div>
 
+              {dispatcharrConfig?.auth_mode === 'api_key' ? (
+                <div className="space-y-2">
+                  <Label htmlFor="api_key">API Key</Label>
+                  <Input
+                    id="api_key"
+                    type="password"
+                    value={dispatcharrConfig?.api_key || ''}
+                    onChange={(e) => handleDispatcharrConfigChange('api_key', e.target.value)}
+                    placeholder={dispatcharrConfig?.has_api_key ? 'Enter a new API key to replace the saved key' : 'Enter API key'}
+                  />
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <Label htmlFor="username">Username</Label>
+                  <Input
+                    id="username"
+                    type="text"
+                    value={dispatcharrConfig?.username || ''}
+                    onChange={(e) => handleDispatcharrConfigChange('username', e.target.value)}
+                    placeholder="admin"
+                  />
+                </div>
+              )}
+
+              {dispatcharrConfig?.auth_mode !== 'api_key' && (
               <div className="space-y-2">
                 <Label htmlFor="password">Password</Label>
                 <Input
@@ -371,6 +414,7 @@ export default function AutomationSettings() {
                   placeholder={dispatcharrConfig?.has_password ? '••••••••' : 'Enter password'}
                 />
               </div>
+              )}
 
               <Separator />
 

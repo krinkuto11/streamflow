@@ -91,11 +91,11 @@ def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
         return False
 
     if received != expected:
-        # Within threshold but not an exact match — log at debug level only.
-        logger.debug(
-            f"UDI integrity minor variance for {entity}: "
-            f"received {received}, expected {expected}"
+        logger.warning(
+            f"UDI integrity check FAILED for {entity}: "
+            f"received {received} of {expected} expected records"
         )
+        return False
 
     return True
 
@@ -868,6 +868,17 @@ class UDIManager:
                 },
             }
 
+            integrity_ok = channels_ok and streams_ok
+            if not integrity_ok:
+                self._update_init_progress(
+                    status='failed',
+                    percentage=100,
+                    message='Initialization failed integrity check — retry the data refresh',
+                    current_step='failed',
+                    entity_counts=entity_counts,
+                )
+                return False
+
             self._update_init_progress(percentage=85, message='Building indexes...', current_step='index')
 
             # ----------------------------------------------------------------
@@ -970,19 +981,10 @@ class UDIManager:
                 f"{len(self._channel_profiles_cache)} profiles"
             )
 
-            # Surface integrity warnings in the progress status if any check failed.
-            # Phase 3 (unstable state) will act on these; for now we log and expose.
-            integrity_ok = channels_ok and streams_ok
-            completion_message = (
-                'Initialization complete'
-                if integrity_ok
-                else 'Initialization complete (integrity warnings — check logs)'
-            )
-
             self._update_init_progress(
                 status='completed',
                 percentage=100,
-                message=completion_message,
+                message='Initialization complete',
                 current_step='done',
                 entity_counts=entity_counts,
             )

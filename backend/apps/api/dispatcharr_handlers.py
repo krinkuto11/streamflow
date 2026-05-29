@@ -38,15 +38,24 @@ def update_dispatcharr_config_response(
         config_manager = get_dispatcharr_config()
 
         base_url = data.get("base_url")
+        auth_mode = data.get("auth_mode")
         username = data.get("username")
-        password = data.get("password")
+        password = data.get("password") if not data.get("clear_password") else ""
+        api_key = data.get("api_key") if not data.get("clear_api_key") else ""
         stream_fetch_page_size = data.get("stream_fetch_page_size")
         stream_fetch_max_workers = data.get("stream_fetch_max_workers")
 
+        if password == "" and config_manager.get_password() and not data.get("clear_password"):
+            password = None
+        if api_key == "" and config_manager.get_api_key() and not data.get("clear_api_key"):
+            api_key = None
+
         success = config_manager.update_config(
             base_url=base_url,
+            auth_mode=auth_mode,
             username=username,
             password=password,
+            api_key=api_key,
             stream_fetch_page_size=stream_fetch_page_size,
             stream_fetch_max_workers=stream_fetch_max_workers,
         )
@@ -60,6 +69,8 @@ def update_dispatcharr_config_response(
             os.environ["DISPATCHARR_USER"] = username.strip()
         if password is not None:
             os.environ["DISPATCHARR_PASS"] = password
+        if api_key is not None:
+            os.environ["DISPATCHARR_API_KEY"] = api_key
 
         os.environ["DISPATCHARR_TOKEN"] = ""
 
@@ -92,8 +103,56 @@ def test_dispatcharr_connection_response(
         config_manager = get_dispatcharr_config()
 
         test_base_url = data.get("base_url") or config_manager.get_base_url()
+        test_auth_mode = data.get("auth_mode") or config_manager.get_auth_mode()
         test_username = data.get("username") or config_manager.get_username()
         test_password = data.get("password") or config_manager.get_password()
+        test_api_key = data.get("api_key") or config_manager.get_api_key()
+
+        if test_auth_mode == "api_key":
+            if not all([test_base_url, test_api_key]):
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": "Missing required credentials (base_url, api_key)",
+                        }
+                    ),
+                    400,
+                )
+
+            channels_url = f"{test_base_url}/api/channels/channels/"
+            try:
+                channels_resp = requests.get(
+                    channels_url,
+                    headers={
+                        "Authorization": f"ApiKey {test_api_key}",
+                        "X-API-Key": test_api_key,
+                        "Accept": "application/json",
+                    },
+                    params={"page_size": 1},
+                    timeout=10,
+                )
+                channels_resp.raise_for_status()
+                return jsonify({"success": True, "message": "Connection successful"})
+            except requests.exceptions.Timeout:
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "error": "Connection timeout. Please check the URL and network connectivity.",
+                        }
+                    ),
+                    400,
+                )
+            except requests.exceptions.ConnectionError:
+                return jsonify({"success": False, "error": "Could not connect to Dispatcharr. Please check the URL."}), 400
+            except requests.exceptions.HTTPError as exc:
+                if exc.response.status_code == 401:
+                    return jsonify({"success": False, "error": "Invalid API key"}), 401
+                return jsonify({"success": False, "error": f"HTTP error: {exc.response.status_code}"}), 400
+            except Exception:
+                logger.warning("Dispatcharr API key connection test failed unexpectedly", exc_info=True)
+                return jsonify({"success": False, "error": "Connection failed. Please check the URL and credentials."}), 400
 
         if not all([test_base_url, test_username, test_password]):
             return (
@@ -157,8 +216,9 @@ def test_dispatcharr_connection_response(
             if exc.response.status_code == 401:
                 return jsonify({"success": False, "error": "Invalid username or password"}), 401
             return jsonify({"success": False, "error": f"HTTP error: {exc.response.status_code}"}), 400
-        except Exception as exc:
-            return jsonify({"success": False, "error": f"Connection failed: {str(exc)}"}), 400
+        except Exception:
+            logger.warning("Dispatcharr credential connection test failed unexpectedly", exc_info=True)
+            return jsonify({"success": False, "error": "Connection failed. Please check the URL and credentials."}), 400
     except Exception as exc:
         logger.error(f"Error testing Dispatcharr connection: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500
@@ -185,7 +245,7 @@ def initialize_udi_response(*, get_dispatcharr_config: Callable[[], Any], get_ud
                 jsonify(
                     {
                         "success": False,
-                        "error": "Dispatcharr is not fully configured. Please provide base_url, username, and password.",
+                        "error": "Dispatcharr is not fully configured. Please provide a base URL and a valid authentication method.",
                     }
                 ),
                 400,

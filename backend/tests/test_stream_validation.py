@@ -61,6 +61,27 @@ class TestStreamValidation(unittest.TestCase):
         call_args = mock_patch.call_args
         data = call_args[0][1]  # Second argument is the data dict
         self.assertEqual(data['streams'], [1, 2])  # Only valid IDs
+
+    @patch('api_utils.patch_request')
+    @patch('api_utils.get_udi_manager')
+    def test_update_channel_streams_dedupes_stream_ids(self, mock_get_udi, mock_patch):
+        """Test that duplicate stream IDs are removed before patching Dispatcharr."""
+        from apps.core.api_utils import update_channel_streams
+
+        mock_udi = MagicMock()
+        mock_udi.get_valid_stream_ids.return_value = {1, 2, 3}
+        mock_get_udi.return_value = mock_udi
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_patch.return_value = mock_response
+
+        result = update_channel_streams(1, [1, 2, 2, 3, 1, 999], allow_dead_streams=True)
+
+        self.assertTrue(result)
+        mock_patch.assert_called_once()
+        data = mock_patch.call_args[0][1]
+        self.assertEqual(data['streams'], [1, 2, 3])
     
     @patch('api_utils.patch_request')
     @patch('api_utils.get_udi_manager')
@@ -122,6 +143,29 @@ class TestStreamValidation(unittest.TestCase):
         data = call_args[0][1]
         # Should have original stream 1 + new valid streams 2 and 3
         self.assertEqual(sorted(data['streams']), [1, 2, 3])
+
+    @patch('api_utils.patch_request')
+    @patch('api_utils.get_udi_manager')
+    def test_add_streams_dedupes_duplicate_new_ids(self, mock_get_udi, mock_patch):
+        """Test duplicate new stream IDs are only added once."""
+        from apps.core.api_utils import add_streams_to_channel
+
+        mock_udi = MagicMock()
+        mock_udi.get_valid_stream_ids.return_value = {1, 2, 3}
+        mock_udi.get_channel_by_id.return_value = {'id': 1, 'name': 'Test Channel', 'streams': [1]}
+        mock_udi.get_channel_streams.return_value = [{'id': 1, 'name': 'Stream 1'}]
+        mock_get_udi.return_value = mock_udi
+
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_patch.return_value = mock_response
+
+        result = add_streams_to_channel(1, [2, 2, 3, 3, 1], allow_dead_streams=True)
+
+        self.assertEqual(result, 2)
+        mock_patch.assert_called_once()
+        data = mock_patch.call_args[0][1]
+        self.assertEqual(data['streams'], [1, 2, 3])
     
     @patch('api_utils.patch_request')
     @patch('api_utils.get_udi_manager')
@@ -234,10 +278,10 @@ class TestGetValidStreamIds(unittest.TestCase):
 class TestDeadStreamFiltering(unittest.TestCase):
     """Test that dead streams are filtered out during update/assign operations."""
     
-    @patch('api_utils.get_dead_stream_urls')
+    @patch('apps.stream.dead_streams_tracker.DeadStreamsTracker')
     @patch('api_utils.patch_request')
     @patch('api_utils.get_udi_manager')
-    def test_update_channel_filters_dead_streams(self, mock_get_udi, mock_patch, mock_dead_urls):
+    def test_update_channel_filters_dead_streams(self, mock_get_udi, mock_patch, mock_tracker_cls):
         """Test that update_channel_streams filters out dead streams by default."""
         from apps.core.api_utils import update_channel_streams
         
@@ -251,8 +295,9 @@ class TestDeadStreamFiltering(unittest.TestCase):
         ]
         mock_get_udi.return_value = mock_udi
         
-        # Mock dead stream URLs
-        mock_dead_urls.return_value = {'http://example.com/dead.m3u8'}
+        mock_tracker = MagicMock()
+        mock_tracker.is_offline.side_effect = lambda url: url == 'http://example.com/dead.m3u8'
+        mock_tracker_cls.return_value = mock_tracker
         
         # Mock successful patch
         mock_response = Mock()
@@ -271,10 +316,10 @@ class TestDeadStreamFiltering(unittest.TestCase):
         data = call_args[0][1]
         self.assertEqual(data['streams'], [1, 2])  # Stream 3 should be filtered
     
-    @patch('api_utils.get_dead_stream_urls')
+    @patch('apps.stream.dead_streams_tracker.DeadStreamsTracker')
     @patch('api_utils.patch_request')
     @patch('api_utils.get_udi_manager')
-    def test_update_channel_allows_dead_streams_in_global_check(self, mock_get_udi, mock_patch, mock_dead_urls):
+    def test_update_channel_allows_dead_streams_in_global_check(self, mock_get_udi, mock_patch, mock_tracker_cls):
         """Test that update_channel_streams allows dead streams during global checks."""
         from apps.core.api_utils import update_channel_streams
         
@@ -283,8 +328,9 @@ class TestDeadStreamFiltering(unittest.TestCase):
         mock_udi.get_valid_stream_ids.return_value = {1, 2, 3}
         mock_get_udi.return_value = mock_udi
         
-        # Mock dead stream URLs
-        mock_dead_urls.return_value = {'http://example.com/dead.m3u8'}
+        mock_tracker = MagicMock()
+        mock_tracker.is_offline.side_effect = lambda url: url == 'http://example.com/dead.m3u8'
+        mock_tracker_cls.return_value = mock_tracker
         
         # Mock successful patch
         mock_response = Mock()
@@ -303,10 +349,10 @@ class TestDeadStreamFiltering(unittest.TestCase):
         data = call_args[0][1]
         self.assertEqual(data['streams'], [1, 2, 3])  # Stream 3 should be included
     
-    @patch('api_utils.get_dead_stream_urls')
+    @patch('apps.stream.dead_streams_tracker.DeadStreamsTracker')
     @patch('api_utils.patch_request')
     @patch('api_utils.get_udi_manager')
-    def test_add_streams_filters_dead_streams(self, mock_get_udi, mock_patch, mock_dead_urls):
+    def test_add_streams_filters_dead_streams(self, mock_get_udi, mock_patch, mock_tracker_cls):
         """Test that add_streams_to_channel filters out dead streams by default."""
         from apps.core.api_utils import add_streams_to_channel
         
@@ -322,8 +368,9 @@ class TestDeadStreamFiltering(unittest.TestCase):
         ]
         mock_get_udi.return_value = mock_udi
         
-        # Mock dead stream URLs
-        mock_dead_urls.return_value = {'http://example.com/dead.m3u8'}
+        mock_tracker = MagicMock()
+        mock_tracker.is_offline.side_effect = lambda url: url == 'http://example.com/dead.m3u8'
+        mock_tracker_cls.return_value = mock_tracker
         
         # Mock successful patch
         mock_response = Mock()
