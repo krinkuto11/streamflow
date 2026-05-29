@@ -6,6 +6,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { changelogAPI } from '@/services/api.js'
+import { formatDuration } from '@/lib/time-format.js'
 import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown } from 'lucide-react'
 
 function formatTimestamp(timestamp) {
@@ -135,6 +136,9 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                     {item.stats.stream_details.some(s => s.loop_probe_ran) && (
                       <TableHead>Loop</TableHead>
                     )}
+                    {item.stats.stream_details.some(s => s.freeze_probe_ran) && (
+                      <TableHead>Freeze</TableHead>
+                    )}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -169,7 +173,7 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                             {streamDetail.loop_probe_ran ? (
                               streamDetail.loop_detected === true ? (
                                 <span className="text-amber-500 font-medium text-xs">
-                                  ⚠ {streamDetail.loop_duration_secs ? `${streamDetail.loop_duration_secs.toFixed(1)}s` : 'Loop'}
+                                  ⚠ {streamDetail.loop_duration_secs ? formatDuration(streamDetail.loop_duration_secs) : 'Loop'}
                                 </span>
                               ) : streamDetail.loop_detected === false ? (
                                 <span className="text-muted-foreground text-xs">✓</span>
@@ -178,6 +182,23 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                               )
                             ) : (
                               <span className="text-muted-foreground text-xs">—</span>
+                            )}
+                          </TableCell>
+                        )}
+                        {item.stats.stream_details.some(s => s.freeze_probe_ran) && (
+                          <TableCell>
+                            {streamDetail.freeze_probe_ran ? (
+                              streamDetail.freeze_detected === true ? (
+                                <span className="text-red-500 font-medium text-xs">
+                                  {streamDetail.freeze_duration_secs ? `${streamDetail.freeze_duration_secs.toFixed(1)}s` : 'Frozen'}
+                                </span>
+                              ) : streamDetail.freeze_detected === false ? (
+                                <span className="text-muted-foreground text-xs">OK</span>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">-</span>
+                              )
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
                             )}
                           </TableCell>
                         )}
@@ -368,6 +389,9 @@ function StepContent({ step }) {
                       {details.checked_streams.some(s => s.loop_probe_ran) && (
                         <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Loop</TableHead>
                       )}
+                      {details.checked_streams.some(s => s.freeze_probe_ran) && (
+                        <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Freeze</TableHead>
+                      )}
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -404,7 +428,7 @@ function StepContent({ step }) {
                             {s.loop_probe_ran ? (
                               s.loop_detected === true ? (
                                 <span className="text-amber-500 font-medium text-xs">
-                                  ⚠ {s.loop_duration_secs ? `${s.loop_duration_secs.toFixed(1)}s` : 'Loop'}
+                                  ⚠ {s.loop_duration_secs ? formatDuration(s.loop_duration_secs) : 'Loop'}
                                 </span>
                               ) : s.loop_detected === false ? (
                                 <span className="text-muted-foreground text-xs">✓</span>
@@ -413,6 +437,23 @@ function StepContent({ step }) {
                               )
                             ) : (
                               <span className="text-muted-foreground text-xs">—</span>
+                            )}
+                          </TableCell>
+                        )}
+                        {details.checked_streams.some(s => s.freeze_probe_ran) && (
+                          <TableCell className="py-1 text-right">
+                            {s.freeze_probe_ran ? (
+                              s.freeze_detected === true ? (
+                                <span className="text-red-500 font-medium text-xs">
+                                  {s.freeze_duration_secs ? `${s.freeze_duration_secs.toFixed(1)}s` : 'Frozen'}
+                                </span>
+                              ) : s.freeze_detected === false ? (
+                                <span className="text-muted-foreground text-xs">OK</span>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">-</span>
+                              )
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
                             )}
                           </TableCell>
                         )}
@@ -548,7 +589,7 @@ function ChangelogEntry({ entry }) {
           {details.duration && (
             <div>
               <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">Duration</p>
-              <p className="text-lg font-bold">{details.duration}</p>
+              <p className="text-lg font-bold">{formatDuration(details.duration)}</p>
             </div>
           )}
           {details.avg_bitrate && details.avg_bitrate !== 'N/A' && (

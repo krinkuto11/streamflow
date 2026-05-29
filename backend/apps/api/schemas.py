@@ -44,6 +44,8 @@ def _normalize_profile_payload(data: Dict[str, Any]) -> Dict[str, Any]:
         "remove_dead_streams",
         "blank_check_enabled",
         "treat_blank_as_dead",
+        "freeze_check_enabled",
+        "treat_freeze_as_dead",
     ):
         if bool_field not in normalized_stream_checking:
             continue
