@@ -7,7 +7,8 @@ import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
-import { teamarrPreflightAPI } from '@/services/api.js'
+import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import {
   Activity,
   CalendarCheck,
@@ -48,12 +49,23 @@ const stateLabels = {
   past: 'Past',
 }
 
+const DEFAULT_PROFILE_SELECT_VALUE = '__teamarr_default_profile__'
+
 const parseCsv = (value) => (
   String(value || '')
     .split(',')
     .map(item => item.trim())
     .filter(Boolean)
 )
+
+const normalizeProfiles = (payload) => {
+  const items = Array.isArray(payload)
+    ? payload
+    : (Array.isArray(payload?.items) ? payload.items : [])
+  return items
+    .filter(profile => profile && profile.id !== undefined && profile.id !== null)
+    .map(profile => ({ ...profile, id: String(profile.id) }))
+}
 
 const formatTimestamp = (timestamp) => {
   if (!timestamp) return 'Never'
@@ -89,6 +101,7 @@ export default function TeamarrPreflight() {
   const [excludeSports, setExcludeSports] = useState('')
   const [includeLeagues, setIncludeLeagues] = useState('')
   const [excludeLeagues, setExcludeLeagues] = useState('')
+  const [profiles, setProfiles] = useState([])
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
   const { toast } = useToast()
@@ -103,6 +116,22 @@ export default function TeamarrPreflight() {
   const recentEvents = status?.recent_events || []
   const activeChecks = status?.active_checks || []
   const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
+  const profileOptions = useMemo(() => {
+    const items = [...profiles]
+    const defaultProfileId = editedConfig?.default_profile_id ? String(editedConfig.default_profile_id) : ''
+    if (defaultProfileId && !items.some(profile => String(profile.id) === defaultProfileId)) {
+      items.unshift({
+        id: defaultProfileId,
+        name: editedConfig.default_profile_name || 'Teamarr Event Preflight',
+        description: 'Default Teamarr preflight profile',
+      })
+    }
+    return items
+  }, [profiles, editedConfig])
+  const selectedProfileValue = useMemo(() => {
+    const profileId = editedConfig?.forced_profile_id || editedConfig?.default_profile_id || ''
+    return profileId ? String(profileId) : DEFAULT_PROFILE_SELECT_VALUE
+  }, [editedConfig])
 
   const hydrateInputs = (nextConfig) => {
     setRetryOffsets((nextConfig.retry_offsets_minutes || []).join(', '))
@@ -114,15 +143,17 @@ export default function TeamarrPreflight() {
 
   const loadData = async () => {
     try {
-      const [configResponse, statusResponse] = await Promise.all([
-        teamarrPreflightAPI.getConfig(),
+      const configResponse = await teamarrPreflightAPI.getConfig()
+      const [statusResponse, profilesResponse] = await Promise.all([
         teamarrPreflightAPI.getStatus(),
+        automationAPI.getProfiles(),
       ])
       const nextConfig = configResponse.data || {}
       setConfig(nextConfig)
       setEditedConfig(nextConfig)
       hydrateInputs(nextConfig)
       setStatus(statusResponse.data || {})
+      setProfiles(normalizeProfiles(profilesResponse.data))
     } catch (err) {
       console.error('Failed to load Teamarr preflight data:', err)
       toast({
@@ -149,6 +180,13 @@ export default function TeamarrPreflight() {
       ...(prev || {}),
       [field]: value,
     }))
+  }
+
+  const updateSelectedProfile = (value) => {
+    const nextProfileId = value === DEFAULT_PROFILE_SELECT_VALUE
+      ? (editedConfig?.default_profile_id || '')
+      : value
+    updateConfigValue('forced_profile_id', nextProfileId)
   }
 
   const saveConfig = async (extra = {}) => {
@@ -341,11 +379,29 @@ export default function TeamarrPreflight() {
                 />
               </div>
               <div className="space-y-2">
-                <Label>Profile ID</Label>
-                <Input
-                  value={editedConfig.forced_profile_id || ''}
-                  onChange={(event) => updateConfigValue('forced_profile_id', event.target.value)}
-                />
+                <Label>Quality Profile</Label>
+                <Select
+                  value={selectedProfileValue}
+                  onValueChange={updateSelectedProfile}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select profile" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {profileOptions.length === 0 ? (
+                      <SelectItem value={DEFAULT_PROFILE_SELECT_VALUE}>Teamarr Event Preflight</SelectItem>
+                    ) : (
+                      profileOptions.map(profile => (
+                        <SelectItem key={profile.id} value={profile.id}>
+                          {profile.name || `Profile ${profile.id}`}
+                        </SelectItem>
+                      ))
+                    )}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  Create or edit profiles in Automation Settings; Save stores the selection here.
+                </p>
               </div>
             </div>
 

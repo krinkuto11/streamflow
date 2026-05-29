@@ -8,7 +8,11 @@ from unittest.mock import Mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from apps.stream.teamarr_preflight_service import TeamarrPreflightService, normalize_config
+from apps.stream.teamarr_preflight_service import (
+    DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
+    TeamarrPreflightService,
+    normalize_config,
+)
 
 
 FIXED_NOW = 1780005600.0
@@ -56,6 +60,30 @@ class FakeUdi:
         return self.streams
 
 
+class FakeAutomationConfig:
+    def __init__(self, profiles=None, next_id="42"):
+        self.profiles = [dict(profile) for profile in (profiles or [])]
+        self.next_id = str(next_id)
+        self.created_profiles = []
+
+    def get_all_profiles(self, *args, **kwargs):
+        return [dict(profile) for profile in self.profiles]
+
+    def get_profile(self, profile_id):
+        profile_id = str(profile_id)
+        for profile in self.profiles:
+            if str(profile.get("id")) == profile_id:
+                return dict(profile)
+        return None
+
+    def create_profile(self, profile_data):
+        self.created_profiles.append(dict(profile_data))
+        profile = dict(profile_data)
+        profile["id"] = self.next_id
+        self.profiles.append(profile)
+        return self.next_id
+
+
 def make_event(**overrides):
     event = {
         "id": 100,
@@ -81,15 +109,17 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def make_service(self, events, *, checker=None, udi=None):
+    def make_service(self, events, *, checker=None, udi=None, automation_config=None):
         checker = checker or FakeChecker()
         udi = udi or FakeUdi()
+        automation_config = automation_config or FakeAutomationConfig()
         http_get = Mock(return_value=FakeResponse(events))
         service = TeamarrPreflightService(
             config_file=self.config_file,
             http_get=http_get,
             udi_provider=lambda: udi,
             stream_checker_provider=lambda: checker,
+            automation_config_provider=lambda: automation_config,
             clock=lambda: FIXED_NOW,
         )
         service.update_config({
@@ -118,6 +148,38 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertTrue(public_config["has_api_key"])
         self.assertEqual(public_config["api_key"], "")
 
+    def test_default_profile_is_created_and_selected_for_preflight(self):
+        automation_config = FakeAutomationConfig()
+        service, _, _ = self.make_service([], automation_config=automation_config)
+
+        config = service.get_config()
+        self.assertEqual(config["forced_profile_id"], "42")
+        self.assertEqual(config["default_profile_id"], "42")
+        self.assertEqual(config["default_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
+        self.assertTrue(config["default_profile_available"])
+        self.assertEqual(len(automation_config.created_profiles), 1)
+        created_profile = automation_config.created_profiles[0]
+        self.assertEqual(created_profile["name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
+        self.assertFalse(created_profile["m3u_update"]["enabled"])
+        self.assertFalse(created_profile["stream_matching"]["enabled"])
+        self.assertTrue(created_profile["stream_checking"]["enabled"])
+        self.assertFalse(created_profile["stream_checking"]["remove_dead_streams"])
+
+    def test_existing_forced_profile_is_preserved(self):
+        automation_config = FakeAutomationConfig(
+            profiles=[
+                {"id": "7", "name": "Custom Event Profile"},
+                {"id": "8", "name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME},
+            ]
+        )
+        service, _, _ = self.make_service([], automation_config=automation_config)
+        service.update_config({"forced_profile_id": "7"})
+
+        config = service.get_config()
+        self.assertEqual(config["forced_profile_id"], "7")
+        self.assertEqual(config["default_profile_id"], "8")
+        self.assertEqual(automation_config.created_profiles, [])
+
     def test_due_event_launches_single_channel_check_with_epg_context(self):
         checker = FakeChecker()
         service, _, http_get = self.make_service([make_event()], checker=checker)
@@ -136,6 +198,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(args[0], 77)
         self.assertEqual(kwargs["program_name"], "Home vs Away")
         self.assertTrue(kwargs["is_epg_scheduled"])
+        self.assertEqual(kwargs["forced_profile_id"], "42")
         http_get.assert_called_once()
         called_url = http_get.call_args[0][0]
         self.assertEqual(called_url, "http://teamarr.test/api/v1/channels/managed")

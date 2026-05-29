@@ -12,6 +12,7 @@ import json
 import os
 import threading
 import time
+from copy import deepcopy
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,50 @@ CONFIG_FILE = CONFIG_DIR / "teamarr_preflight_config.json"
 MAX_EVENTS = 120
 
 READY_SYNC_STATES = {"in_sync", "synced", "ready"}
+DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME = "Teamarr Event Preflight"
+DEFAULT_TEAMARR_PREFLIGHT_PROFILE: Dict[str, Any] = {
+    "name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
+    "description": (
+        "Safe default for Teamarr-managed event preflights. Scores existing "
+        "channel streams without playlist refresh, regex matching, or automatic "
+        "dead-stream removal."
+    ),
+    "enabled": True,
+    "parallel_checks": 1,
+    "m3u_update": {
+        "enabled": False,
+        "playlists": [],
+    },
+    "stream_matching": {
+        "enabled": False,
+        "validate_existing_streams": False,
+    },
+    "stream_checking": {
+        "enabled": True,
+        "allow_revive": False,
+        "remove_dead_streams": False,
+        "check_all_streams": True,
+        "loop_check_enabled": False,
+        "blank_check_enabled": False,
+        "treat_blank_as_dead": False,
+        "freeze_check_enabled": False,
+        "treat_freeze_as_dead": False,
+        "stream_limit": 0,
+        "min_resolution": "any",
+        "min_fps": 0,
+        "min_bitrate": 0,
+        "m3u_priority": [],
+        "m3u_priority_mode": "quality",
+    },
+    "scoring_weights": {
+        "bitrate": 0.40,
+        "resolution": 0.35,
+        "fps": 0.15,
+        "codec": 0.10,
+        "prefer_h265": True,
+        "loop_penalty": 0,
+    },
+}
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -120,10 +165,12 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     return config
 
 
-def public_config(config: Dict[str, Any]) -> Dict[str, Any]:
+def public_config(config: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     visible = dict(config)
     visible["has_api_key"] = bool(visible.get("api_key"))
     visible["api_key"] = ""
+    if metadata:
+        visible.update(metadata)
     return visible
 
 
@@ -158,18 +205,23 @@ class TeamarrPreflightService:
         http_get: Callable[..., Any] = requests.get,
         udi_provider: Callable[[], Any] = get_udi_manager,
         stream_checker_provider: Optional[Callable[[], Any]] = None,
+        automation_config_provider: Optional[Callable[[], Any]] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.config_file = config_file
         self.http_get = http_get
         self.udi_provider = udi_provider
         self.stream_checker_provider = stream_checker_provider or self._default_stream_checker_provider
+        self.automation_config_provider = automation_config_provider or self._default_automation_config_provider
         self.clock = clock
 
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._config = self._load_config()
+        self._default_profile_id: str = ""
+        self._default_profile_error: Optional[str] = None
+        self._ensure_default_profile()
         self._events: deque[Dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._upcoming: List[Dict[str, Any]] = []
         self._attempted_buckets: Dict[str, float] = {}
@@ -192,9 +244,61 @@ class TeamarrPreflightService:
             json.dump(self._config, handle, indent=2, sort_keys=True)
             handle.write("\n")
 
+    @staticmethod
+    def _profile_items(payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, dict):
+            payload = payload.get("items") or payload.get("profiles") or []
+        if not isinstance(payload, list):
+            return []
+        return [item for item in payload if isinstance(item, dict)]
+
+    def _default_profile_metadata(self) -> Dict[str, Any]:
+        return {
+            "default_profile_id": self._default_profile_id,
+            "default_profile_name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
+            "default_profile_available": bool(self._default_profile_id),
+            "default_profile_error": self._default_profile_error,
+        }
+
+    def _ensure_default_profile(self) -> None:
+        try:
+            automation_config = self.automation_config_provider()
+            profiles = self._profile_items(automation_config.get_all_profiles())
+            default_profile = next(
+                (
+                    profile
+                    for profile in profiles
+                    if str(profile.get("name") or "").strip() == DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME
+                ),
+                None,
+            )
+
+            profile_id = str(default_profile.get("id")) if default_profile and default_profile.get("id") else ""
+            if not profile_id:
+                profile_id = str(automation_config.create_profile(deepcopy(DEFAULT_TEAMARR_PREFLIGHT_PROFILE)) or "")
+                if not profile_id:
+                    raise RuntimeError("default profile could not be created")
+                logger.info("Created default Teamarr preflight automation profile id=%s", profile_id)
+
+            with self._lock:
+                self._default_profile_id = profile_id
+                self._default_profile_error = None
+                if not str(self._config.get("forced_profile_id") or "").strip():
+                    self._config["forced_profile_id"] = profile_id
+                    self._save_config()
+        except Exception as exc:
+            with self._lock:
+                self._default_profile_error = "Default profile is unavailable"
+            logger.warning("Could not ensure Teamarr preflight default profile: %s", exc)
+
     def get_config(self, *, include_secret: bool = False) -> Dict[str, Any]:
+        self._ensure_default_profile()
         with self._lock:
-            return dict(self._config) if include_secret else public_config(self._config)
+            if include_secret:
+                config = dict(self._config)
+                config.update(self._default_profile_metadata())
+                return config
+            return public_config(self._config, self._default_profile_metadata())
 
     def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
@@ -209,6 +313,8 @@ class TeamarrPreflightService:
             self._config = normalize_config(payload, current)
             self._save_config()
             enabled = self._config["enabled"]
+
+        self._ensure_default_profile()
 
         if enabled:
             self.start(persist=False)
@@ -253,7 +359,7 @@ class TeamarrPreflightService:
                 "active_checks": list(self._active_checks.values()),
                 "upcoming_events": list(self._upcoming),
                 "recent_events": list(self._events)[:25],
-                "config": public_config(self._config),
+                "config": public_config(self._config, self._default_profile_metadata()),
             }
 
     def run_once(self, *, force: bool = False) -> Dict[str, Any]:
@@ -474,7 +580,7 @@ class TeamarrPreflightService:
     def _run_check(self, key: str, event: Dict[str, Any], config: Dict[str, Any]) -> None:
         try:
             checker = self.stream_checker_provider()
-            forced_profile_id = str(config.get("forced_profile_id") or "").strip() or None
+            forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
             result = checker.check_single_channel(
                 int(event["dispatcharr_channel_id"]),
                 program_name=event.get("event_name"),
@@ -502,6 +608,25 @@ class TeamarrPreflightService:
             with self._lock:
                 self._active_checks.pop(key, None)
                 self._purge_old_attempts()
+
+    def _resolve_profile_id(self, profile_id: Any) -> Optional[str]:
+        requested = str(profile_id or "").strip()
+        if requested:
+            try:
+                automation_config = self.automation_config_provider()
+                if automation_config.get_profile(requested):
+                    return requested
+                logger.warning(
+                    "Teamarr preflight profile id=%s is unavailable; falling back to the default profile",
+                    requested,
+                )
+            except Exception as exc:
+                logger.debug("Could not verify Teamarr preflight profile id=%s: %s", requested, exc)
+                return requested
+
+        self._ensure_default_profile()
+        with self._lock:
+            return self._default_profile_id or None
 
     def _quality_checker_active(self, config: Dict[str, Any]) -> bool:
         if not config.get("skip_during_quality_check", True):
@@ -592,6 +717,12 @@ class TeamarrPreflightService:
         from apps.stream.stream_checker_service import get_stream_checker_service
 
         return get_stream_checker_service()
+
+    @staticmethod
+    def _default_automation_config_provider() -> Any:
+        from apps.automation.automation_config_manager import get_automation_config_manager
+
+        return get_automation_config_manager()
 
 
 _teamarr_preflight_instance: Optional[TeamarrPreflightService] = None
