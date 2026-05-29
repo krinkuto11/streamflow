@@ -3734,6 +3734,7 @@ class AutomatedStreamManager:
                 # Group results by channel for easier joining later
                 if not playlists_refreshed:
                     self._update_run_stage("cache_sync", status="skipped", message="Cache sync not needed")
+                matching_started = time.time()
                 self._update_run_stage("matching", message="Validating existing stream assignments")
 
                 # Validate existing streams
