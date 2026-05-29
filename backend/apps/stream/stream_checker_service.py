@@ -45,8 +45,8 @@ from apps.udi import get_udi_manager
 
 # Import dead streams tracker
 from apps.stream.dead_streams_tracker import DeadStreamsTracker
-from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
 from apps.stream.queue_start import order_channels_for_queue_start
+from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
 from apps.core.auth import _refresh_token
 
 # Import channel settings manager

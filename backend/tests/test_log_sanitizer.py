@@ -4,6 +4,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -69,6 +70,29 @@ class LogSanitizerTests(unittest.TestCase):
         self.assertIn("reason=offline", context)
         self.assertNotIn(raw_url, context)
         self.assertNotIn("provider.example", context)
+
+    def test_debug_mode_keeps_raw_stream_identifiers_visible(self):
+        raw_url = "http://provider.example/live/user/password/123.ts?token=secret"
+
+        with patch.dict(os.environ, {"DEBUG_MODE": "true"}):
+            self.assertEqual(
+                scrub_urls(f"ffmpeg failed while opening {raw_url}"),
+                f"ffmpeg failed while opening {raw_url}",
+            )
+            self.assertIn("stream-123", stream_ref(123, raw_url))
+
+            context = stream_context(
+                stream_id=123,
+                stream_url=raw_url,
+                channel_id=456,
+                reason="offline",
+            )
+
+        self.assertIn("stream_ref=stream-123", context)
+        self.assertIn("channel_ref=channel-456", context)
+        default_context = stream_context(stream_id=123, stream_url=raw_url)
+        self.assertNotIn("stream_ref=stream-123", default_context)
+        self.assertNotIn(raw_url, default_context)
 
     def test_dead_stream_tracker_logs_refs_without_names_or_urls(self):
         raw_url = "http://provider.example/live/user/password/123.ts?token=secret"

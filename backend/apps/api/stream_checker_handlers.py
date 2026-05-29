@@ -360,8 +360,9 @@ def queue_all_channels_response(
     try:
         service = get_stream_checker_service()
         payload_data = payload if isinstance(payload, dict) else {}
-        default_mode = service.config.get("queue.start_mode", "first")
-        default_channel_id = service.config.get("queue.start_channel_id", None)
+        service_config = getattr(service, "config", {}) or {}
+        default_mode = service_config.get("queue.start_mode", "first")
+        default_channel_id = service_config.get("queue.start_channel_id", None)
         start_mode = payload_data.get("start_mode", default_mode)
         start_channel_id = payload_data.get("start_channel_id", default_channel_id)
 
