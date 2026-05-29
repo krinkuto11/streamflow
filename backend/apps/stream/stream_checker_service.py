@@ -3914,6 +3914,10 @@ class StreamCheckerService:
             sync_state.get('active', False)
         )
 
+        if not stream_checking_mode and progress:
+            self.progress.clear()
+            progress = None
+
         self._maybe_refresh_stale_connectivity_guard(stream_checking_mode)
         connectivity_guard_status = dict(self.connectivity_guard_status or {})
         guard_failed = connectivity_guard_status.get('ok') is False

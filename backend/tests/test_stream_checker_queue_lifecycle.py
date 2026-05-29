@@ -201,6 +201,31 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['queue']['started_at'], '2026-05-29T18:03:41')
         self.assertTrue(status['stream_checking_mode'])
 
+    def test_get_status_clears_stale_progress_when_no_check_is_active(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.running = True
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: default
+        service.connectivity_guard_status = {'ok': True}
+        service.progress = Mock()
+        service.progress.get.return_value = {
+            'status': 'analyzing',
+            'channel_id': 1946,
+            'streams_detail': [{'id': 1, 'status': 'checking'}],
+        }
+        service.update_tracker = Mock()
+        service.update_tracker.get_last_global_check.return_value = None
+
+        status = service.get_status()
+
+        self.assertFalse(status['stream_checking_mode'])
+        self.assertIsNone(status['progress'])
+        service.progress.clear.assert_called_once()
+
 
 class TestStreamCheckerQueueHandlers(unittest.TestCase):
     def setUp(self):
