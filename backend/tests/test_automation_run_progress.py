@@ -53,6 +53,9 @@ def test_stage_duration_updates_when_stage_changes():
 
     status = manager.get_run_status()
     assert status["state"] == "completed"
+    assert status["active"] is False
+    assert status["status"] == "completed"
+    assert status["message"] == "Done"
     assert status["stage_duration_seconds"] is not None
 
 
