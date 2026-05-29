@@ -187,6 +187,16 @@ Key rules:
   preflighted.
 - The safest default is scoring/reorder only.
 
+StreamFlow creates a `Teamarr Event Preflight` automation profile if it is
+missing. That default profile is intentionally conservative: no playlist
+refresh, no regex matching, no automatic dead-stream removal, and stream
+checking enabled for scoring current event-channel streams.
+
+To customize event behavior, create or edit an Automation Profile, then select
+it on the Teamarr Preflight page and save. The selected profile controls whether
+the preflight only scores/reorders streams or also runs stricter checks such as
+dead, blank, or freeze handling.
+
 Use retry offsets for events that receive streams shortly before start. For
 example, run a safe preflight 20 minutes before start and retry 10 minutes and
 3 minutes before start if the channel was not ready.
