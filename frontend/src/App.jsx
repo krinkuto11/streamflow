@@ -104,6 +104,7 @@ function App() {
               <Route path="/dashboard" element={<Dashboard />} />
               <Route path="/stream-checker" element={<StreamChecker />} />
               <Route path="/stream-monitoring" element={<StreamMonitoring />} />
+              <Route path="/shadow-monitor" element={<ShadowBlankMonitor />} />
               <Route path="/channels" element={<ChannelConfiguration />} />
               <Route path="/settings" element={<AutomationSettings />} />
               <Route path="/automation/profiles/:profileId" element={<AutomationProfileEditor />} />
