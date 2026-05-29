@@ -147,6 +147,7 @@ def get_automation_status_response(
         stream_checking_enabled = any(
             profile.get("stream_checking", {}).get("enabled", False) for profile in profiles
         )
+        run_progress = manager.get_run_status() if hasattr(manager, "get_run_status") else None
 
         return (
             jsonify(
@@ -158,6 +159,7 @@ def get_automation_status_response(
                     ),
                     "profiles_count": profiles_count,
                     "stream_checking_enabled": stream_checking_enabled,
+                    "run_progress": run_progress,
                 }
             ),
             200,

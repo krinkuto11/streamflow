@@ -5,6 +5,10 @@ import path from 'path'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  test: {
+    include: ['src/**/*.{test,spec}.{js,jsx,ts,tsx}'],
+    exclude: ['node_modules', 'build', 'context/**'],
+  },
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),
