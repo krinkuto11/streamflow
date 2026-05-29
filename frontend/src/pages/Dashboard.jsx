@@ -346,7 +346,30 @@ export default function Dashboard() {
   const runProgressDetail = hasRunProgressTotal
     ? `${runProgressCurrent ?? 0} of ${runProgressTotal}`
     : runProgress.message || runStatus.message || 'Waiting for progress'
-  const showRunProgress = runState !== 'idle' || Object.keys(runProgress).length > 0
+  const showRunProgress = isProcessing || runState !== 'idle' || Object.keys(runProgress).length > 0
+  const displayRunStatus = isProcessing && runState === 'idle'
+    ? 'checking'
+    : (runStatus.status || runState)
+  const displayRunMessage = isProcessing && runState === 'idle'
+    ? 'Stream checker is actively processing'
+    : (runProgress.message || runStatus.message || 'Automation run status')
+  const displayRunStageLabel = qualityStageActive || (isProcessing && runState === 'idle')
+    ? 'Quality Checking'
+    : runStageLabel
+  const displayRunElapsedSeconds = runStatus.elapsed_seconds ?? runProgress.elapsed_seconds
+  const displayRunStageElapsedSeconds = runStatus.stage_elapsed_seconds ?? runProgress.stage_elapsed_seconds
+  const displayRunStages = runStatus.stages?.length ? runStatus.stages : (runProgress.stages || [])
+  const displayRunStageCards = displayRunStages.length > 0
+    ? displayRunStages
+    : (isProcessing
+      ? [{
+          key: 'quality_checking',
+          label: 'Quality Check',
+          status: 'running',
+          current: completed,
+          total: batchTotal,
+        }]
+      : [])
   const qualityCheckedCount = qualityStageActive
     ? completed
     : (runCounts.quality_checked ?? 0)
@@ -389,13 +412,13 @@ export default function Dashboard() {
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
                 <CardTitle>Automation Run</CardTitle>
-                <CardDescription>{runProgress.message || 'Automation run status'}</CardDescription>
+                <CardDescription>{displayRunMessage}</CardDescription>
               </div>
               <Badge
-                variant={runProgress.status === 'completed' ? 'default' : runProgress.status === 'failed' ? 'destructive' : 'outline'}
+                variant={displayRunStatus === 'completed' ? 'default' : displayRunStatus === 'failed' ? 'destructive' : 'outline'}
                 className="w-fit"
               >
-                {runProgress.status}
+                {displayRunStatus}
               </Badge>
             </div>
           </CardHeader>
@@ -403,15 +426,15 @@ export default function Dashboard() {
             <div className="grid gap-3 md:grid-cols-4">
               <div className="rounded-md border p-3">
                 <Label className="text-xs text-muted-foreground">Current Stage</Label>
-                <div className="mt-1 text-xl font-semibold">{runProgress.stage_label || 'Idle'}</div>
+                <div className="mt-1 text-xl font-semibold">{displayRunStageLabel}</div>
               </div>
               <div className="rounded-md border p-3">
                 <Label className="text-xs text-muted-foreground">Elapsed</Label>
-                <div className="mt-1 text-xl font-semibold">{formatDuration(runProgress.elapsed_seconds)}</div>
+                <div className="mt-1 text-xl font-semibold">{formatDuration(displayRunElapsedSeconds)}</div>
               </div>
               <div className="rounded-md border p-3">
                 <Label className="text-xs text-muted-foreground">Stage Time</Label>
-                <div className="mt-1 text-xl font-semibold">{formatDuration(runProgress.stage_elapsed_seconds)}</div>
+                <div className="mt-1 text-xl font-semibold">{formatDuration(displayRunStageElapsedSeconds)}</div>
               </div>
               <div className="rounded-md border p-3">
                 <Label className="text-xs text-muted-foreground">Progress</Label>
@@ -432,7 +455,7 @@ export default function Dashboard() {
             </div>
 
             <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-7">
-              {(runProgress.stages || []).map(stage => (
+              {displayRunStageCards.map(stage => (
                 <div
                   key={stage.key}
                   className={`rounded-md border px-3 py-2 ${
