@@ -9,6 +9,7 @@ import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { getStreamCheckerRunDisplay } from '@/lib/dashboard-run-display.js'
 import { formatDuration as formatDurationValue } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
@@ -85,9 +86,11 @@ export default function Dashboard() {
     loadPlaylists()
     loadPeriods()
     loadEnvironment()
+    loadUdiStats()
     const interval = setInterval(() => {
       loadStatus()
       loadPlaylists()
+      loadUdiStats()
     }, 30000)
     return () => clearInterval(interval)
   }, [])
@@ -115,6 +118,29 @@ export default function Dashboard() {
       })
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadUdiStats = async () => {
+    try {
+      const response = await dispatcharrAPI.getInitializationStatus()
+      const data = response.data || {}
+      const ec = data.entity_counts || {}
+      const counts = {
+        channels_count: ec.channels?.received ?? null,
+        streams_count: ec.streams?.received ?? null,
+        m3u_accounts_count: ec.m3u_accounts?.received ?? null,
+      }
+      const hasCounts = Object.values(counts).some(value => value != null)
+
+      if (hasCounts || data.status === 'completed' || data.status === 'failed') {
+        setUdiStats({
+          syncStatus: data.status || 'unknown',
+          ...counts,
+        })
+      }
+    } catch (err) {
+      console.error('UDI status poll error:', err)
     }
   }
 
@@ -164,16 +190,20 @@ export default function Dashboard() {
         const res = await dispatcharrAPI.getInitializationStatus()
         const data = res.data || {}
         const ec = data.entity_counts || {}
+        const counts = {
+          channels_count: ec.channels?.received ?? null,
+          streams_count: ec.streams?.received ?? null,
+          m3u_accounts_count: ec.m3u_accounts?.received ?? null,
+        }
+        const hasCounts = Object.values(counts).some(value => value != null)
 
-        if (data.status === 'completed' || data.status === 'failed') {
+        if (hasCounts || data.status === 'completed' || data.status === 'failed') {
           clearInterval(udiPollInterval)
           setUdiStats(prev => {
             if (prev !== null) return prev
             return {
-              syncStatus:         data.status,
-              channels_count:     ec.channels?.received     ?? null,
-              streams_count:      ec.streams?.received      ?? null,
-              m3u_accounts_count: ec.m3u_accounts?.received ?? null,
+              syncStatus: data.status || 'unknown',
+              ...counts,
             }
           })
         }
@@ -331,56 +361,92 @@ export default function Dashboard() {
   const runState = runStatus.state || 'idle'
   const runStage = runStatus.stage || 'idle'
   const runStageLabel = runStatus.stage_label || 'Idle'
-  const currentStageIndex = AUTOMATION_STAGES.findIndex((stage) => stage.id === runStage)
   const runProgress = runStatus.progress || {}
+  const runningRun = runState === 'running'
+  const failedRun = runState === 'failed'
+  const completedRun = runState === 'completed'
+  const skippedRun = runState === 'skipped'
   const queueSize     = streamCheckerStatus?.queue?.queue_size || 0
   const completed     = streamCheckerStatus?.queue?.completed  || 0
   const inProgress    = streamCheckerStatus?.queue?.in_progress || 0
   const totalProcessed = completed
   const batchTotal    = completed + inProgress + queueSize
   const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
-  const isProcessing  = streamCheckerStatus?.stream_checking_mode || false
-  const qualityStageActive = runStage === 'quality_checking' && batchTotal > 0
+  const streamCheckerRunDisplay = getStreamCheckerRunDisplay({
+    streamCheckerStatus,
+    runState,
+    runStage,
+    batchTotal,
+    completed,
+  })
+  const isProcessing = streamCheckerRunDisplay.isProcessing
+  const streamQueueActive = streamCheckerRunDisplay.streamQueueActive
+  const streamCheckerOnlyActive = streamCheckerRunDisplay.streamCheckerOnlyActive
   const rawRunProgressPercent = Number(runProgress.percent)
-  const runProgressPercent = qualityStageActive
+  const runProgressPercent = streamQueueActive
     ? queueProgress
     : Number.isFinite(rawRunProgressPercent)
       ? rawRunProgressPercent
       : 0
-  const runProgressCurrent = qualityStageActive ? completed : runProgress.current
-  const runProgressTotal = qualityStageActive ? batchTotal : runProgress.total
+  const runProgressCurrent = streamQueueActive ? completed : runProgress.current
+  const runProgressTotal = streamQueueActive ? batchTotal : runProgress.total
   const hasRunProgressTotal = runProgressTotal !== null && runProgressTotal !== undefined
   const runProgressDetail = hasRunProgressTotal
     ? `${runProgressCurrent ?? 0} of ${runProgressTotal}`
     : runProgress.message || runStatus.message || 'Waiting for progress'
-  const runningRun = runState === 'running'
-  const failedRun = runState === 'failed'
-  const completedRun = runState === 'completed'
-  const skippedRun = runState === 'skipped'
-  const runDisplayStageLabel = skippedRun ? 'Waiting for next run' : runStageLabel
-  const runDisplayBadgeLabel = skippedRun
-    ? 'Waiting'
-    : runningRun
-      ? 'Running'
-      : completedRun
-        ? 'Completed'
-        : failedRun
-          ? 'Failed'
-          : 'Idle'
+  const showRunProgress = isProcessing || runState !== 'idle' || Object.keys(runProgress).length > 0
+  const streamRunActive = streamQueueActive && streamCheckerOnlyActive
+  const displayRunMessage = streamRunActive
+    ? 'Running manual quality checks'
+    : (runProgress.message || runStatus.message || 'Automation run status')
+  const displayRunStageId = streamQueueActive ? 'quality_checking' : runStage
+  const displayRunStageLabel = streamQueueActive ? 'Quality Checking' : runStageLabel
+  const displayRunningRun = runningRun || streamRunActive
+  const displayCurrentStageIndex = AUTOMATION_STAGES.findIndex((stage) => stage.id === displayRunStageId)
+  const runDisplayStageLabel = skippedRun && !streamQueueActive ? 'Waiting for next run' : displayRunStageLabel
+  const runDisplayBadgeLabel = streamRunActive
+    ? 'Running'
+    : skippedRun
+      ? 'Waiting'
+      : runningRun
+        ? 'Running'
+        : completedRun
+          ? 'Completed'
+          : failedRun
+            ? 'Failed'
+            : 'Idle'
+  const streamCheckerElapsedSeconds = streamCheckerRunDisplay.streamCheckerElapsedSeconds
   const liveRunDurationSeconds = runningRun
     ? elapsedSecondsSince(runStatus.started_at) ?? runStatus.duration_seconds
     : runStatus.duration_seconds
   const liveStageDurationSeconds = runningRun
     ? elapsedSecondsSince(runStatus.stage_started_at) ?? runStatus.stage_duration_seconds
     : runStatus.stage_duration_seconds
-  const qualityCheckedCount = qualityStageActive
+  const displayRunUpdatedAt = streamRunActive
+    ? (streamCheckerStatus?.queue?.started_at || streamCheckerStatus?.progress?.timestamp || runStatus.updated_at)
+    : runStatus.updated_at
+  const displayRunElapsedSeconds = streamRunActive
+    ? streamCheckerElapsedSeconds
+    : (runStatus.elapsed_seconds ?? runProgress.elapsed_seconds ?? liveRunDurationSeconds)
+  const displayRunStageElapsedSeconds = streamRunActive
+    ? streamCheckerElapsedSeconds
+    : (runStatus.stage_elapsed_seconds ?? runProgress.stage_elapsed_seconds ?? liveStageDurationSeconds)
+  const qualityCheckedCount = streamQueueActive
     ? completed
     : (runCounts.quality_checked ?? 0)
+  const displayRunCounts = {
+    channels: streamQueueActive ? batchTotal : (runCounts.channels_with_periods ?? 0),
+    playlists: runCounts.refreshed_playlists ?? 0,
+    matched: runCounts.assigned_channels ?? 0,
+    checked: qualityCheckedCount,
+    dead: runCounts.dead_streams ?? 0,
+    blank: runCounts.blank_streams ?? 0,
+  }
   const runBadgeClass = failedRun
     ? 'bg-destructive text-destructive-foreground border-transparent'
     : completedRun
       ? 'bg-green-600 text-white border-transparent'
-      : runningRun
+      : displayRunningRun
         ? 'bg-blue-600 text-white border-transparent'
         : ''
   const shouldDisableActions = isProcessing || actionLoading !== ''
@@ -423,155 +489,155 @@ export default function Dashboard() {
         </Alert>
       )}
 
-      <Card>
-        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="space-y-1">
-            <CardTitle className="flex items-center gap-2 text-lg">
-              <ListChecks className="h-5 w-5 text-muted-foreground" />
-              Automation Run
-            </CardTitle>
-            <CardDescription>
-              {runStatus.message || 'Waiting for automation activity'}
-            </CardDescription>
-          </div>
-          <Badge variant="outline" className={`w-fit gap-1 ${runBadgeClass}`}>
-            {runningRun && <Loader2 className="h-3 w-3 animate-spin" />}
-            {failedRun && <AlertCircle className="h-3 w-3" />}
-            {completedRun && <CheckCircle2 className="h-3 w-3" />}
-            {runDisplayBadgeLabel}
-          </Badge>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Activity className="h-3.5 w-3.5" />
-                Current Stage
-              </div>
-              <div className="mt-1 truncate text-lg font-semibold">{runDisplayStageLabel}</div>
+      {showRunProgress && (
+        <Card>
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1">
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <ListChecks className="h-5 w-5 text-muted-foreground" />
+                Automation Run
+              </CardTitle>
+              <CardDescription>{displayRunMessage}</CardDescription>
             </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Clock3 className="h-3.5 w-3.5" />
-                Updated
-              </div>
-              <div className="mt-1 text-lg font-semibold">{formatTime(runStatus.updated_at)}</div>
-            </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Timer className="h-3.5 w-3.5" />
-                Duration
-              </div>
-              <div className="mt-1 text-lg font-semibold">{formatDuration(liveRunDurationSeconds)}</div>
-            </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Timer className="h-3.5 w-3.5" />
-                Stage Time
-              </div>
-              <div className="mt-1 text-lg font-semibold">{formatDuration(liveStageDurationSeconds)}</div>
-            </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Activity className="h-3.5 w-3.5" />
-                Progress
-              </div>
-              <div className="mt-1 text-lg font-semibold">{Math.round(runProgressPercent)}%</div>
-            </div>
-            <div className="rounded-md border bg-muted/30 p-3">
-              <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
-                <Database className="h-3.5 w-3.5" />
-                API p95 / p99
-              </div>
-              <div className="mt-1 text-lg font-semibold">
-                {apiTiming.p95_seconds != null ? formatDuration(apiTiming.p95_seconds) : 'N/A'}
-                <span className="mx-1 text-muted-foreground">/</span>
-                {apiTiming.p99_seconds != null ? formatDuration(apiTiming.p99_seconds) : 'N/A'}
-              </div>
-            </div>
-          </div>
-
-          <div>
-            <div className="mb-2 flex items-center justify-between gap-3 text-sm">
-              <span className="text-muted-foreground">{runProgressDetail}</span>
-              <span className="text-muted-foreground">{Math.round(runProgressPercent)}%</span>
-            </div>
-            <Progress value={runProgressPercent} className="h-2" />
-          </div>
-
-          <div className="grid gap-2 md:grid-cols-4 lg:grid-cols-8">
-            {AUTOMATION_STAGES.map((stage, index) => {
-              const isCurrent = stage.id === runStage
-              const isDone = completedRun || (runningRun && currentStageIndex >= 0 && index < currentStageIndex)
-              const stageClass = isCurrent
-                ? 'border-primary bg-primary/10 text-primary'
-                : isDone
-                  ? 'border-green-500/50 bg-green-500/10 text-green-600 dark:text-green-400'
-                  : 'border-border bg-background text-muted-foreground'
-              return (
-                <div key={stage.id} className={`rounded-md border px-3 py-2 text-xs font-medium ${stageClass}`}>
-                  <div className="flex items-center gap-2">
-                    {isCurrent && runningRun ? (
-                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                    ) : isDone ? (
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                    ) : (
-                      <Activity className="h-3.5 w-3.5" />
-                    )}
-                    <span className="truncate">{stage.label}</span>
-                  </div>
+            <Badge variant="outline" className={`w-fit gap-1 ${runBadgeClass}`}>
+              {displayRunningRun && <Loader2 className="h-3 w-3 animate-spin" />}
+              {failedRun && <AlertCircle className="h-3 w-3" />}
+              {completedRun && <CheckCircle2 className="h-3 w-3" />}
+              {runDisplayBadgeLabel}
+            </Badge>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Activity className="h-3.5 w-3.5" />
+                  Current Stage
                 </div>
-              )
-            })}
-          </div>
+                <div className="mt-1 truncate text-lg font-semibold">{runDisplayStageLabel}</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Clock3 className="h-3.5 w-3.5" />
+                  Updated
+                </div>
+                <div className="mt-1 text-lg font-semibold">{formatTime(displayRunUpdatedAt)}</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Timer className="h-3.5 w-3.5" />
+                  Duration
+                </div>
+                <div className="mt-1 text-lg font-semibold">{formatDuration(displayRunElapsedSeconds)}</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Timer className="h-3.5 w-3.5" />
+                  Stage Time
+                </div>
+                <div className="mt-1 text-lg font-semibold">{formatDuration(displayRunStageElapsedSeconds)}</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Activity className="h-3.5 w-3.5" />
+                  Progress
+                </div>
+                <div className="mt-1 text-lg font-semibold">{Math.round(runProgressPercent)}%</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Database className="h-3.5 w-3.5" />
+                  API p95 / p99
+                </div>
+                <div className="mt-1 text-lg font-semibold">
+                  {apiTiming.p95_seconds != null ? formatDuration(apiTiming.p95_seconds) : 'N/A'}
+                  <span className="mx-1 text-muted-foreground">/</span>
+                  {apiTiming.p99_seconds != null ? formatDuration(apiTiming.p99_seconds) : 'N/A'}
+                </div>
+              </div>
+            </div>
 
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Channels</div>
-              <div className="text-xl font-semibold">{runCounts.channels_with_periods ?? 0}</div>
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+                <span className="text-muted-foreground">{runProgressDetail}</span>
+                <span className="text-muted-foreground">{Math.round(runProgressPercent)}%</span>
+              </div>
+              <Progress value={runProgressPercent} className="h-2" />
             </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Playlists</div>
-              <div className="text-xl font-semibold">{runCounts.refreshed_playlists ?? 0}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Matched</div>
-              <div className="text-xl font-semibold">{runCounts.assigned_channels ?? 0}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Checked</div>
-              <div className="text-xl font-semibold">{qualityCheckedCount}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Dead</div>
-              <div className="text-xl font-semibold">{runCounts.dead_streams ?? 0}</div>
-            </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Blank</div>
-              <div className="text-xl font-semibold">{runCounts.blank_streams ?? 0}</div>
-            </div>
-          </div>
 
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">M3U Refresh</div>
-              <div className="text-base font-semibold">{formatDuration(runDurations.m3u_refresh_seconds)}</div>
+            <div className="grid gap-2 md:grid-cols-4 lg:grid-cols-8">
+              {AUTOMATION_STAGES.map((stage, index) => {
+                const isCurrent = stage.id === displayRunStageId
+                const isDone = completedRun || (!streamRunActive && runningRun && displayCurrentStageIndex >= 0 && index < displayCurrentStageIndex)
+                const stageClass = isCurrent
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : isDone
+                    ? 'border-green-500/50 bg-green-500/10 text-green-600 dark:text-green-400'
+                    : 'border-border bg-background text-muted-foreground'
+                return (
+                  <div key={stage.id} className={`rounded-md border px-3 py-2 text-xs font-medium ${stageClass}`}>
+                    <div className="flex items-center gap-2">
+                      {isCurrent && displayRunningRun ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : isDone ? (
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                      ) : (
+                        <Activity className="h-3.5 w-3.5" />
+                      )}
+                      <span className="truncate">{stage.label}</span>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Cache Sync</div>
-              <div className="text-base font-semibold">{formatDuration(runDurations.udi_sync_seconds)}</div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Channels</div>
+                <div className="text-xl font-semibold">{displayRunCounts.channels}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Playlists</div>
+                <div className="text-xl font-semibold">{displayRunCounts.playlists}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Matched</div>
+                <div className="text-xl font-semibold">{displayRunCounts.matched}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Checked</div>
+                <div className="text-xl font-semibold">{displayRunCounts.checked}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Dead</div>
+                <div className="text-xl font-semibold">{displayRunCounts.dead}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Blank</div>
+                <div className="text-xl font-semibold">{displayRunCounts.blank}</div>
+              </div>
             </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Stream Matching</div>
-              <div className="text-base font-semibold">{formatDuration(runDurations.stream_matching_seconds)}</div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">M3U Refresh</div>
+                <div className="text-base font-semibold">{formatDuration(runDurations.m3u_refresh_seconds)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Cache Sync</div>
+                <div className="text-base font-semibold">{formatDuration(runDurations.udi_sync_seconds)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Stream Matching</div>
+                <div className="text-base font-semibold">{formatDuration(runDurations.stream_matching_seconds)}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Quality Check</div>
+                <div className="text-base font-semibold">{formatDuration(runDurations.quality_check_seconds)}</div>
+              </div>
             </div>
-            <div className="rounded-md border p-3">
-              <div className="text-xs text-muted-foreground">Quality Check</div>
-              <div className="text-base font-semibold">{formatDuration(runDurations.quality_check_seconds)}</div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Status Cards */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">

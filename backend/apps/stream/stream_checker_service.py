@@ -3863,6 +3863,7 @@ class StreamCheckerService:
             queue_status['total_completed'] = sync_state['completed']
             queue_status['total_failed'] = sync_state['failed']
             queue_status['queue_size'] = queue_status['queued']
+            queue_status['started_at'] = sync_state.get('started_at')
             if queue_status['in_progress'] > 0:
                 queue_status['state'] = 'checking'
             elif queue_status['queue_size'] > 0:
@@ -4054,6 +4055,7 @@ class StreamCheckerService:
                 'in_progress': 0,
                 'queued_streams_count': total_streams,
                 'in_progress_streams_count': 0,
+                'started_at': datetime.now().isoformat(),
                 'generation': sync_generation,
             }
             self.checking = True

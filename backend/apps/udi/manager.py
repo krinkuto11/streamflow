@@ -795,6 +795,7 @@ class UDIManager:
             logger.warning("Cannot refresh data: Dispatcharr credentials not configured")
             self._update_init_progress(status='failed', message='Dispatcharr not configured')
             return False
+        self.fetcher.refresh_config()
         
         try:
             _refresh_start = datetime.now()
