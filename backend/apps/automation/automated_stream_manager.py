@@ -3424,7 +3424,7 @@ class AutomatedStreamManager:
             if playlists_refreshed and refresh_success:
                 udi_sync_started = time.time()
                 self._update_run_status(
-                    stage="udi_sync",
+                    stage="cache_sync",
                     stage_label="Syncing Cache",
                     message="Refreshing cache after playlist update",
                 )
@@ -3526,7 +3526,7 @@ class AutomatedStreamManager:
                         if refresh_success
                         else "Safety gate stopped matching after playlist refresh"
                     ),
-                    stage="udi_sync" if refresh_success else "aborted",
+                    stage="cache_sync" if refresh_success else "aborted",
                     stage_label="Syncing Cache" if refresh_success else "Aborted",
                 )
             
