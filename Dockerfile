@@ -32,8 +32,8 @@ RUN mkdir -p csv logs data
 # Set environment variable for config directory
 ENV CONFIG_DIR=/app/data
 
-# Set permissions for entrypoint
-RUN chmod +x entrypoint.sh
+# Normalize line endings for Windows build contexts and set permissions for entrypoint
+RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
 
 # Create default configuration files in the data directory
 RUN python3 apps/core/create_default_configs.py
