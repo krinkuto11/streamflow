@@ -63,6 +63,20 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertIsNone(status['current_channel'])
         self.assertEqual(status['state'], 'idle')
 
+    def test_queue_status_exposes_batch_started_at(self):
+        check_queue = StreamCheckQueue(max_size=10)
+
+        self.assertTrue(check_queue.add_channel(105, priority=10, stream_count=2))
+        queued_status = check_queue.get_status()
+        self.assertIsNotNone(queued_status['started_at'])
+
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 105)
+        active_status = check_queue.get_status()
+        self.assertEqual(active_status['started_at'], queued_status['started_at'])
+
+        check_queue.clear(reason='test_clear')
+        self.assertIsNone(check_queue.get_status()['started_at'])
+
     def test_service_clear_queue_does_not_leave_abort_stuck_when_idle(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.check_queue = StreamCheckQueue(max_size=10)
@@ -166,6 +180,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             'in_progress': 1,
             'queued_streams_count': 6,
             'in_progress_streams_count': 2,
+            'started_at': '2026-05-29T18:03:41',
             'generation': 1,
         }
         service.checking = True
@@ -183,6 +198,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['queue']['state'], 'checking')
         self.assertEqual(status['queue']['queued'], 2)
         self.assertEqual(status['queue']['in_progress'], 1)
+        self.assertEqual(status['queue']['started_at'], '2026-05-29T18:03:41')
         self.assertTrue(status['stream_checking_mode'])
 
 
