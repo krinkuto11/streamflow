@@ -1940,7 +1940,8 @@ class StreamCheckerService:
                         freeze_check_enabled=freeze_check_enabled,
                         freeze_check_min_duration=analysis_params.get('freeze_check_min_duration', 5.0),
                         freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
-                        freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80)
+                        freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80),
+                        hardware_acceleration=analysis_params.get('hardware_acceleration')
                     )
                 finally:
                     _heartbeat_stop.set()
@@ -2157,6 +2158,7 @@ class StreamCheckerService:
                     user_agent=analysis_params_lp.get('user_agent', 'VLC/3.0.14'),
                     loop_penalty=loop_penalty,
                     probe_duration=analysis_params_lp.get('max_loop_duration', 120) * 3,
+                    hardware_acceleration=analysis_params_lp.get('hardware_acceleration'),
                     channel_id=channel_id,
                     channel_name=channel_name,
                     streams_detail=list(stream_statuses.values()),
@@ -2802,7 +2804,8 @@ class StreamCheckerService:
                     freeze_check_enabled=freeze_check_enabled,
                     freeze_check_min_duration=analysis_params.get('freeze_check_min_duration', 5.0),
                     freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
-                    freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80)
+                    freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80),
+                    hardware_acceleration=analysis_params.get('hardware_acceleration')
                 )
                 
                 # Update stream stats on dispatcharr with ffmpeg-extracted data
@@ -3031,7 +3034,8 @@ class StreamCheckerService:
                         freeze_check_enabled=freeze_check_enabled,
                         freeze_check_min_duration=analysis_params.get('freeze_check_min_duration', 5.0),
                         freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
-                        freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80)
+                        freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80),
+                        hardware_acceleration=analysis_params.get('hardware_acceleration')
                     )
                     self._update_stream_stats(analyzed)
                     score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode)
@@ -3067,6 +3071,7 @@ class StreamCheckerService:
                     user_agent=analysis_params_lp.get('user_agent', 'VLC/3.0.14'),
                     loop_penalty=loop_penalty,
                     probe_duration=analysis_params_lp.get('max_loop_duration', 120) * 3,
+                    hardware_acceleration=analysis_params_lp.get('hardware_acceleration'),
                     channel_id=channel_id,
                     channel_name=channel_name,
                     streams_detail=list(stream_statuses.values()),
@@ -3381,7 +3386,8 @@ class StreamCheckerService:
             self.checking = False
     
     def _run_loop_probes(self, analyzed_streams: list, user_agent: str = 'VLC/3.0.14', loop_penalty: float = 0.0,
-                         probe_duration: int = 360, channel_id: int = 0, channel_name: str = '',
+                         probe_duration: int = 360, hardware_acceleration: Optional[dict] = None,
+                         channel_id: int = 0, channel_name: str = '',
                          streams_detail: Optional[list] = None) -> None:
         """
         Run loop detection probes on eligible streams in parallel with
@@ -3548,6 +3554,7 @@ class StreamCheckerService:
                     stream_tag=tag,
                     probe_duration=probe_duration,
                     user_agent=user_agent,
+                    hardware_acceleration=hardware_acceleration,
                 )
                 stream['loop_detected']      = loop_detected
                 stream['loop_duration_secs'] = loop_duration
@@ -4867,6 +4874,12 @@ class StreamCheckerService:
             updates['stream_analysis']['user_agent'] = sanitized
             if sanitized != user_agent:
                 logger.warning(f"User agent sanitized from '{user_agent}' to '{sanitized}'")
+
+        if 'stream_analysis' in updates and 'hardware_acceleration' in updates['stream_analysis']:
+            from apps.stream.stream_check_utils import normalize_hardware_acceleration_config
+            updates['stream_analysis']['hardware_acceleration'] = normalize_hardware_acceleration_config(
+                updates['stream_analysis'].get('hardware_acceleration')
+            )
         
         # Log what's being updated
         config_changes = []

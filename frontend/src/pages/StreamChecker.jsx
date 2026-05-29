@@ -960,6 +960,75 @@ export default function StreamChecker() {
                         User agent string for ffmpeg/ffprobe (for strict stream providers)
                       </p>
                     </div>
+
+                    <div className="space-y-4 rounded-md border border-border p-4 md:col-span-2">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="hardware_acceleration_enabled">Hardware Acceleration</Label>
+                          <p className="text-xs text-muted-foreground">
+                            Optional ffmpeg acceleration; CPU is used by default
+                          </p>
+                        </div>
+                        <Switch
+                          id="hardware_acceleration_enabled"
+                          checked={editedConfig?.stream_analysis?.hardware_acceleration?.enabled === true}
+                          onCheckedChange={(checked) => updateConfigValue('stream_analysis.hardware_acceleration.enabled', checked)}
+                          disabled={!configEditing}
+                        />
+                      </div>
+
+                      <div className="grid gap-4 md:grid-cols-3">
+                        <div className="space-y-2">
+                          <Label htmlFor="hardware_acceleration_mode">Mode</Label>
+                          <Select
+                            value={editedConfig?.stream_analysis?.hardware_acceleration?.mode || 'auto'}
+                            onValueChange={(value) => updateConfigValue('stream_analysis.hardware_acceleration.mode', value)}
+                            disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
+                          >
+                            <SelectTrigger id="hardware_acceleration_mode">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="auto">Auto</SelectItem>
+                              <SelectItem value="cuda">CUDA</SelectItem>
+                              <SelectItem value="vaapi">VAAPI</SelectItem>
+                              <SelectItem value="qsv">QSV</SelectItem>
+                              <SelectItem value="d3d11va">D3D11VA</SelectItem>
+                              <SelectItem value="dxva2">DXVA2</SelectItem>
+                              <SelectItem value="vdpau">VDPAU</SelectItem>
+                              <SelectItem value="videotoolbox">VideoToolbox</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="hardware_acceleration_device">Device</Label>
+                          <Input
+                            id="hardware_acceleration_device"
+                            type="text"
+                            value={editedConfig?.stream_analysis?.hardware_acceleration?.device || ''}
+                            onChange={(e) => updateConfigValue('stream_analysis.hardware_acceleration.device', e.target.value)}
+                            disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
+                            maxLength={200}
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2">
+                          <div className="space-y-0.5">
+                            <Label htmlFor="hardware_acceleration_fallback">CPU Fallback</Label>
+                            <p className="text-xs text-muted-foreground">
+                              Retry without acceleration if ffmpeg rejects it
+                            </p>
+                          </div>
+                          <Switch
+                            id="hardware_acceleration_fallback"
+                            checked={editedConfig?.stream_analysis?.hardware_acceleration?.allow_fallback !== false}
+                            onCheckedChange={(checked) => updateConfigValue('stream_analysis.hardware_acceleration.allow_fallback', checked)}
+                            disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
+                          />
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </TabsContent>
 

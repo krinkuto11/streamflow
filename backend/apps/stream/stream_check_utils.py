@@ -68,6 +68,27 @@ _LOOP_PROBE_DURATION_MIN      = 60    # enforced floor
 _LOOP_PROBE_DURATION_MAX      = 720   # 12 minutes — ceiling for future flexibility
 
 # Constants for error detection and logging
+FFMPEG_HWACCEL_MODES = {
+    'auto',
+    'cuda',
+    'd3d11va',
+    'dxva2',
+    'qsv',
+    'vaapi',
+    'vdpau',
+    'videotoolbox',
+}
+FFMPEG_HWACCEL_FAILURE_PATTERNS = (
+    'device creation failed',
+    'failed to create',
+    'failed setup for format',
+    'hardware acceleration methods',
+    'no device available',
+    'no hw device',
+    'cannot load',
+    'cannot open',
+    'unknown hwaccel',
+)
 EARLY_EXIT_THRESHOLD = 0.8  # Consider ffmpeg exited early if elapsed < 80% of expected duration
 MAX_ERROR_LINES_TO_LOG = 5  # Maximum number of error lines to log from ffmpeg output
 MAX_DEBUG_LINES_TO_LOG = 10  # Maximum number of debug lines to log from ffmpeg output
@@ -112,6 +133,96 @@ def _get_ffmpeg_extra_args() -> list:
     except ValueError as exc:
         logger.warning(f"Invalid FFMPEG_EXTRA_ARGS (ignored): {exc}")
         return []
+
+
+def normalize_hardware_acceleration_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return a safe, CPU-default hardware acceleration config."""
+    if not isinstance(config, dict):
+        return {
+            'enabled': False,
+            'mode': 'auto',
+            'device': '',
+            'allow_fallback': True,
+        }
+
+    mode = str(config.get('mode') or 'auto').strip().lower()
+    enabled = bool(config.get('enabled', False))
+    if mode in {'', 'none', 'disabled', 'cpu'}:
+        enabled = False
+        mode = 'auto'
+    elif mode not in FFMPEG_HWACCEL_MODES:
+        logger.warning(f"Invalid ffmpeg hardware acceleration mode '{mode}' ignored")
+        enabled = False
+        mode = 'auto'
+
+    device = str(config.get('device') or '').strip()
+    if device and not re.match(r'^[a-zA-Z0-9_./:\\-]+$', device):
+        logger.warning("Invalid ffmpeg hardware acceleration device ignored")
+        device = ''
+
+    return {
+        'enabled': enabled,
+        'mode': mode,
+        'device': device[:200],
+        'allow_fallback': bool(config.get('allow_fallback', True)),
+    }
+
+
+def _get_ffmpeg_hwaccel_args(config: Optional[Dict[str, Any]]) -> list:
+    hwaccel = normalize_hardware_acceleration_config(config)
+    if not hwaccel['enabled']:
+        return []
+
+    args = []
+    mode = hwaccel['mode']
+    device = hwaccel.get('device') or ''
+    if device and mode == 'vaapi':
+        args += ['-vaapi_device', device]
+    args += ['-hwaccel', mode]
+    if device and mode != 'vaapi':
+        args += ['-hwaccel_device', device]
+    return args
+
+
+def _looks_like_hwaccel_failure(output: str) -> bool:
+    lowered = (output or '').lower()
+    return any(pattern in lowered for pattern in FFMPEG_HWACCEL_FAILURE_PATTERNS)
+
+
+def _run_ffmpeg_with_optional_fallback(
+    command: List[str],
+    *,
+    fallback_command: Optional[List[str]],
+    timeout: float,
+    stdout: Any,
+    stderr: Any,
+    text: bool,
+    context: str,
+) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        command,
+        stdout=stdout,
+        stderr=stderr,
+        timeout=timeout,
+        text=text
+    )
+    if (
+        fallback_command
+        and result.returncode != 0
+        and _looks_like_hwaccel_failure(result.stderr or result.stdout or '')
+    ):
+        logger.warning(
+            "FFmpeg hardware acceleration failed during %s; retrying on CPU",
+            context,
+        )
+        return subprocess.run(
+            fallback_command,
+            stdout=stdout,
+            stderr=stderr,
+            timeout=timeout,
+            text=text
+        )
+    return result
 
 
 def _log_ffmpeg_errors(output: str, logger: logging.Logger, error_patterns: list) -> None:
@@ -613,6 +724,7 @@ def get_stream_info_and_bitrate(
     freeze_check_min_duration: float = 5.0,
     freeze_check_noise_threshold: float = 0.001,
     freeze_check_ratio_threshold: float = 0.80,
+    hardware_acceleration: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Get complete stream information using ffmpeg in a single call.
@@ -639,6 +751,7 @@ def get_stream_info_and_bitrate(
         freeze_check_min_duration: Minimum continuous frozen duration in seconds
         freeze_check_noise_threshold: freezedetect noise threshold
         freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
+        hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
 
     Returns:
         Dictionary containing:
@@ -689,6 +802,8 @@ def get_stream_info_and_bitrate(
     logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url_ref(url)}")
 
     extra_args = _get_ffmpeg_extra_args()
+    hwaccel_config = normalize_hardware_acceleration_config(hardware_acceleration)
+    hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
 
     # Flag rationale:
     #   -re      : read at native frame rate so bitrate reflects real playback
@@ -711,10 +826,19 @@ def get_stream_info_and_bitrate(
     command = [
         'ffmpeg', '-re', '-v', 'info', '-stats',
         '-user_agent', user_agent,
-    ] + extra_args + [
+    ] + hwaccel_args + extra_args + [
         '-i', url, '-t', str(duration),
         '-c', 'copy', '-f', 'mpegts', 'pipe:1'
     ]
+    fallback_command = None
+    if hwaccel_args and hwaccel_config.get('allow_fallback', True):
+        fallback_command = [
+            'ffmpeg', '-re', '-v', 'info', '-stats',
+            '-user_agent', user_agent,
+        ] + extra_args + [
+            '-i', url, '-t', str(duration),
+            '-c', 'copy', '-f', 'mpegts', 'pipe:1'
+        ]
 
     video_filters = []
     if blank_check_enabled:
@@ -734,6 +858,13 @@ def get_stream_info_and_bitrate(
             '-vf', ','.join(video_filters),
             '-f', 'null', os.devnull,
         ]
+        if fallback_command:
+            fallback_command += [
+                '-map', '0:v:0?', '-t', str(duration),
+                '-an', '-sn',
+                '-vf', ','.join(video_filters),
+                '-f', 'null', os.devnull,
+            ]
 
     result_data = {
         'video_codec': 'N/A', 'audio_codec': 'N/A', 'resolution': '0x0',
@@ -754,12 +885,14 @@ def get_stream_info_and_bitrate(
 
     try:
         start = time.time()
-        result = subprocess.run(
+        result = _run_ffmpeg_with_optional_fallback(
             command,
+            fallback_command=fallback_command,
             stdout=subprocess.DEVNULL,  # OS drains stdout so ffmpeg never blocks
             stderr=subprocess.PIPE,
             timeout=actual_timeout,
-            text=True
+            text=True,
+            context="stream analysis",
         )
         elapsed = time.time() - start
         result_data['elapsed_time'] = elapsed
@@ -1007,7 +1140,14 @@ def get_stream_info_and_bitrate(
     return result_data
 
 
-def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_agent: str = 'VLC/3.0.14', stream_startup_buffer: int = 10) -> Tuple[Optional[float], str, float]:
+def get_stream_bitrate(
+    url: str,
+    duration: int = 30,
+    timeout: int = 30,
+    user_agent: str = 'VLC/3.0.14',
+    stream_startup_buffer: int = 10,
+    hardware_acceleration: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[float], str, float]:
     """
     Get stream bitrate using ffmpeg.
 
@@ -1020,6 +1160,7 @@ def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_age
         timeout: Base timeout in seconds (actual timeout includes duration + overhead)
         user_agent: User agent string to use for HTTP requests
         stream_startup_buffer: Buffer in seconds for stream startup (default: 10s)
+        hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
 
     Returns:
         Tuple of (bitrate_kbps, status, elapsed_time)
@@ -1029,13 +1170,24 @@ def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_age
     """
     logger.debug(f"Analyzing bitrate for {duration}s...")
     extra_args = _get_ffmpeg_extra_args()
+    hwaccel_config = normalize_hardware_acceleration_config(hardware_acceleration)
+    hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
     command = [
         'ffmpeg', '-re', '-v', 'info', '-stats',
         '-user_agent', user_agent,
-    ] + extra_args + [
+    ] + hwaccel_args + extra_args + [
         '-i', url, '-t', str(duration),
         '-c', 'copy', '-f', 'mpegts', 'pipe:1'
     ]
+    fallback_command = None
+    if hwaccel_args and hwaccel_config.get('allow_fallback', True):
+        fallback_command = [
+            'ffmpeg', '-re', '-v', 'info', '-stats',
+            '-user_agent', user_agent,
+        ] + extra_args + [
+            '-i', url, '-t', str(duration),
+            '-c', 'copy', '-f', 'mpegts', 'pipe:1'
+        ]
 
     bitrate = None
     status = "OK"
@@ -1043,12 +1195,14 @@ def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_age
 
     try:
         start = time.time()
-        result = subprocess.run(
+        result = _run_ffmpeg_with_optional_fallback(
             command,
+            fallback_command=fallback_command,
             stdout=subprocess.DEVNULL,  # OS drains stdout so ffmpeg never blocks
             stderr=subprocess.PIPE,
             timeout=actual_timeout,
-            text=True
+            text=True,
+            context="bitrate analysis",
         )
         elapsed = time.time() - start
         output = result.stderr
@@ -1131,6 +1285,7 @@ def _probe_stream_for_loops(
     stream_tag: str,
     probe_duration: int = _LOOP_PROBE_DURATION,
     user_agent: str = 'VLC/3.0.14',
+    hardware_acceleration: Optional[Dict[str, Any]] = None,
 ) -> 'tuple[bool, float | None, int]':
     """
     Probe a stream for looping content using a single lightweight FFmpeg process.
@@ -1151,6 +1306,7 @@ def _probe_stream_for_loops(
         probe_duration: Seconds to run. Clamped to
                         [_LOOP_PROBE_DURATION_MIN, _LOOP_PROBE_DURATION_MAX].
         user_agent:     HTTP User-Agent forwarded to FFmpeg.
+        hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default.
 
     Returns:
         (loop_detected, loop_duration_secs, frames_processed)
@@ -1176,12 +1332,16 @@ def _probe_stream_for_loops(
         f"sequence_length=3, duration_threshold=10.0s)"
     )
 
+    hwaccel_config = normalize_hardware_acceleration_config(hardware_acceleration)
+    hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
+
     cmd = [
         'ffmpeg',
         '-hide_banner',
         '-nostdin',
         '-loglevel', 'warning',
         '-user_agent', user_agent,
+    ] + hwaccel_args + [
         '-i', url,
         '-t', str(clamped),
         '-map', '0:v:0',
@@ -1191,6 +1351,23 @@ def _probe_stream_for_loops(
         '-f', 'image2pipe',
         'pipe:1',
     ]
+    fallback_cmd = None
+    if hwaccel_args and hwaccel_config.get('allow_fallback', True):
+        fallback_cmd = [
+            'ffmpeg',
+            '-hide_banner',
+            '-nostdin',
+            '-loglevel', 'warning',
+            '-user_agent', user_agent,
+            '-i', url,
+            '-t', str(clamped),
+            '-map', '0:v:0',
+            '-an', '-sn',
+            '-vf', 'scale=32:32:flags=fast_bilinear,format=gray',
+            '-c:v', 'ppm',
+            '-f', 'image2pipe',
+            'pipe:1',
+        ]
 
     try:
         proc = subprocess.Popen(
@@ -1290,6 +1467,19 @@ def _probe_stream_for_loops(
     except Exception:
         stderr_out = ''
 
+    if n == 0 and fallback_cmd and _looks_like_hwaccel_failure(stderr_out):
+        logger.warning(
+            "[loop-probe:%s] FFmpeg hardware acceleration failed; retrying on CPU",
+            stream_tag,
+        )
+        return _probe_stream_for_loops(
+            url=url,
+            stream_tag=stream_tag,
+            probe_duration=probe_duration,
+            user_agent=user_agent,
+            hardware_acceleration={'enabled': False},
+        )
+
     if n == 0:
         logger.warning(
             f"[loop-probe:{stream_tag}] 0 frames received — loop detection "
@@ -1328,6 +1518,7 @@ def analyze_stream(
     freeze_check_min_duration: float = 5.0,
     freeze_check_noise_threshold: float = 0.001,
     freeze_check_ratio_threshold: float = 0.80,
+    hardware_acceleration: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Perform complete stream analysis including codec, resolution, FPS, bitrate, and audio.
@@ -1355,6 +1546,7 @@ def analyze_stream(
         freeze_check_min_duration: Minimum continuous frozen duration in seconds
         freeze_check_noise_threshold: freezedetect noise threshold
         freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
+        hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
 
     Returns:
         Dictionary containing analysis results with keys:
@@ -1431,7 +1623,8 @@ def analyze_stream(
                     freeze_check_enabled=freeze_check_enabled,
                     freeze_check_min_duration=freeze_check_min_duration,
                     freeze_check_noise_threshold=freeze_check_noise_threshold,
-                    freeze_check_ratio_threshold=freeze_check_ratio_threshold
+                    freeze_check_ratio_threshold=freeze_check_ratio_threshold,
+                    hardware_acceleration=hardware_acceleration
                 )
 
                 result = {
