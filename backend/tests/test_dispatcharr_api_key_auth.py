@@ -313,3 +313,31 @@ def test_udi_connection_test_validates_api_key_headers(monkeypatch):
     assert fetcher.UDIFetcher().test_connection() is True
     validate_headers.assert_called_once()
     validate_token.assert_not_called()
+
+
+def test_udi_fetcher_refreshes_base_url_after_setup_config_save(monkeypatch):
+    from apps.udi import fetcher
+
+    base_url = {"value": None}
+
+    monkeypatch.setattr(fetcher, "_get_base_url", lambda: base_url["value"])
+    monkeypatch.setattr(
+        fetcher,
+        "_get_auth_headers",
+        lambda: {
+            "Authorization": "ApiKey secret-key",
+            "X-API-Key": "secret-key",
+            "Accept": "application/json",
+        },
+    )
+    validate_headers = Mock(return_value=True)
+    monkeypatch.setattr(fetcher, "_validate_auth_headers", validate_headers)
+
+    udi_fetcher = fetcher.UDIFetcher()
+    assert udi_fetcher.base_url is None
+
+    base_url["value"] = "http://dispatcharr.test"
+
+    assert udi_fetcher.test_connection() is True
+    assert udi_fetcher.base_url == "http://dispatcharr.test"
+    validate_headers.assert_called_once()

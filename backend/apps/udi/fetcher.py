@@ -81,6 +81,10 @@ class UDIFetcher:
         self._timing_lock = threading.Lock()
         self._request_timings: List[Dict[str, Any]] = []
 
+    def refresh_config(self) -> None:
+        """Refresh cached Dispatcharr connection settings after setup changes."""
+        self.base_url = _get_base_url()
+
     def _record_request_timing(
         self,
         *,
@@ -144,6 +148,7 @@ class UDIFetcher:
         Returns:
             True if connection and auth successful
         """
+        self.refresh_config()
         if not self.base_url:
             return False
             
