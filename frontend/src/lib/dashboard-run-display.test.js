@@ -39,6 +39,30 @@ describe('dashboard stream checker run display', () => {
     ])
   })
 
+  it('lets manual stream checker progress override a skipped automation run', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'skipped',
+      runStage: 'skipped',
+      batchTotal: 3,
+      completed: 1,
+      streamCheckerStatus: {
+        stream_checking_mode: true,
+        queue: {
+          started_at: '2026-05-29T18:02:41Z',
+        },
+      },
+    })
+
+    expect(display.streamCheckerOnlyActive).toBe(true)
+    expect(display.streamQueueActive).toBe(true)
+    expect(display.stageCards[0]).toMatchObject({
+      key: 'quality_checking',
+      status: 'running',
+      current: 1,
+      total: 3,
+    })
+  })
+
   it('falls back to zero seconds until stream starts are available', () => {
     const display = getStreamCheckerRunDisplay({
       runState: 'idle',
