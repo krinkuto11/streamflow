@@ -357,6 +357,16 @@ export default function Dashboard() {
   const failedRun = runState === 'failed'
   const completedRun = runState === 'completed'
   const skippedRun = runState === 'skipped'
+  const runDisplayStageLabel = skippedRun ? 'Waiting for next run' : runStageLabel
+  const runDisplayBadgeLabel = skippedRun
+    ? 'Waiting'
+    : runningRun
+      ? 'Running'
+      : completedRun
+        ? 'Completed'
+        : failedRun
+          ? 'Failed'
+          : 'Idle'
   const liveRunDurationSeconds = runningRun
     ? elapsedSecondsSince(runStatus.started_at) ?? runStatus.duration_seconds
     : runStatus.duration_seconds
@@ -428,7 +438,7 @@ export default function Dashboard() {
             {runningRun && <Loader2 className="h-3 w-3 animate-spin" />}
             {failedRun && <AlertCircle className="h-3 w-3" />}
             {completedRun && <CheckCircle2 className="h-3 w-3" />}
-            {skippedRun ? 'Skipped' : runningRun ? 'Running' : completedRun ? 'Completed' : failedRun ? 'Failed' : 'Idle'}
+            {runDisplayBadgeLabel}
           </Badge>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -438,7 +448,7 @@ export default function Dashboard() {
                 <Activity className="h-3.5 w-3.5" />
                 Current Stage
               </div>
-              <div className="mt-1 truncate text-lg font-semibold">{runStageLabel}</div>
+              <div className="mt-1 truncate text-lg font-semibold">{runDisplayStageLabel}</div>
             </div>
             <div className="rounded-md border bg-muted/30 p-3">
               <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
@@ -653,21 +663,21 @@ export default function Dashboard() {
               <Users className="h-5 w-5 text-muted-foreground" />
               Watched Channels
             </CardTitle>
-            <CardDescription>Current real-client and watcher playback</CardDescription>
+            <CardDescription>Current viewer and watcher playback</CardDescription>
           </div>
           <div className="flex flex-wrap gap-2">
             <Badge variant={realWatchedCount > 0 ? 'default' : 'secondary'}>
-              {realWatchedCount} real
+              {realWatchedCount} viewer channels
             </Badge>
             <Badge variant={watcherOnlyCount > 0 ? 'outline' : 'secondary'}>
-              {watcherOnlyCount} watcher only
+              {watcherOnlyCount} watcher-only channels
             </Badge>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-3">
             <div className="rounded-md border bg-muted/30 p-3">
-              <div className="text-xs font-medium uppercase text-muted-foreground">Real Clients</div>
+              <div className="text-xs font-medium uppercase text-muted-foreground">Viewer Clients</div>
               <div className="mt-1 text-2xl font-semibold">{totalRealClients}</div>
             </div>
             <div className="rounded-md border bg-muted/30 p-3">
@@ -700,14 +710,14 @@ export default function Dashboard() {
                       </div>
                     </div>
                     {channel.has_real_clients ? (
-                      <Badge className="shrink-0 bg-green-600 text-white">Watched</Badge>
+                      <Badge className="shrink-0 bg-green-600 text-white">Viewer active</Badge>
                     ) : (
-                      <Badge variant="outline" className="shrink-0">Watcher</Badge>
+                      <Badge variant="outline" className="shrink-0">Watcher only</Badge>
                     )}
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                    <Badge variant="secondary">{channel.real_client_count || 0} real</Badge>
-                    <Badge variant="outline">{channel.watcher_client_count || 0} watcher</Badge>
+                    <Badge variant="secondary">{channel.real_client_count || 0} viewers</Badge>
+                    <Badge variant="outline">{channel.watcher_client_count || 0} watchers</Badge>
                   </div>
                 </div>
               ))}
