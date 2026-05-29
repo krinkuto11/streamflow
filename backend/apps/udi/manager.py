@@ -288,7 +288,12 @@ class UDIManager:
         Returns:
             Dictionary with status, percentage, message, and entity_counts.
         """
-        return self._init_progress.copy()
+        progress = self._init_progress.copy()
+        progress['entity_counts'] = self._init_progress.get('entity_counts', {}).copy()
+        progress['api_timing'] = self.get_api_timing_summary()
+        progress['last_refresh_duration_seconds'] = round(self._last_refresh_duration_seconds, 3)
+        progress['last_refresh_time'] = self._last_refresh_time.isoformat() if self._last_refresh_time else None
+        return progress
     
     def _update_init_progress(
         self,
@@ -354,6 +359,37 @@ class UDIManager:
         has never completed successfully (e.g. before startup init finishes).
         """
         return self._last_refresh_duration_seconds
+
+    def get_api_timing_summary(self) -> Dict[str, Any]:
+        """Return recent Dispatcharr API latency metrics from the fetcher."""
+        getter = getattr(self.fetcher, "get_api_timing_summary", None)
+        if callable(getter):
+            return getter()
+        return {
+            "sample_count": 0,
+            "failure_count": 0,
+            "p95_seconds": None,
+            "p99_seconds": None,
+            "slowest": [],
+        }
+
+    def get_observability_status(self) -> Dict[str, Any]:
+        """Return UI-safe UDI timing and cache status details."""
+        now = datetime.now()
+        age_seconds = None
+        if self._last_refresh_time:
+            age_seconds = round((now - self._last_refresh_time).total_seconds(), 3)
+        return {
+            "network_ready": self._network_ready,
+            "refresh_running": self._refresh_running,
+            "init_in_progress": self._init_in_progress,
+            "last_refresh_time": self._last_refresh_time.isoformat() if self._last_refresh_time else None,
+            "last_refresh_age_seconds": age_seconds,
+            "last_refresh_duration_seconds": round(self._last_refresh_duration_seconds, 3),
+            "cache_age_description": self.get_cache_age_description(),
+            "api_timing": self.get_api_timing_summary(),
+            "init_progress": self.get_init_progress(),
+        }
 
     def get_cache_age_description(self) -> str:
         """Return a human-readable description of UDI cache age and last sync time.
