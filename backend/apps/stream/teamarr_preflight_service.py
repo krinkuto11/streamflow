@@ -467,8 +467,8 @@ class TeamarrPreflightService:
             daemon=True,
             name=f"TeamarrPreflight-{channel_id}",
         )
-        thread.start()
         self._record_event("preflight_started", event, {"bucket": event.get("trigger_bucket")})
+        thread.start()
         return True
 
     def _run_check(self, key: str, event: Dict[str, Any], config: Dict[str, Any]) -> None:
@@ -489,7 +489,7 @@ class TeamarrPreflightService:
                     "bucket": event.get("trigger_bucket"),
                     "error": "Preflight check failed" if result.get("error") else None,
                     "reason": result.get("reason"),
-                    "stats": result.get("stats"),
+                    "stats": self._public_check_stats(result.get("stats")),
                 },
             )
         except Exception as exc:
@@ -560,6 +560,32 @@ class TeamarrPreflightService:
             payload.get("dispatcharr_channel_id"),
             payload.get("identity"),
         )
+
+    @staticmethod
+    def _public_check_stats(stats: Any) -> Optional[Dict[str, Any]]:
+        if not isinstance(stats, dict):
+            return None
+
+        allowed_keys = {
+            "avg_bitrate",
+            "avg_fps",
+            "avg_resolution",
+            "blank_streams",
+            "dead_streams",
+            "duration",
+            "duration_seconds",
+            "failed",
+            "freeze_streams",
+            "loop_streams",
+            "successful",
+            "streams_analyzed",
+            "total_streams",
+        }
+        return {
+            key: value
+            for key, value in stats.items()
+            if key in allowed_keys and isinstance(value, (str, int, float, bool, type(None)))
+        }
 
     @staticmethod
     def _default_stream_checker_provider() -> Any:

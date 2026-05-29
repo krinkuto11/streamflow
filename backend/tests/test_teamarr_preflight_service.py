@@ -36,7 +36,16 @@ class FakeChecker:
 
     def check_single_channel(self, *args, **kwargs):
         self.calls.append((args, kwargs))
-        return {"success": True, "stats": {"total_streams": 2}}
+        return {
+            "success": True,
+            "stats": {
+                "total_streams": 2,
+                "duration_seconds": 12,
+                "stream_details": [
+                    {"stream_name": "Private Stream", "m3u_account": "Private Provider"},
+                ],
+            },
+        }
 
 
 class FakeUdi:
@@ -131,6 +140,19 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         called_url = http_get.call_args[0][0]
         self.assertEqual(called_url, "http://teamarr.test/api/v1/channels/managed")
         self.assertEqual(http_get.call_args.kwargs["headers"]["X-Teamarr-Key"], "secret")
+
+        deadline = time.time() + 2
+        recent = []
+        while time.time() < deadline:
+            recent = service.get_status()["recent_events"]
+            if recent and recent[0]["type"] == "preflight_completed":
+                break
+            time.sleep(0.01)
+        self.assertEqual(recent[0]["type"], "preflight_completed")
+        public_stats = recent[0]["details"]["stats"]
+        self.assertEqual(public_stats["total_streams"], 2)
+        self.assertEqual(public_stats["duration_seconds"], 12)
+        self.assertNotIn("stream_details", public_stats)
 
     def test_no_streams_records_no_streams_without_launching_check(self):
         checker = FakeChecker()
