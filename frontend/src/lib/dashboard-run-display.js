@@ -13,6 +13,18 @@ const parseTimestamp = (value) => {
   return Number.isFinite(timestamp) ? timestamp : null
 }
 
+export const preferLiveRunSeconds = ({
+  reportedSeconds,
+  liveSeconds,
+  active = false,
+} = {}) => {
+  if (active && Number.isFinite(liveSeconds) && liveSeconds > 0) {
+    return liveSeconds
+  }
+
+  return reportedSeconds ?? liveSeconds
+}
+
 export const getStreamCheckerRunDisplay = ({
   streamCheckerStatus,
   runState = 'idle',

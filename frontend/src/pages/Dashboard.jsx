@@ -10,7 +10,7 @@ import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
 import { getDashboardRunCounts } from '@/lib/dashboard-run-counts.js'
-import { getStreamCheckerRunDisplay } from '@/lib/dashboard-run-display.js'
+import { getStreamCheckerRunDisplay, preferLiveRunSeconds } from '@/lib/dashboard-run-display.js'
 import { formatDuration as formatDurationValue } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
@@ -428,10 +428,18 @@ export default function Dashboard() {
     : runStatus.updated_at
   const displayRunElapsedSeconds = streamRunActive
     ? streamCheckerElapsedSeconds
-    : (runStatus.elapsed_seconds ?? runProgress.elapsed_seconds ?? liveRunDurationSeconds)
+    : preferLiveRunSeconds({
+        active: runningRun,
+        reportedSeconds: runStatus.elapsed_seconds ?? runProgress.elapsed_seconds,
+        liveSeconds: liveRunDurationSeconds,
+      })
   const displayRunStageElapsedSeconds = streamRunActive
     ? streamCheckerElapsedSeconds
-    : (runStatus.stage_elapsed_seconds ?? runProgress.stage_elapsed_seconds ?? liveStageDurationSeconds)
+    : preferLiveRunSeconds({
+        active: runningRun,
+        reportedSeconds: runStatus.stage_elapsed_seconds ?? runProgress.stage_elapsed_seconds,
+        liveSeconds: liveStageDurationSeconds,
+      })
   const displayRunCounts = getDashboardRunCounts({
     streamCheckerStatus,
     streamQueueActive,

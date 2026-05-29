@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getStreamCheckerRunDisplay } from './dashboard-run-display.js'
+import { getStreamCheckerRunDisplay, preferLiveRunSeconds } from './dashboard-run-display.js'
 
 describe('dashboard stream checker run display', () => {
   it('uses queue progress and stream timing when no automation run is active', () => {
@@ -92,5 +92,21 @@ describe('dashboard stream checker run display', () => {
     })
 
     expect(display.streamCheckerElapsedSeconds).toBe(60)
+  })
+
+  it('uses live stage timing while an automation stage is active', () => {
+    expect(preferLiveRunSeconds({
+      active: true,
+      reportedSeconds: 0,
+      liveSeconds: 713,
+    })).toBe(713)
+  })
+
+  it('keeps reported timing for inactive completed stages', () => {
+    expect(preferLiveRunSeconds({
+      active: false,
+      reportedSeconds: 0,
+      liveSeconds: 713,
+    })).toBe(0)
   })
 })
