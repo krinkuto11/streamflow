@@ -91,11 +91,11 @@ def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
         return False
 
     if received != expected:
-        # Within threshold but not an exact match — log at debug level only.
-        logger.debug(
-            f"UDI integrity minor variance for {entity}: "
-            f"received {received}, expected {expected}"
+        logger.warning(
+            f"UDI integrity check FAILED for {entity}: "
+            f"received {received} of {expected} expected records"
         )
+        return False
 
     return True
 
@@ -288,7 +288,12 @@ class UDIManager:
         Returns:
             Dictionary with status, percentage, message, and entity_counts.
         """
-        return self._init_progress.copy()
+        progress = self._init_progress.copy()
+        progress['entity_counts'] = self._init_progress.get('entity_counts', {}).copy()
+        progress['api_timing'] = self.get_api_timing_summary()
+        progress['last_refresh_duration_seconds'] = round(self._last_refresh_duration_seconds, 3)
+        progress['last_refresh_time'] = self._last_refresh_time.isoformat() if self._last_refresh_time else None
+        return progress
     
     def _update_init_progress(
         self,
@@ -354,6 +359,37 @@ class UDIManager:
         has never completed successfully (e.g. before startup init finishes).
         """
         return self._last_refresh_duration_seconds
+
+    def get_api_timing_summary(self) -> Dict[str, Any]:
+        """Return recent Dispatcharr API latency metrics from the fetcher."""
+        getter = getattr(self.fetcher, "get_api_timing_summary", None)
+        if callable(getter):
+            return getter()
+        return {
+            "sample_count": 0,
+            "failure_count": 0,
+            "p95_seconds": None,
+            "p99_seconds": None,
+            "slowest": [],
+        }
+
+    def get_observability_status(self) -> Dict[str, Any]:
+        """Return UI-safe UDI timing and cache status details."""
+        now = datetime.now()
+        age_seconds = None
+        if self._last_refresh_time:
+            age_seconds = round((now - self._last_refresh_time).total_seconds(), 3)
+        return {
+            "network_ready": self._network_ready,
+            "refresh_running": self._refresh_running,
+            "init_in_progress": self._init_in_progress,
+            "last_refresh_time": self._last_refresh_time.isoformat() if self._last_refresh_time else None,
+            "last_refresh_age_seconds": age_seconds,
+            "last_refresh_duration_seconds": round(self._last_refresh_duration_seconds, 3),
+            "cache_age_description": self.get_cache_age_description(),
+            "api_timing": self.get_api_timing_summary(),
+            "init_progress": self.get_init_progress(),
+        }
 
     def get_cache_age_description(self) -> str:
         """Return a human-readable description of UDI cache age and last sync time.
@@ -832,6 +868,17 @@ class UDIManager:
                 },
             }
 
+            integrity_ok = channels_ok and streams_ok
+            if not integrity_ok:
+                self._update_init_progress(
+                    status='failed',
+                    percentage=100,
+                    message='Initialization failed integrity check — retry the data refresh',
+                    current_step='failed',
+                    entity_counts=entity_counts,
+                )
+                return False
+
             self._update_init_progress(percentage=85, message='Building indexes...', current_step='index')
 
             # ----------------------------------------------------------------
@@ -934,19 +981,10 @@ class UDIManager:
                 f"{len(self._channel_profiles_cache)} profiles"
             )
 
-            # Surface integrity warnings in the progress status if any check failed.
-            # Phase 3 (unstable state) will act on these; for now we log and expose.
-            integrity_ok = channels_ok and streams_ok
-            completion_message = (
-                'Initialization complete'
-                if integrity_ok
-                else 'Initialization complete (integrity warnings — check logs)'
-            )
-
             self._update_init_progress(
                 status='completed',
                 percentage=100,
-                message=completion_message,
+                message='Initialization complete',
                 current_step='done',
                 entity_counts=entity_counts,
             )

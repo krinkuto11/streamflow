@@ -16,6 +16,7 @@ import os
 import re
 import time
 import threading
+import copy
 from functools import lru_cache
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1099,6 +1100,16 @@ class RegexChannelMatcher:
 
 class AutomatedStreamManager:
     """Main automated stream management system."""
+
+    RUN_STAGES = [
+        ("preparing", "Preparing"),
+        ("schedule", "Schedule"),
+        ("m3u_refresh", "M3U Refresh"),
+        ("cache_sync", "Cache Sync"),
+        ("matching", "Matching"),
+        ("quality_check", "Quality Check"),
+        ("finalizing", "Finalizing"),
+    ]
     
     def __init__(self, config_file=None):
         if config_file is None:
@@ -1136,6 +1147,212 @@ class AutomatedStreamManager:
         
         # Lock to prevent concurrent execution of heavy batch processes
         self._lock = threading.Lock()
+        self._run_status_lock = threading.Lock()
+        self._run_started_at = None
+        self._stage_started_at = None
+        self._run_status = self._new_run_status()
+
+    def _new_run_status(self) -> Dict[str, Any]:
+        """Build an idle automation progress payload for the dashboard."""
+        return {
+            "active": False,
+            "status": "idle",
+            "stage": "idle",
+            "stage_label": "Idle",
+            "message": "Automation is idle",
+            "percent": 0,
+            "current": 0,
+            "total": None,
+            "started_at": None,
+            "stage_started_at": None,
+            "updated_at": None,
+            "elapsed_seconds": 0,
+            "stage_elapsed_seconds": 0,
+            "forced": False,
+            "forced_period_id": None,
+            "stages": [
+                {
+                    "key": key,
+                    "label": label,
+                    "status": "pending",
+                    "current": 0,
+                    "total": None,
+                    "percent": 0,
+                    "message": "",
+                }
+                for key, label in self.RUN_STAGES
+            ],
+        }
+
+    def _stage_label(self, stage_key: str) -> str:
+        return dict(self.RUN_STAGES).get(stage_key, stage_key.replace("_", " ").title())
+
+    def _ensure_run_status_initialized(self):
+        if not hasattr(self, "_run_status_lock"):
+            self._run_status_lock = threading.Lock()
+        if not hasattr(self, "_run_started_at"):
+            self._run_started_at = None
+        if not hasattr(self, "_stage_started_at"):
+            self._stage_started_at = None
+        if not hasattr(self, "_run_status"):
+            self._run_status = self._new_run_status()
+
+    def _start_run_status(self, forced: bool = False, forced_period_id: Optional[str] = None):
+        self._ensure_run_status_initialized()
+        now = datetime.now()
+        status = self._new_run_status()
+        status.update(
+            {
+                "active": True,
+                "status": "running",
+                "stage": "preparing",
+                "stage_label": self._stage_label("preparing"),
+                "message": "Preparing automation run",
+                "started_at": now.isoformat(),
+                "stage_started_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+                "forced": bool(forced),
+                "forced_period_id": forced_period_id,
+            }
+        )
+        status["stages"][0].update(
+            {
+                "status": "running",
+                "message": "Preparing automation run",
+            }
+        )
+        with self._run_status_lock:
+            self._run_started_at = now
+            self._stage_started_at = now
+            self._run_status = status
+
+    def _update_run_stage(
+        self,
+        stage_key: str,
+        *,
+        message: str = "",
+        current: int = 0,
+        total: Optional[int] = None,
+        status: str = "running",
+    ):
+        self._ensure_run_status_initialized()
+        now = datetime.now()
+        stage_keys = [key for key, _label in self.RUN_STAGES]
+        stage_index = stage_keys.index(stage_key) if stage_key in stage_keys else -1
+        percent = int((current / total) * 100) if total else 0
+
+        with self._run_status_lock:
+            self._stage_started_at = now
+            run_status = "running" if status in {"running", "completed", "skipped"} else status
+            self._run_status.update(
+                {
+                    "active": run_status == "running",
+                    "status": run_status,
+                    "stage": stage_key,
+                    "stage_label": self._stage_label(stage_key),
+                    "message": message,
+                    "current": current,
+                    "total": total,
+                    "percent": max(0, min(100, percent)),
+                    "stage_started_at": now.isoformat(),
+                    "updated_at": now.isoformat(),
+                }
+            )
+
+            for idx, stage in enumerate(self._run_status["stages"]):
+                if stage_index >= 0 and idx < stage_index and stage["status"] in {"pending", "running"}:
+                    stage.update({"status": "completed", "percent": 100})
+                elif idx == stage_index:
+                    stage.update(
+                        {
+                            "status": status,
+                            "current": current,
+                            "total": total,
+                            "percent": max(0, min(100, percent)),
+                            "message": message,
+                        }
+                    )
+
+    def _update_run_progress(
+        self,
+        *,
+        stage_key: Optional[str] = None,
+        current: Optional[int] = None,
+        total: Optional[int] = None,
+        message: Optional[str] = None,
+    ):
+        self._ensure_run_status_initialized()
+        now = datetime.now()
+        with self._run_status_lock:
+            key = stage_key or self._run_status.get("stage")
+            current_value = self._run_status.get("current", 0) if current is None else current
+            total_value = self._run_status.get("total") if total is None else total
+            percent = int((current_value / total_value) * 100) if total_value else self._run_status.get("percent", 0)
+
+            self._run_status.update(
+                {
+                    "stage": key,
+                    "stage_label": self._stage_label(key),
+                    "current": current_value,
+                    "total": total_value,
+                    "percent": max(0, min(100, percent)),
+                    "updated_at": now.isoformat(),
+                }
+            )
+            if message is not None:
+                self._run_status["message"] = message
+
+            for stage in self._run_status["stages"]:
+                if stage["key"] == key:
+                    stage.update(
+                        {
+                            "status": "running",
+                            "current": current_value,
+                            "total": total_value,
+                            "percent": max(0, min(100, percent)),
+                        }
+                    )
+                    if message is not None:
+                        stage["message"] = message
+                    break
+
+    def _finish_run_status(self, status: str, message: str = ""):
+        self._ensure_run_status_initialized()
+        now = datetime.now()
+        with self._run_status_lock:
+            active_stage = self._run_status.get("stage")
+            self._run_status.update(
+                {
+                    "active": False,
+                    "status": status,
+                    "message": message,
+                    "updated_at": now.isoformat(),
+                    "percent": 100 if status == "completed" else self._run_status.get("percent", 0),
+                }
+            )
+            for stage in self._run_status["stages"]:
+                if stage["key"] == active_stage and stage["status"] == "running":
+                    stage["status"] = "completed" if status == "completed" else status
+                    if status == "completed":
+                        stage["percent"] = 100
+                elif status == "completed" and stage["status"] == "pending":
+                    stage["status"] = "skipped"
+
+    def get_run_status(self) -> Dict[str, Any]:
+        """Return a JSON-safe snapshot of the current or most recent automation run."""
+        self._ensure_run_status_initialized()
+        with self._run_status_lock:
+            status = copy.deepcopy(self._run_status)
+            run_started_at = self._run_started_at
+            stage_started_at = self._stage_started_at
+
+        now = datetime.now()
+        if status.get("active"):
+            if run_started_at:
+                status["elapsed_seconds"] = int((now - run_started_at).total_seconds())
+            if stage_started_at:
+                status["stage_elapsed_seconds"] = int((now - stage_started_at).total_seconds())
+        return status
     
     def _load_state(self) -> Dict[str, datetime]:
         """Load persisted automation state from file."""
@@ -1292,6 +1509,186 @@ class AutomatedStreamManager:
             logger.info("Changes will take effect on next scheduled operation")
         else:
             logger.info("Automation configuration updated")
+
+    def _build_run_status(
+        self,
+        *,
+        run_id: Optional[str],
+        state: str,
+        stage: str,
+        stage_label: str,
+        message: str = "",
+        forced: bool = False,
+        forced_period_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        now = datetime.now().isoformat()
+        return {
+            "run_id": run_id,
+            "state": state,
+            "stage": stage,
+            "stage_label": stage_label,
+            "message": message,
+            "forced": forced,
+            "forced_period_id": forced_period_id,
+            "started_at": now if state == "running" else None,
+            "updated_at": now,
+            "completed_at": None,
+            "duration_seconds": None,
+            "counts": {},
+            "durations": {},
+            "last_error": None,
+        }
+
+    def _ensure_run_status_fields(self) -> None:
+        if not hasattr(self, "_run_status_lock"):
+            self._run_status_lock = threading.RLock()
+        if not hasattr(self, "_run_sequence"):
+            self._run_sequence = 0
+        if not hasattr(self, "_run_status"):
+            self._run_status = self._build_run_status(
+                run_id=None,
+                state="idle",
+                stage="idle",
+                stage_label="Idle",
+                message="No automation cycle has run yet",
+            )
+
+    def _start_run_status(self, *, forced: bool, forced_period_id: Optional[str]) -> None:
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            self._run_sequence += 1
+            run_id = f"automation-{int(time.time())}-{self._run_sequence}"
+            self._run_status = self._build_run_status(
+                run_id=run_id,
+                state="running",
+                stage="starting",
+                stage_label="Starting",
+                message="Preparing automation cycle",
+                forced=forced,
+                forced_period_id=forced_period_id,
+            )
+
+    def _update_run_status(
+        self,
+        *,
+        stage: Optional[str] = None,
+        stage_label: Optional[str] = None,
+        message: Optional[str] = None,
+        counts: Optional[Dict[str, Any]] = None,
+        durations: Optional[Dict[str, Any]] = None,
+        state: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            status = self._run_status
+            now = datetime.now()
+            if state:
+                status["state"] = state
+            if stage:
+                status["stage"] = stage
+            if stage_label:
+                status["stage_label"] = stage_label
+            if message is not None:
+                status["message"] = message
+            if counts:
+                status.setdefault("counts", {}).update(counts)
+            if durations:
+                normalized = {}
+                for key, value in durations.items():
+                    try:
+                        normalized[key] = round(float(value), 3)
+                    except (TypeError, ValueError):
+                        normalized[key] = value
+                status.setdefault("durations", {}).update(normalized)
+            if error is not None:
+                status["last_error"] = error
+            status["updated_at"] = now.isoformat()
+
+            started_at = status.get("started_at")
+            if started_at:
+                try:
+                    started = datetime.fromisoformat(started_at)
+                    status["duration_seconds"] = round((now - started).total_seconds(), 3)
+                except (TypeError, ValueError):
+                    pass
+
+    def _finish_run_status(self, *, state: str, stage: str, stage_label: str, message: str, error: Optional[str] = None) -> None:
+        self._ensure_run_status_fields()
+        now = datetime.now()
+        with self._run_status_lock:
+            status = self._run_status
+            status["state"] = state
+            status["stage"] = stage
+            status["stage_label"] = stage_label
+            status["message"] = message
+            status["updated_at"] = now.isoformat()
+            status["completed_at"] = now.isoformat()
+            if error is not None:
+                status["last_error"] = error
+
+            started_at = status.get("started_at")
+            if started_at:
+                try:
+                    started = datetime.fromisoformat(started_at)
+                    status["duration_seconds"] = round((now - started).total_seconds(), 3)
+                except (TypeError, ValueError):
+                    pass
+
+    @staticmethod
+    def _summarize_quality_check_results(check_results, expected_count: int) -> Dict[str, Any]:
+        checked_count = len(check_results or {})
+        expected_count = max(0, int(expected_count or 0))
+        aborted_count = 0
+        failed_count = 0
+        first_abort_message = None
+
+        for result in (check_results or {}).values():
+            if not isinstance(result, dict):
+                continue
+            if result.get("aborted") or result.get("error") == "connectivity_guard":
+                aborted_count += 1
+                if first_abort_message is None:
+                    first_abort_message = result.get("message") or "Quality check was aborted"
+            elif result.get("success") is False or result.get("error"):
+                failed_count += 1
+
+        incomplete_count = max(0, expected_count - checked_count)
+        return {
+            "ok": aborted_count == 0 and incomplete_count == 0,
+            "checked_count": checked_count,
+            "expected_count": expected_count,
+            "aborted_count": aborted_count,
+            "failed_count": failed_count,
+            "incomplete_count": incomplete_count,
+            "abort_message": first_abort_message,
+        }
+
+    def get_run_status(self) -> Dict[str, Any]:
+        """Return the current or most recent automation-cycle status."""
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            status = copy.deepcopy(self._run_status)
+
+        if status.get("state") == "running":
+            now = datetime.now()
+            started_at = status.get("started_at")
+            if started_at:
+                try:
+                    started = datetime.fromisoformat(started_at)
+                    status["duration_seconds"] = round((now - started).total_seconds(), 3)
+                except (TypeError, ValueError):
+                    pass
+            stage_started_at = status.get("stage_started_at")
+            if stage_started_at:
+                try:
+                    stage_started = datetime.fromisoformat(stage_started_at)
+                    status["stage_duration_seconds"] = round((now - stage_started).total_seconds(), 3)
+                except (TypeError, ValueError):
+                    pass
+            status["updated_at"] = now.isoformat()
+
+        return status
     
     def _is_dead_stream_removal_enabled(self) -> bool:
         """Check if dead stream removal is enabled in stream checker config.
@@ -2119,6 +2516,12 @@ class AutomatedStreamManager:
                 batch_size = min(batch_size, 400)
             
             logger.info(f"Processing {total_streams} streams for pattern matching (Parallel, {max_workers} workers, {batch_size} streams per batch)...")
+            self._update_run_progress(
+                stage_key="matching",
+                current=0,
+                total=total_streams,
+                message=f"Matching 0/{total_streams} streams",
+            )
             
             # Resolve dead stream removal setting.
             # When the caller provides allow_dead_streams explicitly (e.g. check_single_channel
@@ -2162,6 +2565,12 @@ class AutomatedStreamManager:
                         # Log every 5% for better visibility as requested
                         if current_pct >= last_log_pct + 5 or completed_count == total_streams:
                              logger.info(f"  Progress: {completed_count}/{total_streams} streams matched ({current_pct}%)")
+                             self._update_run_progress(
+                                 stage_key="matching",
+                                 current=completed_count,
+                                 total=total_streams,
+                                 message=f"Matching {completed_count}/{total_streams} streams",
+                             )
                              last_log_pct = current_pct
                              
                     except Exception as e:
@@ -2757,10 +3166,12 @@ class AutomatedStreamManager:
     
     def run_automation_cycle(self, forced: bool = False, forced_period_id: str = None):
         """Run one complete automation cycle with profile support."""
+        self._start_run_status(forced=forced, forced_period_id=forced_period_id)
         # Determine if this is a forced run (manual trigger)
         # forced and forced_period_id are now passed as arguments
         if forced:
             logger.info(f"Forcing automation cycle{' for period ' + forced_period_id if forced_period_id else ''}")
+        self._start_run_status(forced=forced, forced_period_id=forced_period_id)
             
         # 1. Check Global Automation Switch
         from apps.automation.automation_config_manager import get_automation_config_manager
@@ -2782,6 +3193,7 @@ class AutomatedStreamManager:
         
         if not forced and not current_enabled:
             logger.debug("Regular automation is disabled globally. Skipping cycle.")
+            self._finish_run_status("skipped", "Regular automation is disabled")
             return
 
         # Check if stream checking mode is active - if so, skip this cycle
@@ -2791,6 +3203,7 @@ class AutomatedStreamManager:
             status = stream_checker.get_status()
             if status.get('stream_checking_mode', False) and not forced:
                 logger.debug("Stream checking is active. Skipping automation cycle.")
+                self._finish_run_status("skipped", "Stream checker is already active")
                 return
         except Exception as e:
             logger.debug(f"Could not check stream checking mode status: {e}")
@@ -2801,6 +3214,7 @@ class AutomatedStreamManager:
         
         try:
             # 2. Determine which playlists to update and group channels by period
+            self._update_run_stage("schedule", message="Finding active automation periods")
             udi = get_udi_manager()
             channels = udi.get_channels()
             channels_by_id = {
@@ -2848,9 +3262,15 @@ class AutomatedStreamManager:
             if not active_periods:
                 logger.debug("No channels with active automation periods found. Skipping cycle.")
                 self.last_playlist_update = datetime.now()
+                self._finish_run_status("skipped", "No active automation periods found")
                 return
             
             channels_with_periods = sum(len(p['channels']) for p in active_periods.values())
+            self._update_run_progress(
+                current=len(active_periods),
+                total=max(1, len(active_periods)),
+                message=f"{len(active_periods)} period(s), {channels_with_periods} channel assignment(s)",
+            )
             logger.info(f"Processing {channels_with_periods} channel assignments across {len(active_periods)} active period(s)")
             logger.info(f"UDI cache {udi.get_cache_age_description()}")
             
@@ -2886,6 +3306,21 @@ class AutomatedStreamManager:
                         update_all_playlists = True
                     else:
                         playlists_to_update.update(pf_playlists)
+
+            playlists_refreshed = bool(update_all_playlists or playlists_to_update)
+            self._update_run_status(
+                counts={
+                    "playlists_to_refresh": "all" if update_all_playlists else len(playlists_to_update),
+                    "quality_check_candidates": len(set(channels_to_quality_check)),
+                },
+                stage="m3u_refresh" if playlists_refreshed else "stream_matching",
+                stage_label="Refreshing M3U" if playlists_refreshed else "Matching Streams",
+                message=(
+                    "Refreshing configured playlists"
+                    if playlists_refreshed
+                    else "No playlist refresh requested; using current cache"
+                ),
+            )
             
             # 3. Update Playlists
             refresh_success = False
@@ -2895,13 +3330,17 @@ class AutomatedStreamManager:
             check_results = {}
             
             start_time = datetime.now()
+            m3u_refresh_started = time.time()
 
             # Determine whether a provider playlist refresh will occur this cycle.
             # Pre/post stream counts and the safety gate are only meaningful when
             # playlists are actually refreshed — skip all three when they are not.
-            playlists_refreshed = bool(update_all_playlists or playlists_to_update)
-
             if playlists_refreshed:
+                self._update_run_stage(
+                    "m3u_refresh",
+                    message="Preparing playlist refresh",
+                    total=max(1, len(playlists_to_update) or 1),
+                )
                 try:
                     pre_refresh_stream_count = len(get_streams(log_result=False) or [])
                 except Exception as e:
@@ -2928,15 +3367,22 @@ class AutomatedStreamManager:
             if update_all_playlists:
                 logger.info("Updating ALL playlists (requested by one or more profiles)")
                 refresh_success, refreshed_accounts = self.refresh_playlists(account_id=None, skip_changelog=True)
+                self._update_run_progress(current=1, total=1, message="Playlist refresh completed")
             elif playlists_to_update:
                 logger.info(f"Updating {len(playlists_to_update)} specific playlists: {playlists_to_update}")
                 refresh_success = True
-                for acc_id in playlists_to_update:
+                total_playlists = len(playlists_to_update)
+                for playlist_index, acc_id in enumerate(playlists_to_update, start=1):
                     success, accs = self.refresh_playlists(account_id=int(acc_id), skip_changelog=True)
                     if not success:
                         refresh_success = False
                     if accs:
                         refreshed_accounts.extend(accs)
+                    self._update_run_progress(
+                        current=playlist_index,
+                        total=total_playlists,
+                        message=f"{playlist_index}/{total_playlists} playlist refresh(es) completed",
+                    )
             else:
                 logger.info(
                     "No playlists to update based on active profile settings. "
@@ -2944,9 +3390,24 @@ class AutomatedStreamManager:
                 )
                 self.last_playlist_update = datetime.now()
                 refresh_success = True
+                self._update_run_stage("m3u_refresh", status="skipped", message="No playlist refresh needed")
+
+            self._update_run_status(
+                counts={
+                    "refreshed_playlists": len(refreshed_accounts),
+                    "pre_refresh_streams": pre_refresh_stream_count,
+                },
+                durations={"m3u_refresh_seconds": time.time() - m3u_refresh_started},
+                message=(
+                    f"Playlist refresh {'completed' if refresh_success else 'failed'}"
+                    if playlists_refreshed
+                    else "Current cache selected for stream matching"
+                ),
+            )
 
             validation_details = []
             assignment_details = []
+            cycle_abort_message = None
 
             # Deduplicate while preserving order (channels may appear in multiple active period groups).
             channels_to_quality_check = list(dict.fromkeys(channels_to_quality_check))
@@ -2963,6 +3424,7 @@ class AutomatedStreamManager:
             # profiles), the existing cache is used as-is. The background UDI sync
             # in the finally block handles cache accuracy for the next cycle.
             if playlists_refreshed and refresh_success:
+                self._update_run_stage("cache_sync", message="Syncing cache after playlist refresh", total=1)
                 logger.info(
                     "Syncing UDI cache after provider refresh — "
                     "matching and safety gate will use current stream IDs..."
@@ -2971,12 +3433,14 @@ class AutomatedStreamManager:
                     _sync_udi = get_udi_manager()
                     _sync_udi.refresh_streams()
                     _sync_udi.refresh_channels()
+                    self._update_run_progress(current=1, total=1, message="Cache sync completed")
                     logger.info("✓ UDI cache synced after provider refresh")
                 except Exception as _sync_err:
                     logger.warning(
                         f"UDI sync after provider refresh failed: {_sync_err} — "
                         "proceeding with potentially stale cache"
                     )
+                    self._update_run_progress(current=1, total=1, message="Cache sync completed with warnings")
 
                 # Capture streams_after from the now-current cache for changelog and cleanup
                 changelog_tracking = self.config.get("enabled_features", {}).get("changelog_tracking", True)
@@ -3016,14 +3480,15 @@ class AutomatedStreamManager:
                         logger.warning(f"Could not write playlist changelog entry: {_cl_err}")
 
                 # Dead stream cleanup using accurate current URLs
-                if self.dead_streams_tracker and streams_after:
+                dead_streams_tracker = getattr(self, "dead_streams_tracker", None)
+                if dead_streams_tracker and streams_after:
                     try:
                         current_stream_urls = {
                             s.get('url', '') for s in streams_after
                             if isinstance(s, dict) and s.get('url')
                         }
                         current_stream_urls.discard('')
-                        cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(current_stream_urls)
+                        cleaned_count = dead_streams_tracker.cleanup_removed_streams(current_stream_urls)
                         if cleaned_count > 0:
                             logger.info(
                                 f"Dead streams cleanup: removed {cleaned_count} "
@@ -3049,7 +3514,45 @@ class AutomatedStreamManager:
                         "to preserve existing channel streams."
                     )
                     refresh_success = False
+
+                self._update_run_status(
+                    counts={
+                        "post_refresh_streams": post_refresh_stream_count,
+                    },
+                    durations={"udi_sync_seconds": time.time() - udi_sync_started},
+                    message=(
+                        "Cache sync completed after playlist refresh"
+                        if refresh_success
+                        else "Safety gate stopped matching after playlist refresh"
+                    ),
+                    stage="udi_sync" if refresh_success else "aborted",
+                    stage_label="Syncing Cache" if refresh_success else "Aborted",
+                )
             
+            if refresh_success:
+                if channels_to_quality_check:
+                    try:
+                        from apps.stream.stream_checker_service import get_stream_checker_service
+                        stream_checker_for_guard = get_stream_checker_service()
+                        failed_connectivity = stream_checker_for_guard._require_quality_check_connectivity(
+                            phase='automation_quality_preflight',
+                            update_progress=False,
+                        )
+                        if failed_connectivity is not None:
+                            logger.error(
+                                "Automation quality-check connectivity guard failed. "
+                                "Skipping validation, assignment, and quality checks to preserve channel streams: %s",
+                                failed_connectivity.message,
+                            )
+                            refresh_success = False
+                    except Exception as guard_err:
+                        logger.error(
+                            "Automation quality-check connectivity guard could not prove connectivity. "
+                            "Skipping validation, assignment, and quality checks: %s",
+                            guard_err,
+                        )
+                        refresh_success = False
+
             if refresh_success:
                 # Optional post-refresh delay for environments where provider updates
                 # are eventually consistent. Defaults to 0 to avoid fixed latency.
@@ -3062,7 +3565,10 @@ class AutomatedStreamManager:
                 
                 # 4. Stream Matching (Validation & Assignment)
                 # Group results by channel for easier joining later
-                
+                if not playlists_refreshed:
+                    self._update_run_stage("cache_sync", status="skipped", message="Cache sync not needed")
+                self._update_run_stage("matching", message="Validating existing stream assignments")
+
                 # Validate existing streams
                 try:
                     val_res = self.validate_and_remove_non_matching_streams(force=forced, forced_period_id=forced_period_id, skip_changelog=True)
@@ -3072,16 +3578,38 @@ class AutomatedStreamManager:
                 
                 # Discover and assign new streams
                 try:
+                    self._update_run_progress(message="Matching streams to channels")
                     assign_res = self.discover_and_assign_streams(force=forced, skip_check_trigger=True, forced_period_id=forced_period_id, skip_changelog=True)
                     assignment_details = assign_res.get("assignment_details", [])
                     assigned_stream_ids = assign_res.get("assigned_stream_ids", {})
+                    self._update_run_progress(current=1, total=1, message="Stream matching completed")
                 except Exception as e:
                     logger.error(f"✗ Failed to assign streams: {e}")
                     assigned_stream_ids = {}
 
+                self._update_run_status(
+                    counts={
+                        "validated_channels": len(validation_details),
+                        "assigned_channels": len(assignment_details),
+                    },
+                    durations={"stream_matching_seconds": time.time() - matching_started},
+                    message="Stream matching completed",
+                )
+
                 # 4.5. Trigger Quality Checks for all channels in the period(s)
                 if channels_to_quality_check:
+                    quality_stage_started = time.time()
+                    self._update_run_status(
+                        stage="quality_queueing",
+                        stage_label="Queueing Quality Checks",
+                        message="Selecting channels for quality checks",
+                    )
                     try:
+                        self._update_run_stage(
+                            "quality_check",
+                            message="Preparing synchronous quality checks",
+                            total=len(channels_to_quality_check),
+                        )
                         from apps.stream.stream_checker_service import get_stream_checker_service
                         stream_checker = get_stream_checker_service()
 
@@ -3159,24 +3687,52 @@ class AutomatedStreamManager:
                                 start_meta.get('start_channel_name', start_meta.get('start_channel_id')),
                                 start_meta.get('mode', 'first'),
                             )
+                        self._update_run_status(
+                            counts={
+                                "quality_candidates": len(channels_to_quality_check),
+                                "quality_selected": len(channels_to_check_sync),
+                                "quality_targeted": len(_target_stream_ids),
+                                "quality_skipped": len(channels_to_quality_check) - len(channels_to_check_sync),
+                            },
+                            message=f"{len(channels_to_check_sync)} channel(s) selected for quality checks",
+                        )
 
                         # Run checks synchronously and collect results
                         if channels_to_check_sync:
+                            self._update_run_progress(
+                                current=0,
+                                total=len(channels_to_check_sync),
+                                message=f"Checking {len(channels_to_check_sync)} selected channel(s)",
+                            )
                             target_stream_ids = _target_stream_ids if _target_stream_ids else None
                             check_results = stream_checker.check_channels_synchronously(
                                 channel_ids=channels_to_check_sync,
                                 force_check=forced,
                                 target_stream_ids=target_stream_ids
                             )
+                            self._update_run_progress(
+                                current=len(check_results),
+                                total=len(channels_to_check_sync),
+                                message="Quality checks completed",
+                            )
                             logger.info(f"Synchronous quality checks completed for {len(check_results)} channels")
                         else:
                             logger.info("No channels require synchronous quality checks this cycle (no new assignments)")
                             check_results = {}
+                            self._update_run_progress(current=0, total=0, message="No channels required quality checks")
                     except Exception as e:
                         logger.error(f"✗ Failed to run quality checks: {e}")
+                        cycle_abort_message = f"Quality check stage failed: {e}"
                         check_results = {}
-            
+                else:
+                    self._update_run_stage("quality_check", status="skipped", message="No quality checks configured")
+
+            if not refresh_success:
+                self._update_run_stage("matching", status="skipped", message="Matching skipped")
+                self._update_run_stage("quality_check", status="skipped", message="Quality checks skipped")
+
             # 5. Consolidate Results by Period for Changelog
+            self._update_run_stage("finalizing", message="Finalizing automation results")
             end_time = datetime.now()
             duration_sec = (end_time - start_time).total_seconds()
             duration_str = f"{int(duration_sec)}s"
@@ -3188,6 +3744,7 @@ class AutomatedStreamManager:
                 'total_streams': 0,
                 'streams_analyzed': 0,
                 'dead_streams': 0,
+                'blank_streams': 0,
                 'streams_revived': 0,
                 'added_streams': 0,
                 'removed_streams': 0,
@@ -3203,6 +3760,7 @@ class AutomatedStreamManager:
             total_streams_count = 0
             streams_analyzed_count = 0
             dead_streams_count = 0
+            blank_streams_count = 0
             revived_streams_count = 0
             added_streams_count = 0
             removed_streams_count = 0
@@ -3275,8 +3833,13 @@ class AutomatedStreamManager:
                         ch_dead = c_result.get('dead_streams_count', 0)
                         ch_revived = c_result.get('revived_streams_count', 0)
                         ch_analyzed = len(c_result.get('checked_streams', []))
+                        ch_blank = sum(
+                            1 for stream in c_result.get('checked_streams', [])
+                            if stream.get('blank_detected') is True
+                        )
                         
                         dead_streams_count += ch_dead
+                        blank_streams_count += ch_blank
                         revived_streams_count += ch_revived
                         streams_analyzed_count += ch_analyzed
                         
@@ -3297,6 +3860,7 @@ class AutomatedStreamManager:
                             'status': 'success' if c_result.get('error') is None else 'failed',
                             'details': {
                                 'dead_streams_count': ch_dead,
+                                'blank_streams_count': ch_blank,
                                 'revived_streams_count': ch_revived,
                                 'skipped_streams_count': len(c_result.get('skipped_streams', [])),
                                 'dead_streams': c_result.get('dead_streams', []),
@@ -3351,6 +3915,7 @@ class AutomatedStreamManager:
             run_results['total_streams'] = total_streams_count
             run_results['streams_analyzed'] = streams_analyzed_count
             run_results['dead_streams'] = dead_streams_count
+            run_results['blank_streams'] = blank_streams_count
             run_results['streams_revived'] = revived_streams_count
             run_results['added_streams'] = added_streams_count
             run_results['removed_streams'] = removed_streams_count
@@ -3380,9 +3945,42 @@ class AutomatedStreamManager:
             if active_periods:
                 self.last_playlist_update = datetime.now()
                 self._save_state()
+
+            self._update_run_status(
+                counts={
+                    "streams_analyzed": streams_analyzed_count,
+                    "dead_streams": dead_streams_count,
+                    "blank_streams": blank_streams_count,
+                    "streams_revived": revived_streams_count,
+                    "added_streams": added_streams_count,
+                    "removed_streams": removed_streams_count,
+                },
+                durations={"total_cycle_seconds": duration_sec},
+            )
+            if refresh_success and not cycle_abort_message:
+                self._finish_run_status(
+                    state="completed",
+                    stage="completed",
+                    stage_label="Completed",
+                    message="Automation cycle completed",
+                )
+            else:
+                self._finish_run_status(
+                    state="failed",
+                    stage="aborted",
+                    stage_label="Aborted",
+                    message=cycle_abort_message or "Automation cycle stopped before matching completed",
+                    error=cycle_abort_message,
+                )
             
             logger.info("Automation cycle completed")
+            self._finish_run_status("completed", "Automation cycle completed")
             _cycle_did_work = True
+
+        except Exception as exc:
+            self._finish_run_status("failed", "Automation cycle failed")
+            logger.error(f"Automation cycle failed: {exc}")
+            raise
 
         finally:
             self._m3u_accounts_cache = None
@@ -3392,12 +3990,17 @@ class AutomatedStreamManager:
             # Skipped on early returns (disabled, no active periods, safety gate abort)
             # and when UDI is not yet fully initialised (e.g. concurrent with startup).
             if locals().get('_cycle_did_work') and get_udi_manager().is_network_ready():
+                _skip_stream_channel_sync = bool(
+                    locals().get('playlists_refreshed') and locals().get('refresh_success')
+                )
+
                 def _background_cycle_udi_sync():
                     try:
                         _udi = get_udi_manager()
                         _udi.refresh_m3u_accounts()
-                        _udi.refresh_streams()
-                        _udi.refresh_channels()
+                        if not _skip_stream_channel_sync:
+                            _udi.refresh_streams()
+                            _udi.refresh_channels()
                         _udi.refresh_channel_groups()
                         _udi.refresh_channel_profiles()
                         logger.debug("Background UDI sync completed after automation cycle")

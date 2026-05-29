@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import requests
-from flask import jsonify, send_file, send_from_directory
+from flask import jsonify, make_response, send_file, send_from_directory
 from werkzeug.utils import safe_join
 
 from apps.core.logging_config import setup_logging
@@ -20,10 +20,18 @@ _env_cache: Dict[str, Any] = {"public_ip": None, "fetched_at": 0.0}
 _ENV_CACHE_TTL = 900  # seconds
 
 
+def _frontend_shell_response(static_folder: Path):
+    response = make_response(send_file(static_folder / "index.html"))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
 def root_response(*, static_folder: Path):
     """Serve root frontend entrypoint with API fallback when not built."""
     try:
-        return send_file(static_folder / "index.html")
+        return _frontend_shell_response(static_folder)
     except FileNotFoundError:
         return jsonify(
             {
@@ -110,6 +118,6 @@ def serve_frontend_response(*, static_folder: Path, path: str):
         return send_from_directory(static_folder, path)
 
     try:
-        return send_file(static_folder / "index.html")
+        return _frontend_shell_response(static_folder)
     except FileNotFoundError:
         return jsonify({"error": "Frontend not found"}), 404

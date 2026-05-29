@@ -28,6 +28,7 @@ from apps.automation.automation_events_scheduler import get_events_scheduler
 from apps.automation.regex_validation import is_dangerous_regex
 from apps.core.api_utils import _get_base_url
 from apps.stream.stream_checker_service import get_stream_checker_service
+from apps.stream.shadow_blank_monitor_service import get_shadow_blank_monitor_service
 from apps.automation.scheduling_service import get_scheduling_service
 from apps.background.scheduling_workers import (
     epg_refresh_processor_loop,
@@ -139,6 +140,14 @@ from apps.api.stream_checker_handlers import (
     get_stream_checker_queue_response,
     start_stream_checker_response,
     stop_stream_checker_response,
+)
+from apps.api.shadow_blank_monitor_handlers import (
+    get_shadow_blank_monitor_config_response,
+    get_shadow_blank_monitor_status_response,
+    run_shadow_blank_monitor_once_response,
+    start_shadow_blank_monitor_response,
+    stop_shadow_blank_monitor_response,
+    update_shadow_blank_monitor_config_response,
 )
 from apps.api.scheduling_handlers import (
     create_auto_create_rule_response,
@@ -1284,6 +1293,52 @@ def queue_all_channels():
         payload=request.get_json(silent=True),
         get_stream_checker_service=get_stream_checker_service,
         get_udi_manager=get_udi_manager,
+    )
+
+
+# ===== Shadow Blank Monitor Endpoints =====
+
+@app.route('/api/shadow-blank-monitor/config', methods=['GET'])
+def get_shadow_blank_monitor_config():
+    """Get active-viewer shadow blank monitor configuration."""
+    return get_shadow_blank_monitor_config_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/config', methods=['PUT'])
+def update_shadow_blank_monitor_config():
+    """Update active-viewer shadow blank monitor configuration."""
+    return update_shadow_blank_monitor_config_response(
+        payload=request.get_json(silent=True),
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/status', methods=['GET'])
+def get_shadow_blank_monitor_status():
+    """Get active-viewer shadow blank monitor status."""
+    return get_shadow_blank_monitor_status_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/start', methods=['POST'])
+def start_shadow_blank_monitor():
+    """Start the active-viewer shadow blank monitor."""
+    return start_shadow_blank_monitor_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/stop', methods=['POST'])
+def stop_shadow_blank_monitor():
+    """Stop the active-viewer shadow blank monitor."""
+    return stop_shadow_blank_monitor_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/run-once', methods=['POST'])
+def run_shadow_blank_monitor_once():
+    """Run one active-viewer shadow blank monitor scan."""
+    return run_shadow_blank_monitor_once_response(
+        get_service=get_shadow_blank_monitor_service,
     )
 
 
@@ -2549,6 +2604,15 @@ if __name__ == '__main__':
                         checker.stop()
                 except Exception as e:
                     logger.error(f"Error stopping stream checker service: {e}")
+
+                try:
+                    from apps.stream.shadow_blank_monitor_service import get_shadow_blank_monitor_service
+                    shadow_monitor = get_shadow_blank_monitor_service()
+                    if shadow_monitor:
+                        logger.info("Stopping Shadow Blank Monitor Service...")
+                        shadow_monitor.stop(persist=False)
+                except Exception as e:
+                    logger.error(f"Error stopping shadow blank monitor service: {e}")
                     
                 try:
                     stop_scheduled_event_processor()
@@ -2619,6 +2683,19 @@ if __name__ == '__main__':
             logger.info("Stream monitoring service auto-started")
         except Exception as e:
             logger.error(f"Failed to auto-start stream monitoring service: {e}")
+
+        try:
+            if not check_wizard_complete():
+                logger.info("Shadow blank monitor will not start - setup wizard has not been completed")
+            else:
+                shadow_monitor = get_shadow_blank_monitor_service()
+                if shadow_monitor.get_config().get("enabled"):
+                    shadow_monitor.start(persist=False)
+                    logger.info("Shadow blank monitor auto-started")
+                else:
+                    logger.info("Shadow blank monitor is disabled in configuration")
+        except Exception as e:
+            logger.error(f"Failed to auto-start shadow blank monitor: {e}")
             
         try:
             if check_wizard_complete():

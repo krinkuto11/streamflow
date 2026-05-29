@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """Tests for decoupled UDI refresh behavior in automation."""
 
+import time
 from unittest.mock import Mock
 
 from apps.automation.automated_stream_manager import AutomatedStreamManager
+
+
+def _wait_for_mock_call(mock, timeout: float = 1.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if mock.call_count > 0:
+            return
+        time.sleep(0.01)
 
 
 def _build_manager_for_cycle(monkeypatch, *, m3u_enabled: bool) -> AutomatedStreamManager:
@@ -111,6 +120,7 @@ def test_automation_cycle_refreshes_udi_without_m3u_refresh(monkeypatch):
     manager.run_automation_cycle(forced=True, forced_period_id="period-1")
 
     manager.refresh_playlists.assert_not_called()
+    _wait_for_mock_call(mock_udi.refresh_channel_profiles)
     mock_udi.refresh_m3u_accounts.assert_called_once()
     mock_udi.refresh_streams.assert_called_once()
     mock_udi.refresh_channels.assert_called_once()
@@ -133,6 +143,7 @@ def test_automation_cycle_refreshes_udi_once_with_m3u_refresh(monkeypatch):
     manager.run_automation_cycle(forced=True, forced_period_id="period-1")
 
     manager.refresh_playlists.assert_called_once()
+    _wait_for_mock_call(mock_udi.refresh_channel_profiles)
     mock_udi.refresh_m3u_accounts.assert_called_once()
     mock_udi.refresh_streams.assert_called_once()
     mock_udi.refresh_channels.assert_called_once()

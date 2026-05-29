@@ -13,6 +13,7 @@ from apps.stream import stream_check_utils
 from apps.stream.stream_checker_service import StreamCheckerService
 from apps.stream.stream_check_utils import (
     _parse_blank_detection,
+    _parse_freeze_detection,
     analyze_stream,
     get_stream_info_and_bitrate,
 )
@@ -63,6 +64,44 @@ class TestBlankDetectionParsing(unittest.TestCase):
         self.assertEqual(result["blank_ratio"], 1.0)
 
 
+class TestFreezeDetectionParsing(unittest.TestCase):
+    def test_freeze_window_above_ratio_threshold_is_detected(self):
+        output = _ffmpeg_output(
+            "[freezedetect @ 000] lavfi.freezedetect.freeze_start: 0\n"
+            "[freezedetect @ 000] lavfi.freezedetect.freeze_duration: 26\n"
+            "[freezedetect @ 000] lavfi.freezedetect.freeze_end: 26"
+        )
+
+        result = _parse_freeze_detection(output, duration=30, freeze_ratio_threshold=0.80)
+
+        self.assertTrue(result["freeze_detected"])
+        self.assertEqual(result["freeze_duration_secs"], 26.0)
+        self.assertAlmostEqual(result["freeze_ratio"], 0.8667)
+        self.assertEqual(result["freeze_segments"][0]["start"], 0.0)
+
+    def test_short_freeze_window_below_ratio_threshold_is_clean(self):
+        output = _ffmpeg_output(
+            "[freezedetect @ 000] lavfi.freezedetect.freeze_start: 10\n"
+            "[freezedetect @ 000] lavfi.freezedetect.freeze_duration: 2\n"
+            "[freezedetect @ 000] lavfi.freezedetect.freeze_end: 12"
+        )
+
+        result = _parse_freeze_detection(output, duration=30, freeze_ratio_threshold=0.80)
+
+        self.assertFalse(result["freeze_detected"])
+        self.assertEqual(result["freeze_duration_secs"], 2.0)
+        self.assertAlmostEqual(result["freeze_ratio"], 0.0667)
+
+    def test_open_freeze_segment_runs_until_probe_end(self):
+        output = _ffmpeg_output("[freezedetect @ 000] lavfi.freezedetect.freeze_start: 0")
+
+        result = _parse_freeze_detection(output, duration=30, freeze_ratio_threshold=0.80)
+
+        self.assertTrue(result["freeze_detected"])
+        self.assertEqual(result["freeze_duration_secs"], 30.0)
+        self.assertEqual(result["freeze_ratio"], 1.0)
+
+
 class TestBlankDetectionFfmpegCommand(unittest.TestCase):
     @patch.object(stream_check_utils.subprocess, "run")
     def test_blank_detection_uses_one_input_connection(self, mock_run):
@@ -88,6 +127,32 @@ class TestBlankDetectionFfmpegCommand(unittest.TestCase):
         self.assertTrue(any("blackdetect=d=2:pix_th=0.1" in arg for arg in command))
         self.assertTrue(result["blank_probe_ran"])
         self.assertTrue(result["blank_detected"])
+
+    @patch.object(stream_check_utils.subprocess, "run")
+    def test_freeze_detection_uses_same_input_connection(self, mock_run):
+        mock_run.return_value = Mock(
+            stderr=_ffmpeg_output(
+                "[freezedetect @ 000] lavfi.freezedetect.freeze_start: 0\n"
+                "[freezedetect @ 000] lavfi.freezedetect.freeze_duration: 30\n"
+                "[freezedetect @ 000] lavfi.freezedetect.freeze_end: 30"
+            ),
+            returncode=0,
+        )
+
+        result = get_stream_info_and_bitrate(
+            "http://example.com/test.m3u8",
+            duration=30,
+            timeout=30,
+            freeze_check_enabled=True,
+        )
+
+        command = mock_run.call_args.args[0]
+        self.assertEqual(command[0], "ffmpeg")
+        self.assertEqual(command.count("-i"), 1)
+        self.assertIn("-vf", command)
+        self.assertTrue(any("freezedetect=n=0.001:d=5" in arg for arg in command))
+        self.assertTrue(result["freeze_probe_ran"])
+        self.assertTrue(result["freeze_detected"])
 
     @patch.object(stream_check_utils.subprocess, "run")
     def test_blank_detection_disabled_preserves_plain_quality_command(self, mock_run):
@@ -128,6 +193,11 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
                 "blank_duration_secs": 30.0,
                 "blank_ratio": 1.0,
                 "blank_segments": [{"start": 0.0, "end": 30.0, "duration": 30.0}],
+                "freeze_probe_ran": True,
+                "freeze_detected": True,
+                "freeze_duration_secs": 30.0,
+                "freeze_ratio": 1.0,
+                "freeze_segments": [{"start": 0.0, "end": 30.0, "duration": 30.0}],
             }
 
             with self.assertLogs(stream_check_utils.logger, level="INFO") as logs:
@@ -139,6 +209,10 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
                     blank_check_min_duration=3.0,
                     blank_check_pixel_threshold=0.08,
                     blank_check_ratio_threshold=0.75,
+                    freeze_check_enabled=True,
+                    freeze_check_min_duration=4.0,
+                    freeze_check_noise_threshold=0.002,
+                    freeze_check_ratio_threshold=0.70,
                 )
 
         kwargs = mock_probe.call_args.kwargs
@@ -146,8 +220,14 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
         self.assertEqual(kwargs["blank_check_min_duration"], 3.0)
         self.assertEqual(kwargs["blank_check_pixel_threshold"], 0.08)
         self.assertEqual(kwargs["blank_check_ratio_threshold"], 0.75)
+        self.assertTrue(kwargs["freeze_check_enabled"])
+        self.assertEqual(kwargs["freeze_check_min_duration"], 4.0)
+        self.assertEqual(kwargs["freeze_check_noise_threshold"], 0.002)
+        self.assertEqual(kwargs["freeze_check_ratio_threshold"], 0.70)
         self.assertTrue(result["blank_probe_ran"])
         self.assertTrue(result["blank_detected"])
+        self.assertTrue(result["freeze_probe_ran"])
+        self.assertTrue(result["freeze_detected"])
         self.assertEqual(result["blank_duration_secs"], 30.0)
         self.assertEqual(result["blank_ratio"], 1.0)
         blank_log = "\n".join(
@@ -158,6 +238,29 @@ class TestBlankDetectionAnalysis(unittest.TestCase):
         self.assertIn("ratio=1.000", blank_log)
         self.assertNotIn("Blank Test", blank_log)
         self.assertNotIn("ID: 42", blank_log)
+
+    def test_freeze_detection_marks_stream_dead(self):
+        stream_data = {
+            "resolution": "1920x1080",
+            "bitrate_kbps": 3333.3,
+            "freeze_probe_ran": True,
+            "freeze_detected": True,
+        }
+
+        self.assertEqual(is_stream_dead(stream_data), (True, "freeze"))
+
+    def test_freeze_detection_can_be_kept_out_of_dead_classification(self):
+        stream_data = {
+            "resolution": "1920x1080",
+            "bitrate_kbps": 3333.3,
+            "freeze_probe_ran": True,
+            "freeze_detected": True,
+        }
+
+        self.assertEqual(
+            is_stream_dead(stream_data, {"treat_freeze_as_dead": False}),
+            (False, "none"),
+        )
 
     def test_blank_detection_marks_stream_dead(self):
         stream_data = {

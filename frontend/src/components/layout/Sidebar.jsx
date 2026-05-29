@@ -11,6 +11,7 @@ import {
   X,
   Calendar,
   Activity,
+  Eye,
   ChevronLeft,
   ChevronRight,
   TrendingUp
@@ -29,6 +30,7 @@ const menuItems = [
   { text: 'Dashboard', icon: LayoutDashboard, path: '/' },
   { text: 'Stream Checker', icon: CheckCircle, path: '/stream-checker' },
   { text: 'Stream Monitoring', icon: Activity, path: '/stream-monitoring' },
+  { text: 'Shadow Monitor', icon: Eye, path: '/shadow-monitor' },
   { text: 'Channel Configuration', icon: ListChecks, path: '/channels' },
   { text: 'Scheduling', icon: Calendar, path: '/scheduling' },
   { text: 'Analytics', icon: TrendingUp, path: '/stats' },

@@ -85,8 +85,8 @@ def clear_stream_checker_queue_response(*, get_stream_checker_service: Callable[
     """Handle clearing stream checker queue."""
     try:
         service = get_stream_checker_service()
-        service.clear_queue()
-        return jsonify({"message": "Queue cleared successfully"})
+        result = service.clear_queue()
+        return jsonify({"message": "Queue cleared successfully", **(result or {})})
     except Exception as exc:
         logger.error(f"Error clearing stream checker queue: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500
@@ -350,8 +350,9 @@ def queue_all_channels_response(
     try:
         service = get_stream_checker_service()
         payload_data = payload if isinstance(payload, dict) else {}
-        default_mode = service.config.get("queue.start_mode", "first")
-        default_channel_id = service.config.get("queue.start_channel_id", None)
+        service_config = getattr(service, "config", {}) or {}
+        default_mode = service_config.get("queue.start_mode", "first")
+        default_channel_id = service_config.get("queue.start_channel_id", None)
         start_mode = payload_data.get("start_mode", default_mode)
         start_channel_id = payload_data.get("start_channel_id", default_channel_id)
 
@@ -376,7 +377,7 @@ def queue_all_channels_response(
             return jsonify({"message": "No channels found to queue", "count": 0})
 
         service.update_tracker.mark_channels_updated(channel_ids)
-        added = service.check_queue.add_channels(channel_ids, priority=10)
+        added = service.queue_channels(channel_ids, priority=10)
 
         return jsonify(
             {

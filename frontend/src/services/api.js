@@ -202,6 +202,15 @@ export const streamCheckerAPI = {
   triggerGlobalAction: () => api.post('/stream-checker/global-action'),
 };
 
+export const shadowBlankMonitorAPI = {
+  getConfig: () => api.get('/shadow-blank-monitor/config'),
+  updateConfig: (config) => api.put('/shadow-blank-monitor/config', config),
+  getStatus: () => api.get('/shadow-blank-monitor/status'),
+  start: () => api.post('/shadow-blank-monitor/start'),
+  stop: () => api.post('/shadow-blank-monitor/stop'),
+  runOnce: () => api.post('/shadow-blank-monitor/run-once'),
+};
+
 export const changelogAPI = {
   getChangelog: (days = 7, page = 1, limit = 10) => api.get(`/changelog`, { params: { days, page, limit } }),
 };
