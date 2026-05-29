@@ -1963,6 +1963,13 @@ class StreamCheckerService:
                             "Stream check deferred until provider capacity timed out; preserving existing stream state: "
                             f"{stream_context(stream_id=analyzed.get('stream_id'), stream_url=analyzed.get('stream_url'), channel_id=channel_id)}"
                         )
+                        if not analyzed.get('cached'):
+                            logger.warning(
+                                "Stream check deferred without cached quality stats; excluding from this channel update "
+                                "so unchecked newly assigned streams are not promoted: "
+                                f"{stream_context(stream_id=analyzed.get('stream_id'), stream_url=analyzed.get('stream_url'), channel_id=channel_id)}"
+                            )
+                            continue
                         score = self._calculate_stream_score(analyzed, priority_m3u_ids, priority_mode, scoring_weights)
                         analyzed['score'] = score
                         analyzed['channel_id'] = channel_id

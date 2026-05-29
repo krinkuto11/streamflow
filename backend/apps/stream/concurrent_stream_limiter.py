@@ -281,6 +281,19 @@ class SmartStreamScheduler:
         self.account_limiter = account_limiter
         self.global_limit = global_limit
         logger.info(f"SmartStreamScheduler initialized with global_limit={global_limit}")
+
+    @staticmethod
+    def _normalize_wait_reason(reason: Optional[str]) -> str:
+        """Return a UI/log friendly wait reason."""
+        if reason == 'timeout':
+            # AccountStreamLimiter uses "timeout" when checker-owned slots are full.
+            return 'checking_capacity'
+        return reason or 'provider_capacity'
+
+    @staticmethod
+    def _is_internal_capacity_wait(reason: str) -> bool:
+        """Reasons caused by StreamFlow's own scheduler should wait for completion."""
+        return reason in {'checking_capacity', 'global_worker_limit', 'provider_capacity'}
     
     def check_streams_with_limits(
         self,
@@ -308,9 +321,10 @@ class SmartStreamScheduler:
             start_callback: Optional callback right before a stream starts checking
             defer_callback: Optional callback when a stream is waiting for provider capacity
             stagger_delay: Delay between starting tasks (default: 0.0)
-            provider_wait_timeout: Maximum time a stream may wait for provider capacity.
-                None waits indefinitely, matching the fail-safe "do not mark bad while
-                waiting for capacity" behavior.
+            provider_wait_timeout: Maximum time a stream may wait when capacity is
+                externally unavailable (for example active viewers/profile capacity).
+                StreamFlow-owned checker saturation waits until a probe slot frees
+                instead of skipping streams from the same provider.
             **check_params: Additional parameters for check_function
             
         Returns:
@@ -447,7 +461,7 @@ class SmartStreamScheduler:
                                     acquired_account = False
                                     reason = 'global_worker_limit'
 
-                            wait_reason = reason or 'provider_capacity'
+                            wait_reason = self._normalize_wait_reason(reason)
                             if defer_callback:
                                 try:
                                     with lock:
@@ -455,7 +469,10 @@ class SmartStreamScheduler:
                                 except Exception as e:
                                     logger.error(f"Error in defer_callback for stream {stream['id']}: {e}")
 
-                            if provider_wait_timeout is not None:
+                            if (
+                                provider_wait_timeout is not None
+                                and not self._is_internal_capacity_wait(wait_reason)
+                            ):
                                 elapsed = time.time() - wait_started
                                 if elapsed >= provider_wait_timeout:
                                     logger.warning(

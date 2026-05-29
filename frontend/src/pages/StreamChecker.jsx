@@ -1197,6 +1197,22 @@ export default function StreamChecker() {
                       Delay between starting each concurrent check to prevent overload
                     </p>
                   </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="provider_wait_timeout">Provider Wait Timeout (seconds)</Label>
+                    <Input
+                      id="provider_wait_timeout"
+                      type="number"
+                      value={editedConfig?.concurrent_streams?.provider_wait_timeout ?? 180}
+                      onChange={(e) => updateConfigValue('concurrent_streams.provider_wait_timeout', parseInt(e.target.value))}
+                      disabled={!configEditing || !editedConfig?.concurrent_streams?.enabled}
+                      min={30}
+                      max={900}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Maximum wait when provider capacity is held by active viewers before preserving existing stream state
+                    </p>
+                  </div>
                 </TabsContent>
 
 

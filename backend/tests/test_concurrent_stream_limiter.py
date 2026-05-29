@@ -25,6 +25,7 @@ from apps.stream.concurrent_stream_limiter import (
     get_smart_scheduler,
     initialize_account_limits
 )
+from apps.stream.stream_checker_components import StreamCheckConfig
 
 
 class TestAccountStreamLimiter(unittest.TestCase):
@@ -364,8 +365,15 @@ class TestSmartStreamScheduler(unittest.TestCase):
         """A waiting provider must not prevent a later free provider from running."""
         self.limiter.set_account_limit(1, 1)
         self.limiter.set_account_limit(2, 1)
-        acquired, _ = self.limiter.acquire(1, timeout=0)
-        self.assertTrue(acquired)
+        mock_udi = Mock()
+        mock_udi.get_active_streams_for_account.return_value = 0
+        mock_udi.get_stream_by_id.return_value = None
+        mock_udi.check_stream_can_run.side_effect = (
+            lambda stream: (False, 'active_viewers')
+            if stream.get('m3u_account') == 1
+            else (True, None)
+        )
+        self.limiter.udi_manager = mock_udi
 
         checked_ids = []
         defer_calls = []
@@ -381,15 +389,12 @@ class TestSmartStreamScheduler(unittest.TestCase):
             {'id': 2, 'name': 'Free B', 'url': 'http://test.com/b', 'm3u_account': 2},
         ]
 
-        try:
-            results = self.scheduler.check_streams_with_limits(
-                streams=streams,
-                check_function=mock_check,
-                defer_callback=lambda stream, reason: defer_calls.append((stream['id'], reason)),
-                provider_wait_timeout=0.2,
-            )
-        finally:
-            self.limiter.release(1)
+        results = self.scheduler.check_streams_with_limits(
+            streams=streams,
+            check_function=mock_check,
+            defer_callback=lambda stream, reason: defer_calls.append((stream['id'], reason)),
+            provider_wait_timeout=0.2,
+        )
 
         self.assertIn(2, checked_ids)
         self.assertNotIn(1, checked_ids)
@@ -402,8 +407,15 @@ class TestSmartStreamScheduler(unittest.TestCase):
         """Round-robin scheduling must reach a free provider after many blocked streams."""
         self.limiter.set_account_limit(1, 1)
         self.limiter.set_account_limit(2, 1)
-        acquired, _ = self.limiter.acquire(1, timeout=0)
-        self.assertTrue(acquired)
+        mock_udi = Mock()
+        mock_udi.get_active_streams_for_account.return_value = 0
+        mock_udi.get_stream_by_id.return_value = None
+        mock_udi.check_stream_can_run.side_effect = (
+            lambda stream: (False, 'active_viewers')
+            if stream.get('m3u_account') == 1
+            else (True, None)
+        )
+        self.limiter.udi_manager = mock_udi
 
         checked_ids = []
 
@@ -417,14 +429,11 @@ class TestSmartStreamScheduler(unittest.TestCase):
         ]
         free_stream = {'id': 100, 'name': 'Free B', 'url': 'http://test.com/b', 'm3u_account': 2}
 
-        try:
-            results = self.scheduler.check_streams_with_limits(
-                streams=blocked_streams + [free_stream],
-                check_function=mock_check,
-                provider_wait_timeout=0.1,
-            )
-        finally:
-            self.limiter.release(1)
+        results = self.scheduler.check_streams_with_limits(
+            streams=blocked_streams + [free_stream],
+            check_function=mock_check,
+            provider_wait_timeout=0.1,
+        )
 
         self.assertIn(100, checked_ids)
         free_result = [r for r in results if r.get('stream_id') == 100]
@@ -460,25 +469,62 @@ class TestSmartStreamScheduler(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['status'], 'OK')
 
-    def test_provider_wait_timeout_returns_skip_result_not_error(self):
-        """Provider capacity timeout should preserve state instead of creating an error."""
+    def test_internal_checker_capacity_waits_past_external_timeout(self):
+        """Checker-owned provider slots should wait for completion instead of skipping."""
         self.limiter.set_account_limit(1, 1)
         acquired, _ = self.limiter.acquire(1, timeout=0)
         self.assertTrue(acquired)
 
-        try:
-            results = self.scheduler.check_streams_with_limits(
-                streams=[{'id': 1, 'name': 'Blocked A', 'url': 'http://test.com/a', 'm3u_account': 1}],
-                check_function=lambda **_kwargs: self.fail("check_function should not run"),
-                provider_wait_timeout=0.1,
-            )
-        finally:
+        checked_ids = []
+        defer_reasons = []
+
+        def release_later():
+            time.sleep(0.25)
             self.limiter.release(1)
+
+        def mock_check(**kwargs):
+            checked_ids.append(kwargs['stream_id'])
+            return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+        releaser = threading.Thread(target=release_later)
+        releaser.start()
+        results = self.scheduler.check_streams_with_limits(
+            streams=[{'id': 1, 'name': 'Deferred A', 'url': 'http://test.com/a', 'm3u_account': 1}],
+            check_function=mock_check,
+            defer_callback=lambda _stream, reason: defer_reasons.append(reason),
+            provider_wait_timeout=0.1,
+        )
+        releaser.join()
+
+        self.assertEqual(checked_ids, [1])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['status'], 'OK')
+        self.assertIn('checking_capacity', defer_reasons)
+
+    def test_provider_wait_timeout_returns_skip_result_not_error(self):
+        """Active-viewer capacity timeout should preserve state instead of creating an error."""
+        self.limiter.set_account_limit(1, 1)
+        mock_udi = Mock()
+        mock_udi.check_stream_can_run.return_value = (False, 'active_viewers')
+        mock_udi.get_stream_by_id.return_value = None
+        self.limiter.udi_manager = mock_udi
+
+        results = self.scheduler.check_streams_with_limits(
+            streams=[{'id': 1, 'name': 'Blocked A', 'url': 'http://test.com/a', 'm3u_account': 1}],
+            check_function=lambda **_kwargs: self.fail("check_function should not run"),
+            provider_wait_timeout=0.1,
+        )
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]['status'], 'SKIPPED_PROVIDER_LIMIT')
         self.assertTrue(results[0]['provider_limit_skipped'])
-        self.assertEqual(results[0]['skipped_reason'], 'provider_capacity_unavailable')
+        self.assertEqual(results[0]['skipped_reason'], 'quota_consumed_by_active_viewers')
+
+    def test_default_provider_wait_timeout_is_visible_config(self):
+        self.assertEqual(
+            StreamCheckConfig.DEFAULT_CONFIG['concurrent_streams']['provider_wait_timeout'],
+            180,
+        )
     
     def test_progress_callback(self):
         """Test that progress callback is called correctly."""

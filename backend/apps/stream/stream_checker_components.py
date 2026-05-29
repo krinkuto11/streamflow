@@ -75,7 +75,10 @@ class StreamCheckConfig:
         'concurrent_streams': {
             'global_limit': 10,  # Maximum concurrent stream checks globally (0 = unlimited)
             'enabled': True,  # Enable concurrent checking via Celery
-            'stagger_delay': 1.0  # Delay in seconds between dispatching tasks to prevent simultaneous starts
+            'stagger_delay': 1.0,  # Delay in seconds between dispatching tasks to prevent simultaneous starts
+            # Max wait for externally unavailable capacity (for example active viewers).
+            # Checker-owned provider slots wait until their current probes finish.
+            'provider_wait_timeout': 180
         },
         'dead_stream_handling': {
             'enabled': True,  # Enable dead stream removal
