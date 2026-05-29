@@ -39,6 +39,7 @@ export default function StreamChecker() {
   const [status, setStatus] = useState(null)
   const [progress, setProgress] = useState(null)
   const [config, setConfig] = useState(null)
+  const [hardwareStatus, setHardwareStatus] = useState(null)
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
   const [tick, setTick] = useState(0) // drives countdown re-renders — value never rendered
@@ -84,14 +85,16 @@ export default function StreamChecker() {
 
   const loadData = async () => {
     try {
-      const [statusResponse, progressResponse, configResponse] = await Promise.all([
+      const [statusResponse, progressResponse, configResponse, hardwareStatusResponse] = await Promise.all([
         streamCheckerAPI.getStatus(),
         streamCheckerAPI.getProgress(),
-        streamCheckerAPI.getConfig()
+        streamCheckerAPI.getConfig(),
+        streamCheckerAPI.getHardwareStatus()
       ])
       setStatus(statusResponse.data)
       setProgress(progressResponse.data)
       setConfig(configResponse.data)
+      setHardwareStatus(hardwareStatusResponse.data)
       if (!editedConfig && configResponse.data) {
         setEditedConfig(configResponse.data)
       }
@@ -376,6 +379,18 @@ export default function StreamChecker() {
       ? (selectedStartChannel?.name || 'Select a channel')
       : (firstStartChannel?.name || 'First channel')
   const queueAllDisabled = isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || (queueStartMode === 'channel' && !queueStartChannelId)
+  const detectedGpus = Array.isArray(hardwareStatus?.nvidia_gpus) ? hardwareStatus.nvidia_gpus : []
+  const detectedGpuLabel = detectedGpus.length > 0
+    ? detectedGpus.join(', ')
+    : hardwareStatus?.nvidia_checked
+      ? (hardwareStatus?.nvidia_error || 'No GPU reported')
+      : 'Not checked'
+  const ffmpegModeLabel = hardwareStatus?.config?.enabled
+    ? (hardwareStatus?.mode_supported ? 'Available' : 'Not reported')
+    : 'Disabled'
+  const ffmpegMethodsLabel = Array.isArray(hardwareStatus?.ffmpeg_hwaccels) && hardwareStatus.ffmpeg_hwaccels.length > 0
+    ? hardwareStatus.ffmpeg_hwaccels.join(', ')
+    : (hardwareStatus?.config?.enabled ? (hardwareStatus?.ffmpeg_error || 'No methods reported') : 'Not checked')
 
   return (
     <div className="space-y-6">
@@ -1018,6 +1033,9 @@ export default function StreamChecker() {
                           <p className="text-xs text-muted-foreground">
                             Optional ffmpeg device path or index
                           </p>
+                          <p className="text-xs text-muted-foreground">
+                            Detected GPU: {detectedGpuLabel}
+                          </p>
                         </div>
 
                         <div className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2">
@@ -1033,6 +1051,28 @@ export default function StreamChecker() {
                             onCheckedChange={(checked) => updateConfigValue('stream_analysis.hardware_acceleration.allow_fallback', checked)}
                             disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
                           />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 text-xs md:grid-cols-3">
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">Runtime Device</div>
+                          <div className="mt-1 font-medium text-foreground">{detectedGpuLabel}</div>
+                        </div>
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">Selected Mode</div>
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <span className="font-medium text-foreground">
+                              {hardwareStatus?.config?.mode || 'auto'}
+                            </span>
+                            <Badge variant={hardwareStatus?.mode_supported ? 'default' : 'secondary'}>
+                              {ffmpegModeLabel}
+                            </Badge>
+                          </div>
+                        </div>
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">FFmpeg Methods</div>
+                          <div className="mt-1 font-medium text-foreground">{ffmpegMethodsLabel}</div>
                         </div>
                       </div>
                     </div>

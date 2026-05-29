@@ -189,6 +189,7 @@ export const streamCheckerAPI = {
   addToQueue: (data) => api.post('/stream-checker/queue/add', data),
   clearQueue: () => api.post('/stream-checker/queue/clear'),
   getConfig: () => api.get('/stream-checker/config'),
+  getHardwareStatus: () => api.get('/stream-checker/hardware-status'),
   updateConfig: (config) => api.put('/stream-checker/config', config),
   getProgress: () => api.get('/stream-checker/progress'),
   checkChannel: (channelId) => api.post('/stream-checker/check-channel', { channel_id: channelId }),

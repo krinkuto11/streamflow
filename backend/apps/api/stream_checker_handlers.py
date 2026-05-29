@@ -102,6 +102,16 @@ def get_stream_checker_config_response(*, get_stream_checker_service: Callable[[
         return jsonify({"error": "Internal Server Error"}), 500
 
 
+def get_stream_checker_hardware_status_response(*, get_stream_checker_service: Callable[[], Any]):
+    """Handle retrieval of optional hardware acceleration runtime status."""
+    try:
+        service = get_stream_checker_service()
+        return jsonify(service.get_hardware_acceleration_status())
+    except Exception as exc:
+        logger.error(f"Error getting stream checker hardware status: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
 def get_stream_checker_progress_response(*, get_stream_checker_service: Callable[[], Any]):
     """Handle retrieval of current stream checker progress."""
     try:

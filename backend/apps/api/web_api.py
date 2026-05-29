@@ -137,6 +137,7 @@ from apps.api.stream_checker_handlers import (
     queue_all_channels_response,
     update_stream_checker_config_response,
     get_stream_checker_config_response,
+    get_stream_checker_hardware_status_response,
     get_stream_checker_progress_response,
     get_stream_checker_queue_response,
     start_stream_checker_response,
@@ -1245,6 +1246,11 @@ def clear_stream_checker_queue():
 def get_stream_checker_config():
     """Get stream checker configuration."""
     return get_stream_checker_config_response(get_stream_checker_service=get_stream_checker_service)
+
+@app.route('/api/stream-checker/hardware-status', methods=['GET'])
+def get_stream_checker_hardware_status():
+    """Get stream checker optional hardware acceleration runtime status."""
+    return get_stream_checker_hardware_status_response(get_stream_checker_service=get_stream_checker_service)
 
 @app.route('/api/stream-checker/config', methods=['PUT'])
 def update_stream_checker_config():

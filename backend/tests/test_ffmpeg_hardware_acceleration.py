@@ -85,13 +85,33 @@ class TestHardwareAccelerationConfig(unittest.TestCase):
     def test_startup_diagnostics_does_not_probe_when_disabled(self):
         calls = []
 
-        diagnostics = collect_hardware_acceleration_diagnostics(
-            {"enabled": False, "mode": "cuda"},
-            command_runner=lambda command, timeout: calls.append(command),
-        )
+        with patch.dict(os.environ, {"NVIDIA_VISIBLE_DEVICES": ""}):
+            diagnostics = collect_hardware_acceleration_diagnostics(
+                {"enabled": False, "mode": "cuda"},
+                command_runner=lambda command, timeout: calls.append(command),
+            )
 
         self.assertFalse(diagnostics["config"]["enabled"])
         self.assertEqual(calls, [])
+
+    def test_startup_diagnostics_reports_runtime_gpu_when_config_disabled(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="NVIDIA Test GPU\n", stderr="")
+
+        with patch.dict(os.environ, {"NVIDIA_VISIBLE_DEVICES": "GPU-test"}):
+            diagnostics = collect_hardware_acceleration_diagnostics(
+                {"enabled": False, "mode": "cuda"},
+                command_runner=runner,
+            )
+
+        self.assertFalse(diagnostics["config"]["enabled"])
+        self.assertFalse(diagnostics["ffmpeg_available"])
+        self.assertTrue(diagnostics["nvidia_smi_ok"])
+        self.assertEqual(diagnostics["nvidia_gpus"], ["NVIDIA Test GPU"])
+        self.assertEqual(calls, [["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]])
 
 
 class TestHardwareAccelerationFfmpegCommand(unittest.TestCase):

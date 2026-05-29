@@ -159,13 +159,8 @@ class StreamCheckerService:
         
         self.config = StreamCheckConfig()
         logger.debug("Config loaded")
-        try:
-            from apps.stream.stream_check_utils import log_hardware_acceleration_startup_diagnostics
-            log_hardware_acceleration_startup_diagnostics(
-                self.config.get('stream_analysis.hardware_acceleration', {})
-            )
-        except Exception as e:
-            logger.warning(f"Unable to log hardware acceleration startup diagnostics: {e}")
+        self.hardware_acceleration_diagnostics = {}
+        self._refresh_hardware_acceleration_diagnostics(log_startup=True)
         
         self.update_tracker = ChannelUpdateTracker()
         logger.debug("Update tracker initialized")
@@ -4923,6 +4918,8 @@ class StreamCheckerService:
         
         # Apply the configuration update
         self.config.update(updates)
+        if 'stream_analysis' in updates and 'hardware_acceleration' in updates['stream_analysis']:
+            self._refresh_hardware_acceleration_diagnostics(log_startup=True)
         
         # Log the changes
         if config_changes:
@@ -4942,6 +4939,36 @@ class StreamCheckerService:
         if 'queue' in updates and 'max_size' in updates['queue']:
             # Can't resize existing queue, but will apply on next restart
             logger.info("Queue max size updated, will apply on next restart")
+
+    def _refresh_hardware_acceleration_diagnostics(self, *, log_startup: bool = False) -> Dict:
+        """Refresh cached optional hardware acceleration diagnostics."""
+        try:
+            from apps.stream.stream_check_utils import (
+                collect_hardware_acceleration_diagnostics,
+                log_hardware_acceleration_startup_diagnostics,
+            )
+            config = self.config.get('stream_analysis.hardware_acceleration', {})
+            diagnostics = (
+                log_hardware_acceleration_startup_diagnostics(config)
+                if log_startup
+                else collect_hardware_acceleration_diagnostics(config)
+            )
+            self.hardware_acceleration_diagnostics = diagnostics
+            return diagnostics
+        except Exception as e:
+            logger.warning(f"Unable to refresh hardware acceleration diagnostics: {e}")
+            self.hardware_acceleration_diagnostics = {
+                'config': self.config.get('stream_analysis.hardware_acceleration', {}),
+                'error': str(e),
+            }
+            return self.hardware_acceleration_diagnostics
+
+    def get_hardware_acceleration_status(self) -> Dict:
+        """Return cached startup diagnostics for the current hardware config."""
+        diagnostics = getattr(self, 'hardware_acceleration_diagnostics', None)
+        if not diagnostics:
+            diagnostics = self._refresh_hardware_acceleration_diagnostics(log_startup=False)
+        return diagnostics
 
 
 # Global service instance

@@ -200,9 +200,6 @@ def collect_hardware_acceleration_diagnostics(
         'nvidia_gpus': [],
         'nvidia_error': '',
     }
-    if not hwaccel['enabled']:
-        return diagnostics
-
     def _run(command: List[str], timeout: float) -> subprocess.CompletedProcess:
         if command_runner:
             return command_runner(command, timeout)
@@ -214,26 +211,30 @@ def collect_hardware_acceleration_diagnostics(
             text=True,
         )
 
-    try:
-        ffmpeg_result = _run(['ffmpeg', '-hide_banner', '-hwaccels'], 5.0)
-        diagnostics['ffmpeg_available'] = ffmpeg_result.returncode == 0
-        diagnostics['ffmpeg_hwaccels'] = _parse_ffmpeg_hwaccels(
-            f"{ffmpeg_result.stdout or ''}\n{ffmpeg_result.stderr or ''}"
-        )
-        mode = hwaccel['mode']
-        diagnostics['mode_supported'] = (
-            mode == 'auto' and bool(diagnostics['ffmpeg_hwaccels'])
-        ) or mode in diagnostics['ffmpeg_hwaccels']
-        if ffmpeg_result.returncode != 0:
-            diagnostics['ffmpeg_error'] = (ffmpeg_result.stderr or ffmpeg_result.stdout or '').strip()[:300]
-    except FileNotFoundError:
-        diagnostics['ffmpeg_error'] = 'ffmpeg executable not found'
-    except subprocess.TimeoutExpired:
-        diagnostics['ffmpeg_error'] = 'ffmpeg -hwaccels timed out'
-    except Exception as exc:
-        diagnostics['ffmpeg_error'] = str(exc)[:300]
+    if hwaccel['enabled']:
+        try:
+            ffmpeg_result = _run(['ffmpeg', '-hide_banner', '-hwaccels'], 5.0)
+            diagnostics['ffmpeg_available'] = ffmpeg_result.returncode == 0
+            diagnostics['ffmpeg_hwaccels'] = _parse_ffmpeg_hwaccels(
+                f"{ffmpeg_result.stdout or ''}\n{ffmpeg_result.stderr or ''}"
+            )
+            mode = hwaccel['mode']
+            diagnostics['mode_supported'] = (
+                mode == 'auto' and bool(diagnostics['ffmpeg_hwaccels'])
+            ) or mode in diagnostics['ffmpeg_hwaccels']
+            if ffmpeg_result.returncode != 0:
+                diagnostics['ffmpeg_error'] = (ffmpeg_result.stderr or ffmpeg_result.stdout or '').strip()[:300]
+        except FileNotFoundError:
+            diagnostics['ffmpeg_error'] = 'ffmpeg executable not found'
+        except subprocess.TimeoutExpired:
+            diagnostics['ffmpeg_error'] = 'ffmpeg -hwaccels timed out'
+        except Exception as exc:
+            diagnostics['ffmpeg_error'] = str(exc)[:300]
 
-    should_check_nvidia = hwaccel['mode'] in {'auto', 'cuda'} or diagnostics['nvidia_visible_devices_set']
+    should_check_nvidia = (
+        (hwaccel['enabled'] and hwaccel['mode'] in {'auto', 'cuda'})
+        or diagnostics['nvidia_visible_devices_set']
+    )
     if should_check_nvidia:
         diagnostics['nvidia_checked'] = True
         try:
@@ -266,6 +267,19 @@ def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any
     hwaccel = diagnostics['config']
     if not hwaccel['enabled']:
         logger.info("FFmpeg hardware acceleration disabled; CPU stream analysis path is active")
+        if diagnostics['nvidia_checked']:
+            if diagnostics['nvidia_smi_ok'] and diagnostics['nvidia_gpus']:
+                logger.info(
+                    "NVIDIA runtime visible: NVIDIA_VISIBLE_DEVICES=%s; GPUs=%s",
+                    'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+                    ', '.join(diagnostics['nvidia_gpus']),
+                )
+            else:
+                logger.warning(
+                    "NVIDIA runtime not ready: NVIDIA_VISIBLE_DEVICES=%s; nvidia-smi=%s",
+                    'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+                    diagnostics['nvidia_error'] or 'no GPU reported',
+                )
         return diagnostics
 
     logger.info(
