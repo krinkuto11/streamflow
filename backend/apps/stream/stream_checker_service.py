@@ -19,7 +19,6 @@ updates and maintaining a queue of channels that need checking. It
 integrates with the stream_check_utils.py module for stream analysis.
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -39,6 +38,7 @@ from apps.core.api_utils import (
     patch_request,
     batch_update_stream_stats
 )
+from apps.core.log_sanitizer import audit_ref as _audit_ref, scrub_urls, stream_context, stream_ref
 
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
@@ -90,13 +90,6 @@ logger = setup_logging(__name__)
 
 # Configuration directory
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
-
-
-def _audit_ref(kind: str, value: Any) -> str:
-    if value is None:
-        return f"{kind}-unknown"
-    digest = hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()[:12]
-    return f"{kind}-{digest}"
 
 
 from apps.stream.stream_checker_components import (
@@ -1928,18 +1921,27 @@ class StreamCheckerService:
                                     f"reason={dead_reason}"
                                 )
                             else:
-                                logger.warning(f"Stream {stream_id} detected as DEAD: {stream_name} (reason={dead_reason})")
+                                logger.warning(
+                                    f"Stream detected as dead: "
+                                    f"{stream_context(stream_id=stream_id, stream_url=stream_url, channel_id=channel_id, reason=dead_reason)}"
+                                )
                         else:
                             logger.error(f"Failed to mark stream {stream_id} as dead in tracker")
                     elif not is_dead and was_dead:
                         if allow_revive:
                             if self.dead_streams_tracker.mark_as_alive(stream_url):
                                 revived_stream_ids.append(stream_id)
-                                logger.info(f"Stream {stream_id} REVIVED: {stream_name}")
+                                logger.info(
+                                    f"Stream revived: "
+                                    f"{stream_context(stream_id=stream_id, stream_url=stream_url, channel_id=channel_id)}"
+                                )
                         else:
                             # Not allowed to revive, treat as still dead
                             dead_stream_ids.add(stream_id)
-                            logger.info(f"Stream {stream_id} is alive but revival disabled by profile: {stream_name}")
+                            logger.info(
+                                f"Stream is alive but revival is disabled by profile: "
+                                f"{stream_context(stream_id=stream_id, stream_url=stream_url, channel_id=channel_id)}"
+                            )
                     elif is_dead and was_dead:
                         logger.debug(f"Stream {stream_id} remains dead (already marked)")
                         # Only act on stale dead state if this stream was part of the current
@@ -2750,7 +2752,10 @@ class StreamCheckerService:
                                 f"reason={dead_reason}"
                             )
                         else:
-                            logger.warning(f"Stream {stream['id']} detected as DEAD: {stream_name} (reason={dead_reason})")
+                            logger.warning(
+                                f"Stream detected as dead: "
+                                f"{stream_context(stream_id=stream['id'], stream_url=stream_url, channel_id=channel_id, reason=dead_reason)}"
+                            )
                     else:
                         logger.error(f"Failed to mark stream {stream['id']} as DEAD, will not remove from channel")
                 elif not is_dead and was_dead:
@@ -2758,10 +2763,16 @@ class StreamCheckerService:
                     if allow_revive:
                         if self.dead_streams_tracker.mark_as_alive(stream_url):
                             revived_stream_ids.append(stream['id'])
-                            logger.info(f"Stream {stream['id']} REVIVED: {stream_name}")
+                            logger.info(
+                                f"Stream revived: "
+                                f"{stream_context(stream_id=stream['id'], stream_url=stream_url, channel_id=channel_id)}"
+                            )
                     else:
                         dead_stream_ids.add(stream['id'])
-                        logger.info(f"Stream {stream['id']} is alive but revival disabled by profile: {stream_name}")
+                        logger.info(
+                            f"Stream is alive but revival is disabled by profile: "
+                            f"{stream_context(stream_id=stream['id'], stream_url=stream_url, channel_id=channel_id)}"
+                        )
                 elif is_dead and was_dead:
                     # Stream remains dead. Guard is redundant here — this loop
                     # iterates streams_to_check by definition — but kept for
@@ -3019,7 +3030,7 @@ class StreamCheckerService:
                     for stream_id in dead_stream_ids:
                         dead_stream = next((s for s in analyzed_streams if s.get('stream_id') == stream_id), None)
                         if dead_stream:
-                            logger.info(f"  - Removing dead stream {stream_id}: {dead_stream.get('stream_name', 'Unknown')}")
+                            logger.info(f"  - Removing dead stream {stream_ref(stream_id, dead_stream.get('stream_url'))}")
                     analyzed_streams = [s for s in analyzed_streams if s.get('stream_id') not in dead_stream_ids]
                 else:
                     logger.info(f"⚠️ Found {len(dead_stream_ids)} dead streams in channel {channel_name}, but removal is disabled in config")
@@ -3411,6 +3422,7 @@ class StreamCheckerService:
             stream_name = stream.get('stream_name', 'Unknown')
             stream_id   = stream.get('stream_id')
             score       = stream.get('score', 0)
+            stream_audit_ref = stream_ref(stream_id, stream_url)
 
             # Resolve numeric account ID from UDI.
             # analyzed dicts carry stream_id from quality analysis — use that
@@ -3425,14 +3437,7 @@ class StreamCheckerService:
             except Exception:
                 pass
 
-            # Build a short readable tag for log messages
-            try:
-                from urllib.parse import urlparse as _up
-                _p    = _up(stream_url)
-                _segs = [seg for seg in _p.path.split('/') if seg]
-                tag   = f"{_p.hostname}/{_segs[-1]}" if _segs else (_p.hostname or stream_url[:20])
-            except Exception:
-                tag = stream_url[:30]
+            tag = stream_audit_ref
 
             # Acquire account slot — same mechanism used by quality analysis.
             # Timeout of 60s: if the account is saturated (e.g. live viewers
@@ -3440,15 +3445,15 @@ class StreamCheckerService:
             acquired, reason = account_limiter.acquire(account_id, timeout=60)
             if not acquired:
                 logger.info(
-                    f"[loop-probe:{tag}] Skipping '{stream_name}' — "
+                    f"[loop-probe:{tag}] Skipping stream - "
                     f"account slot unavailable ({reason})"
                 )
                 return
 
             try:
                 logger.info(
-                    f"[loop-probe:{tag}] Probing '{stream_name}' "
-                    f"(ID: {stream_id}, score: {score:.2f})"
+                    f"[loop-probe:{tag}] Probing stream "
+                    f"(score: {score:.2f})"
                 )
                 loop_detected, loop_duration, frames = _probe_stream_for_loops(
                     url=stream_url,
@@ -3462,7 +3467,7 @@ class StreamCheckerService:
 
             except Exception as e:
                 logger.error(
-                    f"[loop-probe:{tag}] Probe failed for '{stream_name}': {e}"
+                    f"[loop-probe:{tag}] Probe failed: {scrub_urls(e)}"
                 )
                 # loop_detected remains None — distinguishable from clean (False)
                 # or detected (True)
@@ -3489,7 +3494,7 @@ class StreamCheckerService:
                             stream_duration=probe_duration,
                         )
                     logger.info(
-                        f"[loop-probe] Completed {completed[0]}/{total}: {stream_name}"
+                        f"[loop-probe] Completed {completed[0]}/{total}: {stream_audit_ref}"
                     )
 
         with ThreadPoolExecutor(max_workers=global_limit) as executor:
@@ -3501,7 +3506,7 @@ class StreamCheckerService:
                     stream = futures[future]
                     logger.error(
                         f"[loop-probe] Unhandled error for stream "
-                        f"{stream.get('stream_name', 'Unknown')}: {e}"
+                        f"{stream_ref(stream.get('stream_id'), stream.get('stream_url'))}: {scrub_urls(e)}"
                     )
 
         logger.info(f"[loop-probe] Parallel probe complete — {completed[0]}/{total} streams probed")
@@ -3516,8 +3521,9 @@ class StreamCheckerService:
                     original = stream.get('score', 0.0)
                     stream['score'] = round(max(0.0, original + loop_penalty), 2)
                     stream['loop_score_penalty'] = loop_penalty
+                    penalty_ref = stream_ref(stream.get('stream_id'), stream.get('stream_url'))
                     logger.info(
-                        f"[loop-probe] Penalty applied to '{stream.get('stream_name', 'Unknown')}': "
+                        f"[loop-probe] Penalty applied to {penalty_ref}: "
                         f"{original:.2f} → {stream['score']:.2f} (penalty={loop_penalty:+.2f})"
                     )
                     penalised += 1
@@ -4226,7 +4232,10 @@ class StreamCheckerService:
                         m3u_account = stream.get('m3u_account')
                         if m3u_account:
                             account_ids.add(m3u_account)
-                            logger.info(f"Found M3U account {m3u_account} from dead stream {dead_info.get('stream_name', 'Unknown')}")
+                            logger.info(
+                                f"Found M3U account {m3u_account} from dead stream "
+                                f"{stream_ref(stream_id, dead_url)}"
+                            )
             
             # Step 2a: Provider fetch — only if m3u_update is enabled in the profile.
             #

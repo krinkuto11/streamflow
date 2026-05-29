@@ -39,7 +39,6 @@ stats line is produced the stream is considered unanalyzable — a missing
 bitrate is a meaningful signal that the stream is dead or unresponsive.
 """
 
-import hashlib
 import io
 import json
 import logging
@@ -54,15 +53,9 @@ from typing import Dict, Optional, Tuple, Any, List
 
 from PIL import Image
 from apps.core.logging_config import setup_logging
+from apps.core.log_sanitizer import audit_ref as _audit_ref, scrub_urls, stream_ref, url_ref
 
 logger = setup_logging(__name__)
-
-
-def _audit_ref(kind: str, value: Any) -> str:
-    if value is None:
-        return f"{kind}-unknown"
-    digest = hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()[:12]
-    return f"{kind}-{digest}"
 
 # ── Loop probe constants ──────────────────────────────────────────────────────
 # Hamming tolerance for one-shot probes is tighter than the live sidecar value
@@ -143,14 +136,14 @@ def _log_ffmpeg_errors(output: str, logger: logging.Logger, error_patterns: list
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"  ffmpeg error details (DEBUG_MODE):")
             for error_line in error_lines[:MAX_DEBUG_LINES_TO_LOG]:
-                logger.debug(f"     {error_line}")
+                logger.debug(f"     {scrub_urls(error_line)}")
         else:
             logger.warning(f"  ffmpeg encountered {len(error_lines)} error(s) (set DEBUG_MODE=true for details)")
     elif logger.isEnabledFor(logging.DEBUG):
         logger.debug(f"  Last lines of ffmpeg output (DEBUG_MODE):")
         for line in output.splitlines()[-MAX_DEBUG_LINES_TO_LOG:]:
             if line.strip():
-                logger.debug(f"     {line.strip()}")
+                logger.debug(f"     {scrub_urls(line.strip())}")
 
 
 def _parse_ffmpeg_progress_time(line: str) -> Optional[float]:
@@ -440,7 +433,7 @@ def _get_hdr_metadata(url: str, timeout: int = 10, user_agent: str = 'VLC/3.0.14
     Returns:
         Dictionary with HDR metadata fields, or None if extraction fails
     """
-    logger.debug(f"Extracting HDR metadata with ffprobe for: {url[:50]}...")
+    logger.debug(f"Extracting HDR metadata with ffprobe for: {url_ref(url)}")
     command = [
         'ffprobe',
         '-user_agent', user_agent,
@@ -563,7 +556,7 @@ def get_stream_info(url: str, timeout: int = 30, user_agent: str = 'VLC/3.0.14')
 
     Get stream information using ffprobe to extract codec, resolution, and FPS.
     """
-    logger.debug(f"Running ffprobe for URL: {url[:50]}...")
+    logger.debug(f"Running ffprobe for URL: {url_ref(url)}")
     command = [
         'ffprobe',
         '-user_agent', user_agent,
@@ -596,13 +589,13 @@ def get_stream_info(url: str, timeout: int = 30, user_agent: str = 'VLC/3.0.14')
         return None, None
 
     except subprocess.TimeoutExpired:
-        logger.warning(f"Timeout ({timeout}s) while fetching stream info for: {url[:50]}...")
+        logger.warning(f"Timeout ({timeout}s) while fetching stream info for: {url_ref(url)}")
         return None, None
     except json.JSONDecodeError as e:
-        logger.warning(f"Failed to decode JSON from ffprobe for {url[:50]}...: {e}")
+        logger.warning(f"Failed to decode JSON from ffprobe for {url_ref(url)}: {scrub_urls(e)}")
         return None, None
     except Exception as e:
-        logger.error(f"Stream info check failed for {url[:50]}...: {e}")
+        logger.error(f"Stream info check failed for {url_ref(url)}: {scrub_urls(e)}")
         return None, None
 
 
@@ -675,7 +668,10 @@ def get_stream_info_and_bitrate(
     url_lower = url.lower()
     if not (url_lower.startswith('http://') or url_lower.startswith('https://') or
             url_lower.startswith('rtmp://') or url_lower.startswith('rtmps://')):
-        logger.error(f"Invalid URL protocol: {url[:50]}... (must be http://, https://, rtmp://, or rtmps://)")
+        logger.error(
+            f"Invalid URL protocol: {url_ref(url)} "
+            "(must be http://, https://, rtmp://, or rtmps://)"
+        )
         return {
             'video_codec': 'N/A', 'audio_codec': 'N/A', 'resolution': '0x0',
             'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,
@@ -690,7 +686,7 @@ def get_stream_info_and_bitrate(
             'freeze_segments': []
         }
 
-    logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url[:50]}...")
+    logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url_ref(url)}")
 
     extra_args = _get_ffmpeg_extra_args()
 
@@ -1300,7 +1296,7 @@ def _probe_stream_for_loops(
             f"inconclusive. Stream may not expose decodable video frames."
         )
         if stderr_out:
-            logger.warning(f"[loop-probe:{stream_tag}] FFmpeg said: {stderr_out[:300]}")
+            logger.warning(f"[loop-probe:{stream_tag}] FFmpeg said: {scrub_urls(stderr_out[:300])}")
     elif loop_detected:
         logger.warning(
             f"[loop-probe:{stream_tag}] LOOP DETECTED — "
@@ -1367,10 +1363,12 @@ def analyze_stream(
         - hdr_format, pixel_format, audio_sample_rate, audio_channels
         - channel_layout, audio_bitrate, status
     """
+    stream_audit_ref = stream_ref(stream_id, stream_url)
+
     if logger.isEnabledFor(logging.DEBUG):
-        logger.info(f"Analyzing stream: {stream_name} (ID: {stream_id})")
+        logger.info(f"Analyzing stream: {stream_audit_ref}")
     else:
-        logger.debug(f"Checking {stream_name}")
+        logger.debug(f"Checking {stream_audit_ref}")
 
     result = {
         'stream_id': stream_id,
@@ -1408,9 +1406,12 @@ def analyze_stream(
         for attempt in range(total_attempts):
             if attempt > 0:
                 if logger.isEnabledFor(logging.DEBUG):
-                    logger.info(f"  Retry attempt {attempt} of {retries} (attempt {attempt + 1} of {total_attempts}) for {stream_name}")
+                    logger.info(
+                        f"  Retry attempt {attempt} of {retries} "
+                        f"(attempt {attempt + 1} of {total_attempts}) for {stream_audit_ref}"
+                    )
                 else:
-                    logger.info(f"  Retry {attempt + 1}/{total_attempts} for {stream_name}")
+                    logger.info(f"  Retry {attempt + 1}/{total_attempts} for {stream_audit_ref}")
                 time.sleep(retry_delay)
 
             try:
@@ -1506,16 +1507,16 @@ def analyze_stream(
                             logger.info(f"    Bitrate: {result['bitrate_kbps']:.2f} kbps (elapsed: {result_data['elapsed_time']:.2f}s)")
                         else:
                             logger.warning(f"    Bitrate detection failed (elapsed: {result_data['elapsed_time']:.2f}s)")
-                        logger.info(f"  Stream analysis complete for {stream_name}")
+                        logger.info(f"  Stream analysis complete for {stream_audit_ref}")
                     else:
                         logger.warning(f"    Status: {result['status']} (elapsed: {result_data['elapsed_time']:.2f}s)")
                 else:
                     if result['status'] == "OK":
                         bitrate_str = f"{result['bitrate_kbps']:.2f} kbps" if result['bitrate_kbps'] is not None else "N/A"
                         hdr_str = f", {result['hdr_format']}" if result.get('hdr_format') else ""
-                        logger.info(f"  {stream_name}: {result['resolution']}, {result['fps']} FPS, {bitrate_str}, {result['video_codec']}/{result['audio_codec']}{hdr_str} ({result_data['elapsed_time']:.2f}s)")
+                        logger.info(f"  {stream_audit_ref}: {result['resolution']}, {result['fps']} FPS, {bitrate_str}, {result['video_codec']}/{result['audio_codec']}{hdr_str} ({result_data['elapsed_time']:.2f}s)")
                     else:
-                        logger.warning(f"  {stream_name}: Check failed - {result['status']} ({result_data['elapsed_time']:.2f}s)")
+                        logger.warning(f"  {stream_audit_ref}: Check failed - {result['status']} ({result_data['elapsed_time']:.2f}s)")
 
                 if result['status'] == "OK":
                     # Check whether FFmpeg ran for a meaningful portion of the
@@ -1529,13 +1530,13 @@ def analyze_stream(
                     elif attempt < total_attempts - 1:
                         if logger.isEnabledFor(logging.DEBUG):
                             logger.warning(
-                                f"  Stream '{stream_name}' exited early "
+                                f"  Stream {stream_audit_ref} exited early "
                                 f"({elapsed:.1f}s / {ffmpeg_duration}s expected) — "
                                 f"retrying (attempt {attempt + 2}/{total_attempts})"
                             )
                         else:
                             logger.warning(
-                                f"  {stream_name} exited early "
+                                f"  {stream_audit_ref} exited early "
                                 f"({elapsed:.1f}s/{ffmpeg_duration}s) — "
                                 f"retrying (attempt {attempt + 2}/{total_attempts})"
                             )
@@ -1544,16 +1545,26 @@ def analyze_stream(
                 else:
                     if attempt < total_attempts - 1:
                         if logger.isEnabledFor(logging.DEBUG):
-                            logger.warning(f"  Stream '{stream_name}' failed with status '{result['status']}'. Retrying in {retry_delay} seconds...")
+                            logger.warning(
+                                f"  Stream {stream_audit_ref} failed with status "
+                                f"'{result['status']}'. Retrying in {retry_delay} seconds..."
+                            )
                         else:
-                            logger.warning(f"  Retrying {stream_name} in {retry_delay}s (attempt {attempt + 2}/{total_attempts})")
+                            logger.warning(
+                                f"  Retrying {stream_audit_ref} in {retry_delay}s "
+                                f"(attempt {attempt + 2}/{total_attempts})"
+                            )
 
             except Exception as inner_e:
-                logger.error(f"  Exception during stream analysis (attempt {attempt + 1} of {total_attempts}): {inner_e}")
+                logger.error(
+                    f"  Exception during stream analysis "
+                    f"(attempt {attempt + 1} of {total_attempts}) for {stream_audit_ref}: "
+                    f"{scrub_urls(inner_e)}"
+                )
                 if attempt < total_attempts - 1:
                     logger.warning(f"  Retrying in {retry_delay} seconds...")
 
     except Exception as outer_e:
-        logger.error(f"Unexpected error in analyze_stream for {stream_name}: {outer_e}")
+        logger.error(f"Unexpected error in analyze_stream for {stream_audit_ref}: {scrub_urls(outer_e)}")
 
     return result
