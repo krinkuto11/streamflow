@@ -6,6 +6,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { changelogAPI } from '@/services/api.js'
+import { formatDuration } from '@/lib/time-format.js'
 import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown } from 'lucide-react'
 
 function formatTimestamp(timestamp) {
@@ -169,7 +170,7 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                             {streamDetail.loop_probe_ran ? (
                               streamDetail.loop_detected === true ? (
                                 <span className="text-amber-500 font-medium text-xs">
-                                  ⚠ {streamDetail.loop_duration_secs ? `${streamDetail.loop_duration_secs.toFixed(1)}s` : 'Loop'}
+                                  ⚠ {streamDetail.loop_duration_secs ? formatDuration(streamDetail.loop_duration_secs) : 'Loop'}
                                 </span>
                               ) : streamDetail.loop_detected === false ? (
                                 <span className="text-muted-foreground text-xs">✓</span>
@@ -404,7 +405,7 @@ function StepContent({ step }) {
                             {s.loop_probe_ran ? (
                               s.loop_detected === true ? (
                                 <span className="text-amber-500 font-medium text-xs">
-                                  ⚠ {s.loop_duration_secs ? `${s.loop_duration_secs.toFixed(1)}s` : 'Loop'}
+                                  ⚠ {s.loop_duration_secs ? formatDuration(s.loop_duration_secs) : 'Loop'}
                                 </span>
                               ) : s.loop_detected === false ? (
                                 <span className="text-muted-foreground text-xs">✓</span>
@@ -548,7 +549,7 @@ function ChangelogEntry({ entry }) {
           {details.duration && (
             <div>
               <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">Duration</p>
-              <p className="text-lg font-bold">{details.duration}</p>
+              <p className="text-lg font-bold">{formatDuration(details.duration)}</p>
             </div>
           )}
           {details.avg_bitrate && details.avg_bitrate !== 'N/A' && (

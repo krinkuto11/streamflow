@@ -26,6 +26,8 @@ MIN_STREAM_FETCH_PAGE_SIZE = 100
 MAX_STREAM_FETCH_PAGE_SIZE = 10000
 MIN_STREAM_FETCH_MAX_WORKERS = 1
 MAX_STREAM_FETCH_MAX_WORKERS = 20
+DEFAULT_AUTH_MODE = 'credentials'
+AUTH_MODES = {'credentials', 'api_key'}
 
 
 def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -35,6 +37,11 @@ def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         return default
     return min(max(parsed, minimum), maximum)
+
+
+def _normalize_auth_mode(value: Any) -> str:
+    mode = str(value or DEFAULT_AUTH_MODE).strip().lower()
+    return mode if mode in AUTH_MODES else DEFAULT_AUTH_MODE
 
 
 class DispatcharrConfig:
@@ -146,6 +153,25 @@ class DispatcharrConfig:
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
         return db_config.get('password')
 
+    def get_api_key(self) -> Optional[str]:
+        """Get Dispatcharr API key from database."""
+        from apps.database.manager import get_db_manager
+        db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        return db_config.get('api_key')
+
+    def get_auth_mode(self) -> str:
+        """Get configured Dispatcharr authentication mode."""
+        from apps.database.manager import get_db_manager
+        db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        mode = _normalize_auth_mode(db_config.get('auth_mode'))
+        if (
+            'auth_mode' not in db_config
+            and db_config.get('api_key')
+            and not (db_config.get('username') and db_config.get('password'))
+        ):
+            return 'api_key'
+        return mode
+
     def get_stream_fetch_page_size(self) -> int:
         """Get Dispatcharr stream page size for UDI stream refreshes."""
         from apps.database.manager import get_db_manager
@@ -176,23 +202,29 @@ class DispatcharrConfig:
         """
         return {
             'base_url': self.get_base_url() or '',
+            'auth_mode': self.get_auth_mode(),
             'username': self.get_username() or '',
             'has_password': bool(self.get_password()),
+            'has_api_key': bool(self.get_api_key()),
             'stream_fetch_page_size': self.get_stream_fetch_page_size(),
             'stream_fetch_max_workers': self.get_stream_fetch_max_workers(),
         }
     
     def update_config(self, base_url: Optional[str] = None, 
+                     auth_mode: Optional[str] = None,
                      username: Optional[str] = None,
                      password: Optional[str] = None,
+                     api_key: Optional[str] = None,
                      stream_fetch_page_size: Optional[Any] = None,
                      stream_fetch_max_workers: Optional[Any] = None) -> bool:
         """Update configuration and save to database.
         
         Args:
             base_url: Dispatcharr base URL
+            auth_mode: Authentication mode, either credentials or api_key
             username: Dispatcharr username
             password: Dispatcharr password
+            api_key: Dispatcharr API key
             stream_fetch_page_size: Items per stream page during UDI stream refreshes
             stream_fetch_max_workers: Concurrent stream page requests during UDI stream refreshes
             
@@ -209,10 +241,14 @@ class DispatcharrConfig:
             
             if base_url is not None:
                 self._config['base_url'] = base_url.strip()
+            if auth_mode is not None:
+                self._config['auth_mode'] = _normalize_auth_mode(auth_mode)
             if username is not None:
                 self._config['username'] = username.strip()
             if password is not None:
                 self._config['password'] = password
+            if api_key is not None:
+                self._config['api_key'] = api_key.strip()
             if stream_fetch_page_size is not None:
                 self._config['stream_fetch_page_size'] = _coerce_int(
                     stream_fetch_page_size,
@@ -234,13 +270,13 @@ class DispatcharrConfig:
         """Check if all required configuration is present.
         
         Returns:
-            True if base_url, username, and password are all configured
+            True if base_url and the selected authentication method are configured.
         """
-        return all([
-            self.get_base_url(),
-            self.get_username(),
-            self.get_password()
-        ])
+        if not self.get_base_url():
+            return False
+        if self.get_auth_mode() == 'api_key':
+            return bool(self.get_api_key())
+        return bool(self.get_username() and self.get_password())
 
 
 # Global singleton instance

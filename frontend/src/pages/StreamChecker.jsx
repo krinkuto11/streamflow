@@ -12,6 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.j
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from '@/components/ui/pagination.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI } from '@/services/api.js'
+import { formatDuration } from '@/lib/time-format.js'
 import {
   Activity,
   CheckCircle2,
@@ -22,6 +23,8 @@ import {
   Settings,
   Trash2,
   AlertCircle,
+  ShieldAlert,
+  ShieldCheck,
   RefreshCw,
   List
 } from 'lucide-react'
@@ -253,6 +256,7 @@ export default function StreamChecker() {
   const queued = status?.queue?.queued || 0
   const totalBatch = queued + inProgress + completed + failed
   const batchProgress = totalBatch > 0 ? ((completed + failed) / totalBatch) * 100 : 0
+  const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
 
   return (
     <div className="space-y-6">
@@ -326,6 +330,16 @@ export default function StreamChecker() {
         </Card>
       </div>
 
+      {connectivityGuardFailed && (
+        <Alert variant="destructive">
+          <ShieldAlert className="h-4 w-4" />
+          <AlertTitle>Connectivity Check Failed</AlertTitle>
+          <AlertDescription>
+            {status?.connectivity_guard?.message || 'Quality checking was stopped before channel streams were changed.'}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Batch Progress — hidden during single channel checks to avoid showing
            stale counters from the previous automation run */}
       {isChecking && totalBatch > 0 && !progress?.is_single_channel_check && (
@@ -335,9 +349,7 @@ export default function StreamChecker() {
               <CardTitle>Batch Progress</CardTitle>
               {status?.queue?.eta_seconds > 0 ? (
                 <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md">
-                  ~{status.queue.eta_seconds > 60
-                    ? `${Math.floor(status.queue.eta_seconds / 60)}m ${status.queue.eta_seconds % 60}s`
-                    : `${status.queue.eta_seconds}s`} remaining
+                  ~{formatDuration(status.queue.eta_seconds)} remaining
                 </span>
               ) : (
                 <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md animate-pulse">
@@ -439,12 +451,9 @@ export default function StreamChecker() {
                             if (remaining === 0) {
                               countdownCell = <span className="text-muted-foreground/50">--</span>
                             } else {
-                              const m = Math.floor(remaining / 60)
-                              const s = remaining % 60
-                              const timeStr = m > 0 ? `${m}m ${String(s).padStart(2, '0')}s` : `${s}s`
                               countdownCell = (
                                 <span className={remaining <= 10 ? 'text-amber-500 font-mono text-xs' : 'text-muted-foreground font-mono text-xs'}>
-                                  {timeStr}
+                                  {formatDuration(remaining)}
                                 </span>
                               )
                             }
@@ -469,7 +478,7 @@ export default function StreamChecker() {
                                 {stream.status === 'error' && <Badge variant="destructive" className="text-[10px]">Error</Badge>}
                                 {stream.status === 'dead' && <Badge variant="destructive" className="text-[10px]">Dead</Badge>}
                                 {stream.status === 'probing' && <Badge variant="outline" className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse">Probing</Badge>}
-                                {stream.status === 'loop_detected' && <Badge variant="outline" className="text-[10px] bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">⚠ {stream.loop_duration_secs ? `${stream.loop_duration_secs.toFixed(1)}s` : ''} Loop Found</Badge>}
+                                {stream.status === 'loop_detected' && <Badge variant="outline" className="text-[10px] bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">⚠ {stream.loop_duration_secs ? formatDuration(stream.loop_duration_secs) : ''} Loop Found</Badge>}
                                 {stream.status === 'low_quality' && (
                                   <Badge variant="outline" className="text-[10px] bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
                                     Low Quality
@@ -573,14 +582,15 @@ export default function StreamChecker() {
 
               {/* Tabs for Configuration Sections */}
               <Tabs defaultValue="analysis" className="w-full">
-                <TabsList className="grid w-full grid-cols-3">
+                <TabsList className="grid h-auto min-h-10 w-full grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-4">
                   <TabsTrigger value="analysis">Stream Analysis</TabsTrigger>
                   <TabsTrigger value="concurrent">Concurrent Checking</TabsTrigger>
+                  <TabsTrigger value="safety">Safety</TabsTrigger>
                   <TabsTrigger value="dead-streams">Dead Streams</TabsTrigger>
                 </TabsList>
 
                 {/* Stream Analysis Tab */}
-                <TabsContent value="analysis" className="space-y-4">
+                <TabsContent value="analysis" className="mt-4 space-y-4">
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="ffmpeg_duration">FFmpeg Duration (seconds)</Label>
@@ -696,7 +706,7 @@ export default function StreamChecker() {
                 </TabsContent>
 
                 {/* Concurrent Checking Tab */}
-                <TabsContent value="concurrent" className="space-y-4">
+                <TabsContent value="concurrent" className="mt-4 space-y-4">
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
                       <Label htmlFor="concurrent_enabled">Enable Concurrent Checking</Label>
@@ -747,8 +757,92 @@ export default function StreamChecker() {
                 </TabsContent>
 
 
+                {/* Safety Tab */}
+                <TabsContent value="safety" className="mt-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="connectivity_guard_enabled">Connectivity Guard</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Verify internet and Dispatcharr API reachability before stream checks can mark streams dead or update channel assignments
+                      </p>
+                    </div>
+                    <Switch
+                      id="connectivity_guard_enabled"
+                      checked={editedConfig?.connectivity_guard?.enabled !== false}
+                      onCheckedChange={(checked) => updateConfigValue('connectivity_guard.enabled', checked)}
+                      disabled={!configEditing}
+                    />
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_timeout">Connectivity Timeout (seconds)</Label>
+                      <Input
+                        id="connectivity_guard_timeout"
+                        type="number"
+                        step="0.5"
+                        value={editedConfig?.connectivity_guard?.timeout_seconds ?? 3}
+                        onChange={(e) => updateConfigValue('connectivity_guard.timeout_seconds', parseFloat(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={1}
+                        max={15}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Per-attempt probe timeout
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_retries">Connectivity Retries</Label>
+                      <Input
+                        id="connectivity_guard_retries"
+                        type="number"
+                        value={editedConfig?.connectivity_guard?.retry_attempts ?? 2}
+                        onChange={(e) => updateConfigValue('connectivity_guard.retry_attempts', parseInt(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={0}
+                        max={10}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Extra attempts before fail-closed abort
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_retry_backoff">Retry Backoff (seconds)</Label>
+                      <Input
+                        id="connectivity_guard_retry_backoff"
+                        type="number"
+                        step="0.5"
+                        value={editedConfig?.connectivity_guard?.retry_backoff_seconds ?? 1}
+                        onChange={(e) => updateConfigValue('connectivity_guard.retry_backoff_seconds', parseFloat(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={0}
+                        max={30}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Pause between transient retry attempts
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 rounded-md border p-3 text-sm">
+                    {editedConfig?.connectivity_guard?.enabled === false ? (
+                      <ShieldAlert className="h-4 w-4 text-muted-foreground" />
+                    ) : (
+                      <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                    )}
+                    <span>
+                      {editedConfig?.connectivity_guard?.enabled === false
+                        ? 'Connectivity guard disabled'
+                        : 'Connectivity guard enabled'}
+                    </span>
+                  </div>
+                </TabsContent>
+
+
                 {/* Dead Streams Tab */}
-                <TabsContent value="dead-streams" className="space-y-4">
+                <TabsContent value="dead-streams" className="mt-4 space-y-4">
                   <p className="text-sm text-muted-foreground">
                     View and manage streams that have been marked as dead. Removal from channels during stream checks depends on each automation profile&apos;s Stream Checking settings.
                   </p>

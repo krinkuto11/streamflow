@@ -21,6 +21,7 @@ from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.auth import (
     _get_base_url,
     _get_auth_headers,
+    _validate_auth_headers,
     _validate_token,
     _refresh_token,
     _token_refresh_lock,
@@ -30,6 +31,10 @@ from apps.core.auth import (
 )
 
 logger = setup_logging(__name__)
+
+GET_TIMEOUT_SECONDS = 45
+GET_RETRY_ATTEMPTS = 3
+GET_RETRY_BACKOFF_SECONDS = 2
 
 
 @dataclass
@@ -73,6 +78,65 @@ class UDIFetcher:
     def __init__(self):
         """Initialize the UDI fetcher."""
         self.base_url = _get_base_url()
+        self._timing_lock = threading.Lock()
+        self._request_timings: List[Dict[str, Any]] = []
+
+    def _record_request_timing(
+        self,
+        *,
+        method: str,
+        url: str,
+        elapsed: float,
+        status_code: Optional[int] = None,
+        success: bool = True,
+    ) -> None:
+        path = url
+        if self.base_url and path.startswith(self.base_url):
+            path = path[len(self.base_url):] or "/"
+
+        entry = {
+            "method": method,
+            "path": path.split("?", 1)[0],
+            "elapsed_seconds": round(float(elapsed), 4),
+            "status_code": status_code,
+            "success": success,
+            "timestamp": time.time(),
+        }
+        with self._timing_lock:
+            self._request_timings.append(entry)
+            if len(self._request_timings) > 500:
+                self._request_timings = self._request_timings[-500:]
+
+    @staticmethod
+    def _percentile(values: List[float], percentile: float) -> Optional[float]:
+        if not values:
+            return None
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return round(ordered[0], 4)
+        index = (len(ordered) - 1) * percentile
+        lower = math.floor(index)
+        upper = math.ceil(index)
+        if lower == upper:
+            return round(ordered[int(index)], 4)
+        weight = index - lower
+        return round(ordered[lower] * (1 - weight) + ordered[upper] * weight, 4)
+
+    def get_api_timing_summary(self) -> Dict[str, Any]:
+        """Return a URL-sanitized latency summary for recent Dispatcharr API calls."""
+        with self._timing_lock:
+            timings = list(self._request_timings)
+
+        latencies = [entry["elapsed_seconds"] for entry in timings]
+        failures = [entry for entry in timings if not entry.get("success")]
+        slowest = sorted(timings, key=lambda entry: entry.get("elapsed_seconds", 0), reverse=True)[:5]
+        return {
+            "sample_count": len(timings),
+            "failure_count": len(failures),
+            "p95_seconds": self._percentile(latencies, 0.95),
+            "p99_seconds": self._percentile(latencies, 0.99),
+            "slowest": slowest,
+        }
         
     def test_connection(self) -> bool:
         """Test connection to Dispatcharr API with short timeout.
@@ -86,6 +150,8 @@ class UDIFetcher:
         try:
             # Uses 5 second timeout in _validate_token
             headers = _get_auth_headers()
+            if headers.get("X-API-Key") or headers.get("Authorization", "").startswith("ApiKey "):
+                return _validate_auth_headers(headers)
             token = headers.get("Authorization", "").replace("Bearer ", "")
             return _validate_token(token)
         except Exception:
@@ -228,27 +294,45 @@ class UDIFetcher:
         Returns:
             JSON response data or None if failed
         """
-        try:
-            start_time = time.time()
-            log_api_request(logger, "GET", url)
-            resp = requests.get(url, headers=_get_auth_headers(), timeout=30)
-            elapsed = time.time() - start_time
-            log_api_response(logger, "GET", url, resp.status_code, elapsed)
-            
-            resp.raise_for_status()
-            return resp.json()
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                if _refresh_token():
-                    logger.info("Retrying request with new token...")
-                    resp = requests.get(url, headers=_get_auth_headers(), timeout=30)
-                    resp.raise_for_status()
-                    return resp.json()
-            logger.error(f"Error fetching {url}: {e}")
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching {url}: {e}")
-            return None
+        for attempt in range(1, GET_RETRY_ATTEMPTS + 1):
+            try:
+                start_time = time.time()
+                log_api_request(logger, "GET", url)
+                resp = requests.get(url, headers=_get_auth_headers(), timeout=GET_TIMEOUT_SECONDS)
+                elapsed = time.time() - start_time
+                log_api_response(logger, "GET", url, resp.status_code, elapsed)
+
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if e.response is not None else None
+                if status_code == 401:
+                    if _refresh_token():
+                        logger.info("Retrying request with new token...")
+                        resp = requests.get(url, headers=_get_auth_headers(), timeout=GET_TIMEOUT_SECONDS)
+                        resp.raise_for_status()
+                        return resp.json()
+
+                retryable = status_code in {429, 500, 502, 503, 504}
+                if retryable and attempt < GET_RETRY_ATTEMPTS:
+                    logger.warning(
+                        f"Transient HTTP {status_code} fetching {url}; retrying "
+                        f"({attempt}/{GET_RETRY_ATTEMPTS})"
+                    )
+                    time.sleep(GET_RETRY_BACKOFF_SECONDS * attempt)
+                    continue
+                logger.error(f"Error fetching {url}: {e}")
+                return None
+            except requests.exceptions.RequestException as e:
+                if attempt < GET_RETRY_ATTEMPTS:
+                    logger.warning(
+                        f"Transient error fetching {url}: {e}; retrying "
+                        f"({attempt}/{GET_RETRY_ATTEMPTS})"
+                    )
+                    time.sleep(GET_RETRY_BACKOFF_SECONDS * attempt)
+                    continue
+                logger.error(f"Error fetching {url}: {e}")
+                return None
     
     def _post_url(self, url: str, json_body: Any) -> Optional[Any]:
         """POST JSON to a URL with authentication and one auto-retry on 401.
@@ -266,6 +350,13 @@ class UDIFetcher:
             resp = requests.post(url, headers=_get_auth_headers(), json=json_body, timeout=30)
             elapsed = time.time() - start_time
             log_api_response(logger, "POST", url, resp.status_code, elapsed)
+            self._record_request_timing(
+                method="POST",
+                url=url,
+                elapsed=elapsed,
+                status_code=resp.status_code,
+                success=resp.status_code < 400,
+            )
 
             resp.raise_for_status()
             return resp.json()
@@ -273,12 +364,28 @@ class UDIFetcher:
             if e.response is not None and e.response.status_code == 401:
                 if _refresh_token():
                     logger.info("Retrying POST request with new token...")
+                    retry_start = time.time()
                     resp = requests.post(url, headers=_get_auth_headers(), json=json_body, timeout=30)
+                    retry_elapsed = time.time() - retry_start
+                    self._record_request_timing(
+                        method="POST",
+                        url=url,
+                        elapsed=retry_elapsed,
+                        status_code=resp.status_code,
+                        success=resp.status_code < 400,
+                    )
                     resp.raise_for_status()
                     return resp.json()
             logger.error(f"Error POSTing to {url}: {e}")
             return None
         except requests.exceptions.RequestException as e:
+            self._record_request_timing(
+                method="POST",
+                url=url,
+                elapsed=time.time() - start_time if 'start_time' in locals() else 0,
+                status_code=None,
+                success=False,
+            )
             logger.error(f"Error POSTing to {url}: {e}")
             return None
 
