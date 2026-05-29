@@ -212,7 +212,8 @@ class AccountStreamLimiter:
             if timeout is not None:
                 elapsed = time.time() - start_time
                 if elapsed >= timeout:
-                    logger.warning(
+                    log_method = logger.debug if timeout <= 0 else logger.warning
+                    log_method(
                         f"Timeout acquiring slot for account {account_id} after {elapsed:.1f}s "
                         f"({active_count} active + {checking_count} checking = {total_in_use}/{limit})"
                     )
