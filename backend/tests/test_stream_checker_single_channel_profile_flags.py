@@ -106,7 +106,7 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
 
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.StreamCheckConfig')
-    @patch('apps.automation.automation_config_manager.get_automation_config_manager')
+    @patch('stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_session_manager.get_session_manager')
     @patch('stream_checker_service.fetch_channel_streams')
     def test_m3u_update_disabled_skips_playlist_refresh_api_call(
@@ -143,7 +143,7 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
 
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.StreamCheckConfig')
-    @patch('apps.automation.automation_config_manager.get_automation_config_manager')
+    @patch('stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_session_manager.get_session_manager')
     @patch('stream_checker_service.fetch_channel_streams')
     def test_m3u_update_disabled_uses_existing_cache_when_checking_enabled(
@@ -181,7 +181,7 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
 
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.StreamCheckConfig')
-    @patch('apps.automation.automation_config_manager.get_automation_config_manager')
+    @patch('stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_session_manager.get_session_manager')
     @patch('stream_checker_service.fetch_channel_streams')
     def test_m3u_update_disabled_refreshes_channel_after_matching_only(
@@ -220,7 +220,7 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
 
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.StreamCheckConfig')
-    @patch('apps.automation.automation_config_manager.get_automation_config_manager')
+    @patch('stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_session_manager.get_session_manager')
     @patch('stream_checker_service.fetch_channel_streams')
     def test_all_flags_false_skips_both_refresh_and_udi_sync(
@@ -268,7 +268,7 @@ class TestSingleChannelM3uUpdateFlagEnabled(unittest.TestCase):
 
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.StreamCheckConfig')
-    @patch('apps.automation.automation_config_manager.get_automation_config_manager')
+    @patch('stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_session_manager.get_session_manager')
     @patch('stream_checker_service.fetch_channel_streams')
     def test_m3u_update_enabled_calls_refresh_then_syncs_udi(
@@ -332,7 +332,7 @@ class TestStep3DeadStreamClearIsUnconditional(unittest.TestCase):
 
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.StreamCheckConfig')
-    @patch('apps.automation.automation_config_manager.get_automation_config_manager')
+    @patch('stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_session_manager.get_session_manager')
     @patch('stream_checker_service.fetch_channel_streams')
     def test_dead_stream_clear_runs_with_all_flags_off(
@@ -368,7 +368,7 @@ class TestStep3DeadStreamClearIsUnconditional(unittest.TestCase):
 
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.StreamCheckConfig')
-    @patch('apps.automation.automation_config_manager.get_automation_config_manager')
+    @patch('stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_session_manager.get_session_manager')
     @patch('stream_checker_service.fetch_channel_streams')
     def test_dead_stream_clear_runs_with_checking_only_profile(
