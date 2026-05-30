@@ -88,6 +88,11 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
   const channelStats = groupType === 'check' && item.stats ?
     `Avg ${item.stats.avg_resolution || 'N/A'}, ${item.stats.avg_bitrate || 'N/A'}` :
     null
+  const streamDetails = item.stats?.stream_details || []
+  const hasScore = streamDetails.some(s => s.score !== undefined && s.score !== null)
+  const hasLoopProbe = streamDetails.some(s => s.loop_probe_ran)
+  const hasBlankProbe = streamDetails.some(s => s.blank_probe_ran)
+  const hasFreezeProbe = streamDetails.some(s => s.freeze_probe_ran)
 
   return (
     <AccordionItem key={itemIndex} value={`channel-${groupIndex}-${itemIndex}`}>
@@ -119,7 +124,7 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
             </ul>
           )}
 
-          {groupType === 'check' && item.stats && item.stats.stream_details && item.stats.stream_details.length > 0 && (
+          {groupType === 'check' && streamDetails.length > 0 && (
             <div className="rounded-md border mt-2">
               <Table>
                 <TableHeader>
@@ -130,19 +135,14 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                     <TableHead>Framerate</TableHead>
                     <TableHead>Bitrate</TableHead>
                     <TableHead>Codec</TableHead>
-                    {item.stats.stream_details.some(s => s.score !== undefined && s.score !== null) && (
-                      <TableHead>Score</TableHead>
-                    )}
-                    {item.stats.stream_details.some(s => s.loop_probe_ran) && (
-                      <TableHead>Loop</TableHead>
-                    )}
-                    {item.stats.stream_details.some(s => s.freeze_probe_ran) && (
-                      <TableHead>Freeze</TableHead>
-                    )}
+                    {hasScore && <TableHead>Score</TableHead>}
+                    {hasLoopProbe && <TableHead>Loop</TableHead>}
+                    {hasBlankProbe && <TableHead>Blank</TableHead>}
+                    {hasFreezeProbe && <TableHead>Freeze</TableHead>}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {[...item.stats.stream_details]
+                  {[...streamDetails]
                     .sort((a, b) => {
                       const scoreA = a.score !== undefined && a.score !== null ? a.score : -Infinity
                       const scoreB = b.score !== undefined && b.score !== null ? b.score : -Infinity
@@ -165,10 +165,10 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                         <TableCell>{streamDetail.fps || 'N/A'}</TableCell>
                         <TableCell>{streamDetail.bitrate || 'N/A'}</TableCell>
                         <TableCell>{streamDetail.video_codec || 'N/A'}</TableCell>
-                        {item.stats.stream_details.some(s => s.score !== undefined && s.score !== null) && (
+                        {hasScore && (
                           <TableCell>{streamDetail.score !== undefined && streamDetail.score !== null ? streamDetail.score.toFixed(2) : 'N/A'}</TableCell>
                         )}
-                        {item.stats.stream_details.some(s => s.loop_probe_ran) && (
+                        {hasLoopProbe && (
                           <TableCell>
                             {streamDetail.loop_probe_ran ? (
                               streamDetail.loop_detected === true ? (
@@ -185,12 +185,29 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                             )}
                           </TableCell>
                         )}
-                        {item.stats.stream_details.some(s => s.freeze_probe_ran) && (
+                        {hasBlankProbe && (
+                          <TableCell>
+                            {streamDetail.blank_probe_ran ? (
+                              streamDetail.blank_detected === true ? (
+                                <span className="text-red-500 font-medium text-xs">
+                                  {streamDetail.blank_duration_secs ? formatDuration(streamDetail.blank_duration_secs) : 'Blank'}
+                                </span>
+                              ) : streamDetail.blank_detected === false ? (
+                                <span className="text-muted-foreground text-xs">OK</span>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">-</span>
+                              )
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
+                            )}
+                          </TableCell>
+                        )}
+                        {hasFreezeProbe && (
                           <TableCell>
                             {streamDetail.freeze_probe_ran ? (
                               streamDetail.freeze_detected === true ? (
                                 <span className="text-red-500 font-medium text-xs">
-                                  {streamDetail.freeze_duration_secs ? `${streamDetail.freeze_duration_secs.toFixed(1)}s` : 'Frozen'}
+                                  {streamDetail.freeze_duration_secs ? formatDuration(streamDetail.freeze_duration_secs) : 'Frozen'}
                                 </span>
                               ) : streamDetail.freeze_detected === false ? (
                                 <span className="text-muted-foreground text-xs">OK</span>
