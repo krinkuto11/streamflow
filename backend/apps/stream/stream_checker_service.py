@@ -4166,12 +4166,14 @@ class StreamCheckerService:
         import time as time_module
         start_time = time_module.time()
         self.abort_current_check.clear()
+        udi = None
         
         try:
             logger.info(f"Starting single channel check for channel {channel_id}")
             
             # Get channel info from UDI
             udi = get_udi_manager()
+            udi.set_automation_busy()
             channel = udi.get_channel_by_id(channel_id)
             if not channel:
                 error_msg = f"Channel {channel_id} not found"
@@ -4820,6 +4822,9 @@ class StreamCheckerService:
             logger.error(f"Error checking single channel {channel_id}: {e}", exc_info=True)
             self.progress.clear()
             return {'success': False, 'error': str(e)}
+        finally:
+            if udi is not None:
+                udi.clear_automation_busy()
     
     def clear_queue(self):
         """Clear the checking queue."""

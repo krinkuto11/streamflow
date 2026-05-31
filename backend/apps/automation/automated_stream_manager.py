@@ -3229,7 +3229,9 @@ class AutomatedStreamManager:
         # We don't early return here, we let the individual periods be checked below
         
         logger.debug("Starting automation cycle...")
-        
+        automation_busy_guard = get_udi_manager()
+        automation_busy_guard.set_automation_busy()
+
         try:
             # 2. Determine which playlists to update and group channels by period
             self._update_run_status(
@@ -3237,7 +3239,7 @@ class AutomatedStreamManager:
                 stage_label="Checking Schedule",
                 message="Loading scheduled windows and channel assignments",
             )
-            udi = get_udi_manager()
+            udi = automation_busy_guard
             channels = udi.get_channels()
             channels_by_id = {
                 int(channel.get('id')): channel
@@ -4060,6 +4062,7 @@ class AutomatedStreamManager:
 
         finally:
             self._m3u_accounts_cache = None
+            automation_busy_guard.clear_automation_busy()
 
             # Background UDI sync — pull all writes from this cycle back into cache.
             # Only fires when the cycle actually completed matching/checking work.

@@ -119,6 +119,8 @@ def test_automation_cycle_refreshes_udi_without_m3u_refresh(monkeypatch):
 
     manager.run_automation_cycle(forced=True, forced_period_id="period-1")
 
+    mock_udi.set_automation_busy.assert_called_once()
+    mock_udi.clear_automation_busy.assert_called_once()
     manager.refresh_playlists.assert_not_called()
     _wait_for_mock_call(mock_udi.refresh_channel_profiles)
     mock_udi.refresh_m3u_accounts.assert_called_once()
@@ -142,6 +144,8 @@ def test_automation_cycle_refreshes_udi_once_with_m3u_refresh(monkeypatch):
 
     manager.run_automation_cycle(forced=True, forced_period_id="period-1")
 
+    mock_udi.set_automation_busy.assert_called_once()
+    mock_udi.clear_automation_busy.assert_called_once()
     manager.refresh_playlists.assert_called_once()
     _wait_for_mock_call(mock_udi.refresh_channel_profiles)
     mock_udi.refresh_m3u_accounts.assert_called_once()

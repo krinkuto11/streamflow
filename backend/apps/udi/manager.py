@@ -125,6 +125,7 @@ class UDIManager:
         # The scheduled UDI refresh worker checks this before firing to avoid
         # replacing the cache mid-pipeline. Cleared before any background sync fires.
         self._automation_busy: bool = False
+        self._automation_busy_count: int = 0
         self._automation_busy_lock = threading.Lock()
         self._automation_busy_since: Optional[datetime] = None
         # If busy flag is not cleared within this window (e.g. due to a crash),
@@ -454,8 +455,10 @@ class UDIManager:
         any post-completion background sync fires.
         """
         with self._automation_busy_lock:
+            self._automation_busy_count += 1
             self._automation_busy = True
-            self._automation_busy_since = datetime.now()
+            if self._automation_busy_since is None:
+                self._automation_busy_since = datetime.now()
 
     def clear_automation_busy(self) -> None:
         """Clear the automation busy flag.
@@ -465,8 +468,10 @@ class UDIManager:
         thread, so the sync does not hold the busy flag.
         """
         with self._automation_busy_lock:
-            self._automation_busy = False
-            self._automation_busy_since = None
+            self._automation_busy_count = max(0, self._automation_busy_count - 1)
+            if self._automation_busy_count == 0:
+                self._automation_busy = False
+                self._automation_busy_since = None
 
     def is_automation_busy(self) -> bool:
         """Return True if a cycle or single-channel check is currently running.
@@ -488,6 +493,7 @@ class UDIManager:
                         "This usually means automation crashed without calling clear_automation_busy()."
                     )
                     self._automation_busy = False
+                    self._automation_busy_count = 0
                     self._automation_busy_since = None
                     return False
             return True
