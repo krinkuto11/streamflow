@@ -4,7 +4,30 @@ Provides an autouse fixture that runs each test function against a fresh
 in-memory SQLite database.  This avoids any leftover state between tests
 and removes the need for a real on-disk DB file during the test suite.
 """
+import builtins
+import importlib
+import sys
+
 import pytest
+
+
+def _install_legacy_module_alias(alias: str, target: str) -> None:
+    """Expose old top-level module names used by legacy tests."""
+    module = importlib.import_module(target)
+    sys.modules.setdefault(alias, module)
+    setattr(builtins, alias, module)
+
+
+for _alias, _target in {
+    'api_utils': 'apps.core.api_utils',
+    'automated_stream_manager': 'apps.automation.automated_stream_manager',
+    'automation_config_manager': 'apps.automation.automation_config_manager',
+    'scheduling_service': 'apps.automation.scheduling_service',
+    'stream_checker_service': 'apps.stream.stream_checker_service',
+    'stream_monitoring_service': 'apps.stream.stream_monitoring_service',
+    'stream_session_manager': 'apps.stream.stream_session_manager',
+}.items():
+    _install_legacy_module_alias(_alias, _target)
 
 
 @pytest.fixture(autouse=True, scope='function')

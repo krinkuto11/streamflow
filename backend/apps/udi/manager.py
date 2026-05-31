@@ -32,6 +32,7 @@ from typing import Dict, List, Optional, Any, Set, Tuple
 
 from apps.udi.fetcher import UDIFetcher, FetchResult
 from apps.udi.cache import UDICache
+from apps.udi.storage import UDIStorage
 from apps.core.auth import _get_auth_headers
 
 from apps.core.logging_config import setup_logging
@@ -777,6 +778,8 @@ class UDIManager:
             True if at least one custom stream exists
         """
         self._ensure_initialized()
+        if not self._has_custom_streams and self._streams_cache:
+            self._has_custom_streams = any(st.get('is_custom', False) for st in self._streams_cache)
         return self._has_custom_streams
 
     def get_stream_count(self) -> int:

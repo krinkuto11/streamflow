@@ -72,7 +72,7 @@ class SchedulingService:
 
     def __init__(self):
         """Initialize the scheduling service."""
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._epg_all_programs_cache: Optional[Dict[str, Any]] = None
         self._config = self._load_config()
         self._scheduled_events = self._load_scheduled_events()
@@ -283,7 +283,21 @@ class SchedulingService:
         try:
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'auto_create_rules').first()
             if setting and setting.value:
-                return setting.value
+                cutoff = datetime.now(timezone.utc) - timedelta(days=EXECUTED_EVENTS_RETENTION_DAYS)
+                retained = []
+                for event in setting.value:
+                    try:
+                        executed_at = _parse_dt(event.get('executed_at', '2000-01-01T00:00:00+00:00'))
+                    except (ValueError, AttributeError):
+                        executed_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+                    if executed_at > cutoff:
+                        retained.append(event)
+                if len(retained) != len(setting.value):
+                    from sqlalchemy.orm.attributes import flag_modified
+                    setting.value = retained
+                    flag_modified(setting, "value")
+                    session.commit()
+                return retained
         except Exception as e:
             logger.error(f"Error loading auto-create rules: {e}")
         finally:
@@ -319,7 +333,21 @@ class SchedulingService:
         try:
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'executed_events').first()
             if setting and setting.value:
-                return setting.value
+                cutoff = datetime.now(timezone.utc) - timedelta(days=EXECUTED_EVENTS_RETENTION_DAYS)
+                retained = []
+                for event in setting.value:
+                    try:
+                        executed_at = _parse_dt(event.get('executed_at', '2000-01-01T00:00:00+00:00'))
+                    except (ValueError, AttributeError):
+                        executed_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+                    if executed_at > cutoff:
+                        retained.append(event)
+                if len(retained) != len(setting.value):
+                    from sqlalchemy.orm.attributes import flag_modified
+                    setting.value = retained
+                    flag_modified(setting, "value")
+                    session.commit()
+                return retained
         except Exception as e:
             logger.error(f"Error loading executed events: {e}")
         finally:
@@ -882,24 +910,14 @@ class SchedulingService:
         # NoTvgIdError intentionally not caught here — let it propagate to the handler
         programs = self.get_programs_by_channel(channel_id)
 
-        now = datetime.now(timezone.utc)
         matching_programs = []
         for program in programs:
             title = program.get('title', '')
             if not pattern.search(title):
                 continue
-            # Mirror match_programs_to_rules: skip programs that have already started
-            start_str = program.get('start_time')
-            if start_str:
-                try:
-                    start_dt = _parse_dt(start_str)
-                    if start_dt <= now:
-                        continue
-                except (ValueError, AttributeError):
-                    pass
             matching_programs.append(program)
 
-        logger.debug(f"Regex '{effective_pattern}' matched {len(matching_programs)} future programs for channel {channel_id}")
+        logger.debug(f"Regex '{effective_pattern}' matched {len(matching_programs)} programs for channel {channel_id}")
         return matching_programs
 
     def match_programs_to_rules(self, force_refresh: bool = False) -> Dict[str, Any]:
@@ -1065,7 +1083,35 @@ class SchedulingService:
                         # Bug 5: deduplicate on (channel, rule, exact start time)
                         dedup_key = (channel_id, rule_id, program_start)
                         if dedup_key in existing_keys:
-                            skipped_count += 1
+                            existing_event = existing_keys[dedup_key]
+                            updates = {
+                                'channel_name': channel_name,
+                                'channel_logo_url': logo_url,
+                                'program_title': title,
+                                'program_end_time': program_end,
+                                'minutes_before': minutes_before,
+                                'check_time': check_time.isoformat(),
+                                'tvg_id': tvg_id,
+                                'schedule_type': rule.get('schedule_type', 'check'),
+                                'session_type': rule.get('session_type', 'standard'),
+                                'interval_s': rule.get('interval_s', 1.0),
+                                'run_seconds': rule.get('run_seconds', 0),
+                                'per_sample_timeout_s': rule.get('per_sample_timeout_s', 1.0),
+                                'engine_container_id': rule.get('engine_container_id'),
+                                'enable_looping_detection': rule.get('enable_looping_detection', True),
+                                'enable_logo_detection': rule.get('enable_logo_detection', True),
+                                'program_date': program_date,
+                            }
+                            changed = False
+                            for key, value in updates.items():
+                                if existing_event.get(key) != value:
+                                    existing_event[key] = value
+                                    changed = True
+                            if changed:
+                                existing_event['updated_at'] = datetime.now(timezone.utc).isoformat()
+                                updated_count += 1
+                            else:
+                                skipped_count += 1
                             continue
 
                         # Also skip if already queued in this batch
@@ -1108,6 +1154,7 @@ class SchedulingService:
 
             if events_to_add:
                 self._scheduled_events.extend(events_to_add)
+            if events_to_add or updated_count:
                 self._save_scheduled_events()
 
         logger.info(
@@ -1334,6 +1381,15 @@ class SchedulingService:
         read-check and the cache write use short critical sections, so callers
         holding _lock (e.g. match_programs_to_rules) can call this safely.
         """
+        legacy_cache = getattr(self, '_epg_cache', None)
+        if not force_refresh and isinstance(legacy_cache, list):
+            by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            for program in legacy_cache:
+                if isinstance(program, dict) and program.get('tvg_id'):
+                    by_tvg_id[program['tvg_id']].append(program)
+            if by_tvg_id:
+                return dict(by_tvg_id)
+
         # Cache check — short critical section, no I/O inside
         with self._lock:
             if not force_refresh and self._epg_all_programs_cache:
@@ -1479,6 +1535,13 @@ class SchedulingService:
                 import_channel_group_ids = list(rule_data.get('channel_group_ids', []))
                 import_regex = rule_data['regex_pattern']
                 import_name = rule_data['name']
+                udi = get_udi_manager()
+                missing_channel_ids = [
+                    cid for cid in import_channel_ids
+                    if not udi.get_channel_by_id(cid)
+                ]
+                if missing_channel_ids:
+                    raise ValueError(f"Invalid channel IDs: {missing_channel_ids}")
 
                 with self._lock:
                     matching_rule = next(
@@ -1500,7 +1563,6 @@ class SchedulingService:
                                 raise IOError("Failed to save replaced rule")
                             replaced_count += 1
                         else:
-                            udi = get_udi_manager()
                             all_ids = list(existing_channel_ids | import_channel_ids_set)
                             channels_info = []
                             for cid in all_ids:

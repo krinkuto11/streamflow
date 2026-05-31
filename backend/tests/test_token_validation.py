@@ -29,16 +29,11 @@ class TestTokenValidation(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
     
-    @patch('api_utils.requests.get')
-    @patch('api_utils.os.getenv')
-    def test_validate_token_with_valid_token(self, mock_getenv, mock_get):
+    @patch('apps.core.auth.requests.get')
+    @patch('apps.core.auth._get_base_url', return_value='http://test.com')
+    def test_validate_token_with_valid_token(self, mock_base_url, mock_get):
         """Test that _validate_token returns True for valid tokens."""
-        from apps.core.api_utils import _validate_token
-        
-        # Mock environment variables
-        mock_getenv.side_effect = lambda key: {
-            'DISPATCHARR_BASE_URL': 'http://test.com'
-        }.get(key)
+        from apps.core.auth import _validate_token
         
         # Mock successful API response
         mock_response = Mock()
@@ -55,16 +50,11 @@ class TestTokenValidation(unittest.TestCase):
         self.assertIn('Authorization', call_args[1]['headers'])
         self.assertEqual(call_args[1]['headers']['Authorization'], 'Bearer valid_token_123')
     
-    @patch('api_utils.requests.get')
-    @patch('api_utils.os.getenv')
-    def test_validate_token_with_invalid_token(self, mock_getenv, mock_get):
+    @patch('apps.core.auth.requests.get')
+    @patch('apps.core.auth._get_base_url', return_value='http://test.com')
+    def test_validate_token_with_invalid_token(self, mock_base_url, mock_get):
         """Test that _validate_token returns False for invalid tokens."""
-        from apps.core.api_utils import _validate_token
-        
-        # Mock environment variables
-        mock_getenv.side_effect = lambda key: {
-            'DISPATCHARR_BASE_URL': 'http://test.com'
-        }.get(key)
+        from apps.core.auth import _validate_token
         
         # Mock failed API response
         mock_response = Mock()
@@ -74,16 +64,11 @@ class TestTokenValidation(unittest.TestCase):
         result = _validate_token('invalid_token')
         self.assertFalse(result)
     
-    @patch('api_utils.requests.get')
-    @patch('api_utils.os.getenv')
-    def test_validate_token_with_connection_error(self, mock_getenv, mock_get):
+    @patch('apps.core.auth.requests.get')
+    @patch('apps.core.auth._get_base_url', return_value='http://test.com')
+    def test_validate_token_with_connection_error(self, mock_base_url, mock_get):
         """Test that _validate_token returns False on connection error."""
-        from apps.core.api_utils import _validate_token
-        
-        # Mock environment variables
-        mock_getenv.side_effect = lambda key: {
-            'DISPATCHARR_BASE_URL': 'http://test.com'
-        }.get(key)
+        from apps.core.auth import _validate_token
         
         # Mock connection error
         mock_get.side_effect = Exception("Connection failed")
@@ -91,11 +76,11 @@ class TestTokenValidation(unittest.TestCase):
         result = _validate_token('some_token')
         self.assertFalse(result)
     
-    @patch('api_utils.login')
-    @patch('api_utils.os.getenv')
+    @patch('apps.core.auth._login')
+    @patch('apps.core.auth.os.getenv')
     def test_get_auth_headers_uses_existing_token(self, mock_getenv, mock_login):
         """Test that _get_auth_headers uses existing token without validating or logging in."""
-        from apps.core.api_utils import _get_auth_headers
+        from apps.core.auth import _get_auth_headers
         
         # Mock that we have a token
         mock_getenv.return_value = 'existing_token_123'
@@ -108,17 +93,17 @@ class TestTokenValidation(unittest.TestCase):
         # Verify login was NOT called (token validation only happens on 401)
         mock_login.assert_not_called()
     
-    @patch('api_utils.login')
-    @patch('api_utils.load_dotenv')
-    @patch('api_utils.env_path')
-    @patch('api_utils.os.getenv')
+    @patch('apps.core.auth._login')
+    @patch('apps.core.auth.load_dotenv')
+    @patch('apps.core.auth.env_path')
+    @patch('apps.core.auth.os.getenv')
     def test_get_auth_headers_logs_in_when_no_token(self, mock_getenv, mock_env_path, 
                                                        mock_load_dotenv, mock_login):
         """Test that _get_auth_headers logs in only when no token exists."""
-        from apps.core.api_utils import _get_auth_headers
+        from apps.core.auth import _get_auth_headers
         
         # Mock environment: first call has no token, second call (after login) has new token
-        token_calls = [None, 'new_valid_token']
+        token_calls = [None, None, 'new_valid_token']
         mock_getenv.side_effect = token_calls
         
         # Mock successful login
@@ -142,26 +127,20 @@ class TestTokenValidationCaching(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         # Clear the token validation cache before each test
-        import apps.core.api_utils
-        api_utils._token_validation_cache.clear()
+        import apps.core.auth
+        apps.core.auth._token_validation_cache.clear()
         
     def tearDown(self):
         """Clean up after tests."""
         # Clear the token validation cache after each test
-        import apps.core.api_utils
-        api_utils._token_validation_cache.clear()
+        import apps.core.auth
+        apps.core.auth._token_validation_cache.clear()
     
-    @patch('api_utils.requests.get')
-    @patch('api_utils.os.getenv')
-    def test_token_validation_cache_prevents_duplicate_api_calls(self, mock_getenv, mock_get):
+    @patch('apps.core.auth.requests.get')
+    @patch('apps.core.auth._get_base_url', return_value='http://test.com')
+    def test_token_validation_cache_prevents_duplicate_api_calls(self, mock_base_url, mock_get):
         """Test that cached token validation prevents redundant API calls."""
-        from apps.core.api_utils import _validate_token, _token_validation_cache
-        
-        # Mock environment variables
-        mock_getenv.side_effect = lambda key: {
-            'DISPATCHARR_BASE_URL': 'http://test.com',
-            'TOKEN_VALIDATION_TTL': '60'
-        }.get(key)
+        from apps.core.auth import _validate_token, _token_validation_cache
         
         # Mock successful API response
         mock_response = Mock()
@@ -183,18 +162,12 @@ class TestTokenValidationCaching(unittest.TestCase):
         self.assertTrue(result3)
         self.assertEqual(mock_get.call_count, 1)  # Still only 1 call
     
-    @patch('api_utils.time.time')
-    @patch('api_utils.requests.get')
-    @patch('api_utils.os.getenv')
-    def test_token_validation_cache_expires(self, mock_getenv, mock_get, mock_time):
+    @patch('apps.core.auth.time.time')
+    @patch('apps.core.auth.requests.get')
+    @patch('apps.core.auth._get_base_url', return_value='http://test.com')
+    def test_token_validation_cache_expires(self, mock_base_url, mock_get, mock_time):
         """Test that token validation cache expires after TTL."""
-        from apps.core.api_utils import _validate_token, _token_validation_cache, TOKEN_VALIDATION_TTL
-        
-        # Mock environment variables
-        mock_getenv.side_effect = lambda key: {
-            'DISPATCHARR_BASE_URL': 'http://test.com',
-            'TOKEN_VALIDATION_TTL': '60'
-        }.get(key)
+        from apps.core.auth import _validate_token, _token_validation_cache, TOKEN_VALIDATION_TTL
         
         # Mock successful API response
         mock_response = Mock()
@@ -219,18 +192,12 @@ class TestTokenValidationCaching(unittest.TestCase):
         self.assertTrue(result3)
         self.assertEqual(mock_get.call_count, 2)
     
-    @patch('api_utils.time.time')
-    @patch('api_utils.requests.get')
-    @patch('api_utils.os.getenv')
-    def test_failed_validation_clears_cache(self, mock_getenv, mock_get, mock_time):
+    @patch('apps.core.auth.time.time')
+    @patch('apps.core.auth.requests.get')
+    @patch('apps.core.auth._get_base_url', return_value='http://test.com')
+    def test_failed_validation_clears_cache(self, mock_base_url, mock_get, mock_time):
         """Test that failed validation clears the cache."""
-        from apps.core.api_utils import _validate_token, _token_validation_cache
-        
-        # Mock environment variables
-        mock_getenv.side_effect = lambda key: {
-            'DISPATCHARR_BASE_URL': 'http://test.com',
-            'TOKEN_VALIDATION_TTL': '60'
-        }.get(key)
+        from apps.core.auth import _validate_token, _token_validation_cache
         
         # First call at time 0 - successful
         mock_time.return_value = 0
@@ -240,7 +207,7 @@ class TestTokenValidationCaching(unittest.TestCase):
         
         result1 = _validate_token('valid_token_123')
         self.assertTrue(result1)
-        self.assertIn('valid_token_123', _token_validation_cache)
+        self.assertIn('bearer:valid_token_123', _token_validation_cache)
         
         # Second call at time 61 (after TTL) - failed (401)
         mock_time.return_value = 61
@@ -251,11 +218,11 @@ class TestTokenValidationCaching(unittest.TestCase):
         result2 = _validate_token('valid_token_123')
         self.assertFalse(result2)
         # Cache should be cleared on failure
-        self.assertNotIn('valid_token_123', _token_validation_cache)
+        self.assertNotIn('bearer:valid_token_123', _token_validation_cache)
     
     def test_clear_token_validation_cache(self):
         """Test that _clear_token_validation_cache clears all cached tokens."""
-        from apps.core.api_utils import _clear_token_validation_cache, _token_validation_cache
+        from apps.core.auth import _clear_token_validation_cache, _token_validation_cache
         
         # Add some tokens to cache
         _token_validation_cache['token1'] = 100

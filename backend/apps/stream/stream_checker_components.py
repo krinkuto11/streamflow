@@ -775,8 +775,9 @@ class StreamCheckQueue:
 class StreamCheckerProgress:
     """Manages progress tracking for stream checker operations."""
     
-    def __init__(self):
+    def __init__(self, progress_file: Optional[Any] = None):
         self.lock = threading.Lock()
+        self.progress_file = progress_file
 
     @staticmethod
     def _build_provider_progress(streams_detail: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
@@ -897,6 +898,16 @@ class StreamCheckerProgress:
                 db.set_system_setting('stream_checker_progress', progress_data)
             except Exception as e:
                 logger.warning(f"Failed to write progress to database: {e}")
+            if self.progress_file:
+                try:
+                    import json
+                    from pathlib import Path
+
+                    path = Path(self.progress_file)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(progress_data), encoding='utf-8')
+                except Exception as e:
+                    logger.warning(f"Failed to write progress to file: {e}")
     
     def clear(self):
         """Clear progress tracking."""
@@ -907,6 +918,13 @@ class StreamCheckerProgress:
                 db.set_system_setting('stream_checker_progress', {})
             except Exception as e:
                 logger.warning(f"Failed to clear progress in database: {e}")
+            if self.progress_file:
+                try:
+                    from pathlib import Path
+
+                    Path(self.progress_file).write_text("{}", encoding='utf-8')
+                except Exception as e:
+                    logger.warning(f"Failed to clear progress file: {e}")
     
     def get(self) -> Optional[Dict]:
         """Get current progress."""
@@ -915,6 +933,19 @@ class StreamCheckerProgress:
             try:
                 db = get_db_manager()
                 data = db.get_system_setting('stream_checker_progress', {})
-                return data if data else None
+                if data:
+                    return data
             except Exception:
-                return None
+                pass
+            if self.progress_file:
+                try:
+                    import json
+                    from pathlib import Path
+
+                    path = Path(self.progress_file)
+                    if path.exists():
+                        data = json.loads(path.read_text(encoding='utf-8'))
+                        return data if data else None
+                except Exception:
+                    return None
+            return None

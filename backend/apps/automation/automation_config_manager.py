@@ -119,6 +119,7 @@ class AutomationConfigManager:
         if not per: return None
         cron_val = per.cron_schedule or ""
         sched_type = "interval" if cron_val.isdigit() else "cron"
+        sched_value = int(cron_val) if sched_type == "interval" and cron_val else cron_val
         res = {
             "id": str(per.id),
             "name": per.name,
@@ -128,7 +129,7 @@ class AutomationConfigManager:
             "exclude_regex": per.exclude_regex,
             "matching_type": per.matching_type,
             "automation_type": per.automation_type,
-            "schedule": {"type": sched_type, "value": cron_val}
+            "schedule": {"type": sched_type, "value": sched_value}
         }
         extra = self._normalize_extra_settings(per.extra_settings)
         if extra:
