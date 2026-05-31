@@ -211,6 +211,7 @@ class TeamarrPreflightService:
         udi_provider: Callable[[], Any] = get_udi_manager,
         stream_checker_provider: Optional[Callable[[], Any]] = None,
         automation_config_provider: Optional[Callable[[], Any]] = None,
+        automation_status_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.config_file = config_file
@@ -218,6 +219,7 @@ class TeamarrPreflightService:
         self.udi_provider = udi_provider
         self.stream_checker_provider = stream_checker_provider or self._default_stream_checker_provider
         self.automation_config_provider = automation_config_provider or self._default_automation_config_provider
+        self.automation_status_provider = automation_status_provider or self._default_automation_status_provider
         self.clock = clock
 
         self._lock = threading.RLock()
@@ -547,8 +549,8 @@ class TeamarrPreflightService:
         if not channel_id:
             self._record_event("no_dispatcharr_channel", event, {})
             return False
-        if self._quality_checker_active(config):
-            self._record_event("deferred_quality_check_active", event, {"bucket": event.get("trigger_bucket")})
+        if self._automation_or_quality_checker_active(config):
+            self._record_event("deferred_automation_active", event, {"bucket": event.get("trigger_bucket")})
             return False
         if not self._channel_has_streams(channel_id):
             self._mark_attempted(event)
@@ -653,9 +655,18 @@ class TeamarrPreflightService:
         with self._lock:
             return self._default_profile_id or None
 
-    def _quality_checker_active(self, config: Dict[str, Any]) -> bool:
+    def _automation_or_quality_checker_active(self, config: Dict[str, Any]) -> bool:
         if not config.get("skip_during_quality_check", True):
             return False
+        try:
+            automation_status = self.automation_status_provider() or {}
+        except Exception as exc:
+            logger.warning(f"Teamarr preflight could not read automation status: {exc}")
+            return True
+
+        if automation_status.get("active") or automation_status.get("state") == "running":
+            return True
+
         try:
             checker = self.stream_checker_provider()
             status = checker.get_status() if checker else {}
@@ -769,6 +780,21 @@ class TeamarrPreflightService:
         from apps.automation.automation_config_manager import get_automation_config_manager
 
         return get_automation_config_manager()
+
+    @staticmethod
+    def _default_automation_status_provider() -> Dict[str, Any]:
+        try:
+            from apps.api import web_api
+
+            manager = getattr(web_api, "automation_manager", None)
+            if manager is None:
+                return {}
+            getter = getattr(manager, "get_run_status", None)
+            if callable(getter):
+                return getter() or {}
+        except Exception as exc:
+            logger.debug("Could not read global automation run status: %s", exc)
+        return {}
 
 
 _teamarr_preflight_instance: Optional[TeamarrPreflightService] = None

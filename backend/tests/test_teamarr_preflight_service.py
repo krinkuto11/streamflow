@@ -121,10 +121,11 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def make_service(self, events, *, checker=None, udi=None, automation_config=None):
+    def make_service(self, events, *, checker=None, udi=None, automation_config=None, automation_status=None):
         checker = checker or FakeChecker()
         udi = udi or FakeUdi()
         automation_config = automation_config or FakeAutomationConfig()
+        automation_status = automation_status or {}
         http_get = Mock(return_value=FakeResponse(events))
         service = TeamarrPreflightService(
             config_file=self.config_file,
@@ -132,6 +133,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             udi_provider=lambda: udi,
             stream_checker_provider=lambda: checker,
             automation_config_provider=lambda: automation_config,
+            automation_status_provider=lambda: automation_status,
             clock=lambda: FIXED_NOW,
         )
         service.update_config({
@@ -285,6 +287,25 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
 
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["type"], "no_streams_yet")
+
+    def test_active_automation_run_defers_preflight_without_marking_attempted(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event()],
+            checker=checker,
+            automation_status={"active": True, "stage": "stream_matching"},
+        )
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(checker.calls, [])
+
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["type"], "deferred_automation_active")
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "due")
 
     def test_include_filters_keep_non_matching_sports_out_of_due_set(self):
         service, _, _ = self.make_service([make_event(sport="basketball")])

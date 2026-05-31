@@ -359,8 +359,8 @@ export default function TeamarrPreflight() {
               </div>
               <div className="flex items-center justify-between rounded-md border border-border p-4">
                 <div>
-                  <Label className="text-base">Quality Check Guard</Label>
-                  <p className="text-sm text-muted-foreground">Defers while Stream Checker is busy</p>
+                  <Label className="text-base">Automation Guard</Label>
+                  <p className="text-sm text-muted-foreground">Defers while automation or Stream Checker is busy</p>
                 </div>
                 <Switch
                   checked={Boolean(editedConfig.skip_during_quality_check)}
