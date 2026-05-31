@@ -379,18 +379,18 @@ export default function StreamChecker() {
       ? (selectedStartChannel?.name || 'Select a channel')
       : (firstStartChannel?.name || 'First channel')
   const queueAllDisabled = isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || (queueStartMode === 'channel' && !queueStartChannelId)
-  const detectedGpus = Array.isArray(hardwareStatus?.nvidia_gpus) ? hardwareStatus.nvidia_gpus : []
-  const detectedGpuLabel = detectedGpus.length > 0
-    ? detectedGpus.join(', ')
+  const detectedGpuCount = Number.isFinite(Number(hardwareStatus?.nvidia_gpu_count)) ? Number(hardwareStatus?.nvidia_gpu_count) : 0
+  const detectedGpuLabel = detectedGpuCount > 0
+    ? `${detectedGpuCount} detected`
     : hardwareStatus?.nvidia_checked
-      ? (hardwareStatus?.nvidia_error || 'No GPU reported')
+      ? 'No GPU reported'
       : 'Not checked'
   const ffmpegModeLabel = hardwareStatus?.config?.enabled
     ? (hardwareStatus?.mode_supported ? 'Available' : 'Not reported')
     : 'Disabled'
   const ffmpegMethodsLabel = Array.isArray(hardwareStatus?.ffmpeg_hwaccels) && hardwareStatus.ffmpeg_hwaccels.length > 0
     ? hardwareStatus.ffmpeg_hwaccels.join(', ')
-    : (hardwareStatus?.config?.enabled ? (hardwareStatus?.ffmpeg_error || 'No methods reported') : 'Not checked')
+    : (hardwareStatus?.config?.enabled ? 'No methods reported' : 'Not checked')
 
   return (
     <div className="space-y-6">

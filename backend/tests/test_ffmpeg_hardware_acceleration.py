@@ -16,6 +16,7 @@ from apps.stream.stream_check_utils import (
     get_stream_info_and_bitrate,
     normalize_hardware_acceleration_config,
 )
+from apps.api.stream_checker_handlers import _sanitize_hardware_acceleration_status
 
 
 def _ffmpeg_output() -> str:
@@ -112,6 +113,33 @@ class TestHardwareAccelerationConfig(unittest.TestCase):
         self.assertTrue(diagnostics["nvidia_smi_ok"])
         self.assertEqual(diagnostics["nvidia_gpus"], ["NVIDIA Test GPU"])
         self.assertEqual(calls, [["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]])
+
+    def test_api_status_sanitizer_removes_error_details_and_gpu_names(self):
+        status = _sanitize_hardware_acceleration_status({
+            "config": {"enabled": True, "mode": "cuda", "allow_fallback": True},
+            "ffmpeg_available": False,
+            "mode_supported": False,
+            "ffmpeg_hwaccels": ["cuda"],
+            "ffmpeg_error": "Traceback with /host/path and command details",
+            "nvidia_checked": True,
+            "nvidia_visible_devices_set": True,
+            "nvidia_smi_available": True,
+            "nvidia_smi_ok": True,
+            "nvidia_gpus": ["NVIDIA Test GPU"],
+            "nvidia_error": "driver detail",
+            "error": "raw exception detail",
+        })
+
+        self.assertEqual(status["config"]["mode"], "cuda")
+        self.assertEqual(status["ffmpeg_hwaccels"], ["cuda"])
+        self.assertEqual(status["nvidia_gpu_count"], 1)
+        self.assertFalse(status["diagnostics_available"])
+        self.assertFalse(status["ffmpeg_diagnostics_available"])
+        self.assertFalse(status["nvidia_diagnostics_available"])
+        self.assertNotIn("ffmpeg_error", status)
+        self.assertNotIn("nvidia_error", status)
+        self.assertNotIn("nvidia_gpus", status)
+        self.assertNotIn("error", status)
 
 
 class TestHardwareAccelerationFfmpegCommand(unittest.TestCase):
