@@ -13,22 +13,29 @@ import sys
 import pytest
 
 
-def _install_legacy_module_alias(alias: str, target: str) -> None:
-    """Expose old top-level module names used by legacy tests."""
-    module = importlib.import_module(target)
-    sys.modules.setdefault(alias, module)
-    setattr(builtins, alias, module)
-
-
-for _alias, _target in {
+LEGACY_MODULE_ALIASES = {
     'api_utils': 'apps.core.api_utils',
     'automated_stream_manager': 'apps.automation.automated_stream_manager',
     'automation_config_manager': 'apps.automation.automation_config_manager',
+    'channel_settings_manager': 'channel_settings_manager',
     'scheduling_service': 'apps.automation.scheduling_service',
     'stream_checker_service': 'apps.stream.stream_checker_service',
     'stream_monitoring_service': 'apps.stream.stream_monitoring_service',
     'stream_session_manager': 'apps.stream.stream_session_manager',
-}.items():
+}
+
+
+def _install_legacy_module_alias(alias: str, target: str, *, force: bool = False) -> None:
+    """Expose old top-level module names used by legacy tests."""
+    module = importlib.import_module(target)
+    if force:
+        sys.modules[alias] = module
+    else:
+        sys.modules.setdefault(alias, module)
+    setattr(builtins, alias, module)
+
+
+for _alias, _target in LEGACY_MODULE_ALIASES.items():
     _install_legacy_module_alias(_alias, _target)
 
 
@@ -44,6 +51,9 @@ def clean_test_db(monkeypatch):
     """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+
+    for alias, target in LEGACY_MODULE_ALIASES.items():
+        _install_legacy_module_alias(alias, target, force=True)
 
     import apps.database.connection as conn
     import apps.database.manager as mgr
