@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest'
-import { getStreamCheckerRunDisplay } from './dashboard-run-display.js'
+import {
+  getAutomationStageCards,
+  getRunDurationValue,
+  getStreamCheckerRunDisplay,
+  preferLiveRunSeconds,
+} from './dashboard-run-display.js'
+
+const stages = [
+  { id: 'settings', label: 'Preparing' },
+  { id: 'period_discovery', label: 'Schedule' },
+  { id: 'm3u_refresh', label: 'M3U Refresh' },
+  { id: 'udi_sync', label: 'Cache Sync' },
+  { id: 'stream_matching', label: 'Matching' },
+  { id: 'quality_queueing', label: 'Queueing' },
+  { id: 'quality_checking', label: 'Quality Check' },
+  { id: 'finalizing', label: 'Finalizing' },
+]
 
 describe('dashboard stream checker run display', () => {
   it('uses queue progress and stream timing when no automation run is active', () => {
@@ -92,5 +108,103 @@ describe('dashboard stream checker run display', () => {
     })
 
     expect(display.streamCheckerElapsedSeconds).toBe(60)
+  })
+
+  it('uses live stage timing while an automation stage is active', () => {
+    expect(preferLiveRunSeconds({
+      active: true,
+      reportedSeconds: 0,
+      liveSeconds: 713,
+    })).toBe(713)
+  })
+
+  it('keeps reported timing for inactive completed stages', () => {
+    expect(preferLiveRunSeconds({
+      active: false,
+      reportedSeconds: 0,
+      liveSeconds: 713,
+    })).toBe(0)
+  })
+
+  it('normalizes backend stage keys and marks active automation predecessors as done', () => {
+    const cards = getAutomationStageCards({
+      stages,
+      runStatusStages: [
+        { key: 'preparing', status: 'completed' },
+        { key: 'schedule', status: 'completed' },
+        { key: 'm3u_refresh', status: 'completed' },
+        { key: 'cache_sync', status: 'completed' },
+        { key: 'matching', status: 'completed' },
+        { key: 'quality_check', status: 'running' },
+      ],
+      displayRunStageId: 'quality_check',
+      displayRunningRun: true,
+    })
+
+    expect(cards.map(stage => stage.status)).toEqual([
+      'completed',
+      'completed',
+      'completed',
+      'completed',
+      'completed',
+      'completed',
+      'running',
+      'pending',
+    ])
+  })
+
+  it('synthesizes completed predecessors for manual stream checker runs', () => {
+    const cards = getAutomationStageCards({
+      stages,
+      displayRunStageId: 'quality_checking',
+      displayRunningRun: true,
+      streamRunActive: true,
+    })
+
+    expect(cards[0].status).toBe('completed')
+    expect(cards[5].status).toBe('completed')
+    expect(cards[6].status).toBe('running')
+    expect(cards[7].status).toBe('pending')
+  })
+
+  it('uses live stage timing while a duration card is actively running', () => {
+    const value = getRunDurationValue({
+      runDurations: {},
+      durationKey: 'stream_matching_seconds',
+      stageId: 'stream_matching',
+      displayRunStageId: 'matching',
+      displayRunningRun: true,
+      displayRunStageElapsedSeconds: 91,
+      stages,
+    })
+
+    expect(value).toBe(91)
+  })
+
+  it('uses manual stream checker elapsed time for the quality duration card', () => {
+    const value = getRunDurationValue({
+      runDurations: {},
+      durationKey: 'quality_check_seconds',
+      stageId: 'quality_checking',
+      displayRunStageId: 'quality_checking',
+      streamRunActive: true,
+      streamCheckerElapsedSeconds: 128,
+      stages,
+    })
+
+    expect(value).toBe(128)
+  })
+
+  it('shows zero-second placeholders for synthetic manual predecessors', () => {
+    const value = getRunDurationValue({
+      runDurations: {},
+      durationKey: 'm3u_refresh_seconds',
+      stageId: 'm3u_refresh',
+      displayRunStageId: 'quality_checking',
+      streamRunActive: true,
+      stages,
+    })
+
+    expect(value).toBe(0)
   })
 })
