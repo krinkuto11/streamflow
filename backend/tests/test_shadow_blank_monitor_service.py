@@ -36,16 +36,7 @@ class FakeStreamChecker:
         return self.status
 
 
-def make_service(
-    tmp_path,
-    *,
-    udi,
-    blank_probe=None,
-    switch_calls=None,
-    clock=None,
-    checker=None,
-    automation_status=None,
-):
+def make_service(tmp_path, *, udi, blank_probe=None, switch_calls=None, clock=None, checker=None):
     switch_calls = switch_calls if switch_calls is not None else []
 
     def switch_stream(channel_id, stream_id=None, url=None):
@@ -59,7 +50,6 @@ def make_service(
         base_url_provider=lambda: "http://dispatcharr.local",
         blank_probe=blank_probe or (lambda url, config: {"blank_detected": False}),
         stream_checker_provider=lambda: checker or FakeStreamChecker(),
-        automation_status_provider=lambda: automation_status or {},
         clock=clock or (lambda: 1000.0),
     )
 
@@ -516,23 +506,3 @@ def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
 
     assert probe_urls == []
     assert status["recent_events"][0]["type"] == "quality_check_active"
-
-
-def test_automation_run_guard_skips_probe(tmp_path):
-    probe_urls = []
-    udi = FakeUdi(
-        statuses=[{"uuid-1": active_status(stream_id=10)}],
-        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
-    )
-    service = make_service(
-        tmp_path,
-        udi=udi,
-        automation_status={"active": True, "stage": "cache_sync"},
-        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": True},
-    )
-    service.update_config({"enabled": False, "dry_run": False, "confirmation_count": 1})
-
-    status = service.run_once(force=True)
-
-    assert probe_urls == []
-    assert status["recent_events"][0]["type"] == "automation_active"

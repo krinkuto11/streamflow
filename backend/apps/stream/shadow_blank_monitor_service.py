@@ -158,7 +158,6 @@ class ShadowBlankMonitorService:
         base_url_provider: Optional[Callable[[], Optional[str]]] = None,
         blank_probe: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
         stream_checker_provider: Optional[Callable[[], Any]] = None,
-        automation_status_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.config_file = config_file
@@ -168,7 +167,6 @@ class ShadowBlankMonitorService:
         self.blank_probe = blank_probe or self._run_blank_probe
         self._uses_default_blank_probe = blank_probe is None
         self.stream_checker_provider = stream_checker_provider or self._default_stream_checker_provider
-        self.automation_status_provider = automation_status_provider or self._default_automation_status_provider
         self.clock = clock
 
         self._lock = threading.RLock()
@@ -377,9 +375,8 @@ class ShadowBlankMonitorService:
             if self._cooldown_remaining(channel_uuid) > 0:
                 self._record_event("cooldown", target, {"cooldown_seconds": self._cooldown_remaining(channel_uuid)})
                 continue
-            conflict = self._automation_or_quality_checker_conflict(target, config)
-            if conflict:
-                self._record_event(conflict, target, {})
+            if self._quality_checker_conflicts(target, config):
+                self._record_event("quality_check_active", target, {})
                 continue
             if int(target.get("watcher_client_count") or 0) > 0:
                 continue
@@ -876,48 +873,20 @@ class ShadowBlankMonitorService:
 
         return get_stream_checker_service()
 
-    @staticmethod
-    def _default_automation_status_provider() -> Dict[str, Any]:
-        try:
-            from apps.api import web_api
-
-            manager = getattr(web_api, "automation_manager", None)
-            if manager is None:
-                return {}
-            getter = getattr(manager, "get_run_status", None)
-            if callable(getter):
-                return getter() or {}
-        except Exception as exc:
-            logger.debug("Could not read global automation run status: %s", exc)
-        return {}
-
-    def _automation_or_quality_checker_conflict(
-        self,
-        target: Dict[str, Any],
-        config: Dict[str, Any],
-    ) -> Optional[str]:
+    def _quality_checker_conflicts(self, target: Dict[str, Any], config: Dict[str, Any]) -> bool:
         if not config.get("skip_during_quality_check", True):
-            return None
-
-        try:
-            automation_status = self.automation_status_provider() or {}
-        except Exception as exc:
-            logger.warning(f"Shadow blank monitor could not read automation status: {exc}")
-            return "automation_active"
-
-        if automation_status.get("active") or automation_status.get("state") == "running":
-            return "automation_active"
+            return False
 
         channel_id = target.get("channel_id")
         if channel_id is None:
-            return None
+            return False
 
         try:
             checker = self.stream_checker_provider()
             status = checker.get_status() if checker else {}
         except Exception as exc:
             logger.warning(f"Shadow blank monitor could not read quality checker status: {exc}")
-            return "quality_check_active"
+            return True
 
         queue_status = status.get("queue") or {}
         progress = status.get("progress") or {}
@@ -925,14 +894,14 @@ class ShadowBlankMonitorService:
 
         try:
             if current_channel is not None and int(current_channel) == int(channel_id):
-                return "quality_check_active"
+                return True
         except (TypeError, ValueError):
             pass
 
         if status.get("stream_checking_mode") and queue_status.get("in_progress", 0) and current_channel is None:
-            return "quality_check_active"
+            return True
 
-        return None
+        return False
 
     @staticmethod
     def _public_target(target: Dict[str, Any]) -> Dict[str, Any]:
