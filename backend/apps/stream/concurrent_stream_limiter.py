@@ -28,6 +28,24 @@ from apps.core.logging_config import setup_logging
 logger = setup_logging(__name__)
 
 
+class AcquireResult(tuple):
+    """Tuple-compatible acquire result that remains truthy/falsey by success."""
+
+    def __new__(cls, acquired: bool, reason: str):
+        return super().__new__(cls, (acquired, reason))
+
+    @property
+    def acquired(self) -> bool:
+        return self[0]
+
+    @property
+    def reason(self) -> str:
+        return self[1]
+
+    def __bool__(self) -> bool:
+        return bool(self[0])
+
+
 class AccountStreamLimiter:
     """
     Manages concurrent stream limits per M3U account.
@@ -132,8 +150,13 @@ class AccountStreamLimiter:
         if self.udi_manager:
             try:
                 active_count = self.udi_manager.get_active_streams_for_account(account_id)
+                if not isinstance(active_count, (int, float)):
+                    active_count = 0
+                else:
+                    active_count = int(active_count)
             except Exception as e:
                 logger.warning(f"Could not get active streams for account {account_id}: {e}")
+                active_count = 0
         
         # Get currently checking streams
         with self.lock:
@@ -164,12 +187,12 @@ class AccountStreamLimiter:
         """
         if account_id is None:
             # Custom stream with no account - always allow
-            return (True, 'acquired')
+            return AcquireResult(True, 'acquired')
         
         limit = self.get_account_limit(account_id)
         if limit == 0:
             # Unlimited - always allow
-            return (True, 'acquired')
+            return AcquireResult(True, 'acquired')
         
         # Poll for available slot with exponential backoff
         start_time = time.time()
@@ -184,8 +207,13 @@ class AccountStreamLimiter:
             if self.udi_manager:
                 try:
                     active_count = self.udi_manager.get_active_streams_for_account(account_id)
+                    if not isinstance(active_count, (int, float)):
+                        active_count = 0
+                    else:
+                        active_count = int(active_count)
                 except Exception as e:
                     logger.warning(f"Could not get active streams for account {account_id}: {e}")
+                    active_count = 0
             
             # Check if we have available slots: active_viewers + checking_streams < max_streams
             # We need to check this atomically with acquiring the semaphore
@@ -201,7 +229,7 @@ class AccountStreamLimiter:
                         f"({active_count} active + {checking_count + 1} checking = "
                         f"{total_in_use + 1}/{limit})"
                     )
-                    return (True, 'acquired')
+                    return AcquireResult(True, 'acquired')
 
                 if active_count >= limit:
                     last_wait_reason = 'active_viewers'
@@ -217,7 +245,7 @@ class AccountStreamLimiter:
                         f"Timeout acquiring slot for account {account_id} after {elapsed:.1f}s "
                         f"({active_count} active + {checking_count} checking = {total_in_use}/{limit})"
                     )
-                    return (False, last_wait_reason)
+                    return AcquireResult(False, last_wait_reason)
             
             # Wait before retrying (exponential backoff)
             time.sleep(wait_time)
@@ -488,7 +516,9 @@ class SmartStreamScheduler:
                         # Apply URL transformation if using M3U profile with search/replace patterns
                         stream_url = stream.get('url', '')
                         if self.account_limiter.udi_manager:
-                            stream_url = self.account_limiter.udi_manager.apply_profile_url_transformation(stream)
+                            transformed_url = self.account_limiter.udi_manager.apply_profile_url_transformation(stream)
+                            if isinstance(transformed_url, str):
+                                stream_url = transformed_url
 
                         # Notify that this stream has acquired a slot and is starting.
                         # Lock protects stream_statuses which is shared across worker threads.

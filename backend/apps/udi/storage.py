@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
+CONFIG_DIR = Path("/app/data")
 
 
 class UDIStorage:

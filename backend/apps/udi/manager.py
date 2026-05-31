@@ -23,11 +23,14 @@ Usage:
     udi.refresh_all()
 """
 
+import json
+import os
 import threading
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
 
 from apps.udi.fetcher import UDIFetcher, FetchResult
@@ -259,6 +262,72 @@ class UDIManager:
 
         logger.warning("Timed out waiting for concurrent UDI initialization to complete")
         return False
+
+    def _load_legacy_storage_snapshot(self) -> bool:
+        """Load old single-file UDI storage for compatibility tests/migrations.
+
+        Runtime V2 data is intentionally in-memory and refreshed from Dispatcharr.
+        This fallback only activates for an overridden storage directory, or when
+        explicitly enabled, so a normal container does not silently prefer stale
+        `/app/data/udi_data.json` over the live API.
+        """
+        try:
+            from apps.udi import storage as udi_storage
+
+            storage_dir = Path(getattr(udi_storage, "CONFIG_DIR", Path("/app/data")))
+            if (
+                storage_dir == Path("/app/data")
+                and os.environ.get("STREAMFLOW_ENABLE_LEGACY_UDI_STORAGE") != "1"
+            ):
+                return False
+
+            snapshot_path = storage_dir / "udi_data.json"
+            if not snapshot_path.exists():
+                return False
+
+            data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return False
+
+            self._channels_cache = data.get("channels", []) if isinstance(data.get("channels"), list) else []
+            self._streams_cache = data.get("streams", []) if isinstance(data.get("streams"), list) else []
+            self._channel_groups_cache = (
+                data.get("channel_groups", []) if isinstance(data.get("channel_groups"), list) else []
+            )
+            self._logos_cache = data.get("logos", []) if isinstance(data.get("logos"), list) else []
+            self._m3u_accounts_cache = (
+                data.get("m3u_accounts", []) if isinstance(data.get("m3u_accounts"), list) else []
+            )
+            channel_profiles = data.get("channel_profiles", data.get("profiles", []))
+            self._channel_profiles_cache = channel_profiles if isinstance(channel_profiles, list) else []
+            profile_channels = data.get("profile_channels", {})
+            self._profile_channels_cache = profile_channels if isinstance(profile_channels, dict) else {}
+
+            self._build_indexes()
+            self._initialized = True
+            self._network_ready = False
+            self._last_refresh_time = None
+            self._init_progress.update(
+                {
+                    "status": "completed",
+                    "percentage": 100,
+                    "message": "Loaded legacy UDI storage snapshot",
+                    "current_step": "legacy_storage",
+                    "entity_counts": {
+                        "channels": {"received": len(self._channels_cache), "expected": None},
+                        "streams": {"received": len(self._streams_cache), "expected": None},
+                        "groups": {"received": len(self._channel_groups_cache), "expected": None},
+                        "logos": {"received": len(self._logos_cache), "expected": None},
+                        "m3u_accounts": {"received": len(self._m3u_accounts_cache), "expected": None},
+                        "profiles": {"received": len(self._channel_profiles_cache), "expected": None},
+                    },
+                }
+            )
+            logger.info("Loaded legacy UDI storage snapshot from %s", snapshot_path)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to load legacy UDI storage snapshot: %s", exc)
+            return False
     
     def _build_indexes(self) -> None:
         """Build index caches for fast lookups."""
@@ -2110,6 +2179,8 @@ class UDIManager:
             config = get_dispatcharr_config()
             if not config.is_configured():
                 logger.warning("UDI Manager not initialized and Dispatcharr not configured — skipping auto-init.")
+                return
+            if self._load_legacy_storage_snapshot():
                 return
             logger.info("UDI Manager not initialized, auto-initializing from API...")
             self.initialize()

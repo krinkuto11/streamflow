@@ -74,6 +74,8 @@ class SchedulingService:
         """Initialize the scheduling service."""
         self._lock = threading.RLock()
         self._epg_all_programs_cache: Optional[Dict[str, Any]] = None
+        self._epg_cache: List[Dict[str, Any]] = []
+        self._epg_cache_time: Optional[datetime] = None
         self._config = self._load_config()
         self._scheduled_events = self._load_scheduled_events()
         self._auto_create_rules = self._load_auto_create_rules()
@@ -97,6 +99,7 @@ class SchedulingService:
         """
         default_config = {
             'epg_schedule': {'type': 'interval', 'value': 60},
+            'epg_refresh_interval_minutes': 60,
             'udi_refresh_schedule': None,
             'enabled': True
         }
@@ -111,7 +114,7 @@ class SchedulingService:
 
                 # One-time migration: convert legacy integer key to schedule object
                 if 'epg_refresh_interval_minutes' in config and 'epg_schedule' not in config:
-                    legacy_minutes = config.pop('epg_refresh_interval_minutes', 60)
+                    legacy_minutes = config.get('epg_refresh_interval_minutes', 60)
                     config['epg_schedule'] = {'type': 'interval', 'value': int(legacy_minutes)}
                     logger.info(
                         f"Migrated EPG schedule: epg_refresh_interval_minutes={legacy_minutes} "
@@ -123,6 +126,10 @@ class SchedulingService:
                 if 'udi_refresh_schedule' not in config:
                     config['udi_refresh_schedule'] = None
                     needs_save = True
+                if 'epg_refresh_interval_minutes' not in config:
+                    config['epg_refresh_interval_minutes'] = int(
+                        config.get('epg_schedule', {}).get('value', 60)
+                    )
 
                 # Persist only when something actually changed
                 if needs_save:

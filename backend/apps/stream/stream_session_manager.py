@@ -19,6 +19,7 @@ import re
 
 from apps.core.logging_config import setup_logging
 from apps.udi import get_udi_manager
+from apps.config.dispatcharr_config import get_dispatcharr_config
 
 logger = setup_logging(__name__)
 

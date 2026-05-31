@@ -18,10 +18,13 @@ LEGACY_MODULE_ALIASES = {
     'automated_stream_manager': 'apps.automation.automated_stream_manager',
     'automation_config_manager': 'apps.automation.automation_config_manager',
     'channel_settings_manager': 'channel_settings_manager',
+    'dispatcharr_config': 'apps.config.dispatcharr_config',
     'scheduling_service': 'apps.automation.scheduling_service',
+    'stream_check_utils': 'apps.stream.stream_check_utils',
     'stream_checker_service': 'apps.stream.stream_checker_service',
     'stream_monitoring_service': 'apps.stream.stream_monitoring_service',
     'stream_session_manager': 'apps.stream.stream_session_manager',
+    'udi': 'apps.udi',
 }
 
 

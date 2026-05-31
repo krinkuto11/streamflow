@@ -78,7 +78,11 @@ class DeadStreamsTracker:
     
     def is_dead(self, stream_url: str) -> bool:
         """Check if a stream is marked as dead."""
-        return self.db.is_stream_dead(stream_url)
+        try:
+            return self.db.is_stream_dead(stream_url)
+        except Exception as e:
+            logger.error(f"Error checking dead stream state: {scrub_urls(e)}")
+            return False
     
     def get_dead_reason(self, stream_url: str) -> Optional[str]:
         """Get the reason why a stream was marked as dead."""
