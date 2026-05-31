@@ -135,7 +135,7 @@ class DispatcharrConfig:
         if not db_config:
             self._load_config()
             db_config = self._config
-        return db_config.get('base_url')
+        return db_config.get('base_url') or os.getenv('DISPATCHARR_BASE_URL')
     
     def get_username(self) -> Optional[str]:
         """Get Dispatcharr username from database.
@@ -148,7 +148,7 @@ class DispatcharrConfig:
         if not db_config:
             self._load_config()
             db_config = self._config
-        return db_config.get('username')
+        return db_config.get('username') or os.getenv('DISPATCHARR_USER')
     
     def get_password(self) -> Optional[str]:
         """Get Dispatcharr password from database.
@@ -161,7 +161,7 @@ class DispatcharrConfig:
         if not db_config:
             self._load_config()
             db_config = self._config
-        return db_config.get('password')
+        return db_config.get('password') or os.getenv('DISPATCHARR_PASS')
 
     def get_api_key(self) -> Optional[str]:
         """Get Dispatcharr API key from database."""
@@ -170,12 +170,14 @@ class DispatcharrConfig:
         if not db_config:
             self._load_config()
             db_config = self._config
-        return db_config.get('api_key')
+        return db_config.get('api_key') or os.getenv('DISPATCHARR_API_KEY') or os.getenv('DISPATCHARR_TOKEN')
 
     def get_auth_mode(self) -> str:
         """Get configured Dispatcharr authentication mode."""
         from apps.database.manager import get_db_manager
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        if not db_config and (os.getenv('DISPATCHARR_API_KEY') or os.getenv('DISPATCHARR_TOKEN')):
+            return 'api_key'
         mode = _normalize_auth_mode(db_config.get('auth_mode'))
         if (
             'auth_mode' not in db_config

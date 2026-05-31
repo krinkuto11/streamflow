@@ -74,7 +74,7 @@ class SchedulingService:
         """Initialize the scheduling service."""
         self._lock = threading.RLock()
         self._epg_all_programs_cache: Optional[Dict[str, Any]] = None
-        self._epg_cache: List[Dict[str, Any]] = []
+        self._epg_cache: Dict[str, Any] = {}
         self._epg_cache_time: Optional[datetime] = None
         self._config = self._load_config()
         self._scheduled_events = self._load_scheduled_events()
@@ -1389,6 +1389,20 @@ class SchedulingService:
         holding _lock (e.g. match_programs_to_rules) can call this safely.
         """
         legacy_cache = getattr(self, '_epg_cache', None)
+        if not force_refresh and isinstance(legacy_cache, dict):
+            by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            for tvg_id, payload in legacy_cache.items():
+                if isinstance(payload, dict):
+                    programs = payload.get('programs', [])
+                else:
+                    programs = payload
+                if isinstance(programs, list):
+                    by_tvg_id[str(tvg_id)].extend(
+                        program for program in programs if isinstance(program, dict)
+                    )
+            if by_tvg_id:
+                return dict(by_tvg_id)
+
         if not force_refresh and isinstance(legacy_cache, list):
             by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for program in legacy_cache:

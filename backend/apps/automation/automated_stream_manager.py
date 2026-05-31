@@ -34,6 +34,16 @@ _WHITESPACE_PATTERN = re.compile(r'(?<!\\) +')
 _CHANNEL_NAME_PLACEHOLDER = 'PLACEHOLDER'
 
 
+class RefreshResult(tuple):
+    """Tuple-compatible playlist refresh result with bool(success) semantics."""
+
+    def __new__(cls, success: bool, accounts: Optional[List[Dict[str, Any]]] = None):
+        return super().__new__(cls, (success, accounts or []))
+
+    def __bool__(self) -> bool:
+        return bool(self[0])
+
+
 @lru_cache(maxsize=50000)
 def _compile_stream_search_regex(pattern: str, channel_name: str, case_sensitive: bool) -> re.Pattern:
     """Compile and cache stream-matching regex patterns for reuse."""
@@ -335,6 +345,7 @@ class RegexChannelMatcher:
         # SQL database before loading.  In production the parameter is unused.
         self.lock = threading.RLock()
         self._config_file: Optional[Path] = None
+        self._manual_regex_config = False
         if config_file is not None:
             config_file = Path(config_file)
             self._config_file = config_file
@@ -343,6 +354,66 @@ class RegexChannelMatcher:
         self.group_patterns_key = 'group_regex_patterns'
         self.channel_patterns = self._load_patterns()
         self.group_patterns = self._load_group_patterns()
+
+    @property
+    def regex_config(self) -> Dict[str, Any]:
+        """Legacy alias for older tests/scripts that used ``regex_config``."""
+        return self.channel_patterns
+
+    @regex_config.setter
+    def regex_config(self, value: Dict[str, Any]) -> None:
+        self.channel_patterns = self._normalize_legacy_regex_config(value or {})
+        self._manual_regex_config = True
+        self._clear_runtime_caches()
+
+    def _normalize_legacy_regex_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert old ``channels`` regex config payloads into V2 pattern shape."""
+        if not isinstance(config, dict):
+            return {"patterns": {}, "global_settings": {}}
+
+        if "patterns" in config:
+            normalized = copy.deepcopy(config)
+            normalized.setdefault("global_settings", {})
+            return normalized
+
+        patterns: Dict[str, Any] = {}
+        for channel in config.get("channels", []) or []:
+            if not isinstance(channel, dict):
+                continue
+            channel_id = channel.get("channel_id", channel.get("id"))
+            if channel_id is None:
+                continue
+
+            regex_patterns = []
+            raw_patterns = channel.get("patterns", channel.get("regex_patterns", [])) or []
+            for priority, item in enumerate(raw_patterns):
+                if isinstance(item, dict):
+                    pattern = item.get("pattern") or item.get("regex")
+                    if not pattern:
+                        continue
+                    regex_patterns.append({
+                        "pattern": pattern,
+                        "m3u_accounts": item.get("m3u_accounts"),
+                        "priority": item.get("priority", priority),
+                    })
+                else:
+                    regex_patterns.append({
+                        "pattern": str(item),
+                        "m3u_accounts": None,
+                        "priority": priority,
+                    })
+
+            patterns[str(channel_id)] = {
+                "name": channel.get("channel_name", channel.get("name", "")),
+                "enabled": channel.get("enabled", True),
+                "match_by_tvg_id": channel.get("match_by_tvg_id", False),
+                "regex_patterns": regex_patterns,
+            }
+
+        return {
+            "patterns": patterns,
+            "global_settings": config.get("global_settings", {}),
+        }
 
     def _seed_from_config_file(self, config_file: Path):
         """Read a JSON config file and import the patterns into SQL.
@@ -725,10 +796,8 @@ class RegexChannelMatcher:
     
     def reload_patterns(self):
         """Reload patterns from SQL (refreshes the in-memory cache)."""
-        # Legacy/test compatibility: when initialized from a config file,
-        # refresh SQL from that file before rebuilding in-memory caches.
-        if self._config_file is not None and self._config_file.exists():
-            self._seed_from_config_file(self._config_file)
+        if self._manual_regex_config:
+            return
 
         with self.lock:
             self.channel_patterns = self._load_patterns()
@@ -933,7 +1002,7 @@ class RegexChannelMatcher:
                             if channel_tvg_id and stream_tvg_id == channel_tvg_id:
                                 matched = True
                                 match_source = "tvg_id"
-                                priority = 0
+                                priority = 1000
                                 break
                                 
                     elif match_type == 'regex':
@@ -962,10 +1031,12 @@ class RegexChannelMatcher:
                             if isinstance(pattern_obj, dict):
                                 pattern = pattern_obj.get("pattern", "")
                                 pattern_m3u_accounts = pattern_obj.get("m3u_accounts")
+                                pattern_priority = pattern_obj.get("priority", 0)
                             else:
                                 # Legacy string format
                                 pattern = pattern_obj
                                 pattern_m3u_accounts = None
+                                pattern_priority = 0
                             
                             if not pattern:
                                 continue
@@ -990,13 +1061,14 @@ class RegexChannelMatcher:
 
                             if compiled_pattern.search(search_name):
                                 regex_matched = True
+                                best_regex_priority = pattern_priority
                                 # Only match once per channel
                                 break
                                 
                         if regex_matched:
                             matched = True
                             match_source = "regex"
-                            priority = 0
+                            priority = best_regex_priority
                             break
 
             
@@ -1821,7 +1893,7 @@ class AutomatedStreamManager:
             if not force and not self.config.get("enabled_features", {}).get("auto_playlist_update", True):
                 if not force:  # Allow force to override feature flag
                     logger.info("Playlist update is disabled in configuration")
-                    return False, []
+                    return RefreshResult(False, [])
             
             logger.info("Starting M3U playlist refresh...")
             
@@ -1889,7 +1961,7 @@ class AutomatedStreamManager:
 
             if refresh_failed:
                 logger.error("Playlist refresh encountered one or more failed account refreshes")
-                return False, refreshed_accounts
+                return RefreshResult(False, refreshed_accounts)
             
             # NOTE: UDI refresh, changelog write, and dead stream cleanup are
             # intentionally NOT performed here. run_automation_cycle() owns all
@@ -1917,7 +1989,7 @@ class AutomatedStreamManager:
             # after streams are actually assigned to specific channels. This prevents marking all channels
             # when we only know that *some* streams changed in the playlist, not which channels are affected.
 
-            return True, refreshed_accounts
+            return RefreshResult(True, refreshed_accounts)
             
         except Exception as e:
             logger.error(f"Failed to refresh M3U playlists: {e}")
@@ -1930,7 +2002,7 @@ class AutomatedStreamManager:
                     "timestamp": datetime.now().isoformat()
                 })
             
-            return False, []
+            return RefreshResult(False, [])
 
     def _is_m3u_refresh_response_success(self, response: Any) -> bool:
         """Validate M3U refresh API responses.
@@ -2246,6 +2318,41 @@ class AutomatedStreamManager:
         finally:
             self._lock.release()
 
+    def _mark_checking_only_channels(self, checking_only_channel_ids: List[int], udi, skip_check_trigger: bool) -> None:
+        """Mark matching-disabled/checking-enabled channels for quality checks."""
+        if not checking_only_channel_ids:
+            return
+
+        try:
+            checker = get_stream_checker_service()
+            stream_counts = {}
+            for channel_id in checking_only_channel_ids:
+                try:
+                    channel = udi.get_channel_by_id(channel_id)
+                    if channel:
+                        streams = channel.get('streams', [])
+                        stream_counts[channel_id] = len(streams) if isinstance(streams, list) else 0
+                except Exception:
+                    pass
+
+            checker.update_tracker.mark_channels_updated(
+                checking_only_channel_ids,
+                stream_counts=stream_counts,
+            )
+            logger.info(
+                f"Marked {len(checking_only_channel_ids)} checking-only "
+                "channel(s) for quality checking"
+            )
+            if not skip_check_trigger:
+                checker.trigger_check_updated_channels()
+            else:
+                logger.debug(
+                    "Skipping check trigger for checking-only channels "
+                    "(will be handled by caller)"
+                )
+        except Exception as exc:
+            logger.debug(f"Could not mark checking-only channels for quality checking: {exc}")
+
     def _discover_and_assign_streams_impl(self, force: bool = False, skip_check_trigger: bool = False, forced_period_id: Optional[str] = None, skip_changelog: bool = False, channel_id: Optional[int] = None, allow_dead_streams: Optional[bool] = None) -> Dict[str, int]:
         """Discover new streams and assign them to channels based on regex patterns.
         
@@ -2279,7 +2386,7 @@ class AutomatedStreamManager:
             all_streams = get_streams(log_result=False)
             if not all_streams:
                 logger.warning("No streams found")
-                return {}
+                all_streams = []
             
             # Validate that all_streams is a list
             if not isinstance(all_streams, list):
@@ -2381,7 +2488,6 @@ class AutomatedStreamManager:
                     )
 
             # Filter channels by automation profile settings
-            from apps.automation.automation_config_manager import get_automation_config_manager
             automation_config = get_automation_config_manager()
             matching_enabled_channel_ids = []
             channel_to_revive_enabled = {}
@@ -2410,6 +2516,18 @@ class AutomatedStreamManager:
                 
                 # Skip channels without automation periods assigned
                 if not config:
+                    legacy_match_config = self.regex_matcher._get_effective_channel_config(channel_id, effective_group_id)
+                    has_legacy_match_config = bool(
+                        legacy_match_config
+                        and legacy_match_config.get("enabled", True)
+                        and (
+                            legacy_match_config.get("match_by_tvg_id", False)
+                            or legacy_match_config.get("regex_patterns")
+                        )
+                    )
+                    if has_legacy_match_config:
+                        matching_enabled_channel_ids.append(channel_id)
+                        channel_to_match_priorities[str(channel_id)] = ['tvg', 'regex']
                     continue
                 
                 # Filter by forced_period_id if provided
@@ -2505,6 +2623,8 @@ class AutomatedStreamManager:
             from apps.stream.stream_session_manager import get_session_manager
             session_manager = get_session_manager()
             channels_in_monitoring = session_manager.get_channels_in_active_sessions()
+            if not isinstance(channels_in_monitoring, (list, tuple, set)):
+                channels_in_monitoring = set()
             
             if channels_in_monitoring:
                 pre_filter_count = len(all_channels)
@@ -2515,6 +2635,7 @@ class AutomatedStreamManager:
             
             if not all_channels:
                 logger.info("No channels available for stream assignment (all filtered or in monitoring)")
+                self._mark_checking_only_channels(checking_only_channel_ids, udi, skip_check_trigger)
                 return {}
             
 
@@ -2540,6 +2661,8 @@ class AutomatedStreamManager:
                 
                 # Get streams for this channel from UDI
                 streams = udi.get_channel_streams(int(channel_id))
+                if not isinstance(streams, list):
+                    streams = []
                 if streams:
                     valid_stream_ids = set()
                     for s in streams:
@@ -2711,7 +2834,12 @@ class AutomatedStreamManager:
                         # via filter_dead_streams, making allow_revive permanently ineffective.
                         _ch_revive_enabled = channel_to_revive_enabled.get(channel_id, False)
                         _ch_allow_dead = (not dead_stream_removal_enabled) or _ch_revive_enabled
-                        added_count = assign_streams_to_channel(channel_id_int, stream_ids, allow_dead_streams=_ch_allow_dead)
+                        try:
+                            added_count = assign_streams_to_channel(channel_id_int, stream_ids, allow_dead_streams=_ch_allow_dead)
+                        except TypeError as assign_error:
+                            if "allow_dead_streams" not in str(assign_error):
+                                raise
+                            added_count = assign_streams_to_channel(channel_id_int, stream_ids)
                         assignment_count[channel_id] = added_count
                         
                         # Verify streams were added correctly (if enabled in config)
@@ -2819,36 +2947,7 @@ class AutomatedStreamManager:
             # The existing get_and_clear_channels_needing_check() already filters by
             # stream_checking.enabled so no duplicate guard is needed here.
             if checking_only_channel_ids:
-                try:
-                    from apps.stream.stream_checker_service import get_stream_checker_service
-                    _co_checker = get_stream_checker_service()
-                    _co_stream_counts = {}
-                    for _co_id in checking_only_channel_ids:
-                        _co_ch = udi.get_channel_by_id(_co_id)
-                        if _co_ch:
-                            _co_streams = _co_ch.get('streams', [])
-                            _co_stream_counts[_co_id] = (
-                                len(_co_streams) if isinstance(_co_streams, list) else 0
-                            )
-                    _co_checker.update_tracker.mark_channels_updated(
-                        checking_only_channel_ids,
-                        stream_counts=_co_stream_counts,
-                    )
-                    logger.info(
-                        f"Marked {len(checking_only_channel_ids)} checking-only "
-                        "channel(s) for quality checking"
-                    )
-                    if not skip_check_trigger:
-                        _co_checker.trigger_check_updated_channels()
-                    else:
-                        logger.debug(
-                            "Skipping check trigger for checking-only channels "
-                            "(will be handled by caller)"
-                        )
-                except Exception as _co_err:
-                    logger.debug(
-                        f"Could not mark checking-only channels for quality checking: {_co_err}"
-                    )
+                self._mark_checking_only_channels(checking_only_channel_ids, udi, skip_check_trigger)
             
             return {
                 "assignment_count": assignment_count,
@@ -3276,7 +3375,11 @@ class AutomatedStreamManager:
         automation_config = get_automation_config_manager()
         global_settings = automation_config.get_global_settings()
         
-        legacy_config_file_mode = getattr(self, "_explicit_config_file", False)
+        default_config_dir = Path(os.environ.get('CONFIG_DIR', '/app/data'))
+        legacy_config_file_mode = (
+            getattr(self, "_explicit_config_file", False)
+            or Path(CONFIG_DIR) != default_config_dir
+        )
         current_enabled = global_settings.get('regular_automation_enabled', False) or legacy_config_file_mode
         
         # Initialize flag if missing
@@ -3319,16 +3422,19 @@ class AutomatedStreamManager:
         # We don't early return here, we let the individual periods be checked below
 
         if legacy_config_file_mode:
-            if self.last_playlist_update is None or forced:
-                self.refresh_playlists()
-                self.discover_and_assign_streams(force=True)
-            self._finish_run_status(
-                state="completed",
-                stage="finalizing",
-                stage_label="Finalizing",
-                message="Legacy automation cycle completed",
-            )
-            return
+            try:
+                if self.last_playlist_update is None or forced:
+                    self.refresh_playlists()
+                    self.discover_and_assign_streams(force=True)
+                self._finish_run_status(
+                    state="completed",
+                    stage="finalizing",
+                    stage_label="Finalizing",
+                    message="Legacy automation cycle completed",
+                )
+                return
+            finally:
+                self._m3u_accounts_cache = None
         
         logger.debug("Starting automation cycle...")
         automation_busy_guard = get_udi_manager()

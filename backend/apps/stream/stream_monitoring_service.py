@@ -1012,6 +1012,12 @@ class StreamMonitoringService:
                     success = update_channel_streams(session.channel_id, new_order_ids)
                     if success:
                         logger.debug(f"Reordered streams for session {session_id} to {new_order_ids}")
+                        try:
+                            get_udi_manager().refresh_channel_by_id(session.channel_id)
+                        except Exception as refresh_error:
+                            logger.debug(
+                                f"Could not refresh UDI channel {session.channel_id} after sync: {refresh_error}"
+                            )
                 except Exception as e:
                     logger.error(f"Failed to sync stream order for session {session_id}: {e}")
 
