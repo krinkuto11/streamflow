@@ -595,6 +595,7 @@ class TeamarrPreflightService:
             deferral_reason = self._controlled_deferral_reason(result)
             if deferral_reason:
                 self._clear_attempted(key)
+                self._finish_active_check(key)
                 self._record_event(
                     "preflight_deferred",
                     event,
@@ -607,6 +608,7 @@ class TeamarrPreflightService:
                 return
 
             event_type = "preflight_completed" if result.get("success") else "preflight_failed"
+            self._finish_active_check(key)
             self._record_event(
                 event_type,
                 event,
@@ -619,14 +621,18 @@ class TeamarrPreflightService:
             )
         except Exception as exc:
             logger.error(f"Teamarr preflight check failed for channel {event.get('dispatcharr_channel_id')}: {exc}", exc_info=True)
+            self._finish_active_check(key)
             self._record_event("preflight_failed", event, {
                 "error": "Teamarr preflight check failed",
                 "bucket": event.get("trigger_bucket"),
             })
         finally:
-            with self._lock:
-                self._active_checks.pop(key, None)
-                self._purge_old_attempts()
+            self._finish_active_check(key)
+
+    def _finish_active_check(self, key: str) -> None:
+        with self._lock:
+            self._active_checks.pop(key, None)
+            self._purge_old_attempts()
 
     def _resolve_profile_id(self, profile_id: Any) -> Optional[str]:
         requested = str(profile_id or "").strip()

@@ -34,6 +34,11 @@ class TestDeadStreamDetection(unittest.TestCase):
         """Clean up test fixtures."""
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def assertDeadVerdict(self, verdict, expected_dead, expected_reason):
+        is_dead, reason = verdict
+        self.assertIs(is_dead, expected_dead)
+        self.assertEqual(reason, expected_reason)
     
     @patch('stream_checker_service.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_detect_dead_stream_zero_resolution(self):
@@ -48,7 +53,7 @@ class TestDeadStreamDetection(unittest.TestCase):
             'bitrate_kbps': 5000
         }
         
-        self.assertTrue(service._is_stream_dead(stream_data))
+        self.assertDeadVerdict(service._is_stream_dead(stream_data), True, 'offline')
     
     @patch('stream_checker_service.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_detect_dead_stream_zero_bitrate(self):
@@ -63,7 +68,7 @@ class TestDeadStreamDetection(unittest.TestCase):
             'bitrate_kbps': 0
         }
         
-        self.assertTrue(service._is_stream_dead(stream_data))
+        self.assertDeadVerdict(service._is_stream_dead(stream_data), True, 'offline')
     
     @patch('stream_checker_service.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_detect_dead_stream_both_zero(self):
@@ -78,7 +83,7 @@ class TestDeadStreamDetection(unittest.TestCase):
             'bitrate_kbps': 0
         }
         
-        self.assertTrue(service._is_stream_dead(stream_data))
+        self.assertDeadVerdict(service._is_stream_dead(stream_data), True, 'offline')
     
     @patch('stream_checker_service.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_detect_healthy_stream(self):
@@ -93,7 +98,7 @@ class TestDeadStreamDetection(unittest.TestCase):
             'bitrate_kbps': 5000
         }
         
-        self.assertFalse(service._is_stream_dead(stream_data))
+        self.assertDeadVerdict(service._is_stream_dead(stream_data), False, 'none')
     
     @patch('stream_checker_service.CONFIG_DIR', Path(tempfile.mkdtemp()))
     def test_detect_dead_stream_partial_zero_resolution(self):
@@ -108,10 +113,10 @@ class TestDeadStreamDetection(unittest.TestCase):
             'bitrate_kbps': 5000
         }
         
-        self.assertTrue(service._is_stream_dead(stream_data))
+        self.assertDeadVerdict(service._is_stream_dead(stream_data), True, 'offline')
         
         stream_data['resolution'] = '0x1080'
-        self.assertTrue(service._is_stream_dead(stream_data))
+        self.assertDeadVerdict(service._is_stream_dead(stream_data), True, 'offline')
 
 
 class TestDeadStreamTagging(unittest.TestCase):

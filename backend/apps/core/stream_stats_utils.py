@@ -32,15 +32,15 @@ def parse_bitrate_value(bitrate_raw) -> Optional[float]:
         bitrate_raw: Raw bitrate value in various formats
         
     Returns:
-        Bitrate in kbps as float, or None if parsing fails or value is invalid
+        Bitrate in kbps as float, or None if parsing fails or value is missing
     """
-    if not bitrate_raw:
+    if bitrate_raw is None or bitrate_raw == '':
         return None
     
     try:
         # If it's already a number
         if isinstance(bitrate_raw, (int, float)):
-            return float(bitrate_raw) if bitrate_raw > 0 else None
+            return float(bitrate_raw) if bitrate_raw >= 0 else None
         
         # If it's a string, parse it
         if isinstance(bitrate_raw, str):
@@ -64,7 +64,7 @@ def parse_bitrate_value(bitrate_raw) -> Optional[float]:
             match = re.search(r'(\d+\.?\d*)', bitrate_str)
             if match:
                 value = float(match.group(1))
-                return value if value > 0 else None
+                return value if value >= 0 else None
     except (ValueError, TypeError, AttributeError):
         pass
     
