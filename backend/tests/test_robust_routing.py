@@ -1,7 +1,16 @@
 import subprocess
 import time
 import os
-import fcntl
+
+import pytest
+
+if os.environ.get("RUN_ROBUST_ROUTING_TESTS") != "1":
+    pytest.skip(
+        "robust routing test requires a live orchestrator/UDP stream fixture",
+        allow_module_level=True,
+    )
+
+fcntl = pytest.importorskip("fcntl", reason="requires Unix fcntl")
 
 def test_ffmpeg_robust_routing():
     # Use a dummy but valid URL or local file if possible. 

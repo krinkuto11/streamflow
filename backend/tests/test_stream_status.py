@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
-import apps.stream.stream_session_manager
+import apps.stream.stream_session_manager as stream_session_manager
 from apps.stream.stream_session_manager import StreamInfo, SessionInfo, StreamSessionManager
 
 # Patch CONFIG_DIR to avoid mkdir calls
