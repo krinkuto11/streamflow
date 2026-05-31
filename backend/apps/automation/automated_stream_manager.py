@@ -1102,12 +1102,13 @@ class AutomatedStreamManager:
     """Main automated stream management system."""
 
     RUN_STAGES = [
-        ("preparing", "Preparing"),
-        ("schedule", "Schedule"),
+        ("settings", "Preparing"),
+        ("period_discovery", "Schedule"),
         ("m3u_refresh", "M3U Refresh"),
         ("cache_sync", "Cache Sync"),
-        ("matching", "Matching"),
-        ("quality_check", "Quality Check"),
+        ("stream_matching", "Matching"),
+        ("quality_queueing", "Queueing"),
+        ("quality_checking", "Quality Check"),
         ("finalizing", "Finalizing"),
     ]
     
@@ -1457,6 +1458,23 @@ class AutomatedStreamManager:
             if error is not None:
                 status["last_error"] = error
             status["updated_at"] = now.isoformat()
+
+            stage_keys = [item["key"] for item in status.get("stages", [])]
+            if stage in stage_keys:
+                stage_index = stage_keys.index(stage)
+                for idx, stage_item in enumerate(status.get("stages", [])):
+                    if idx < stage_index and stage_item.get("status") in {"pending", "running"}:
+                        stage_item.update({"status": "completed", "percent": 100})
+                    elif idx == stage_index:
+                        stage_item.update(
+                            {
+                                "status": "running" if status.get("state") == "running" else status.get("state", "running"),
+                                "current": status.get("progress", {}).get("current", stage_item.get("current", 0)),
+                                "total": status.get("progress", {}).get("total", stage_item.get("total")),
+                                "percent": status.get("progress", {}).get("percent", stage_item.get("percent", 0)),
+                                "message": status.get("progress", {}).get("message", status.get("message", "")),
+                            }
+                        )
 
             started_at = status.get("started_at")
             if started_at:

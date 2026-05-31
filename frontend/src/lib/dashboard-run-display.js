@@ -13,6 +13,16 @@ const parseTimestamp = (value) => {
   return Number.isFinite(timestamp) ? timestamp : null
 }
 
+const STAGE_KEY_ALIASES = {
+  preparing: 'settings',
+  schedule: 'period_discovery',
+  udi_sync: 'cache_sync',
+  matching: 'stream_matching',
+  quality_check: 'quality_checking',
+}
+
+export const normalizeRunStageKey = (key) => STAGE_KEY_ALIASES[key] || key
+
 export const preferLiveRunSeconds = ({
   reportedSeconds,
   liveSeconds,
@@ -23,6 +33,92 @@ export const preferLiveRunSeconds = ({
   }
 
   return reportedSeconds ?? liveSeconds
+}
+
+export const getAutomationStageCards = ({
+  stages = [],
+  runStatusStages = [],
+  displayRunStageId = 'idle',
+  displayRunningRun = false,
+  completedRun = false,
+  streamRunActive = false,
+} = {}) => {
+  const normalizedDisplayStageId = normalizeRunStageKey(displayRunStageId)
+  const displayCurrentStageIndex = stages.findIndex(stage => stage.id === normalizedDisplayStageId)
+  const backendStages = new Map(
+    (runStatusStages || []).map(stage => [normalizeRunStageKey(stage?.key), stage])
+  )
+
+  return stages.map((stage, index) => {
+    const backendStage = backendStages.get(stage.id)
+    let status = backendStage?.status
+
+    if (!status || status === 'pending') {
+      if (streamRunActive && displayCurrentStageIndex >= 0) {
+        if (index < displayCurrentStageIndex) {
+          status = 'completed'
+        } else if (index === displayCurrentStageIndex) {
+          status = displayRunningRun ? 'running' : 'completed'
+        } else {
+          status = 'pending'
+        }
+      } else if (completedRun) {
+        status = 'completed'
+      } else if (displayRunningRun && displayCurrentStageIndex >= 0 && index < displayCurrentStageIndex) {
+        status = 'completed'
+      } else if (displayRunningRun && index === displayCurrentStageIndex) {
+        status = 'running'
+      } else {
+        status = 'pending'
+      }
+    }
+
+    return {
+      ...stage,
+      ...backendStage,
+      id: stage.id,
+      label: stage.label,
+      status,
+    }
+  })
+}
+
+export const getRunDurationValue = ({
+  runDurations = {},
+  durationKey,
+  stageId,
+  displayRunStageId,
+  displayRunningRun = false,
+  streamRunActive = false,
+  streamCheckerElapsedSeconds = null,
+  displayRunStageElapsedSeconds = null,
+  stages = [],
+} = {}) => {
+  const reportedSeconds = runDurations?.[durationKey]
+  if (reportedSeconds !== null && reportedSeconds !== undefined) {
+    return reportedSeconds
+  }
+
+  const normalizedStageId = normalizeRunStageKey(stageId)
+  const normalizedDisplayStageId = normalizeRunStageKey(displayRunStageId)
+
+  if (streamRunActive) {
+    if (normalizedStageId === 'quality_checking') {
+      return streamCheckerElapsedSeconds
+    }
+
+    const stageIndex = stages.findIndex(stage => stage.id === normalizedStageId)
+    const currentIndex = stages.findIndex(stage => stage.id === normalizedDisplayStageId)
+    if (stageIndex >= 0 && currentIndex >= 0 && stageIndex < currentIndex) {
+      return 0
+    }
+  }
+
+  if (displayRunningRun && normalizedStageId === normalizedDisplayStageId) {
+    return displayRunStageElapsedSeconds
+  }
+
+  return reportedSeconds
 }
 
 export const getStreamCheckerRunDisplay = ({

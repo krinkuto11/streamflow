@@ -45,6 +45,47 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["durations"]["m3u_refresh_seconds"], 1.235)
         self.assertIsNotNone(status["completed_at"])
         self.assertIsNotNone(status["duration_seconds"])
+        self.assertEqual(
+            [stage["key"] for stage in status["stages"]],
+            [
+                "settings",
+                "period_discovery",
+                "m3u_refresh",
+                "cache_sync",
+                "stream_matching",
+                "quality_queueing",
+                "quality_checking",
+                "finalizing",
+            ],
+        )
+
+    def test_run_status_marks_prior_stages_completed(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._update_run_status(
+            stage="settings",
+            stage_label="Preparing Automation",
+            message="Reading configuration",
+        )
+        manager._update_run_status(
+            stage="stream_matching",
+            stage_label="Matching Streams",
+            message="Matching streams",
+            progress={"current": 2, "total": 4, "message": "Matching streams"},
+        )
+
+        status = manager.get_run_status()
+        stages = {stage["key"]: stage for stage in status["stages"]}
+
+        self.assertEqual(stages["settings"]["status"], "completed")
+        self.assertEqual(stages["period_discovery"]["status"], "completed")
+        self.assertEqual(stages["m3u_refresh"]["status"], "completed")
+        self.assertEqual(stages["cache_sync"]["status"], "completed")
+        self.assertEqual(stages["stream_matching"]["status"], "running")
+        self.assertEqual(stages["stream_matching"]["current"], 2)
+        self.assertEqual(stages["stream_matching"]["total"], 4)
+        self.assertEqual(stages["quality_queueing"]["status"], "pending")
 
     def test_run_status_returns_copy(self):
         manager = self._manager()
