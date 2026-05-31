@@ -535,6 +535,7 @@ class StreamCheckQueue:
         import collections
         self.stream_processing_times = collections.deque(maxlen=100)
         self.channel_start_times = {}
+        self.batch_started_at = None
         self.last_cleared_at = None
         self.last_clear_reason = None
         self.stats = {
@@ -561,6 +562,7 @@ class StreamCheckQueue:
                 self.stats['total_failed'] = 0
                 self.queued.clear()
                 self.failed.clear()
+                self.batch_started_at = datetime.now()
                 self.last_cleared_at = None
                 self.last_clear_reason = None
 
@@ -703,6 +705,7 @@ class StreamCheckQueue:
                 'total_queued': self.stats['total_queued'],
                 'total_completed': self.stats['total_completed'],
                 'total_failed': self.stats['total_failed'],
+                'started_at': self.batch_started_at.isoformat() if self.batch_started_at else None,
                 'state': self._state_locked(),
                 'last_cleared_at': self.last_cleared_at,
                 'last_clear_reason': self.last_clear_reason
@@ -740,6 +743,7 @@ class StreamCheckQueue:
             self.completed.clear()
             self.failed.clear()
             self.channel_start_times.clear()
+            self.batch_started_at = None
             self.stats = {
                 'total_queued': 0,
                 'total_completed': 0,
