@@ -1,6 +1,6 @@
 # PR 430 V2 Changelog And Validation
 
-This document is the detailed changelog for PR #430. It records the V2 branch scope, screenshot evidence, local validation, live Unraid validation, and the remaining final clean-install gate before the PR should move out of draft.
+This document is the detailed changelog for PR #430. It records the V2 branch scope, screenshot evidence, local validation, self-hosted runtime validation, and the remaining final clean-install gate before the PR should move out of draft.
 
 ## Branch Scope
 
@@ -94,8 +94,8 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 
 Current V2 screenshots included in this branch:
 
-- `docs/pr-screenshots/v2-dashboard-stage-status-live-unraid-dark-sanitized.png`
-  - Dark-mode live Unraid evidence for the dev feedback from PR #428.
+- `docs/pr-screenshots/v2-dashboard-stage-status-selfhosted-dark-sanitized.png`
+  - Dark-mode self-hosted validation evidence for the dev feedback from PR #428.
   - Shows all automation stages completed and duration boxes populated.
 - `docs/pr-screenshots/teamarr-preflight-profile-selector.png`
   - Teamarr Preflight profile selector UI.
