@@ -80,6 +80,8 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Supports CUDA mode with CPU fallback.
 - Logs hardware acceleration readiness at startup.
 - Shows hardware acceleration runtime status.
+- Covers NVIDIA/GPU runtime visibility in the live stack; the Unraid validation observed CUDA mode with CPU fallback enabled and the NVIDIA runtime/GPU visible.
+- Adds regression coverage in `backend/tests/test_ffmpeg_hardware_acceleration.py`.
 
 ### Changelog, Tests, And Docs
 
@@ -171,6 +173,7 @@ V2 image was built on Unraid and deployed over the live StreamFlow container:
 
 - Image tag: `ghcr.io/bttfw/streamflow:teamarr-preflight-no-api-key-ui`
 - Live health after deploy: healthy.
+- Hardware acceleration startup logs showed CUDA mode available with CPU fallback enabled and the NVIDIA runtime/GPU visible.
 - Startup UDI refresh completed with:
   - 228 channels
   - 217,192 streams
@@ -215,8 +218,10 @@ The final requested gate is still pending:
    - Teamarr preflight config
    - scheduling config
 3. Remove the StreamFlow container and appdata.
-4. Recreate StreamFlow from scratch on Unraid.
+4. Recreate StreamFlow from scratch on Unraid with the current GPU/NVIDIA runtime passthrough.
 5. Restore settings, profiles, periods, regex, shadow monitor, Teamarr preflight, and scheduling.
 6. Verify startup UDI refresh.
-7. Run a real Full Check.
-8. Add the clean-install/full-run result to this document and PR #430 before marking the PR ready for review.
+7. Run a real Full Check with GPU passthrough enabled.
+8. Repeat a fresh install without GPU/NVIDIA runtime passthrough.
+9. Verify the no-GPU install starts cleanly, reports CPU/fallback hardware status, and completes a real Full Check without CUDA/NVIDIA runtime failures.
+10. Add both clean-install/full-run results to this document and PR #430 before marking the PR ready for review.
