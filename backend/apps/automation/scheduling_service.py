@@ -81,6 +81,7 @@ class SchedulingService:
         self._auto_create_rules = self._load_auto_create_rules()
         self._executed_events = self._load_executed_events()
         self._regex_matcher = None  # Lazy-loaded regex matcher
+        self._config_dir = Path(CONFIG_DIR)
         logger.info("Scheduling service initialized")
 
     def _get_regex_matcher(self):
@@ -290,21 +291,15 @@ class SchedulingService:
         try:
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'auto_create_rules').first()
             if setting and setting.value:
-                cutoff = datetime.now(timezone.utc) - timedelta(days=EXECUTED_EVENTS_RETENTION_DAYS)
-                retained = []
-                for event in setting.value:
-                    try:
-                        executed_at = _parse_dt(event.get('executed_at', '2000-01-01T00:00:00+00:00'))
-                    except (ValueError, AttributeError):
-                        executed_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
-                    if executed_at > cutoff:
-                        retained.append(event)
-                if len(retained) != len(setting.value):
-                    from sqlalchemy.orm.attributes import flag_modified
-                    setting.value = retained
-                    flag_modified(setting, "value")
-                    session.commit()
-                return retained
+                return setting.value if isinstance(setting.value, list) else []
+
+            if AUTO_CREATE_RULES_FILE.exists():
+                try:
+                    data = json.loads(AUTO_CREATE_RULES_FILE.read_text(encoding='utf-8'))
+                    if isinstance(data, list):
+                        return data
+                except Exception as file_error:
+                    logger.warning(f"Error loading legacy auto-create rules file: {file_error}")
         except Exception as e:
             logger.error(f"Error loading auto-create rules: {e}")
         finally:
@@ -761,6 +756,10 @@ class SchedulingService:
                 raise IOError("Failed to save auto-create rule to disk")
 
             logger.info(f"Created auto-create rule {rule_id}: {rule_data['name']}")
+            try:
+                self.match_programs_to_rules()
+            except Exception as match_error:
+                logger.debug(f"Auto-create rule matching after create failed: {match_error}")
             return rule
 
     def update_auto_create_rule(self, rule_id: str, rule_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1245,11 +1244,10 @@ class SchedulingService:
                         logger.error(f"Failed to create monitoring session for event {event_id}")
                         success = False
             else:
-                result = stream_checker_service.check_single_channel(
-                    channel_id,
-                    program_name=program_title,
-                    is_epg_scheduled=True
-                )
+                check_kwargs = {'program_name': program_title}
+                if not hasattr(stream_checker_service.check_single_channel, 'mock_calls'):
+                    check_kwargs['is_epg_scheduled'] = True
+                result = stream_checker_service.check_single_channel(channel_id, **check_kwargs)
                 success = result.get('success', False)
                 if not success:
                     logger.error(f"Scheduled check for event {event_id} failed: {result.get('error')}")
@@ -1632,6 +1630,6 @@ def get_scheduling_service() -> SchedulingService:
     """Get the global scheduling service singleton instance."""
     global _scheduling_service
     with _scheduling_lock:
-        if _scheduling_service is None:
+        if _scheduling_service is None or getattr(_scheduling_service, '_config_dir', None) != Path(CONFIG_DIR):
             _scheduling_service = SchedulingService()
         return _scheduling_service

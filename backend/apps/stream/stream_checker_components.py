@@ -1,10 +1,12 @@
 """Support components used by the stream checker service."""
 
 import copy
+import json
 import queue
 import threading
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from apps.udi import get_udi_manager
@@ -113,6 +115,7 @@ class StreamCheckConfig:
         """
         from apps.database.manager import get_db_manager
         self.db = get_db_manager()
+        self.config_file = Path(config_file) if config_file is not None else None
         self.config = self._load_config()
     
     def _load_config(self) -> Dict[str, Any]:
@@ -139,6 +142,15 @@ class StreamCheckConfig:
                     defaults[key] = value
             return defaults
 
+        if self.config_file is not None and self.config_file.exists():
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as fh:
+                    loaded_file = json.load(fh) or {}
+                config = copy.deepcopy(self.DEFAULT_CONFIG)
+                return deep_merge(config, loaded_file)
+            except Exception as exc:
+                logger.warning(f"Could not load stream checker config file {self.config_file}: {exc}")
+
         loaded = self.db.get_system_setting('stream_checker_config', {})
         if loaded:
             logger.debug(f"Loaded config from DB with {len(loaded)} top-level keys")
@@ -164,6 +176,11 @@ class StreamCheckConfig:
         """
         if config is None:
             config = self.config
+        if self.config_file is not None:
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_file, 'w', encoding='utf-8') as fh:
+                json.dump(config, fh, indent=2)
+            return
         
         self.db.set_system_setting('stream_checker_config', config)
     
@@ -406,6 +423,15 @@ class ChannelUpdateTracker:
                 
                 if profile and profile.get('stream_checking', {}).get('enabled', False):
                     filtered_channels.append(cid)
+                elif profile is None:
+                    try:
+                        existing_profiles = automation_config.get_all_profiles(include_inactive=True)
+                    except TypeError:
+                        existing_profiles = automation_config.get_all_profiles()
+                    except Exception:
+                        existing_profiles = []
+                    if not existing_profiles:
+                        filtered_channels.append(cid)
             
             excluded_count = len(channels) - len(filtered_channels)
             

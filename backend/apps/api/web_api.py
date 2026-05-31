@@ -394,6 +394,31 @@ def _set_epg_refresh_running(value: bool):
     global epg_refresh_running
     epg_refresh_running = bool(value)
 
+
+class _ThreadHandleProxy:
+    """Stable thread reference for legacy imports that bind module globals."""
+
+    def __init__(self):
+        self.thread = None
+
+    def set(self, thread):
+        self.thread = thread
+
+    def is_alive(self):
+        return bool(self.thread and self.thread.is_alive())
+
+    def join(self, timeout=None):
+        if self.thread:
+            return self.thread.join(timeout=timeout)
+        return None
+
+    def __bool__(self):
+        return self.is_alive()
+
+
+if scheduled_event_processor_thread is None:
+    scheduled_event_processor_thread = _ThreadHandleProxy()
+
 # Initialize the global proxy manager
 udp_proxy_manager = UDPProxyManager()
 
@@ -432,6 +457,12 @@ def check_wizard_complete():
     using the system even if they haven't configured any channel patterns yet.
     """
     try:
+        config_dir = Path(CONFIG_DIR)
+        automation_file = config_dir / 'automation_config.json'
+        regex_file = config_dir / 'channel_regex_config.json'
+        if automation_file.exists() or regex_file.exists():
+            return automation_file.exists() and regex_file.exists()
+
         # SQL-backed readiness: require Dispatcharr credentials to be configured.
         dispatcharr_config = get_dispatcharr_config()
         return dispatcharr_config.is_configured()
@@ -464,7 +495,7 @@ def start_scheduled_event_processor():
     """Start the background thread for processing scheduled events."""
     global scheduled_event_processor_thread, scheduled_event_processor_running, scheduled_event_processor_wake
     
-    if scheduled_event_processor_thread is not None and scheduled_event_processor_thread.is_alive():
+    if scheduled_event_processor_thread.is_alive():
         logger.warning("Scheduled event processor is already running")
         return False
     
@@ -472,12 +503,13 @@ def start_scheduled_event_processor():
     scheduled_event_processor_wake = threading.Event()
     
     scheduled_event_processor_running = True
-    scheduled_event_processor_thread = threading.Thread(
+    thread = threading.Thread(
         target=scheduled_event_processor,
         name="ScheduledEventProcessor",
         daemon=True  # Daemon thread will exit when main program exits
     )
-    scheduled_event_processor_thread.start()
+    scheduled_event_processor_thread.set(thread)
+    thread.start()
     logger.info("Scheduled event processor started")
     return True
 
@@ -486,7 +518,7 @@ def stop_scheduled_event_processor():
     """Stop the background thread for processing scheduled events."""
     global scheduled_event_processor_thread, scheduled_event_processor_running, scheduled_event_processor_wake
     
-    if scheduled_event_processor_thread is None or not scheduled_event_processor_thread.is_alive():
+    if not scheduled_event_processor_thread.is_alive():
         logger.warning("Scheduled event processor is not running")
         return False
     
@@ -779,6 +811,7 @@ def add_bulk_regex_patterns():
     return add_bulk_regex_patterns_response(
         payload=request.get_json(silent=True),
         get_regex_matcher=get_regex_matcher,
+        get_udi_manager=get_udi_manager,
     )
 
 # ==========================================
@@ -1152,6 +1185,7 @@ def ensure_wizard_config():
     """
     return ensure_wizard_config_response(
         get_automation_config_manager=get_automation_config_manager,
+        config_dir=CONFIG_DIR,
     )
 
 @app.route('/api/setup-wizard/create-sample-patterns', methods=['POST'])
@@ -2594,15 +2628,16 @@ def handle_session_settings():
     )
 
 
+# --- Telemetry API ---
+from apps.telemetry.telemetry_api import telemetry_bp
+app.register_blueprint(telemetry_bp, url_prefix='/api/telemetry')
+
+
 # Serve React app for all frontend routes (catch-all - must be last!)
 @app.route('/<path:path>')
 def serve_frontend(path):
     """Serve React frontend files or return index.html for client-side routing."""
     return serve_frontend_response(static_folder=static_folder, path=path)
-
-# --- Telemetry API ---
-from apps.telemetry.telemetry_api import telemetry_bp
-app.register_blueprint(telemetry_bp, url_prefix='/api/telemetry')
 
 
 

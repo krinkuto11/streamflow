@@ -2,7 +2,7 @@
 """Regex and matching API handler functions extracted from web_api."""
 
 import re
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from flask import jsonify
 
@@ -230,6 +230,7 @@ def add_bulk_regex_patterns_response(
     *,
     payload: Any,
     get_regex_matcher: Callable[[], Any],
+    get_udi_manager: Optional[Callable[[], Any]] = None,
 ):
     """Handle bulk regex pattern additions for multiple channels."""
     try:
@@ -239,6 +240,7 @@ def add_bulk_regex_patterns_response(
         m3u_accounts = parsed.m3u_accounts
 
         channel_repo = UdiChannelRepository()
+        udi = get_udi_manager() if get_udi_manager is not None else None
         matcher = get_regex_matcher()
 
         is_valid, _ = matcher.validate_regex_patterns(regex_patterns)
@@ -250,7 +252,11 @@ def add_bulk_regex_patterns_response(
 
         for channel_id in channel_ids:
             try:
-                channel = channel_repo.get_channel_by_id(channel_id)
+                channel = (
+                    udi.get_channel_by_id(channel_id)
+                    if udi is not None
+                    else channel_repo.get_channel_by_id(channel_id)
+                )
                 if not channel:
                     failed_channels.append({"channel_id": channel_id, "error": "Channel not found"})
                     continue

@@ -346,11 +346,14 @@ class RegexChannelMatcher:
         self.lock = threading.RLock()
         self._config_file: Optional[Path] = None
         self._manual_regex_config = False
-        if config_file is not None:
-            config_file = Path(config_file)
-            self._config_file = config_file
-            if config_file.exists():
-                self._seed_from_config_file(config_file)
+        self._explicit_regex_config_file = config_file is not None
+        self._file_backed_compat = self._explicit_regex_config_file or str(CONFIG_DIR) != "/app/data"
+        if config_file is None:
+            config_file = CONFIG_DIR / "channel_regex_config.json"
+        config_file = Path(config_file)
+        self._config_file = config_file
+        if config_file.exists():
+            self._seed_from_config_file(config_file)
         self.group_patterns_key = 'group_regex_patterns'
         self.channel_patterns = self._load_patterns()
         self.group_patterns = self._load_group_patterns()
@@ -374,6 +377,13 @@ class RegexChannelMatcher:
         if "patterns" in config:
             normalized = copy.deepcopy(config)
             normalized.setdefault("global_settings", {})
+            for pattern_data in normalized.get("patterns", {}).values():
+                if isinstance(pattern_data, dict) and "regex" not in pattern_data:
+                    pattern_data["regex"] = [
+                        p.get("pattern")
+                        for p in pattern_data.get("regex_patterns", [])
+                        if isinstance(p, dict) and p.get("pattern")
+                    ]
             return normalized
 
         patterns: Dict[str, Any] = {}
@@ -407,6 +417,7 @@ class RegexChannelMatcher:
                 "name": channel.get("channel_name", channel.get("name", "")),
                 "enabled": channel.get("enabled", True),
                 "match_by_tvg_id": channel.get("match_by_tvg_id", False),
+                "regex": [p["pattern"] for p in regex_patterns],
                 "regex_patterns": regex_patterns,
             }
 
@@ -443,6 +454,14 @@ class RegexChannelMatcher:
 
     def _build_in_memory(self, configs: Dict[str, Any], global_settings: Dict[str, Any]) -> Dict:
         """Build the canonical in-memory dict from DAL data."""
+        configs = copy.deepcopy(configs or {})
+        for pattern_data in configs.values():
+            if isinstance(pattern_data, dict) and "regex" not in pattern_data:
+                pattern_data["regex"] = [
+                    p.get("pattern")
+                    for p in pattern_data.get("regex_patterns", [])
+                    if isinstance(p, dict) and p.get("pattern")
+                ]
         return {
             'patterns': configs,
             'global_settings': global_settings,
@@ -460,6 +479,19 @@ class RegexChannelMatcher:
         Falls back to the legacy ``channel_regex_config`` SystemSetting JSON
         blob if the new tables are empty, migrating the data transparently.
         """
+        if self._config_file is not None and self._file_backed_compat and not self._config_file.exists():
+            empty = {
+                "patterns": {},
+                "global_settings": {
+                    "case_sensitive": False,
+                    "require_exact_match": False,
+                },
+            }
+            self._config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._config_file, 'w', encoding='utf-8') as fh:
+                json.dump(empty, fh, indent=2)
+            return empty
+
         from apps.database.manager import get_db_manager
         db = get_db_manager()
 
@@ -539,6 +571,10 @@ class RegexChannelMatcher:
         if global_settings:
             legacy_payload['global_settings'] = global_settings
         db.set_system_setting('channel_regex_config', legacy_payload)
+        if self._config_file is not None:
+            self._config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self._config_file, 'w', encoding='utf-8') as fh:
+                json.dump(legacy_payload, fh, indent=2)
         # Keep in-memory cache in sync
         self.channel_patterns = self._build_in_memory(
             db.get_all_channel_regex_configs(), global_settings
@@ -770,8 +806,13 @@ class RegexChannelMatcher:
                 'name': name,
                 'enabled': enabled,
                 'match_by_tvg_id': match_by_tvg_id,
+                'regex': [p['pattern'] for p in normalized_patterns],
                 'regex_patterns': normalized_patterns,
             }
+            if self._config_file is not None:
+                self._config_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(self._config_file, 'w', encoding='utf-8') as fh:
+                    json.dump(self.channel_patterns, fh, indent=2)
         self._clear_runtime_caches()
         
         if silent:
@@ -1341,20 +1382,6 @@ class AutomatedStreamManager:
     
     def _load_config(self) -> Dict:
         """Load automation configuration from SQL."""
-        from apps.database.connection import get_session
-        from apps.database.models import SystemSetting
-        try:
-            session = get_session()
-            setting = session.query(SystemSetting).filter(SystemSetting.key == 'automation_config').first()
-            if setting and setting.value:
-                return setting.value
-        except Exception as e:
-            logger.error(f"Failed to load automation config: {e}")
-        finally:
-            try: session.close()
-            except: pass
-        
-        # Default configuration
         default_config = {
             "playlist_update_interval_minutes": 5,
             "playlist_update_cron": "",
@@ -1368,12 +1395,40 @@ class AutomatedStreamManager:
             "validate_existing_streams": False,
             "verify_stream_assignments": False
         }
+
+        if self.config_file.exists():
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as fh:
+                    file_config = json.load(fh) or {}
+                return {**default_config, **file_config}
+            except Exception as exc:
+                logger.warning(f"Could not load automation config file {self.config_file}: {exc}")
+
+        from apps.database.connection import get_session
+        from apps.database.models import SystemSetting
+        try:
+            session = get_session()
+            setting = session.query(SystemSetting).filter(SystemSetting.key == 'automation_config').first()
+            if setting and setting.value:
+                return setting.value
+        except Exception as e:
+            logger.error(f"Failed to load automation config: {e}")
+        finally:
+            try: session.close()
+            except: pass
         
         self._save_config(default_config)
         return default_config
     
     def _save_config(self, config: Dict):
         """Save configuration to SQL."""
+        try:
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_file, 'w', encoding='utf-8') as fh:
+                json.dump(config, fh, indent=2)
+        except Exception as file_exc:
+            logger.debug(f"Could not write automation config file {self.config_file}: {file_exc}")
+
         from apps.database.connection import get_session
         from apps.database.models import SystemSetting
         try:
@@ -4347,6 +4402,7 @@ class AutomatedStreamManager:
             
         logger.info("Starting automation service...")
         self.automation_running = True
+        self.running = True
         self.automation_start_time = datetime.now()
         self.automation_wake_event.clear()
         self.automation_thread = threading.Thread(target=self._automation_loop, daemon=True)
@@ -4357,6 +4413,7 @@ class AutomatedStreamManager:
         """Stop the automation background thread."""
         logger.info("Stopping automation service...")
         self.automation_running = False
+        self.running = False
         self.automation_wake_event.set()  # Wake up thread to exit
         
         if self.automation_thread:

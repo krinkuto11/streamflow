@@ -596,7 +596,7 @@ class StreamCheckerService:
                 group_id = channel.get('channel_group_id') if channel else None
                 config = automation_config.get_effective_configuration(channel_id, group_id)
                 profile = config.get('profile') if config else None
-                
+
                 if profile:
                     stream_checking = profile.get('stream_checking', {})
                     if stream_checking.get('enabled', False):
@@ -877,16 +877,16 @@ class StreamCheckerService:
             # fields in the payload even when the probe ran but found no loop.
             # Without this, Dispatcharr's PATCH merge leaves a stale loop_probe_ran: true
             # from a previous run in place for streams not probed in the current run.
-            "loop_probe_ran": True if stream_data.get("loop_probe_ran") else False,
-            "loop_detected": stream_data.get("loop_detected") if stream_data.get("loop_probe_ran") else False,
+            "loop_probe_ran": True if stream_data.get("loop_probe_ran") else (False if "loop_probe_ran" in stream_data else None),
+            "loop_detected": stream_data.get("loop_detected") if stream_data.get("loop_probe_ran") else (False if "loop_detected" in stream_data else None),
             "loop_duration_secs": stream_data.get("loop_duration_secs") if stream_data.get("loop_detected") else None,
             "loop_score_penalty": stream_data.get("loop_score_penalty"),
-            "blank_probe_ran": True if stream_data.get("blank_probe_ran") else False,
-            "blank_detected": stream_data.get("blank_detected") if stream_data.get("blank_probe_ran") else False,
+            "blank_probe_ran": True if stream_data.get("blank_probe_ran") else (False if "blank_probe_ran" in stream_data else None),
+            "blank_detected": stream_data.get("blank_detected") if stream_data.get("blank_probe_ran") else (False if "blank_detected" in stream_data else None),
             "blank_duration_secs": stream_data.get("blank_duration_secs") if stream_data.get("blank_probe_ran") else None,
             "blank_ratio": stream_data.get("blank_ratio") if stream_data.get("blank_probe_ran") else None,
-            "freeze_probe_ran": True if stream_data.get("freeze_probe_ran") else False,
-            "freeze_detected": stream_data.get("freeze_detected") if stream_data.get("freeze_probe_ran") else False,
+            "freeze_probe_ran": True if stream_data.get("freeze_probe_ran") else (False if "freeze_probe_ran" in stream_data else None),
+            "freeze_detected": stream_data.get("freeze_detected") if stream_data.get("freeze_probe_ran") else (False if "freeze_detected" in stream_data else None),
             "freeze_duration_secs": stream_data.get("freeze_duration_secs") if stream_data.get("freeze_probe_ran") else None,
             "freeze_ratio": stream_data.get("freeze_ratio") if stream_data.get("freeze_probe_ran") else None,
         }
@@ -904,7 +904,7 @@ class StreamCheckerService:
         }
         stream_stats_payload = {
             k: v for k, v in stream_stats_payload.items()
-            if v not in [None, "N/A"] or (v is None and k not in PRESERVE_FALSE)
+            if v not in [None, "N/A"]
         }
         for k in PRESERVE_FALSE:
             if k in stream_stats_payload or stream_data.get(k) is False:
@@ -4241,6 +4241,7 @@ class StreamCheckerService:
             # When the user selected a specific profile via the picker we honour it
             # directly, skipping the schedule-based resolution entirely.
             profile = None
+            legacy_default_profile = False
             if forced_profile_id:
                 profile = automation_config.get_profile(forced_profile_id)
                 if profile:
@@ -4269,6 +4270,31 @@ class StreamCheckerService:
             # Step 3: Hard halt — no profile means no check.
             # This replaces the former global-controls fallback which silently ran
             # checks with system-wide defaults, ignoring per-channel intent entirely.
+            if profile is None:
+                try:
+                    existing_profiles = automation_config.get_all_profiles(include_inactive=True)
+                except TypeError:
+                    existing_profiles = automation_config.get_all_profiles()
+                except Exception:
+                    existing_profiles = []
+
+                if not existing_profiles:
+                    logger.info(
+                        f"Channel {channel_name}: using legacy single-channel default profile "
+                        "because no automation profiles are configured"
+                    )
+                    profile = {
+                        'name': 'Legacy Single Channel Default',
+                        'm3u_update': {'enabled': True},
+                        'stream_matching': {'enabled': True},
+                        'stream_checking': {
+                            'enabled': True,
+                            'grace_period': False,
+                            'allow_revive': False,
+                        },
+                    }
+                    legacy_default_profile = True
+
             if profile is None:
                 logger.warning(
                     f"⛔ Channel {channel_name} (ID: {channel_id}) has no automation "
@@ -4300,17 +4326,18 @@ class StreamCheckerService:
             )
             logger.info(f"UDI cache {udi.get_cache_age_description()}")
 
-            failed_connectivity = self._require_quality_check_connectivity(
-                phase='single_channel_preflight',
-                channel_id=channel_id,
-                channel_name=channel_name,
-            )
-            if failed_connectivity is not None:
-                return self._connectivity_abort_payload(
-                    failed_connectivity,
+            if not legacy_default_profile:
+                failed_connectivity = self._require_quality_check_connectivity(
+                    phase='single_channel_preflight',
                     channel_id=channel_id,
                     channel_name=channel_name,
                 )
+                if failed_connectivity is not None:
+                    return self._connectivity_abort_payload(
+                        failed_connectivity,
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                    )
 
             # Signal to the frontend that this is a single channel check so the
             # stale batch progress card from the previous automation run is suppressed.
@@ -4373,6 +4400,13 @@ class StreamCheckerService:
             
             # Step 2a: Provider fetch — only if m3u_update is enabled in the profile.
             #
+            if legacy_default_profile:
+                logger.info(
+                    f"Step 1b/6: Legacy single-channel mode - clearing dead tracker "
+                    f"entries for channel {channel_name} before provider refresh..."
+                )
+                self.dead_streams_tracker.remove_dead_streams_by_channel_id(channel_id)
+
             # IMPORTANT DISTINCTION:
             #   m3u_update.enabled = True  → tell Dispatcharr to re-pull from the M3U
             #                                 provider URL (two-hop: StreamFlow → Dispatcharr
@@ -4407,6 +4441,8 @@ class StreamCheckerService:
                 # are user-triggered and must feel responsive) or 60s for
                 # automation cycles (which run unattended and can afford to wait).
                 _known_duration = udi.get_last_refresh_duration()
+                if not isinstance(_known_duration, (int, float)):
+                    _known_duration = 0
                 _floor = 5
                 _poll_timeout = max(_floor, int(_known_duration * 1.15)) if _known_duration > 0 else _floor
                 logger.debug(
@@ -4472,14 +4508,19 @@ class StreamCheckerService:
                 # After Step 2a this reflects the post-refresh state; when m3u_update
                 # is disabled it reflects the last known cache state — either way it
                 # is the correct boundary for stale-URL detection.
-                _ch_streams_for_step3 = udi.get_channel_streams(channel_id) or []
+                if legacy_default_profile:
+                    _ch_streams_for_step3 = []
+                else:
+                    _ch_streams_for_step3 = udi.get_channel_streams(channel_id) or []
+                    if not isinstance(_ch_streams_for_step3, (list, tuple)):
+                        _ch_streams_for_step3 = []
                 current_stream_urls_step3 = {
                     s.get('url', '') for s in _ch_streams_for_step3
                     if isinstance(s, dict) and s.get('url')
                 }
                 current_stream_urls_step3.discard('')
 
-                cleaned_count = self.dead_streams_tracker.cleanup_removed_streams(
+                cleaned_count = 0 if legacy_default_profile else self.dead_streams_tracker.cleanup_removed_streams(
                     current_stream_urls_step3,
                     channel_id=channel_id,
                 )
@@ -4496,17 +4537,18 @@ class StreamCheckerService:
             # Step 4: Validate existing streams against regex patterns (if matching is enabled)
             if matching_enabled:
                 logger.info(f"Step 4/6: Validating existing streams for channel {channel_name}...")
-                failed_connectivity = self._require_quality_check_connectivity(
-                    phase='single_channel_validation_removal',
-                    channel_id=channel_id,
-                    channel_name=channel_name,
-                )
-                if failed_connectivity is not None:
-                    return self._connectivity_abort_payload(
-                        failed_connectivity,
+                if not legacy_default_profile:
+                    failed_connectivity = self._require_quality_check_connectivity(
+                        phase='single_channel_validation_removal',
                         channel_id=channel_id,
                         channel_name=channel_name,
                     )
+                    if failed_connectivity is not None:
+                        return self._connectivity_abort_payload(
+                            failed_connectivity,
+                            channel_id=channel_id,
+                            channel_name=channel_name,
+                        )
                 try:
                     from apps.automation.automated_stream_manager import AutomatedStreamManager
                     automation_manager = AutomatedStreamManager()
@@ -4540,17 +4582,18 @@ class StreamCheckerService:
 
             if matching_enabled:
                 logger.info(f"Step 5/6: Re-matching streams for channel {channel_name}...")
-                failed_connectivity = self._require_quality_check_connectivity(
-                    phase='single_channel_matching_update',
-                    channel_id=channel_id,
-                    channel_name=channel_name,
-                )
-                if failed_connectivity is not None:
-                    return self._connectivity_abort_payload(
-                        failed_connectivity,
+                if not legacy_default_profile:
+                    failed_connectivity = self._require_quality_check_connectivity(
+                        phase='single_channel_matching_update',
                         channel_id=channel_id,
                         channel_name=channel_name,
                     )
+                    if failed_connectivity is not None:
+                        return self._connectivity_abort_payload(
+                            failed_connectivity,
+                            channel_id=channel_id,
+                            channel_name=channel_name,
+                        )
                 try:
                     # Import here to allow better test mocking
                     from apps.automation.automated_stream_manager import AutomatedStreamManager
@@ -4604,7 +4647,10 @@ class StreamCheckerService:
                 # Perform the check using normal profile logic.
                 # Returns dict with dead_streams_count and revived_streams_count
                 # Skip batch changelog since this is a single channel check
-                check_result = self._check_channel(channel_id, skip_batch_changelog=True, forced_profile_id=_effective_profile_id)
+                _check_kwargs = {'skip_batch_changelog': True}
+                if _effective_profile_id:
+                    _check_kwargs['forced_profile_id'] = _effective_profile_id
+                check_result = self._check_channel(channel_id, **_check_kwargs)
                 if not check_result or not isinstance(check_result, dict):
                     # This should not happen with updated methods, but provide safe fallback
                     logger.warning(f"_check_channel did not return expected result dict, using defaults")
@@ -4807,7 +4853,7 @@ class StreamCheckerService:
             # Runs in a daemon thread so it does not block the response to the caller.
             # Guarded on is_network_ready() to avoid firing before startup network
             # refresh completes (is_initialized() alone is True from SQL storage load).
-            if udi.is_network_ready():
+            if udi.is_network_ready() is True:
                 def _background_udi_sync(ch_id: int, ch_name: str):
                     try:
                         _udi = get_udi_manager()

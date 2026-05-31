@@ -294,7 +294,7 @@ def update_stream_checker_config_response(
                     service.start()
                     logger.info("Stream checker service auto-started after config update")
 
-                if regular_automation_enabled and not manager.automation_running:
+                if not manager.automation_running:
                     manager.start_automation()
                     logger.info("Automation service auto-started after config update")
 
