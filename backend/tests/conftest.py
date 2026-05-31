@@ -6,6 +6,8 @@ and removes the need for a real on-disk DB file during the test suite.
 """
 import builtins
 import importlib
+import os
+from pathlib import Path
 import sys
 
 import pytest
@@ -61,6 +63,9 @@ def clean_test_db(monkeypatch):
     from apps.database.connection import Base
     import apps.database.models  # noqa: F401 – registers all models with Base
     Base.metadata.create_all(test_engine)
+
+    channel_settings_file = Path(os.environ.get('CONFIG_DIR', '/app/data')) / 'channel_settings.json'
+    channel_settings_file.unlink(missing_ok=True)
 
     yield test_engine
 
