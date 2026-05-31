@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from copy import deepcopy
@@ -782,16 +783,26 @@ class TeamarrPreflightService:
         return get_automation_config_manager()
 
     @staticmethod
+    def _automation_status_from_module(module: Any) -> Optional[Dict[str, Any]]:
+        manager = getattr(module, "automation_manager", None) if module is not None else None
+        getter = getattr(manager, "get_run_status", None)
+        if callable(getter):
+            return getter() or {}
+        return None
+
+    @staticmethod
     def _default_automation_status_provider() -> Dict[str, Any]:
         try:
+            for module_name in ("apps.api.web_api", "web_api", "__main__"):
+                status = TeamarrPreflightService._automation_status_from_module(sys.modules.get(module_name))
+                if status is not None:
+                    return status
+
             from apps.api import web_api
 
-            manager = getattr(web_api, "automation_manager", None)
-            if manager is None:
-                return {}
-            getter = getattr(manager, "get_run_status", None)
-            if callable(getter):
-                return getter() or {}
+            status = TeamarrPreflightService._automation_status_from_module(web_api)
+            if status is not None:
+                return status
         except Exception as exc:
             logger.debug("Could not read global automation run status: %s", exc)
         return {}

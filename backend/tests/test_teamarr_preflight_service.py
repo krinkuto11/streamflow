@@ -307,6 +307,33 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         upcoming = service.get_status()["upcoming_events"]
         self.assertEqual(upcoming[0]["state"], "due")
 
+    def test_default_automation_status_provider_uses_running_main_module(self):
+        class FakeAutomationManager:
+            def get_run_status(self):
+                return {"active": True, "stage": "stream_matching"}
+
+        main_module = sys.modules["__main__"]
+        sentinel = object()
+        previous_main_manager = getattr(main_module, "automation_manager", sentinel)
+        previous_api_module = sys.modules.pop("apps.api.web_api", None)
+        previous_web_module = sys.modules.pop("web_api", None)
+
+        try:
+            main_module.automation_manager = FakeAutomationManager()
+            status = TeamarrPreflightService._default_automation_status_provider()
+        finally:
+            if previous_main_manager is sentinel:
+                delattr(main_module, "automation_manager")
+            else:
+                main_module.automation_manager = previous_main_manager
+            if previous_api_module is not None:
+                sys.modules["apps.api.web_api"] = previous_api_module
+            if previous_web_module is not None:
+                sys.modules["web_api"] = previous_web_module
+
+        self.assertTrue(status["active"])
+        self.assertEqual(status["stage"], "stream_matching")
+
     def test_include_filters_keep_non_matching_sports_out_of_due_set(self):
         service, _, _ = self.make_service([make_event(sport="basketball")])
         service.update_config({"include_sports": ["soccer"]})
