@@ -81,6 +81,7 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Logs hardware acceleration readiness at startup.
 - Shows hardware acceleration runtime status.
 - Covers NVIDIA/GPU runtime visibility in a self-hosted validation stack; validation observed CUDA mode with CPU fallback enabled and the NVIDIA runtime/GPU visible.
+- Sanitizes the hardware-status API response so host-specific diagnostics, GPU model names, and raw exception details stay out of client-visible JSON.
 - Adds regression coverage in `backend/tests/test_ffmpeg_hardware_acceleration.py`.
 
 ### Changelog, Tests, And Docs
