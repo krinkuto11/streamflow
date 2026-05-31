@@ -27,7 +27,7 @@ import time
 from collections import defaultdict, deque, Counter
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Any
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import queue
 
 from apps.core.api_utils import (
@@ -3997,7 +3997,13 @@ class StreamCheckerService:
 
         return self.check_queue.add_channels(channel_ids, priority)
     
-    def check_channels_synchronously(self, channel_ids: List[int], force_check: bool = False, target_stream_ids: Optional[Dict[int, List[str]]] = None) -> Dict[int, Dict]:
+    def check_channels_synchronously(
+        self,
+        channel_ids: List[int],
+        force_check: bool = False,
+        target_stream_ids: Optional[Dict[int, List[str]]] = None,
+        progress_callback: Optional[Callable[[int, int, Dict], None]] = None,
+    ) -> Dict[int, Dict]:
         """Check multiple channels synchronously and return results.
         
         Using this method Bypasses the queue and worker/scheduler entirely.
@@ -4011,6 +4017,8 @@ class StreamCheckerService:
                                If provided, only these specific streams will be evaluated.
                                Any stream not in the list will be skipped and its existing
                                stats cached. Used by automation for newly matched streams.
+            progress_callback: Optional callback invoked after each channel completes
+                               with (completed_count, total_channels, channel_result).
             
         Returns:
             Dict mapping channel_id to result dict (containing dead/revived streams)
@@ -4115,6 +4123,17 @@ class StreamCheckerService:
                         if self.sync_batch_state.get('generation') == sync_generation and self.sync_batch_state.get('active'):
                             self.sync_batch_state['failed'] += 1
                 finally:
+                    if progress_callback is not None:
+                        try:
+                            with self.lock:
+                                completed_count = (
+                                    int(self.sync_batch_state.get('completed', 0) or 0)
+                                    + int(self.sync_batch_state.get('failed', 0) or 0)
+                                )
+                            progress_callback(completed_count, len(channel_ids), results.get(channel_id, {}))
+                        except Exception as progress_error:
+                            logger.debug("Synchronous channel progress callback failed: %s", progress_error)
+
                     duration_sec = (datetime.now() - channel_start_time).total_seconds()
                     if stream_count > 0:
                         time_per_stream = duration_sec / stream_count

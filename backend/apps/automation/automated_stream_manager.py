@@ -3716,6 +3716,20 @@ class AutomatedStreamManager:
 
                         # Run checks synchronously and collect results
                         if channels_to_check_sync:
+                            def _quality_progress_callback(completed_count, total_count, channel_result):
+                                channel_name = ""
+                                if isinstance(channel_result, dict):
+                                    channel_name = channel_result.get("channel_name") or ""
+                                message = f"Checked {completed_count}/{total_count} channel(s)"
+                                if channel_name:
+                                    message = f"{message}: {channel_name}"
+                                self._update_run_progress(
+                                    stage_key="quality_checking",
+                                    current=completed_count,
+                                    total=total_count,
+                                    message=message,
+                                )
+
                             self._update_run_status(
                                 stage="quality_checking",
                                 stage_label="Quality Checking",
@@ -3730,7 +3744,8 @@ class AutomatedStreamManager:
                             check_results = stream_checker.check_channels_synchronously(
                                 channel_ids=channels_to_check_sync,
                                 force_check=forced,
-                                target_stream_ids=target_stream_ids
+                                target_stream_ids=target_stream_ids,
+                                progress_callback=_quality_progress_callback,
                             )
                             self._update_run_progress(
                                 stage_key="quality_checking",
