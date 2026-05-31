@@ -88,6 +88,7 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 
 - Adds detailed operations guide: `docs/operations-guide.md`.
 - Adds dashboard run-count and run-display helpers with frontend tests.
+- Updates audited frontend dependencies so `npm audit --audit-level=moderate` reports zero vulnerabilities.
 - Adds backend tests for Teamarr preflight, stream checker queue lifecycle, progress observability, hardware acceleration, viewer activity, Dispatcharr stream switching, dead-stream handling, and connectivity guard behavior.
 - Cleans up mocks and edge cases in single-channel profile flag tests.
 
