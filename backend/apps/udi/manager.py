@@ -522,7 +522,30 @@ class UDIManager:
             List of channel dictionaries.
         """
         self._ensure_initialized()
-        return list(self._channels_cache)
+        result: List[Dict[str, Any]] = []
+        positions_by_id: Dict[Any, int] = {}
+        duplicate_count = 0
+
+        for channel in self._channels_cache:
+            channel_id = channel.get('id')
+            if channel_id is None:
+                result.append(channel)
+                continue
+
+            if channel_id in positions_by_id:
+                result[positions_by_id[channel_id]] = channel
+                duplicate_count += 1
+            else:
+                positions_by_id[channel_id] = len(result)
+                result.append(channel)
+
+        if duplicate_count:
+            logger.warning(
+                "UDI channels cache deduplicated %s duplicate channel entries",
+                duplicate_count,
+            )
+
+        return result
     
     def get_channel_by_id(self, channel_id: int, fetch_if_missing: bool = True) -> Optional[Dict[str, Any]]:
         """Get a specific channel by ID.

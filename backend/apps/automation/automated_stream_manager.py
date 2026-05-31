@@ -1711,6 +1711,11 @@ class AutomatedStreamManager:
             config = get_db_manager().get_system_setting('stream_checker_config', {})
             if config:
                 return config.get('dead_stream_handling', {}).get('enabled', True)
+            legacy_config_file = Path(os.environ.get('CONFIG_DIR', str(CONFIG_DIR))) / 'stream_checker_config.json'
+            if legacy_config_file.exists():
+                with open(legacy_config_file, 'r', encoding='utf-8') as f:
+                    legacy_config = json.load(f)
+                return legacy_config.get('dead_stream_handling', {}).get('enabled', True)
             return True
         except Exception as e:
             logger.error(f"Error reading stream checker config from DB: {e}")

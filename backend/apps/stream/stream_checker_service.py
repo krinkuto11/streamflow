@@ -643,8 +643,7 @@ class StreamCheckerService:
             }
         
         # Use centralized utility for the check
-        is_dead, reason = utils_is_stream_dead(stream_data, check_config)
-        return is_dead, reason
+        return utils_is_stream_dead(stream_data, check_config)
     
     def _calculate_channel_averages(self, analyzed_streams: List[Dict], dead_stream_ids: set) -> Dict[str, str]:
         """Calculate channel-level average statistics from analyzed streams.

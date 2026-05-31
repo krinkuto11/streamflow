@@ -25,3 +25,10 @@ class M3UPriorityConfig:
             return False
         self._config["global_priority_mode"] = mode
         return True
+
+
+_m3u_priority_config = M3UPriorityConfig()
+
+
+def get_m3u_priority_config() -> M3UPriorityConfig:
+    return _m3u_priority_config
