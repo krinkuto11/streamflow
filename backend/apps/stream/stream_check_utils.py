@@ -211,25 +211,25 @@ def collect_hardware_acceleration_diagnostics(
             text=True,
         )
 
-    if hwaccel['enabled']:
-        try:
-            ffmpeg_result = _run(['ffmpeg', '-hide_banner', '-hwaccels'], 5.0)
-            diagnostics['ffmpeg_available'] = ffmpeg_result.returncode == 0
-            diagnostics['ffmpeg_hwaccels'] = _parse_ffmpeg_hwaccels(
-                f"{ffmpeg_result.stdout or ''}\n{ffmpeg_result.stderr or ''}"
-            )
+    try:
+        ffmpeg_result = _run(['ffmpeg', '-hide_banner', '-hwaccels'], 5.0)
+        diagnostics['ffmpeg_available'] = ffmpeg_result.returncode == 0
+        diagnostics['ffmpeg_hwaccels'] = _parse_ffmpeg_hwaccels(
+            f"{ffmpeg_result.stdout or ''}\n{ffmpeg_result.stderr or ''}"
+        )
+        if hwaccel['enabled']:
             mode = hwaccel['mode']
             diagnostics['mode_supported'] = (
                 mode == 'auto' and bool(diagnostics['ffmpeg_hwaccels'])
             ) or mode in diagnostics['ffmpeg_hwaccels']
-            if ffmpeg_result.returncode != 0:
-                diagnostics['ffmpeg_error'] = (ffmpeg_result.stderr or ffmpeg_result.stdout or '').strip()[:300]
-        except FileNotFoundError:
-            diagnostics['ffmpeg_error'] = 'ffmpeg executable not found'
-        except subprocess.TimeoutExpired:
-            diagnostics['ffmpeg_error'] = 'ffmpeg -hwaccels timed out'
-        except Exception as exc:
-            diagnostics['ffmpeg_error'] = str(exc)[:300]
+        if ffmpeg_result.returncode != 0:
+            diagnostics['ffmpeg_error'] = (ffmpeg_result.stderr or ffmpeg_result.stdout or '').strip()[:300]
+    except FileNotFoundError:
+        diagnostics['ffmpeg_error'] = 'ffmpeg executable not found'
+    except subprocess.TimeoutExpired:
+        diagnostics['ffmpeg_error'] = 'ffmpeg -hwaccels timed out'
+    except Exception as exc:
+        diagnostics['ffmpeg_error'] = str(exc)[:300]
 
     should_check_nvidia = (
         (hwaccel['enabled'] and hwaccel['mode'] in {'auto', 'cuda'})

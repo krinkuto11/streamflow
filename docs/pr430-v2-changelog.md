@@ -84,6 +84,7 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Supports CUDA mode with CPU fallback.
 - Logs hardware acceleration readiness at startup.
 - Shows hardware acceleration runtime status.
+- Reports ffmpeg availability even when hardware acceleration is disabled, so CPU-only deployments do not look like ffmpeg is missing.
 - Covers NVIDIA/GPU runtime visibility in a self-hosted validation stack; validation observed CUDA mode with CPU fallback enabled and the NVIDIA runtime/GPU visible.
 - Sanitizes the hardware-status API response so host-specific diagnostics, GPU model names, and raw exception details stay out of client-visible JSON.
 - Adds regression coverage in `backend/tests/test_ffmpeg_hardware_acceleration.py`.
@@ -193,7 +194,7 @@ Security validation:
 - GitHub Advanced Security / CodeQL comment for information exposure in `backend/apps/api/stream_checker_handlers.py` was fixed by sanitizing unexpected single-channel check failures.
 - The original CodeQL review thread is now resolved/outdated on PR #430 after commit `15b5bc8`.
 - Follow-up local validation after commit `c576cab`: `backend/tests/test_shadow_blank_monitor_service.py` passed (`17 passed`), Teamarr/single-channel targeted tests passed (`12 passed`), full backend suite passed (`992 passed, 2 skipped`), frontend tests passed (`17 passed`), and frontend production build passed.
-- Follow-up local validation after the dashboard live-refresh and abort-state fixes: run-observability/queue targeted tests passed (`21 passed`), full backend suite passed (`994 passed, 2 skipped`), frontend tests passed (`19 passed`), and frontend production build passed.
+- Follow-up local validation after the dashboard live-refresh, abort-state, and CPU-only hardware-status fixes: run-observability/queue/hardware targeted tests passed (`20 passed` for the latest hardware/abort target set), full backend suite passed (`994 passed, 2 skipped`), frontend tests passed (`19 passed`), and frontend production build passed.
 
 ## Self-Hosted Runtime Validation
 
@@ -259,4 +260,5 @@ Current clean-install gate progress:
 - GPU runtime status reported CUDA mode available with CPU fallback enabled.
 - Shadow Monitor restored with `skip_during_quality_check=false`.
 - Real Full Check with GPU passthrough reached the quality-checking phase with no observed failures before it was intentionally stopped for CPU-only/no-GPU fresh-install validation.
-- CPU-only/no-GPU fresh install and Full Check are still pending.
+- A restored no-GPU run with the previous CUDA setting verified CPU fallback and exposed a hardware-status reporting issue; controlled abort now finalized as `aborted`, not `failed`.
+- CPU-only/no-GPU fresh install and Full Check will be repeated on the post-fix image before this PR is marked ready.
