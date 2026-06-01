@@ -41,6 +41,7 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Uses live timing for active dashboard stages.
 - Polls live automation and stream-checker status every second while avoiding overlapping status requests, so dashboard cards update without a browser reload.
 - Formats sub-second API p95/p99 values as milliseconds instead of rounding them to `0s`.
+- Finalizes controlled automation aborts as `aborted` instead of `failed`, and shows the aborted state explicitly in the dashboard.
 - Shows freeze counts in dashboard run summaries.
 - Shows manual stream-checker progress over skipped automation status.
 - Clears stale stream-checker progress when the checker is idle.
@@ -169,7 +170,7 @@ Frontend tests:
 npm.cmd --prefix frontend run test:ci -- --reporter=dot
 ```
 
-Result: `17 passed`.
+Result: `19 passed`.
 
 Frontend production build:
 
@@ -185,13 +186,14 @@ Full backend pytest suite:
 python -m pytest backend/tests -q --tb=short --disable-warnings
 ```
 
-Result: `992 passed, 2 skipped`.
+Result: `994 passed, 2 skipped`.
 
 Security validation:
 
 - GitHub Advanced Security / CodeQL comment for information exposure in `backend/apps/api/stream_checker_handlers.py` was fixed by sanitizing unexpected single-channel check failures.
 - The original CodeQL review thread is now resolved/outdated on PR #430 after commit `15b5bc8`.
 - Follow-up local validation after commit `c576cab`: `backend/tests/test_shadow_blank_monitor_service.py` passed (`17 passed`), Teamarr/single-channel targeted tests passed (`12 passed`), full backend suite passed (`992 passed, 2 skipped`), frontend tests passed (`17 passed`), and frontend production build passed.
+- Follow-up local validation after the dashboard live-refresh and abort-state fixes: run-observability/queue targeted tests passed (`21 passed`), full backend suite passed (`994 passed, 2 skipped`), frontend tests passed (`19 passed`), and frontend production build passed.
 
 ## Self-Hosted Runtime Validation
 
@@ -256,5 +258,5 @@ Current clean-install gate progress:
 - Startup UDI refresh completed with 213 channels, 217,429 streams, and 6 M3U accounts.
 - GPU runtime status reported CUDA mode available with CPU fallback enabled.
 - Shadow Monitor restored with `skip_during_quality_check=false`.
-- Real Full Check with GPU passthrough is running on period `Full Check`.
-- Final Full Check counts and duration will be added after the run reaches a terminal state.
+- Real Full Check with GPU passthrough reached the quality-checking phase with no observed failures before it was intentionally stopped for CPU-only/no-GPU fresh-install validation.
+- CPU-only/no-GPU fresh install and Full Check are still pending.

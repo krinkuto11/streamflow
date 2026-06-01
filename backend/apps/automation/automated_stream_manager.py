@@ -1842,6 +1842,42 @@ class AutomatedStreamManager:
                 if stage_item["key"] == active_stage and stage_item["status"] == "running":
                     stage_item["status"] = "completed" if final_state == "completed" else final_state
 
+    def _finish_cycle_outcome(
+        self,
+        *,
+        refresh_success: bool,
+        cycle_abort_message: Optional[str],
+        cycle_failed_message: Optional[str] = None,
+    ) -> str:
+        if refresh_success and not cycle_abort_message and not cycle_failed_message:
+            self._finish_run_status(
+                state="completed",
+                stage="completed",
+                stage_label="Completed",
+                message="Automation cycle completed",
+            )
+            return "completed"
+
+        if cycle_abort_message:
+            self._finish_run_status(
+                state="aborted",
+                stage="aborted",
+                stage_label="Aborted",
+                message=cycle_abort_message,
+                error=cycle_abort_message,
+            )
+            return "aborted"
+
+        failed_message = cycle_failed_message or "Automation cycle stopped before matching completed"
+        self._finish_run_status(
+            state="failed",
+            stage="failed",
+            stage_label="Failed",
+            message=failed_message,
+            error=failed_message,
+        )
+        return "failed"
+
     @staticmethod
     def _summarize_quality_check_results(check_results, expected_count: int) -> Dict[str, Any]:
         checked_count = len(check_results or {})
@@ -3714,6 +3750,7 @@ class AutomatedStreamManager:
             validation_details = []
             assignment_details = []
             cycle_abort_message = None
+            cycle_failed_message = None
 
             # Deduplicate while preserving order (channels may appear in multiple active period groups).
             channels_to_quality_check = list(dict.fromkeys(channels_to_quality_check))
@@ -3822,6 +3859,7 @@ class AutomatedStreamManager:
                         "Automation safety gate triggered. Skipping validation and assignment "
                         "to preserve existing channel streams."
                     )
+                    cycle_abort_message = "Automation safety gate stopped matching after playlist refresh"
                     refresh_success = False
 
                 self._update_run_status(
@@ -3852,6 +3890,7 @@ class AutomatedStreamManager:
                                 "Skipping validation, assignment, and quality checks to preserve channel streams: %s",
                                 failed_connectivity.message,
                             )
+                            cycle_abort_message = failed_connectivity.message
                             refresh_success = False
                     except Exception as guard_err:
                         logger.error(
@@ -3859,6 +3898,7 @@ class AutomatedStreamManager:
                             "Skipping validation, assignment, and quality checks: %s",
                             guard_err,
                         )
+                        cycle_abort_message = str(guard_err)
                         refresh_success = False
 
             if refresh_success:
@@ -4080,11 +4120,11 @@ class AutomatedStreamManager:
                         )
                     except Exception as e:
                         logger.error(f"✗ Failed to run quality checks: {e}")
-                        cycle_abort_message = f"Quality check stage failed: {e}"
+                        cycle_failed_message = f"Quality check stage failed: {e}"
                         check_results = {}
                         self._update_run_status(
                             durations={"quality_check_seconds": time.time() - quality_stage_started},
-                            error=cycle_abort_message,
+                            error=cycle_failed_message,
                             message="Quality check stage failed",
                         )
             
@@ -4329,26 +4369,18 @@ class AutomatedStreamManager:
                 },
                 durations={"total_cycle_seconds": duration_sec},
             )
-            if refresh_success and not cycle_abort_message:
-                self._finish_run_status(
-                    state="completed",
-                    stage="completed",
-                    stage_label="Completed",
-                    message="Automation cycle completed",
-                )
-            else:
-                self._finish_run_status(
-                    state="failed",
-                    stage="aborted",
-                    stage_label="Aborted",
-                    message=cycle_abort_message or "Automation cycle stopped before matching completed",
-                    error=cycle_abort_message,
-                )
+            cycle_outcome = self._finish_cycle_outcome(
+                refresh_success=refresh_success,
+                cycle_abort_message=cycle_abort_message,
+                cycle_failed_message=cycle_failed_message,
+            )
             
-            if refresh_success and not cycle_abort_message:
+            if cycle_outcome == "completed":
                 logger.info("Automation cycle completed")
-            else:
+            elif cycle_outcome == "aborted":
                 logger.warning("Automation cycle aborted")
+            else:
+                logger.warning("Automation cycle failed")
             _cycle_did_work = True
 
         except Exception as exc:

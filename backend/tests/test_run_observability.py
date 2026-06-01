@@ -111,6 +111,41 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertGreaterEqual(status["stage_duration_seconds"], 44)
         self.assertNotEqual(status["updated_at"], manager._run_status["updated_at"])
 
+    def test_cycle_abort_finishes_as_aborted_not_failed(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._update_run_status(stage="quality_checking", stage_label="Quality Checking")
+        outcome = manager._finish_cycle_outcome(
+            refresh_success=True,
+            cycle_abort_message="Quality check stage stopped before completion (0/212 channels checked)",
+        )
+
+        status = manager.get_run_status()
+        self.assertEqual(outcome, "aborted")
+        self.assertEqual(status["state"], "aborted")
+        self.assertEqual(status["stage"], "aborted")
+        self.assertEqual(status["stage_label"], "Aborted")
+        self.assertEqual(status["last_error"], "Quality check stage stopped before completion (0/212 channels checked)")
+
+    def test_cycle_quality_exception_finishes_as_failed(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._update_run_status(stage="quality_checking", stage_label="Quality Checking")
+        outcome = manager._finish_cycle_outcome(
+            refresh_success=True,
+            cycle_abort_message=None,
+            cycle_failed_message="Quality check stage failed: boom",
+        )
+
+        status = manager.get_run_status()
+        self.assertEqual(outcome, "failed")
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(status["stage"], "failed")
+        self.assertEqual(status["stage_label"], "Failed")
+        self.assertEqual(status["last_error"], "Quality check stage failed: boom")
+
     def test_quality_summary_flags_connectivity_abort_and_incomplete_run(self):
         summary = AutomatedStreamManager._summarize_quality_check_results(
             {

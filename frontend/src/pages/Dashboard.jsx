@@ -397,6 +397,7 @@ export default function Dashboard() {
   const runProgress = runStatus.progress || {}
   const runningRun = runState === 'running'
   const failedRun = runState === 'failed'
+  const abortedRun = runState === 'aborted'
   const completedRun = runState === 'completed'
   const skippedRun = runState === 'skipped'
   const queueSize     = streamCheckerStatus?.queue?.queue_size || 0
@@ -447,7 +448,9 @@ export default function Dashboard() {
           ? 'Completed'
           : failedRun
             ? 'Failed'
-            : 'Idle'
+            : abortedRun
+              ? 'Aborted'
+              : 'Idle'
   const streamCheckerElapsedSeconds = streamCheckerRunDisplay.streamCheckerElapsedSeconds
   const liveRunDurationSeconds = runningRun
     ? elapsedSecondsSince(runStatus.started_at, dashboardNow) ?? runStatus.duration_seconds
@@ -533,7 +536,9 @@ export default function Dashboard() {
   })
   const runBadgeClass = failedRun
     ? 'bg-destructive text-destructive-foreground border-transparent'
-    : completedRun
+    : abortedRun
+      ? 'bg-amber-600 text-white border-transparent'
+      : completedRun
       ? 'bg-green-600 text-white border-transparent'
       : displayRunningRun
         ? 'bg-blue-600 text-white border-transparent'
@@ -591,6 +596,7 @@ export default function Dashboard() {
             <Badge variant="outline" className={`w-fit gap-1 ${runBadgeClass}`}>
               {displayRunningRun && <Loader2 className="h-3 w-3 animate-spin" />}
               {failedRun && <AlertCircle className="h-3 w-3" />}
+              {abortedRun && <AlertCircle className="h-3 w-3" />}
               {completedRun && <CheckCircle2 className="h-3 w-3" />}
               {runDisplayBadgeLabel}
             </Badge>
@@ -657,11 +663,14 @@ export default function Dashboard() {
               {displayStageCards.map((stage) => {
                 const isCurrent = stage.id === displayRunStageId && stage.status === 'running'
                 const isDone = stage.status === 'completed'
+                const isAborted = stage.status === 'aborted'
                 const stageClass = isCurrent
                   ? 'border-primary bg-primary/10 text-primary'
                   : isDone
                     ? 'border-green-500/50 bg-green-500/10 text-green-600 dark:text-green-400'
-                    : 'border-border bg-background text-muted-foreground'
+                    : isAborted
+                      ? 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                      : 'border-border bg-background text-muted-foreground'
                 return (
                   <div key={stage.id} className={`rounded-md border px-3 py-2 text-xs font-medium ${stageClass}`}>
                     <div className="flex items-center gap-2">
@@ -669,6 +678,8 @@ export default function Dashboard() {
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : isDone ? (
                         <CheckCircle2 className="h-3.5 w-3.5" />
+                      ) : isAborted ? (
+                        <AlertCircle className="h-3.5 w-3.5" />
                       ) : (
                         <Activity className="h-3.5 w-3.5" />
                       )}

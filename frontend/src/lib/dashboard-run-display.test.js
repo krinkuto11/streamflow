@@ -153,6 +153,21 @@ describe('dashboard stream checker run display', () => {
     ])
   })
 
+  it('preserves aborted backend stages for dashboard rendering', () => {
+    const cards = getAutomationStageCards({
+      stages,
+      runStatusStages: [
+        { key: 'settings', status: 'completed' },
+        { key: 'm3u_refresh', status: 'completed' },
+        { key: 'quality_checking', status: 'aborted' },
+      ],
+      displayRunStageId: 'aborted',
+      displayRunningRun: false,
+    })
+
+    expect(cards.find(stage => stage.id === 'quality_checking').status).toBe('aborted')
+  })
+
   it('synthesizes completed predecessors for manual stream checker runs', () => {
     const cards = getAutomationStageCards({
       stages,
