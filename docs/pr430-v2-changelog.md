@@ -253,5 +253,5 @@ Current clean-install gate progress:
 - Startup UDI refresh completed with 213 channels, 217,429 streams, and 6 M3U accounts.
 - GPU runtime status reported CUDA mode available with CPU fallback enabled.
 - Shadow Monitor restored with `skip_during_quality_check=false`.
-- Real Full Check with GPU passthrough is running on period `Full Check` against 212 selected channels.
-- At the last documented poll, the run was in Quality Check with 74/212 channels completed, 0 stream-checker queue failures, and 2,014 streams still queued.
+- Real Full Check with GPU passthrough is running on period `Full Check`.
+- Final Full Check counts and duration will be added after the run reaches a terminal state.
