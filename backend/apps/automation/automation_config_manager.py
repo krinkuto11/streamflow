@@ -872,11 +872,14 @@ class AutomationConfigManager:
         res = []
         for pid, profile_id in pid_profile.items():
             period = self.get_period(pid)
-            if period:
-                period_with_profile = period.copy()
-                period_with_profile["profile"] = self.get_profile(profile_id)
-                period_with_profile["profile_id"] = profile_id
-                res.append(period_with_profile)
+            if not period:
+                continue
+            if period.get("enabled") is False:
+                continue
+            period_with_profile = period.copy()
+            period_with_profile["profile"] = self.get_profile(profile_id)
+            period_with_profile["profile_id"] = profile_id
+            res.append(period_with_profile)
         return res
 
     def get_effective_configuration(self, channel_id: int, group_id: Optional[int] = None) -> Optional[Dict]:
