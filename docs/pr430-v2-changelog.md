@@ -47,7 +47,6 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Clears stale stream-checker progress when the checker is idle.
 - Adds a dashboard route alias fix.
 - Adds dashboard viewer activity status.
-- Normalizes V2 card title typography so dense dashboard, stream-checker, shadow-monitor, and Teamarr panels do not inherit oversized default card headings.
 
 ### Stream Checker And Quality Runs
 
