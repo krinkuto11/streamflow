@@ -914,7 +914,7 @@ export default function Dashboard() {
       {/* Quick Actions */}
       <Card>
         <CardHeader>
-          <CardTitle>Quick Actions</CardTitle>
+          <CardTitle className="text-lg">Quick Actions</CardTitle>
           <CardDescription>Perform common operations on your stream management system</CardDescription>
         </CardHeader>
         <CardContent>
@@ -1030,7 +1030,7 @@ export default function Dashboard() {
       {/* System Information */}
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
-          <CardHeader><CardTitle>Automation Configuration</CardTitle></CardHeader>
+          <CardHeader><CardTitle className="text-lg">Automation Configuration</CardTitle></CardHeader>
           <CardContent>
             <dl className="space-y-3 text-sm">
               <div className="flex justify-between items-center">
@@ -1062,7 +1062,7 @@ export default function Dashboard() {
         </Card>
 
         <Card>
-          <CardHeader><CardTitle>Stream Checker Status</CardTitle></CardHeader>
+          <CardHeader><CardTitle className="text-lg">Stream Checker Status</CardTitle></CardHeader>
           <CardContent>
             <dl className="space-y-3 text-sm">
               <div className="flex justify-between items-center">
@@ -1101,7 +1101,7 @@ export default function Dashboard() {
       {/* Available Playlists */}
       <Card>
         <CardHeader>
-          <CardTitle>Global Playlist Visibility</CardTitle>
+          <CardTitle className="text-lg">Global Playlist Visibility</CardTitle>
           <CardDescription>Toggle global extraction pooling for upstream API connections.</CardDescription>
         </CardHeader>
         <CardContent>

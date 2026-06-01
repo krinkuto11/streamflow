@@ -295,7 +295,7 @@ export default function ShadowBlankMonitor() {
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
         <Card>
           <CardHeader>
-            <CardTitle>Configuration</CardTitle>
+            <CardTitle className="text-lg">Configuration</CardTitle>
             <CardDescription>Detection, switching, and watcher identity</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -444,7 +444,7 @@ export default function ShadowBlankMonitor() {
         <div className="space-y-4">
           <Card>
             <CardHeader>
-              <CardTitle>Watched Now</CardTitle>
+              <CardTitle className="text-lg">Watched Now</CardTitle>
               <CardDescription>Channels with active non-watcher clients</CardDescription>
             </CardHeader>
             <CardContent>
@@ -473,7 +473,7 @@ export default function ShadowBlankMonitor() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Recent Events</CardTitle>
+              <CardTitle className="text-lg">Recent Events</CardTitle>
               <CardDescription>Latest monitor decisions</CardDescription>
             </CardHeader>
             <CardContent>

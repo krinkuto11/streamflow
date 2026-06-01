@@ -548,7 +548,7 @@ export default function StreamChecker() {
         <Card>
           <CardHeader className="pb-2">
             <div className="flex justify-between items-center">
-              <CardTitle>Batch Progress</CardTitle>
+              <CardTitle className="text-lg">Batch Progress</CardTitle>
               {status?.queue?.eta_seconds > 0 ? (
                 <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md">
                   ~{formatDuration(status.queue.eta_seconds)} remaining
@@ -577,7 +577,7 @@ export default function StreamChecker() {
       {progress && isChecking && (
         <Card>
           <CardHeader>
-            <CardTitle>Current Progress</CardTitle>
+            <CardTitle className="text-lg">Current Progress</CardTitle>
             <CardDescription>
               {progress.channel_name || 'Processing...'}
             </CardDescription>
@@ -796,7 +796,7 @@ export default function StreamChecker() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
             <div>
-              <CardTitle>Stream Queue</CardTitle>
+              <CardTitle className="text-lg">Stream Queue</CardTitle>
               <CardDescription>
                 {queueSize} channels waiting to be checked
               </CardDescription>
@@ -824,7 +824,7 @@ export default function StreamChecker() {
       <Card>
         <CardHeader className="flex flex-row items-center justify-between">
           <div>
-            <CardTitle>Stream Checker Configuration</CardTitle>
+            <CardTitle className="text-lg">Stream Checker Configuration</CardTitle>
             <CardDescription>
               Configure stream analysis and checking parameters
             </CardDescription>
