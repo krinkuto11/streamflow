@@ -508,7 +508,7 @@ def test_quality_checker_guard_is_opt_in(tmp_path):
     assert status["recent_events"][0]["type"] == "probe_ok"
 
 
-def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
+def test_quality_checker_state_does_not_pause_shadow_probe(tmp_path):
     probe_urls = []
     udi = FakeUdi(
         statuses=[{"uuid-1": active_status(stream_id=10)}],
@@ -523,7 +523,7 @@ def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
         tmp_path,
         udi=udi,
         checker=checker,
-        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": True},
+        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": False},
     )
     service.update_config({
         "enabled": False,
@@ -534,5 +534,6 @@ def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
 
     status = service.run_once(force=True)
 
-    assert probe_urls == []
-    assert status["recent_events"][0]["type"] == "quality_check_active"
+    assert service.get_config()["skip_during_quality_check"] is False
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert status["recent_events"][0]["type"] == "probe_ok"

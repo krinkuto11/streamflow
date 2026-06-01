@@ -125,7 +125,9 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
     if config["watch_mode"] not in WATCH_MODES:
         config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
-    config["skip_during_quality_check"] = bool(config.get("skip_during_quality_check"))
+    # The shadow monitor protects active viewers through Dispatcharr's local
+    # channel proxy. It should not pause just because quality checks are active.
+    config["skip_during_quality_check"] = False
     config["watcher_user_agent"] = str(config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"]).strip()
     config["watcher_api_key"] = str(config.get("watcher_api_key") or "").strip()
     config["excluded_channel_ids"] = [
