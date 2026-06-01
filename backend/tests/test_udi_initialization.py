@@ -32,19 +32,32 @@ class TestUDIInitialization(unittest.TestCase):
         self.temp_dir = tempfile.mkdtemp()
         self.app = app.test_client()
         self.app.testing = True
+
+        for key in (
+            'DISPATCHARR_BASE_URL',
+            'DISPATCHARR_URL',
+            'DISPATCHARR_USER',
+            'DISPATCHARR_PASS',
+            'DISPATCHARR_API_KEY',
+            'DISPATCHARR_TOKEN',
+        ):
+            os.environ.pop(key, None)
         
-        # Reset UDI Manager singleton
-        import apps.udimanager
-        udi.manager._udi_manager = None
+        # Reset singleton state that may have been created by earlier tests.
+        import apps.config.dispatcharr_config as dispatcharr_config_module
+        import apps.udi.manager as udi_manager_module
+        dispatcharr_config_module._dispatcharr_config = None
+        udi_manager_module._udi_manager = None
     
     def tearDown(self):
         """Clean up test fixtures."""
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
         
-        # Reset UDI Manager singleton
-        import apps.udimanager
-        udi.manager._udi_manager = None
+        import apps.config.dispatcharr_config as dispatcharr_config_module
+        import apps.udi.manager as udi_manager_module
+        dispatcharr_config_module._dispatcharr_config = None
+        udi_manager_module._udi_manager = None
     
     def test_initialize_udi_requires_credentials(self):
         """Test that UDI initialization endpoint requires configured credentials."""

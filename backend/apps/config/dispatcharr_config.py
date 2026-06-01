@@ -170,13 +170,13 @@ class DispatcharrConfig:
         if not db_config:
             self._load_config()
             db_config = self._config
-        return db_config.get('api_key') or os.getenv('DISPATCHARR_API_KEY') or os.getenv('DISPATCHARR_TOKEN')
+        return db_config.get('api_key') or os.environ.get('DISPATCHARR_API_KEY')
 
     def get_auth_mode(self) -> str:
         """Get configured Dispatcharr authentication mode."""
         from apps.database.manager import get_db_manager
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
-        if not db_config and (os.getenv('DISPATCHARR_API_KEY') or os.getenv('DISPATCHARR_TOKEN')):
+        if not db_config and os.environ.get('DISPATCHARR_API_KEY'):
             return 'api_key'
         mode = _normalize_auth_mode(db_config.get('auth_mode'))
         if (

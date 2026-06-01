@@ -460,7 +460,7 @@ def check_wizard_complete():
         config_dir = Path(CONFIG_DIR)
         automation_file = config_dir / 'automation_config.json'
         regex_file = config_dir / 'channel_regex_config.json'
-        if automation_file.exists() or regex_file.exists():
+        if str(config_dir) != "/app/data" and (automation_file.exists() or regex_file.exists()):
             return automation_file.exists() and regex_file.exists()
 
         # SQL-backed readiness: require Dispatcharr credentials to be configured.

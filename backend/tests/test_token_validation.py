@@ -23,6 +23,12 @@ class TestTokenValidation(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.temp_dir = tempfile.mkdtemp()
+        os.environ.pop('DISPATCHARR_API_KEY', None)
+        try:
+            import apps.config.dispatcharr_config as dispatcharr_config_module
+            dispatcharr_config_module._dispatcharr_config = None
+        except Exception:
+            pass
         
     def tearDown(self):
         """Clean up test fixtures."""

@@ -348,12 +348,14 @@ class RegexChannelMatcher:
         self._manual_regex_config = False
         self._explicit_regex_config_file = config_file is not None
         self._file_backed_compat = self._explicit_regex_config_file or str(CONFIG_DIR) != "/app/data"
+        self._config_file_signature: Optional[Tuple[int, int]] = None
         if config_file is None:
             config_file = CONFIG_DIR / "channel_regex_config.json"
         config_file = Path(config_file)
         self._config_file = config_file
-        if config_file.exists():
+        if self._file_backed_compat and config_file.exists():
             self._seed_from_config_file(config_file)
+            self._remember_config_file_signature()
         self.group_patterns_key = 'group_regex_patterns'
         self.channel_patterns = self._load_patterns()
         self.group_patterns = self._load_group_patterns()
@@ -447,6 +449,26 @@ class RegexChannelMatcher:
                 f"Could not seed regex config from {config_file}: "
                 f"{type(exc).__name__}: {exc}"
             )
+
+    def _remember_config_file_signature(self) -> None:
+        """Record the legacy config file state after we import or write it."""
+        if self._config_file is None:
+            self._config_file_signature = None
+            return
+        try:
+            stat = self._config_file.stat()
+            self._config_file_signature = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            self._config_file_signature = None
+
+    def _config_file_changed_since_last_import(self) -> bool:
+        if not self._file_backed_compat or self._config_file is None or not self._config_file.exists():
+            return False
+        try:
+            stat = self._config_file.stat()
+        except OSError:
+            return False
+        return self._config_file_signature != (stat.st_mtime_ns, stat.st_size)
     
     # ------------------------------------------------------------------
     # Internal helpers
@@ -571,10 +593,11 @@ class RegexChannelMatcher:
         if global_settings:
             legacy_payload['global_settings'] = global_settings
         db.set_system_setting('channel_regex_config', legacy_payload)
-        if self._config_file is not None:
+        if self._config_file is not None and self._file_backed_compat:
             self._config_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._config_file, 'w', encoding='utf-8') as fh:
                 json.dump(legacy_payload, fh, indent=2)
+            self._remember_config_file_signature()
         # Keep in-memory cache in sync
         self.channel_patterns = self._build_in_memory(
             db.get_all_channel_regex_configs(), global_settings
@@ -809,10 +832,11 @@ class RegexChannelMatcher:
                 'regex': [p['pattern'] for p in normalized_patterns],
                 'regex_patterns': normalized_patterns,
             }
-            if self._config_file is not None:
+            if self._config_file is not None and self._file_backed_compat:
                 self._config_file.parent.mkdir(parents=True, exist_ok=True)
                 with open(self._config_file, 'w', encoding='utf-8') as fh:
                     json.dump(self.channel_patterns, fh, indent=2)
+                self._remember_config_file_signature()
         self._clear_runtime_caches()
         
         if silent:
@@ -839,6 +863,10 @@ class RegexChannelMatcher:
         """Reload patterns from SQL (refreshes the in-memory cache)."""
         if self._manual_regex_config:
             return
+
+        if self._config_file_changed_since_last_import():
+            self._seed_from_config_file(self._config_file)
+            self._remember_config_file_signature()
 
         with self.lock:
             self.channel_patterns = self._load_patterns()
@@ -2967,14 +2995,12 @@ class AutomatedStreamManager:
                     for channel_id in assignment_count.keys():
                         if assignment_count[channel_id] > 0:
                             channel_ids_to_mark.append(int(channel_id))
-                            # Get current stream count from UDI
-                            try:
-                                channel = udi.get_channel_by_id(int(channel_id))
-                                if channel:
-                                    streams_list = channel.get('streams', [])
-                                    stream_counts[int(channel_id)] = len(streams_list) if isinstance(streams_list, list) else 0
-                            except Exception:
-                                pass  # If we can't get count, marking will still work
+                            # Avoid a post-write UDI/network fetch here. The checker
+                            # only needs a best-effort current count for its update
+                            # tracker, and we already know the pre-assignment set plus
+                            # how many streams Dispatcharr accepted.
+                            existing_streams = channel_streams.get(str(channel_id), set())
+                            stream_counts[int(channel_id)] = len(existing_streams) + int(assignment_count[channel_id])
                     
                     # Try to get stream checker service and mark channels
                     if channel_ids_to_mark:
@@ -3430,10 +3456,9 @@ class AutomatedStreamManager:
         automation_config = get_automation_config_manager()
         global_settings = automation_config.get_global_settings()
         
-        default_config_dir = Path(os.environ.get('CONFIG_DIR', '/app/data'))
         legacy_config_file_mode = (
             getattr(self, "_explicit_config_file", False)
-            or Path(CONFIG_DIR) != default_config_dir
+            or Path(CONFIG_DIR) != Path('/app/data')
         )
         current_enabled = global_settings.get('regular_automation_enabled', False) or legacy_config_file_mode
         

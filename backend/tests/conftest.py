@@ -58,6 +58,17 @@ def clean_test_db(monkeypatch):
     for alias, target in LEGACY_MODULE_ALIASES.items():
         _install_legacy_module_alias(alias, target, force=True)
 
+    def reset_stream_limiter_state():
+        try:
+            from apps.stream import concurrent_stream_limiter as limiter_module
+            if limiter_module._account_limiter is not None:
+                limiter_module._account_limiter.clear()
+            limiter_module._smart_scheduler = None
+        except Exception:
+            pass
+
+    reset_stream_limiter_state()
+
     import apps.database.connection as conn
     import apps.database.manager as mgr
 
@@ -83,5 +94,6 @@ def clean_test_db(monkeypatch):
     yield test_engine
 
     # Cleanup
+    reset_stream_limiter_state()
     mgr._db_manager = None
     Base.metadata.drop_all(test_engine)
