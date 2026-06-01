@@ -355,7 +355,11 @@ def check_single_channel_now_response(
         if result.get("error") == "no_profile":
             return jsonify(result), 400
 
-        return jsonify(result), 500
+        logger.warning(
+            "Single-channel check failed; returning sanitized error response for channel %s",
+            channel_id,
+        )
+        return jsonify({"success": False, "error": "Internal Server Error"}), 500
 
     except Exception as exc:
         logger.error(f"Error checking single channel: {exc}")

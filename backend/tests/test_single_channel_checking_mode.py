@@ -429,6 +429,33 @@ class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
         self.assertTrue(data.get('skipped'))
         self.assertEqual(data.get('reason'), 'active_viewers')
 
+    def test_handler_sanitizes_unexpected_service_errors(self):
+        """Handler must not expose internal exception details from service results."""
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_channel_now_response
+
+        mock_service = Mock()
+        mock_service.check_single_channel.return_value = {
+            'success': False,
+            'error': 'Traceback with /app/data/secret/path',
+            'channel_id': 1,
+        }
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_channel_now_response(
+                payload={'channel_id': 1},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 500)
+
+        import json as json_mod
+        data = json_mod.loads(response.get_data(as_text=True))
+        self.assertEqual(data.get('error'), 'Internal Server Error')
+        self.assertNotIn('secret', response.get_data(as_text=True))
+
 
 
 class TestSingleChannelForcedProfileId(unittest.TestCase):
