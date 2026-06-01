@@ -64,6 +64,7 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Adds active-viewer shadow blank monitor support.
 - Adds freeze detection support to the shadow monitor.
 - Adds configuration for dry run, cooldowns, confirmation count, watcher API key, concurrent watchers, skip-during-quality-check, and watch mode.
+- Keeps the shadow monitor active by default during quality checks; it shadows only real active viewers and does not consume provider stream slots.
 - Protects UUID-keyed active viewer channels.
 - Adds viewer and watcher status cards to the dashboard.
 
@@ -93,6 +94,7 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Cleans up mocks and edge cases in single-channel profile flag tests.
 - Restores the broad legacy backend pytest suite by fixing test isolation, stale global limiter state, unsafe import-time DB mutation, and Dispatcharr auth environment leakage.
 - Sanitizes unexpected single-channel check API failures so internal exception details are not exposed in client-visible JSON.
+- Keeps the PR Changelog comment in sync with this file while the clean-install gate is still running.
 
 ## Screenshot Evidence
 
@@ -109,6 +111,9 @@ Current V2 screenshots included in this branch:
   - Hardware acceleration settings UI.
 - `docs/pr-screenshots/dashboard-viewer-activity.png`
   - Dashboard viewer activity card.
+- `docs/pr-screenshots/v2-gpu-full-run-live-dark.png`
+  - Dark-mode evidence from the clean-install GPU passthrough Full Check while Quality Check was actively running.
+  - Shows completed stages, populated duration boxes, stream-checker progress, and active Shadow Monitor status.
 
 Historical screenshots retained from the V2 stack and related precursor PRs:
 
@@ -177,12 +182,13 @@ Full backend pytest suite:
 python -m pytest backend/tests -q --tb=short --disable-warnings
 ```
 
-Result: `991 passed, 2 skipped`.
+Result: `992 passed, 2 skipped`.
 
 Security validation:
 
 - GitHub Advanced Security / CodeQL comment for information exposure in `backend/apps/api/stream_checker_handlers.py` was fixed by sanitizing unexpected single-channel check failures.
 - The original CodeQL review thread is now resolved/outdated on PR #430 after commit `15b5bc8`.
+- Follow-up local validation after commit `c576cab`: `backend/tests/test_shadow_blank_monitor_service.py` passed (`17 passed`), Teamarr/single-channel targeted tests passed (`12 passed`), full backend suite passed (`992 passed, 2 skipped`), frontend tests passed (`17 passed`), and frontend production build passed.
 
 ## Self-Hosted Runtime Validation
 
@@ -217,9 +223,9 @@ Observed live dashboard result:
 
 ## Final Gate Before Ready For Review
 
-The final requested gate is still pending:
+The final requested gate is in progress:
 
-1. Save a full appdata backup.
+1. Save a full persistent-data backup.
 2. Export machine-readable settings:
    - Dispatcharr config
    - automation config
@@ -230,7 +236,7 @@ The final requested gate is still pending:
    - shadow monitor config
    - Teamarr preflight config
    - scheduling config
-3. Remove the StreamFlow container and appdata.
+3. Remove the StreamFlow container and persistent data directory.
 4. Recreate StreamFlow from scratch on the self-hosted validation stack with the current GPU/NVIDIA runtime passthrough.
 5. Restore settings, profiles, periods, regex, shadow monitor, Teamarr preflight, and scheduling.
 6. Verify startup UDI refresh.
@@ -238,3 +244,14 @@ The final requested gate is still pending:
 8. Repeat a fresh install without GPU/NVIDIA runtime passthrough.
 9. Verify the no-GPU install starts cleanly, reports CPU/fallback hardware status, and completes a real Full Check without CUDA/NVIDIA runtime failures.
 10. Add both clean-install/full-run results to this document and PR #430 before marking the PR ready for review.
+
+Current clean-install gate progress:
+
+- Backup and machine-readable exports completed.
+- Fresh empty boot with GPU/NVIDIA runtime passthrough completed.
+- Settings, profiles, periods, regex patterns, shadow monitor, Teamarr preflight, scheduling, and Dispatcharr config were restored.
+- Startup UDI refresh completed with 213 channels, 217,429 streams, and 6 M3U accounts.
+- GPU runtime status reported CUDA mode available with CPU fallback enabled.
+- Shadow Monitor restored with `skip_during_quality_check=false`.
+- Real Full Check with GPU passthrough is running on period `Full Check` against 212 selected channels.
+- At the last documented poll, the run was in Quality Check with 74/212 channels completed, 0 stream-checker queue failures, and 2,014 streams still queued.
