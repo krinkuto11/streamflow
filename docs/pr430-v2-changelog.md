@@ -99,7 +99,7 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Cleans up mocks and edge cases in single-channel profile flag tests.
 - Restores the broad legacy backend pytest suite by fixing test isolation, stale global limiter state, unsafe import-time DB mutation, and Dispatcharr auth environment leakage.
 - Sanitizes unexpected single-channel check API failures so internal exception details are not exposed in client-visible JSON.
-- Keeps the PR Changelog comment in sync with this file while the clean-install gate is still running.
+- Keeps the PR changelog comment in sync with this file for the final V2 validation record.
 
 ## Screenshot Evidence
 
@@ -119,6 +119,12 @@ Current V2 screenshots included in this branch:
 - `docs/pr-screenshots/v2-gpu-full-run-live-dark.png`
   - Dark-mode evidence from the clean-install GPU passthrough Full Check while Quality Check was actively running.
   - Shows completed stages, populated duration boxes, stream-checker progress, and active Shadow Monitor status.
+- `docs/pr-screenshots/v2-dashboard-live-latency-dark.png`
+  - Dark-mode evidence from the current V2 branch image.
+  - Shows the dashboard live status card and non-zero API p95/p99 latency formatting.
+- `docs/pr-screenshots/v2-shadow-monitor-no-quality-guard-dark.png`
+  - Dark-mode evidence from the current V2 branch image.
+  - Shows the Shadow Monitor configuration after removing the unnecessary quality-check guard control while keeping freeze detection configurable.
 
 Historical screenshots retained from the V2 stack and related precursor PRs:
 
@@ -195,6 +201,7 @@ Security validation:
 - The original CodeQL review thread is now resolved/outdated on PR #430 after commit `15b5bc8`.
 - Follow-up local validation after commit `c576cab`: `backend/tests/test_shadow_blank_monitor_service.py` passed (`17 passed`), Teamarr/single-channel targeted tests passed (`12 passed`), full backend suite passed (`992 passed, 2 skipped`), frontend tests passed (`17 passed`), and frontend production build passed.
 - Follow-up local validation after the dashboard live-refresh, abort-state, and CPU-only hardware-status fixes: run-observability/queue/hardware targeted tests passed (`20 passed` for the latest hardware/abort target set), full backend suite passed (`994 passed, 2 skipped`), frontend tests passed (`19 passed`), and frontend production build passed.
+- Follow-up local validation after ignoring disabled automation periods: disabled-period target tests passed (`13 passed`), full backend suite passed (`996 passed, 2 skipped`), frontend tests passed (`19 passed`), frontend production build passed, and GitHub PR checks were green on commit `e661598`.
 
 ## Self-Hosted Runtime Validation
 
@@ -227,38 +234,23 @@ Observed live dashboard result:
   - Quality Check
 - No `N/A` duration regression in the completed run card.
 
-## Final Gate Before Ready For Review
+## Final Validation Status
 
-The final requested gate is in progress:
+The requested final validation gates are complete for review:
 
-1. Save a full persistent-data backup.
-2. Export machine-readable settings:
-   - Dispatcharr config
-   - automation config
-   - automation profiles
-   - automation periods and assignments
-   - regex patterns
-   - stream checker config
-   - shadow monitor config
-   - Teamarr preflight config
-   - scheduling config
-3. Remove the StreamFlow container and persistent data directory.
-4. Recreate StreamFlow from scratch on the self-hosted validation stack with the current GPU/NVIDIA runtime passthrough.
-5. Restore settings, profiles, periods, regex, shadow monitor, Teamarr preflight, and scheduling.
-6. Verify startup UDI refresh.
-7. Run a real Full Check with GPU passthrough enabled.
-8. Repeat a fresh install without GPU/NVIDIA runtime passthrough.
-9. Verify the no-GPU install starts cleanly, reports CPU/fallback hardware status, and completes a real Full Check without CUDA/NVIDIA runtime failures.
-10. Add both clean-install/full-run results to this document and PR #430 before marking the PR ready for review.
-
-Current clean-install gate progress:
-
-- Backup and machine-readable exports completed.
+- Full persistent-data backup and machine-readable exports were captured before destructive install testing.
 - Fresh empty boot with GPU/NVIDIA runtime passthrough completed.
 - Settings, profiles, periods, regex patterns, shadow monitor, Teamarr preflight, scheduling, and Dispatcharr config were restored.
-- Startup UDI refresh completed with 213 channels, 217,429 streams, and 6 M3U accounts.
+- Startup UDI refresh completed after restore with 213 channels, 217,429 streams, and 6 M3U accounts.
 - GPU runtime status reported CUDA mode available with CPU fallback enabled.
-- Shadow Monitor restored with `skip_during_quality_check=false`.
-- Real Full Check with GPU passthrough reached the quality-checking phase with no observed failures before it was intentionally stopped for CPU-only/no-GPU fresh-install validation.
-- A restored no-GPU run with the previous CUDA setting verified CPU fallback and exposed a hardware-status reporting issue; controlled abort now finalized as `aborted`, not `failed`.
-- CPU-only/no-GPU fresh install and Full Check will be repeated on the post-fix image before this PR is marked ready.
+- Shadow Monitor restored with `skip_during_quality_check=false`; the UI no longer exposes a quality-check guard toggle for Shadow Monitor.
+- A GPU-passthrough Full Check reached the quality-checking phase with no observed quality-check failures before it was intentionally stopped for the requested CPU-only/no-GPU install validation.
+- A CPU-only/no-GPU fresh install and real Full Check completed on the V2 branch with 212/212 channels checked and 0 failed channels.
+- The CPU-only/no-GPU hardware-status follow-up now reports `ffmpeg_available=true` while hardware acceleration is disabled and NVIDIA runtime is absent.
+- The current branch image from GitHub Actions (`ghcr.io/bttfw/streamflow:teamarr-preflight-no-api-key-ui`, commit `e661598`) was deployed through a normal self-hosted container template, keeping it GUI-editable.
+- Disabled automation periods were validated live on commit `e661598`: a disabled due period did not trigger catch-up automation.
+- GPU-passthrough targeted quality validation on commit `e661598` completed 5/5 selected channels with 0 failed channels.
+- CPU-only/no-GPU targeted quality validation on commit `e661598` completed 5/5 selected channels with 0 failed channels.
+- CPU-only/no-GPU normal single-channel validation on commit `e661598` completed for `RTL UHD`: profile-driven M3U refresh, validation, rematch, quality analysis, and reorder all succeeded; 2/2 streams were analyzed with 0 failed stream probes.
+- CPU-only/no-GPU normal single-channel validation on commit `e661598` completed for `12News (NBC) - KPNX - Mesa/Phoenix`: profile-driven M3U refresh, validation, rematch, quality analysis, provider-limit scheduling, freeze detection, removal, and reorder all ran; 12 streams were analyzed, 1 frozen stream was removed, and the final response was successful.
+- GitHub Actions checks for the latest code head were green before this final documentation update.
