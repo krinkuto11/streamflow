@@ -483,6 +483,31 @@ def test_continuous_default_probe_does_not_block_new_scans(tmp_path):
     assert service.get_status()["recent_events"][0]["type"] == "viewer_left"
 
 
+def test_quality_checker_guard_is_opt_in(tmp_path):
+    probe_urls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    checker = FakeStreamChecker({
+        "stream_checking_mode": True,
+        "queue": {"current_channel": 1, "in_progress": 1},
+        "progress": {},
+    })
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        checker=checker,
+        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    service.update_config({"enabled": False, "dry_run": False})
+
+    status = service.run_once(force=True)
+
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert status["recent_events"][0]["type"] == "probe_ok"
+
+
 def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
     probe_urls = []
     udi = FakeUdi(
@@ -500,7 +525,12 @@ def test_quality_checker_same_channel_guard_skips_probe(tmp_path):
         checker=checker,
         blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": True},
     )
-    service.update_config({"enabled": False, "dry_run": False, "confirmation_count": 1})
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "skip_during_quality_check": True,
+    })
 
     status = service.run_once(force=True)
 
