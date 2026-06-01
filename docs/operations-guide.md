@@ -230,6 +230,80 @@ when ffmpeg supports the selected mode. CPU fallback only retries failures that
 look like hardware/device initialization errors; normal dead streams, HTTP
 failures, and timeouts are still handled as stream results.
 
+### Docker Compose Examples
+
+Use the CPU-only compose shape for ordinary servers or for validating that
+StreamFlow starts without GPU passthrough:
+
+```yaml
+services:
+  streamflow:
+    image: ghcr.io/krinkuto11/streamflow:latest
+    container_name: streamflow
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - /srv/streamflow/data:/app/data
+    environment:
+      TZ: Europe/Berlin
+      CONFIG_DIR: /app/data
+```
+
+For NVIDIA/CUDA probing on a normal Docker Compose host, install the NVIDIA
+Container Toolkit on the host first, then expose the GPU runtime to StreamFlow:
+
+```yaml
+services:
+  streamflow:
+    image: ghcr.io/krinkuto11/streamflow:latest
+    container_name: streamflow
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    volumes:
+      - /srv/streamflow/data:/app/data
+    environment:
+      TZ: Europe/Berlin
+      CONFIG_DIR: /app/data
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities:
+                - gpu
+```
+
+Some non-Swarm Compose installations ignore `deploy.resources`. In that case,
+use the runtime/device syntax supported by your Docker version, for example:
+
+```yaml
+services:
+  streamflow:
+    image: ghcr.io/krinkuto11/streamflow:latest
+    container_name: streamflow
+    restart: unless-stopped
+    runtime: nvidia
+    ports:
+      - "5000:5000"
+    volumes:
+      - /srv/streamflow/data:/app/data
+    environment:
+      TZ: Europe/Berlin
+      CONFIG_DIR: /app/data
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+```
+
+After starting either template, open StreamFlow, keep CPU fallback enabled, and
+run a targeted quality check before enabling GPU decode for large full checks.
+The hardware status API and startup logs should show whether CUDA is available
+or whether StreamFlow is safely using CPU fallback.
+
 ## Dashboard, Changelog, And Logs
 
 Use the Dashboard for live state:

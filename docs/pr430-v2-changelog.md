@@ -90,6 +90,7 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 ### Changelog, Tests, And Docs
 
 - Adds detailed operations guide: `docs/operations-guide.md`.
+- Documents normal Docker Compose templates for CPU-only startup validation and NVIDIA/CUDA runtime passthrough.
 - Adds dashboard run-count and run-display helpers with frontend tests.
 - Updates audited frontend dependencies so `npm audit --audit-level=moderate` reports zero vulnerabilities.
 - Adds backend tests for Teamarr preflight, stream checker queue lifecycle, progress observability, hardware acceleration, viewer activity, Dispatcharr stream switching, dead-stream handling, and connectivity guard behavior.
