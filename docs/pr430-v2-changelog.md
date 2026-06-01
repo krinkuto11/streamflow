@@ -91,6 +91,8 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Updates audited frontend dependencies so `npm audit --audit-level=moderate` reports zero vulnerabilities.
 - Adds backend tests for Teamarr preflight, stream checker queue lifecycle, progress observability, hardware acceleration, viewer activity, Dispatcharr stream switching, dead-stream handling, and connectivity guard behavior.
 - Cleans up mocks and edge cases in single-channel profile flag tests.
+- Restores the broad legacy backend pytest suite by fixing test isolation, stale global limiter state, unsafe import-time DB mutation, and Dispatcharr auth environment leakage.
+- Sanitizes unexpected single-channel check API failures so internal exception details are not exposed in client-visible JSON.
 
 ## Screenshot Evidence
 
@@ -169,6 +171,19 @@ npm.cmd --prefix frontend run build
 
 Result: passed.
 
+Full backend pytest suite:
+
+```bash
+python -m pytest backend/tests -q --tb=short --disable-warnings
+```
+
+Result: `990 passed, 2 skipped`.
+
+Security validation:
+
+- GitHub Advanced Security / CodeQL comment for information exposure in `backend/apps/api/stream_checker_handlers.py` was fixed by sanitizing unexpected single-channel check failures.
+- The original CodeQL review thread is now resolved/outdated on PR #430 after commit `15b5bc8`.
+
 ## Self-Hosted Runtime Validation
 
 V2 image was built and deployed over an existing self-hosted StreamFlow container:
@@ -199,10 +214,6 @@ Observed live dashboard result:
   - Stream Matching
   - Quality Check
 - No `N/A` duration regression in the completed run card.
-
-## Known Broad Test Caveat
-
-A direct broad run of `python -m pytest backend/tests -q` still hits legacy or unrelated collection blockers/failures outside this V2 validation target, including missing legacy `profile_config`, Unix-only `fcntl` imports on Windows, and existing collection issues in older tests. The targeted V2 matrix above is the validation set used for this PR.
 
 ## Final Gate Before Ready For Review
 
