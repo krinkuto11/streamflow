@@ -345,7 +345,7 @@ export default function TeamarrPreflight() {
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
         <Card>
           <CardHeader>
-            <CardTitle className="text-lg">Configuration</CardTitle>
+            <CardTitle>Configuration</CardTitle>
             <CardDescription>Connector, timing, profile, and filters</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -455,7 +455,7 @@ export default function TeamarrPreflight() {
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">Managed Events</CardTitle>
+              <CardTitle>Managed Events</CardTitle>
               <CardDescription>Upcoming Teamarr event channels</CardDescription>
             </CardHeader>
             <CardContent>
@@ -488,7 +488,7 @@ export default function TeamarrPreflight() {
 
           <Card>
             <CardHeader>
-              <CardTitle className="text-lg">Recent Events</CardTitle>
+              <CardTitle>Recent Events</CardTitle>
               <CardDescription>Latest connector decisions</CardDescription>
             </CardHeader>
             <CardContent>
