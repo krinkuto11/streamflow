@@ -9,7 +9,13 @@ import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
-import { getStreamCheckerRunDisplay } from '@/lib/dashboard-run-display.js'
+import {
+  getAutomationStageCards,
+  getRunDurationValue,
+  getStreamCheckerRunDisplay,
+  normalizeRunStageKey,
+  preferLiveRunSeconds,
+} from '@/lib/dashboard-run-display.js'
 import { formatDuration as formatDurationValue } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
@@ -396,10 +402,9 @@ export default function Dashboard() {
   const displayRunMessage = streamRunActive
     ? 'Running manual quality checks'
     : (runProgress.message || runStatus.message || 'Automation run status')
-  const displayRunStageId = streamQueueActive ? 'quality_checking' : runStage
+  const displayRunStageId = normalizeRunStageKey(streamQueueActive ? 'quality_checking' : runStage)
   const displayRunStageLabel = streamQueueActive ? 'Quality Checking' : runStageLabel
   const displayRunningRun = runningRun || streamRunActive
-  const displayCurrentStageIndex = AUTOMATION_STAGES.findIndex((stage) => stage.id === displayRunStageId)
   const runDisplayStageLabel = skippedRun && !streamQueueActive ? 'Waiting for next run' : displayRunStageLabel
   const runDisplayBadgeLabel = streamRunActive
     ? 'Running'
@@ -427,7 +432,63 @@ export default function Dashboard() {
     : (runStatus.elapsed_seconds ?? runProgress.elapsed_seconds ?? liveRunDurationSeconds)
   const displayRunStageElapsedSeconds = streamRunActive
     ? streamCheckerElapsedSeconds
-    : (runStatus.stage_elapsed_seconds ?? runProgress.stage_elapsed_seconds ?? liveStageDurationSeconds)
+    : preferLiveRunSeconds({
+        active: runningRun,
+        reportedSeconds: runStatus.stage_elapsed_seconds ?? runProgress.stage_elapsed_seconds,
+        liveSeconds: liveStageDurationSeconds,
+      })
+  const displayStageCards = getAutomationStageCards({
+    stages: AUTOMATION_STAGES,
+    runStatusStages: runStatus.stages,
+    displayRunStageId,
+    displayRunningRun,
+    completedRun,
+    streamRunActive,
+  })
+  const m3uRefreshDuration = getRunDurationValue({
+    runDurations,
+    durationKey: 'm3u_refresh_seconds',
+    stageId: 'm3u_refresh',
+    displayRunStageId,
+    displayRunningRun,
+    streamRunActive,
+    streamCheckerElapsedSeconds,
+    displayRunStageElapsedSeconds,
+    stages: AUTOMATION_STAGES,
+  })
+  const cacheSyncDuration = getRunDurationValue({
+    runDurations,
+    durationKey: 'udi_sync_seconds',
+    stageId: 'udi_sync',
+    displayRunStageId,
+    displayRunningRun,
+    streamRunActive,
+    streamCheckerElapsedSeconds,
+    displayRunStageElapsedSeconds,
+    stages: AUTOMATION_STAGES,
+  })
+  const streamMatchingDuration = getRunDurationValue({
+    runDurations,
+    durationKey: 'stream_matching_seconds',
+    stageId: 'stream_matching',
+    displayRunStageId,
+    displayRunningRun,
+    streamRunActive,
+    streamCheckerElapsedSeconds,
+    displayRunStageElapsedSeconds,
+    stages: AUTOMATION_STAGES,
+  })
+  const qualityCheckDuration = getRunDurationValue({
+    runDurations,
+    durationKey: 'quality_check_seconds',
+    stageId: 'quality_checking',
+    displayRunStageId,
+    displayRunningRun,
+    streamRunActive,
+    streamCheckerElapsedSeconds,
+    displayRunStageElapsedSeconds,
+    stages: AUTOMATION_STAGES,
+  })
   const qualityCheckedCount = streamQueueActive
     ? completed
     : (runCounts.quality_checked ?? 0)
@@ -555,9 +616,9 @@ export default function Dashboard() {
             </div>
 
             <div className="grid gap-2 md:grid-cols-4 lg:grid-cols-8">
-              {AUTOMATION_STAGES.map((stage, index) => {
-                const isCurrent = stage.id === displayRunStageId
-                const isDone = completedRun || (!streamRunActive && runningRun && displayCurrentStageIndex >= 0 && index < displayCurrentStageIndex)
+              {displayStageCards.map((stage) => {
+                const isCurrent = stage.id === displayRunStageId && stage.status === 'running'
+                const isDone = stage.status === 'completed'
                 const stageClass = isCurrent
                   ? 'border-primary bg-primary/10 text-primary'
                   : isDone
@@ -610,19 +671,19 @@ export default function Dashboard() {
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">M3U Refresh</div>
-                <div className="text-base font-semibold">{formatDuration(runDurations.m3u_refresh_seconds)}</div>
+                <div className="text-base font-semibold">{formatDuration(m3uRefreshDuration)}</div>
               </div>
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">Cache Sync</div>
-                <div className="text-base font-semibold">{formatDuration(runDurations.udi_sync_seconds)}</div>
+                <div className="text-base font-semibold">{formatDuration(cacheSyncDuration)}</div>
               </div>
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">Stream Matching</div>
-                <div className="text-base font-semibold">{formatDuration(runDurations.stream_matching_seconds)}</div>
+                <div className="text-base font-semibold">{formatDuration(streamMatchingDuration)}</div>
               </div>
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">Quality Check</div>
-                <div className="text-base font-semibold">{formatDuration(runDurations.quality_check_seconds)}</div>
+                <div className="text-base font-semibold">{formatDuration(qualityCheckDuration)}</div>
               </div>
             </div>
           </CardContent>
