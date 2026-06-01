@@ -177,7 +177,7 @@ Full backend pytest suite:
 python -m pytest backend/tests -q --tb=short --disable-warnings
 ```
 
-Result: `990 passed, 2 skipped`.
+Result: `991 passed, 2 skipped`.
 
 Security validation:
 
