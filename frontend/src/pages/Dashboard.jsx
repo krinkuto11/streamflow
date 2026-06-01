@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
@@ -17,7 +17,7 @@ import {
   normalizeRunStageKey,
   preferLiveRunSeconds,
 } from '@/lib/dashboard-run-display.js'
-import { formatDuration as formatDurationValue } from '@/lib/time-format.js'
+import { formatDuration as formatDurationValue, formatLatency as formatLatencyValue } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
   Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
@@ -44,8 +44,16 @@ const AUTOMATION_STAGES = [
   { id: 'finalizing', label: 'Finalizing' },
 ]
 
+const LIVE_STATUS_POLL_MS = 1000
+const BACKGROUND_DATA_POLL_MS = 30000
+
 const formatDuration = (seconds) => {
   const formatted = formatDurationValue(seconds)
+  return formatted || 'N/A'
+}
+
+const formatLatency = (seconds) => {
+  const formatted = formatLatencyValue(seconds)
   return formatted || 'N/A'
 }
 
@@ -56,11 +64,11 @@ const formatTime = (value) => {
   return date.toLocaleTimeString()
 }
 
-const elapsedSecondsSince = (value) => {
+const elapsedSecondsSince = (value, now = Date.now()) => {
   if (!value) return null
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return null
-  return Math.max(0, (Date.now() - date.getTime()) / 1000)
+  return Math.max(0, (now - date.getTime()) / 1000)
 }
 
 const formatShadowEvent = (eventType) => {
@@ -84,25 +92,42 @@ export default function Dashboard() {
   const [periods, setPeriods] = useState([])
   const [udiStats, setUdiStats] = useState(null)
   const [udiSyncing, setUdiSyncing] = useState(false)
+  const [dashboardNow, setDashboardNow] = useState(() => Date.now())
+  const statusPollInFlight = useRef(false)
   // debug_mode gates the fault injection panel (Phase 5 — not yet built)
   const [debugMode, setDebugMode] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
+    setDashboardNow(Date.now())
     loadStatus()
     loadPlaylists()
     loadPeriods()
     loadEnvironment()
     loadUdiStats()
-    const interval = setInterval(() => {
+
+    const statusInterval = setInterval(() => {
+      setDashboardNow(Date.now())
+      loadStatus()
+    }, LIVE_STATUS_POLL_MS)
+
+    const backgroundInterval = setInterval(() => {
       loadStatus()
       loadPlaylists()
       loadUdiStats()
-    }, 30000)
-    return () => clearInterval(interval)
+    }, BACKGROUND_DATA_POLL_MS)
+
+    return () => {
+      clearInterval(statusInterval)
+      clearInterval(backgroundInterval)
+    }
   }, [])
 
   const loadStatus = async () => {
+    if (statusPollInFlight.current) {
+      return
+    }
+    statusPollInFlight.current = true
     try {
       const [automationResponse, streamCheckerResponse, automationConfigResponse, shadowMonitorResponse, viewerActivityResponse] = await Promise.all([
         automationAPI.getStatus(),
@@ -124,6 +149,7 @@ export default function Dashboard() {
         variant: "destructive"
       })
     } finally {
+      statusPollInFlight.current = false
       setLoading(false)
     }
   }
@@ -385,6 +411,7 @@ export default function Dashboard() {
     runStage,
     batchTotal,
     completed,
+    now: dashboardNow,
   })
   const isProcessing = streamCheckerRunDisplay.isProcessing
   const streamQueueActive = streamCheckerRunDisplay.streamQueueActive
@@ -423,10 +450,10 @@ export default function Dashboard() {
             : 'Idle'
   const streamCheckerElapsedSeconds = streamCheckerRunDisplay.streamCheckerElapsedSeconds
   const liveRunDurationSeconds = runningRun
-    ? elapsedSecondsSince(runStatus.started_at) ?? runStatus.duration_seconds
+    ? elapsedSecondsSince(runStatus.started_at, dashboardNow) ?? runStatus.duration_seconds
     : runStatus.duration_seconds
   const liveStageDurationSeconds = runningRun
-    ? elapsedSecondsSince(runStatus.stage_started_at) ?? runStatus.stage_duration_seconds
+    ? elapsedSecondsSince(runStatus.stage_started_at, dashboardNow) ?? runStatus.stage_duration_seconds
     : runStatus.stage_duration_seconds
   const displayRunUpdatedAt = streamRunActive
     ? (streamCheckerStatus?.queue?.started_at || streamCheckerStatus?.progress?.timestamp || runStatus.updated_at)
@@ -611,9 +638,9 @@ export default function Dashboard() {
                   API p95 / p99
                 </div>
                 <div className="mt-1 text-lg font-semibold">
-                  {apiTiming.p95_seconds != null ? formatDuration(apiTiming.p95_seconds) : 'N/A'}
+                  {apiTiming.p95_seconds != null ? formatLatency(apiTiming.p95_seconds) : 'N/A'}
                   <span className="mx-1 text-muted-foreground">/</span>
-                  {apiTiming.p99_seconds != null ? formatDuration(apiTiming.p99_seconds) : 'N/A'}
+                  {apiTiming.p99_seconds != null ? formatLatency(apiTiming.p99_seconds) : 'N/A'}
                 </div>
               </div>
             </div>

@@ -69,3 +69,17 @@ export function formatDuration(value) {
 
   return seconds > 0 ? `${minutes}m ${seconds}s` : `${minutes}m`
 }
+
+export function formatLatency(value) {
+  const secondsValue = parseDurationSeconds(value)
+  if (secondsValue === null) {
+    return value === null || value === undefined ? '' : String(value)
+  }
+
+  if (secondsValue < 1) {
+    const milliseconds = Math.round(secondsValue * 1000)
+    return `${milliseconds}ms`
+  }
+
+  return formatDuration(secondsValue)
+}

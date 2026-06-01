@@ -4,7 +4,7 @@ This document is the detailed changelog for PR #430. It records the V2 branch sc
 
 ## Branch Scope
 
-Base: `upstream/dev` after PR #428 was merged.
+Base: `upstream/dev` after PR #429 was merged.
 
 Head: `bttfw:v2/teamarr-preflight-no-api-key-ui`
 
@@ -39,6 +39,8 @@ This branch also contains the dashboard automation-stage fix from PR #429 so V2 
 - Keeps completed stages green instead of greyed out when an automation run is forced from the dashboard.
 - Shows live and completed duration boxes instead of `N/A` for M3U refresh, cache sync, stream matching, and quality checking.
 - Uses live timing for active dashboard stages.
+- Polls live automation and stream-checker status every second while avoiding overlapping status requests, so dashboard cards update without a browser reload.
+- Formats sub-second API p95/p99 values as milliseconds instead of rounding them to `0s`.
 - Shows freeze counts in dashboard run summaries.
 - Shows manual stream-checker progress over skipped automation status.
 - Clears stale stream-checker progress when the checker is idle.
