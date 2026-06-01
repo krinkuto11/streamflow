@@ -11,6 +11,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
 import { getDashboardRunCounts } from '@/lib/dashboard-run-counts.js'
 import {
+  getDashboardActionStates,
   getAutomationStageCards,
   getRunDurationValue,
   getStreamCheckerRunDisplay,
@@ -21,7 +22,7 @@ import { formatDuration as formatDurationValue, formatLatency as formatLatencyVa
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
   Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
-  Clock3, AlertCircle, ListChecks, Timer, Eye, Users
+  Clock3, AlertCircle, ListChecks, Timer, Eye, Users, StopCircle
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -336,6 +337,41 @@ export default function Dashboard() {
     }
   }
 
+  const handleStopActiveRun = async () => {
+    try {
+      setActionLoading('stop-run')
+
+      const activeStreamCheck = Boolean(
+        streamCheckerStatus?.stream_checking_mode ||
+        streamCheckerStatus?.checking ||
+        (streamCheckerStatus?.queue?.queue_size || 0) > 0 ||
+        (streamCheckerStatus?.queue?.in_progress || 0) > 0
+      )
+      const activeAutomationRun = Boolean(status?.running || status?.run_status?.active)
+
+      if (activeStreamCheck) {
+        await streamCheckerAPI.clearQueue()
+      }
+      if (activeAutomationRun) {
+        await automationAPI.stop()
+      }
+
+      toast({
+        title: "Stop Requested",
+        description: "Active automation and stream-check work is being stopped.",
+      })
+      await loadStatus()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to stop the active run",
+        variant: "destructive",
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
   const handleTogglePlaylist = async (playlistId, currentlyEnabled) => {
     try {
       setTogglingPlaylist(playlistId)
@@ -417,25 +453,31 @@ export default function Dashboard() {
   const isProcessing = streamCheckerRunDisplay.isProcessing
   const streamQueueActive = streamCheckerRunDisplay.streamQueueActive
   const streamCheckerOnlyActive = streamCheckerRunDisplay.streamCheckerOnlyActive
+  const streamRunActive = streamCheckerOnlyActive
+  const streamProgress = streamCheckerStatus?.progress || {}
+  const singleStreamRunActive = streamRunActive && !streamQueueActive
   const rawRunProgressPercent = Number(runProgress.percent)
   const runProgressPercent = streamQueueActive
     ? queueProgress
+    : singleStreamRunActive && Number.isFinite(Number(streamProgress.percentage))
+      ? Number(streamProgress.percentage)
     : Number.isFinite(rawRunProgressPercent)
       ? rawRunProgressPercent
       : 0
-  const runProgressCurrent = streamQueueActive ? completed : runProgress.current
-  const runProgressTotal = streamQueueActive ? batchTotal : runProgress.total
+  const runProgressCurrent = streamQueueActive ? completed : (singleStreamRunActive ? null : runProgress.current)
+  const runProgressTotal = streamQueueActive ? batchTotal : (singleStreamRunActive ? null : runProgress.total)
   const hasRunProgressTotal = runProgressTotal !== null && runProgressTotal !== undefined
   const runProgressDetail = hasRunProgressTotal
     ? `${runProgressCurrent ?? 0} of ${runProgressTotal}`
-    : runProgress.message || runStatus.message || 'Waiting for progress'
+    : singleStreamRunActive
+      ? (streamProgress.channel_name || streamProgress.step || 'Single channel check in progress')
+      : runProgress.message || runStatus.message || 'Waiting for progress'
   const showRunProgress = isProcessing || runState !== 'idle' || Object.keys(runProgress).length > 0
-  const streamRunActive = streamQueueActive && streamCheckerOnlyActive
   const displayRunMessage = streamRunActive
     ? 'Running manual quality checks'
     : (runProgress.message || runStatus.message || 'Automation run status')
-  const displayRunStageId = normalizeRunStageKey(streamQueueActive ? 'quality_checking' : runStage)
-  const displayRunStageLabel = streamQueueActive ? 'Quality Checking' : runStageLabel
+  const displayRunStageId = normalizeRunStageKey(streamRunActive ? 'quality_checking' : runStage)
+  const displayRunStageLabel = streamRunActive ? 'Quality Checking' : runStageLabel
   const displayRunningRun = runningRun || streamRunActive
   const runDisplayStageLabel = skippedRun && !streamQueueActive ? 'Waiting for next run' : displayRunStageLabel
   const runDisplayBadgeLabel = streamRunActive
@@ -543,7 +585,12 @@ export default function Dashboard() {
       : displayRunningRun
         ? 'bg-blue-600 text-white border-transparent'
         : ''
-  const shouldDisableActions = isProcessing || actionLoading !== ''
+  const actionStates = getDashboardActionStates({
+    actionLoading,
+    isStreamCheckerProcessing: isProcessing,
+    udiSyncing,
+  })
+  const showStopRunAction = displayRunningRun || isProcessing
   const shadowWatchedCount = shadowMonitorStatus?.watched_count || shadowMonitorStatus?.watched_channels?.length || 0
   const shadowLastEvent = shadowMonitorStatus?.recent_events?.[0]
   const viewerChannels = viewerActivityStatus?.channels || []
@@ -567,22 +614,6 @@ export default function Dashboard() {
         <p className="text-muted-foreground">Monitor and control your stream automation</p>
       </div>
 
-      {/* Active Operations Alert */}
-      {isProcessing && (
-        <Alert className="border-blue-500 bg-blue-50 dark:bg-blue-950">
-          <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
-          <AlertDescription className="text-blue-900 dark:text-blue-100">
-            <div className="font-medium mb-1">Stream checker is actively processing</div>
-            <div className="text-sm">
-              {completed} of {batchTotal} channels completed
-              {inProgress > 0 && ` (${inProgress} in progress, ${queueSize} in queue)`}
-            </div>
-            <Progress value={queueProgress} className="mt-2 h-2" />
-            <div className="text-xs mt-1 text-muted-foreground">Quick actions are temporarily disabled</div>
-          </AlertDescription>
-        </Alert>
-      )}
-
       {showRunProgress && (
         <Card>
           <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -593,13 +624,32 @@ export default function Dashboard() {
               </CardTitle>
               <CardDescription>{displayRunMessage}</CardDescription>
             </div>
-            <Badge variant="outline" className={`w-fit gap-1 ${runBadgeClass}`}>
-              {displayRunningRun && <Loader2 className="h-3 w-3 animate-spin" />}
-              {failedRun && <AlertCircle className="h-3 w-3" />}
-              {abortedRun && <AlertCircle className="h-3 w-3" />}
-              {completedRun && <CheckCircle2 className="h-3 w-3" />}
-              {runDisplayBadgeLabel}
-            </Badge>
+            <div className="flex flex-wrap items-center gap-2">
+              {showStopRunAction && (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleStopActiveRun}
+                  disabled={actionLoading === 'stop-run'}
+                  title="Stop the active automation or stream-check run"
+                >
+                  {actionLoading === 'stop-run' ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <StopCircle className="mr-2 h-4 w-4" />
+                  )}
+                  Stop Run
+                </Button>
+              )}
+              <Badge variant="outline" className={`w-fit gap-1 ${runBadgeClass}`}>
+                {displayRunningRun && <Loader2 className="h-3 w-3 animate-spin" />}
+                {failedRun && <AlertCircle className="h-3 w-3" />}
+                {abortedRun && <AlertCircle className="h-3 w-3" />}
+                {completedRun && <CheckCircle2 className="h-3 w-3" />}
+                {runDisplayBadgeLabel}
+              </Badge>
+            </div>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
@@ -986,8 +1036,9 @@ export default function Dashboard() {
             <div className="flex flex-col justify-center gap-3 sm:min-w-[180px]">
               <Button
                 onClick={handleReloadUDI}
-                disabled={shouldDisableActions || udiSyncing}
+                disabled={actionStates.reloadUdi.disabled}
                 className="w-full"
+                title={actionStates.reloadUdi.reason || 'Reload Dispatcharr cache'}
               >
                 {udiSyncing
                   ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -997,7 +1048,13 @@ export default function Dashboard() {
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button disabled={shouldDisableActions} variant="outline" className="w-full">
+                  <Button
+                    disabled={actionStates.runAutomation.disabled}
+                    variant="outline"
+                    className="w-full"
+                    aria-describedby={actionStates.runAutomation.reason ? 'run-automation-disabled-reason' : undefined}
+                    title={actionStates.runAutomation.reason || 'Run automation'}
+                  >
                     <PlayCircle className="mr-2 h-4 w-4" />
                     {actionLoading === 'automation' ? 'Running...' : 'Run Automation'}
                     <ChevronDown className="ml-2 h-4 w-4 opacity-50" />
@@ -1022,6 +1079,11 @@ export default function Dashboard() {
                   )}
                 </DropdownMenuContent>
               </DropdownMenu>
+              {actionStates.runAutomation.reason && (
+                <p id="run-automation-disabled-reason" className="text-xs text-muted-foreground">
+                  {actionStates.runAutomation.reason}
+                </p>
+              )}
             </div>
           </div>
         </CardContent>

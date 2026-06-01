@@ -162,3 +162,32 @@ export const getStreamCheckerRunDisplay = ({
     streamQueueActive,
   }
 }
+
+export const getDashboardActionStates = ({
+  actionLoading = '',
+  isStreamCheckerProcessing = false,
+  udiSyncing = false,
+} = {}) => {
+  const actionBusy = actionLoading !== ''
+  const reloadUdiReason = udiSyncing
+    ? 'UDI sync is already running.'
+    : actionBusy
+      ? 'Another dashboard action is running.'
+      : null
+  const runAutomationReason = isStreamCheckerProcessing
+    ? 'Automation cannot start while a stream check is already active.'
+    : actionBusy
+      ? 'Another dashboard action is running.'
+      : null
+
+  return {
+    reloadUdi: {
+      disabled: udiSyncing || actionBusy,
+      reason: reloadUdiReason,
+    },
+    runAutomation: {
+      disabled: isStreamCheckerProcessing || actionBusy,
+      reason: runAutomationReason,
+    },
+  }
+}

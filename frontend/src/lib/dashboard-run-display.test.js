@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  getDashboardActionStates,
   getAutomationStageCards,
   getRunDurationValue,
   getStreamCheckerRunDisplay,
@@ -107,6 +108,33 @@ describe('dashboard stream checker run display', () => {
       },
     })
 
+    expect(display.streamCheckerElapsedSeconds).toBe(60)
+  })
+
+  it('detects active single-channel checks even when no batch queue is exposed', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'idle',
+      batchTotal: 0,
+      completed: 0,
+      now: Date.parse('2026-05-29T18:05:41Z'),
+      streamCheckerStatus: {
+        checking: true,
+        stream_checking_mode: true,
+        queue: {
+          queue_size: 0,
+          in_progress: 0,
+        },
+        progress: {
+          is_single_channel_check: true,
+          timestamp: '2026-05-29T18:04:41Z',
+          channel_name: 'Single Channel',
+        },
+      },
+    })
+
+    expect(display.isProcessing).toBe(true)
+    expect(display.streamCheckerOnlyActive).toBe(true)
+    expect(display.streamQueueActive).toBe(false)
     expect(display.streamCheckerElapsedSeconds).toBe(60)
   })
 
@@ -221,5 +249,28 @@ describe('dashboard stream checker run display', () => {
     })
 
     expect(value).toBe(0)
+  })
+
+  it('keeps UDI reload available during stream checks but blocks conflicting automation starts', () => {
+    const actions = getDashboardActionStates({
+      actionLoading: '',
+      isStreamCheckerProcessing: true,
+      udiSyncing: false,
+    })
+
+    expect(actions.reloadUdi.disabled).toBe(false)
+    expect(actions.runAutomation.disabled).toBe(true)
+    expect(actions.runAutomation.reason).toMatch(/stream check/i)
+  })
+
+  it('blocks dashboard actions while another action is already running', () => {
+    const actions = getDashboardActionStates({
+      actionLoading: 'udi',
+      isStreamCheckerProcessing: false,
+      udiSyncing: true,
+    })
+
+    expect(actions.reloadUdi.disabled).toBe(true)
+    expect(actions.runAutomation.disabled).toBe(true)
   })
 })
