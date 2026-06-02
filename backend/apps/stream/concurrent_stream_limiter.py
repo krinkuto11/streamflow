@@ -394,6 +394,34 @@ class AccountStreamLimiter:
                     f"Attempted to release profile slot {profile_id} "
                     f"but checking count is already 0"
                 )
+
+    def should_preempt_profile_for_viewer(self, profile: Optional[Dict[str, Any]]) -> bool:
+        """Return True when a real viewer needs the reserved profile slot."""
+        if not profile or not self.udi_manager:
+            return False
+
+        profile_id = profile.get('id') if isinstance(profile, dict) else None
+        if profile_id is None:
+            return False
+
+        try:
+            max_streams = int(profile.get('max_streams', 0) or 0)
+        except (TypeError, ValueError):
+            max_streams = 0
+        if max_streams == 0:
+            return False
+
+        active_getter = getattr(self.udi_manager, 'get_active_streams_for_profile', None)
+        if not callable(active_getter):
+            return False
+
+        try:
+            active_count = int(active_getter(profile_id) or 0)
+        except Exception as e:
+            logger.warning(f"Could not check active viewers for profile {profile_id}: {e}")
+            return False
+
+        return active_count + 1 > max_streams
     
     def clear(self):
         """Clear all account limits and checking counts."""
@@ -543,11 +571,10 @@ class SmartStreamScheduler:
                         except Exception as e:
                             logger.error(f"Error retrieving cached stats for stream {stream['id']}: {e}")
 
-                    skipped_reason = (
-                        'quota_consumed_by_active_viewers'
-                        if reason_detail == 'active_viewers'
-                        else 'provider_capacity_unavailable'
-                    )
+                    skipped_reason = {
+                        'active_viewers': 'quota_consumed_by_active_viewers',
+                        'viewer_preempted': 'viewer_preempted',
+                    }.get(reason_detail, 'provider_capacity_unavailable')
                     return {
                         'stream_id': stream['id'],
                         'stream_name': stream.get('name', 'Unknown'),
@@ -681,12 +708,31 @@ class SmartStreamScheduler:
                             except Exception as e:
                                 logger.error(f"Error in start_callback for stream {stream['id']}: {e}")
 
+                        preempt_logged = False
+
+                        def preempt_check() -> bool:
+                            nonlocal preempt_logged
+                            should_preempt = self.account_limiter.should_preempt_profile_for_viewer(acquired_profile)
+                            if should_preempt and not preempt_logged:
+                                preempt_logged = True
+                                logger.info(
+                                    "Preempting stream check for stream %s because active viewer capacity is needed",
+                                    stream.get('id'),
+                                )
+                            return should_preempt
+
+                        runtime_params = dict(check_params)
+                        if acquired_profile:
+                            runtime_params['preempt_check'] = preempt_check
+
                         result = check_function(
                             stream_url=stream_url,
                             stream_id=stream['id'],
                             stream_name=stream.get('name', 'Unknown'),
-                            **check_params
+                            **runtime_params
                         )
+                        if isinstance(result, dict) and result.get('preempted'):
+                            result = provider_wait_result('viewer_preempted')
                         return result
                     finally:
                         # Release account slot immediately when stream finishes

@@ -258,6 +258,42 @@ class TestAnalyzeStream(unittest.TestCase):
         self.assertEqual(result['status'], 'OK')
         self.assertEqual(result['bitrate_kbps'], 5000.0)
 
+    @patch('stream_check_utils.get_stream_info_and_bitrate')
+    @patch('time.sleep')
+    def test_preempted_analysis_does_not_retry(self, mock_sleep, mock_get_info_and_bitrate):
+        """Viewer preemption should return a distinct non-retried status."""
+        mock_get_info_and_bitrate.return_value = {
+            'video_codec': 'N/A',
+            'audio_codec': 'N/A',
+            'resolution': '0x0',
+            'fps': 0,
+            'bitrate_kbps': None,
+            'hdr_format': None,
+            'pixel_format': None,
+            'audio_sample_rate': None,
+            'audio_channels': None,
+            'channel_layout': None,
+            'audio_bitrate': None,
+            'status': 'PREEMPTED',
+            'elapsed_time': 1.0,
+            'preempted': True,
+            'preempt_reason': 'viewer_preempted',
+        }
+
+        result = analyze_stream(
+            stream_url='http://test.stream',
+            stream_id=123,
+            stream_name='Test Stream',
+            retries=2,
+            retry_delay=5,
+        )
+
+        self.assertEqual(mock_get_info_and_bitrate.call_count, 1)
+        self.assertEqual(mock_sleep.call_count, 0)
+        self.assertEqual(result['status'], 'PREEMPTED')
+        self.assertTrue(result['preempted'])
+        self.assertEqual(result['preempt_reason'], 'viewer_preempted')
+
 
 if __name__ == '__main__':
     unittest.main()

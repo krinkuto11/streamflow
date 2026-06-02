@@ -669,7 +669,7 @@ export default function StreamChecker() {
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
                 ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
-                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, provider_limit_wait_timeout: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
+                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, viewer_preempted: 4, provider_limit_wait_timeout: 5, error: 6, low_quality: 7, blank: 8, freeze: 9, dead: 10 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -743,6 +743,7 @@ export default function StreamChecker() {
                                 {stream.status === 'pending' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Pending</Badge>}
                                 {stream.status === 'checking' && <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">Checking</Badge>}
                                 {stream.status === 'waiting_provider_limit' && <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Waiting</Badge>}
+                                {stream.status === 'viewer_preempted' && <Badge variant="outline" className="text-[10px] border-cyan-500/40 bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300">Preempted</Badge>}
                                 {stream.status === 'provider_limit_wait_timeout' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Skipped</Badge>}
                                 {stream.status === 'completed' && <Badge variant="outline" className="text-[10px] bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Completed</Badge>}
                                 {stream.status === 'error' && <Badge variant="destructive" className="text-[10px]">Error</Badge>}

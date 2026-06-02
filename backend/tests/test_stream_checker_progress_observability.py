@@ -23,12 +23,13 @@ def test_progress_update_builds_provider_progress_counters():
             channel_id=10,
             channel_name='Test Channel',
             current=1,
-            total=6,
+            total=7,
             status='analyzing',
             streams_detail=[
                 {'id': 1, 'name': 'A1', 'm3u_account': 'Provider A', 'status': 'checking'},
                 {'id': 2, 'name': 'A2', 'm3u_account': 'Provider A', 'status': 'waiting_provider_limit'},
                 {'id': 3, 'name': 'A3', 'm3u_account': 'Provider A', 'status': 'provider_limit_wait_timeout'},
+                {'id': 7, 'name': 'A4', 'm3u_account': 'Provider A', 'status': 'viewer_preempted'},
                 {'id': 4, 'name': 'B1', 'm3u_account': 'Provider B', 'status': 'completed'},
                 {'id': 5, 'name': 'B2', 'm3u_account': 'Provider B', 'status': 'pending'},
                 {'id': 6, 'name': 'B3', 'm3u_account': 'Provider B', 'status': 'dead'},
@@ -41,8 +42,8 @@ def test_progress_update_builds_provider_progress_counters():
 
     assert provider_a['checking'] == 1
     assert provider_a['waiting'] == 1
-    assert provider_a['skipped'] == 1
-    assert provider_a['finished'] == 1
+    assert provider_a['skipped'] == 2
+    assert provider_a['finished'] == 2
     assert provider_a['state'] == 'waiting_provider_limit'
 
     assert provider_b['pending'] == 1
@@ -58,6 +59,6 @@ def test_progress_update_builds_provider_progress_counters():
         'waiting_streams': 1,
         'pending_streams': 1,
         'completed_streams': 1,
-        'skipped_streams': 1,
+        'skipped_streams': 2,
         'failed_streams': 1,
     }

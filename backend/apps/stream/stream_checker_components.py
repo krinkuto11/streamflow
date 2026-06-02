@@ -835,7 +835,7 @@ class StreamCheckerProgress:
             waiting = counts.get('waiting_provider_limit', 0)
             pending = counts.get('pending', 0)
             completed = counts.get('completed', 0)
-            skipped = counts.get('provider_limit_wait_timeout', 0)
+            skipped = counts.get('provider_limit_wait_timeout', 0) + counts.get('viewer_preempted', 0)
             failed = sum(counts.get(status, 0) for status in failed_statuses)
             finished = completed + skipped + failed
 

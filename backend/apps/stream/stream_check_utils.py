@@ -107,6 +107,11 @@ FREEZE_END_RE = re.compile(r'freeze_end:\s*(?P<end>-?[0-9]+(?:\.[0-9]+)?)')
 FREEZE_DURATION_RE = re.compile(r'freeze_duration:\s*(?P<duration>-?[0-9]+(?:\.[0-9]+)?)')
 FFMPEG_TIME_RE = re.compile(r'time=(?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+(?:\.\d+)?)')
 
+
+class StreamProbePreempted(Exception):
+    """Raised when a real viewer needs the profile capacity used by a probe."""
+
+
 # FourCC to common codec name mapping
 FOURCC_TO_CODEC = {
     'avc1': 'h264',
@@ -344,14 +349,67 @@ def _run_ffmpeg_with_optional_fallback(
     stderr: Any,
     text: bool,
     context: str,
+    preempt_check: Optional[Callable[[], bool]] = None,
 ) -> subprocess.CompletedProcess:
-    result = subprocess.run(
-        command,
-        stdout=stdout,
-        stderr=stderr,
-        timeout=timeout,
-        text=text
-    )
+    def _run(command_to_run: List[str]) -> subprocess.CompletedProcess:
+        if preempt_check is None:
+            return subprocess.run(
+                command_to_run,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=timeout,
+                text=text
+            )
+
+        process = subprocess.Popen(
+            command_to_run,
+            stdout=stdout,
+            stderr=stderr,
+            text=text,
+        )
+        deadline = time.monotonic() + timeout
+        preempted = False
+        timed_out = False
+
+        try:
+            while process.poll() is None:
+                if preempt_check():
+                    preempted = True
+                    process.terminate()
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    process.kill()
+                    break
+                time.sleep(0.5)
+
+            try:
+                stdout_data, stderr_data = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout_data, stderr_data = process.communicate()
+                timed_out = True
+
+            if preempted:
+                raise StreamProbePreempted()
+            if timed_out:
+                raise subprocess.TimeoutExpired(
+                    command_to_run,
+                    timeout,
+                    output=stdout_data,
+                    stderr=stderr_data,
+                )
+            return subprocess.CompletedProcess(
+                command_to_run,
+                process.returncode,
+                stdout=stdout_data,
+                stderr=stderr_data,
+            )
+        finally:
+            if process.poll() is None:
+                process.kill()
+
+    result = _run(command)
     if (
         fallback_command
         and result.returncode != 0
@@ -361,13 +419,7 @@ def _run_ffmpeg_with_optional_fallback(
             "FFmpeg hardware acceleration failed during %s; retrying on CPU",
             context,
         )
-        return subprocess.run(
-            fallback_command,
-            stdout=stdout,
-            stderr=stderr,
-            timeout=timeout,
-            text=text
-        )
+        return _run(fallback_command)
     return result
 
 
@@ -871,6 +923,7 @@ def get_stream_info_and_bitrate(
     freeze_check_noise_threshold: float = 0.001,
     freeze_check_ratio_threshold: float = 0.80,
     hardware_acceleration: Optional[Dict[str, Any]] = None,
+    preempt_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Get complete stream information using ffmpeg in a single call.
@@ -898,6 +951,7 @@ def get_stream_info_and_bitrate(
         freeze_check_noise_threshold: freezedetect noise threshold
         freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
         hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
+        preempt_check: Optional callback returning True when the probe should abort
 
     Returns:
         Dictionary containing:
@@ -1023,7 +1077,8 @@ def get_stream_info_and_bitrate(
         'blank_segments': [],
         'freeze_probe_ran': False, 'freeze_detected': False,
         'freeze_duration_secs': None, 'freeze_ratio': None,
-        'freeze_segments': []
+        'freeze_segments': [],
+        'preempted': False, 'preempt_reason': None,
     }
 
     # Total subprocess timeout: analysis window + startup headroom
@@ -1039,6 +1094,7 @@ def get_stream_info_and_bitrate(
             timeout=actual_timeout,
             text=True,
             context="stream analysis",
+            preempt_check=preempt_check,
         )
         elapsed = time.time() - start
         result_data['elapsed_time'] = elapsed
@@ -1278,6 +1334,12 @@ def get_stream_info_and_bitrate(
         logger.warning(f"Timeout ({actual_timeout}s) while analyzing stream")
         result_data['status'] = "Timeout"
         result_data['elapsed_time'] = actual_timeout
+    except StreamProbePreempted:
+        logger.info("Stream analysis preempted because viewer capacity is needed")
+        result_data['status'] = "PREEMPTED"
+        result_data['preempted'] = True
+        result_data['preempt_reason'] = 'viewer_preempted'
+        result_data['elapsed_time'] = time.time() - start if 'start' in locals() else 0
     except Exception as e:
         logger.error(f"Stream analysis failed: {e}")
         result_data['status'] = "Error"
@@ -1665,6 +1727,7 @@ def analyze_stream(
     freeze_check_noise_threshold: float = 0.001,
     freeze_check_ratio_threshold: float = 0.80,
     hardware_acceleration: Optional[Dict[str, Any]] = None,
+    preempt_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Perform complete stream analysis including codec, resolution, FPS, bitrate, and audio.
@@ -1693,6 +1756,7 @@ def analyze_stream(
         freeze_check_noise_threshold: freezedetect noise threshold
         freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
         hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
+        preempt_check: Optional callback returning True when a real viewer needs capacity
 
     Returns:
         Dictionary containing analysis results with keys:
@@ -1737,6 +1801,8 @@ def analyze_stream(
         'freeze_duration_secs': None,
         'freeze_ratio': None,
         'freeze_segments': [],
+        'preempted': False,
+        'preempt_reason': None,
     }
 
     try:
@@ -1770,7 +1836,8 @@ def analyze_stream(
                     freeze_check_min_duration=freeze_check_min_duration,
                     freeze_check_noise_threshold=freeze_check_noise_threshold,
                     freeze_check_ratio_threshold=freeze_check_ratio_threshold,
-                    hardware_acceleration=hardware_acceleration
+                    hardware_acceleration=hardware_acceleration,
+                    preempt_check=preempt_check,
                 )
 
                 result = {
@@ -1802,6 +1869,8 @@ def analyze_stream(
                     'freeze_duration_secs': result_data.get('freeze_duration_secs'),
                     'freeze_ratio': result_data.get('freeze_ratio'),
                     'freeze_segments': result_data.get('freeze_segments', []),
+                    'preempted': bool(result_data.get('preempted')),
+                    'preempt_reason': result_data.get('preempt_reason'),
                 }
 
                 if result.get('blank_probe_ran'):
@@ -1857,6 +1926,11 @@ def analyze_stream(
                     else:
                         logger.warning(f"  {stream_audit_ref}: Check failed - {result['status']} ({result_data['elapsed_time']:.2f}s)")
 
+                if result.get('preempted'):
+                    logger.info(
+                        f"  {stream_audit_ref}: Check preempted for active viewer capacity"
+                    )
+                    break
                 if result['status'] == "OK":
                     # Check whether FFmpeg ran for a meaningful portion of the
                     # probe window.  A stream that exits early produced partial

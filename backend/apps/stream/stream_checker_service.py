@@ -1773,6 +1773,7 @@ class StreamCheckerService:
             analyzed_streams = []
             dead_stream_ids = set()  # Use set for O(1) lookups
             revived_stream_ids = []
+            preempted_stream_ids = set()
             total_streams = len(streams_to_check)
             completed_count = [0]  # Use list for mutable closure
             
@@ -1819,7 +1820,12 @@ class StreamCheckerService:
 
                 if stream_id in stream_statuses:
                     if result.get('provider_limit_skipped'):
-                        stream_statuses[stream_id]['status'] = 'provider_limit_wait_timeout'
+                        reason_detail = result.get('reason_detail')
+                        stream_statuses[stream_id]['status'] = (
+                            'viewer_preempted'
+                            if reason_detail == 'viewer_preempted'
+                            else 'provider_limit_wait_timeout'
+                        )
                         stream_statuses[stream_id]['reason_detail'] = result.get('reason_detail')
                         stream_statuses[stream_id]['score'] = None
                     elif result.get('status') == 'ERROR':
@@ -1905,7 +1911,7 @@ class StreamCheckerService:
                             self.progress.update(
                                 channel_id=channel_id,
                                 channel_name=channel_name,
-                                current=sum(1 for s in stream_statuses.values() if s.get('status') in ('completed', 'dead', 'error', 'loop_detected', 'blank', 'freeze')),
+                                current=sum(1 for s in stream_statuses.values() if s.get('status') in ('completed', 'dead', 'error', 'loop_detected', 'blank', 'freeze', 'viewer_preempted')),
                                 total=total_streams,
                                 status='analyzing',
                                 step='Analyzing streams with account limits',
@@ -1960,6 +1966,8 @@ class StreamCheckerService:
                 
                 for analyzed in results:
                     if analyzed.get('provider_limit_skipped'):
+                        if analyzed.get('reason_detail') == 'viewer_preempted':
+                            preempted_stream_ids.add(analyzed.get('stream_id'))
                         logger.warning(
                             "Stream check deferred until provider capacity timed out; preserving existing stream state: "
                             f"{stream_context(stream_id=analyzed.get('stream_id'), stream_url=analyzed.get('stream_url'), channel_id=channel_id)}"
@@ -2352,6 +2360,8 @@ class StreamCheckerService:
                     elif is_revived:
                         stream_stat['status'] = 'revived'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
+                    elif analyzed.get('reason_detail') == 'viewer_preempted':
+                        stream_stat['status'] = 'viewer_preempted'
                     else:
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
 
@@ -2416,6 +2426,8 @@ class StreamCheckerService:
                 final_stream_ids = [sid for sid in current_stream_ids if sid not in dead_stream_ids]
             else:
                 final_stream_ids = current_stream_ids  # Keep all streams if removal is disabled
+            if preempted_stream_ids:
+                final_stream_ids = [sid for sid in final_stream_ids if sid not in preempted_stream_ids]
             self._complete_channel_check(
                 channel_id,
                 lambda: self.update_tracker.mark_channel_checked(
@@ -2439,6 +2451,11 @@ class StreamCheckerService:
                     'name': next((st.get('name') for st in streams if st['id'] == s), f'Stream {s}'),
                     'm3u_account': next((st.get('m3u_account') for st in streams if st['id'] == s), None)
                 } for s in revived_stream_ids],
+                'preempted_streams': [{
+                    'id': s,
+                    'name': next((st.get('name') for st in streams if st['id'] == s), f'Stream {s}'),
+                    'm3u_account': next((st.get('m3u_account') for st in streams if st['id'] == s), None)
+                } for s in preempted_stream_ids],
                 'skipped_streams': [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked],
                 'checked_streams': stream_stats,
                 # In-memory analyzed_streams: authoritative source for loop results
