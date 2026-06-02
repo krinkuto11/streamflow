@@ -132,25 +132,46 @@ export default function Dashboard() {
     }
     statusPollInFlight.current = true
     try {
-      const [automationResponse, streamCheckerResponse, automationConfigResponse, shadowMonitorResponse, viewerActivityResponse] = await Promise.all([
+      const [automationResult, streamCheckerResult, automationConfigResult, shadowMonitorResult, viewerActivityResult] = await Promise.allSettled([
         automationAPI.getStatus(),
         streamCheckerAPI.getStatus(),
         automationAPI.getConfig(),
-        shadowBlankMonitorAPI.getStatus().catch(() => ({ data: null })),
-        viewerActivityAPI.getStatus().catch(() => ({ data: null })),
+        shadowBlankMonitorAPI.getStatus(),
+        viewerActivityAPI.getStatus(),
       ])
-      setStatus(automationResponse.data)
-      setStreamCheckerStatus(streamCheckerResponse.data)
-      setAutomationConfig(automationConfigResponse.data || {})
-      setShadowMonitorStatus(shadowMonitorResponse.data)
-      setViewerActivityStatus(viewerActivityResponse.data)
+
+      if (automationResult.status === 'fulfilled') {
+        setStatus(automationResult.value.data)
+      }
+      if (streamCheckerResult.status === 'fulfilled') {
+        setStreamCheckerStatus(streamCheckerResult.value.data)
+      }
+      if (automationConfigResult.status === 'fulfilled') {
+        setAutomationConfig(automationConfigResult.value.data || {})
+      }
+      if (shadowMonitorResult.status === 'fulfilled') {
+        setShadowMonitorStatus(shadowMonitorResult.value.data)
+      }
+      if (viewerActivityResult.status === 'fulfilled') {
+        setViewerActivityStatus(viewerActivityResult.value.data)
+      }
+
+      const failedResults = [
+        automationResult,
+        streamCheckerResult,
+        automationConfigResult,
+        shadowMonitorResult,
+        viewerActivityResult,
+      ].filter(result => result.status === 'rejected')
+
+      if (failedResults.length > 0) {
+        console.warn(
+          'Dashboard status poll had partial failures:',
+          failedResults.map(result => result.reason?.message || result.reason)
+        )
+      }
     } catch (err) {
       console.error('Failed to load status:', err)
-      toast({
-        title: "Error",
-        description: "Failed to load automation status",
-        variant: "destructive"
-      })
     } finally {
       statusPollInFlight.current = false
       setLoading(false)
