@@ -158,6 +158,31 @@ export const getStreamCheckerRunDisplay = ({
   }
 }
 
+export const getSkippedRunDisplay = ({
+  skippedRun = false,
+  streamRunActive = false,
+  streamQueueActive = false,
+  runProgressMessage = '',
+  runStatusMessage = '',
+} = {}) => {
+  const noDueRun = skippedRun && !streamRunActive && !streamQueueActive
+  if (!noDueRun) {
+    return {
+      badgeLabel: null,
+      message: null,
+      progressDetail: null,
+      stageLabel: null,
+    }
+  }
+
+  return {
+    badgeLabel: 'Idle',
+    message: 'Waiting for next scheduled run',
+    progressDetail: runProgressMessage || runStatusMessage || 'No active automation periods are due',
+    stageLabel: 'No Due Periods',
+  }
+}
+
 export const getDashboardActionStates = ({
   actionLoading = '',
   isStreamCheckerProcessing = false,

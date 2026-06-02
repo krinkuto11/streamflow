@@ -14,6 +14,7 @@ import {
   getDashboardActionStates,
   getAutomationStageCards,
   getRunDurationValue,
+  getSkippedRunDisplay,
   getStreamCheckerRunDisplay,
   normalizeRunStageKey,
   preferLiveRunSeconds,
@@ -459,6 +460,13 @@ export default function Dashboard() {
   const streamRunActive = streamCheckerOnlyActive
   const streamProgress = streamCheckerStatus?.progress || {}
   const singleStreamRunActive = streamRunActive && !streamQueueActive
+  const skippedRunDisplay = getSkippedRunDisplay({
+    skippedRun,
+    streamRunActive,
+    streamQueueActive,
+    runProgressMessage: runProgress.message,
+    runStatusMessage: runStatus.message,
+  })
   const rawRunProgressPercent = Number(runProgress.percent)
   const runProgressPercent = streamQueueActive
     ? queueProgress
@@ -474,18 +482,18 @@ export default function Dashboard() {
     ? `${runProgressCurrent ?? 0} of ${runProgressTotal}`
     : singleStreamRunActive
       ? (streamProgress.channel_name || streamProgress.step || 'Single channel check in progress')
-      : runProgress.message || runStatus.message || 'Waiting for progress'
+      : skippedRunDisplay.progressDetail || runProgress.message || runStatus.message || 'Waiting for progress'
   const showRunProgress = isProcessing || runState !== 'idle' || Object.keys(runProgress).length > 0
   const displayRunMessage = streamRunActive
     ? 'Running manual quality checks'
-    : (runProgress.message || runStatus.message || 'Automation run status')
+    : skippedRunDisplay.message || runProgress.message || runStatus.message || 'Automation run status'
   const displayRunStageId = normalizeRunStageKey(streamRunActive ? 'quality_checking' : runStage)
   const displayRunStageLabel = streamRunActive ? 'Quality Checking' : runStageLabel
   const displayRunningRun = runningRun || streamRunActive
-  const runDisplayStageLabel = skippedRun && !streamQueueActive ? 'Waiting for next run' : displayRunStageLabel
+  const runDisplayStageLabel = skippedRunDisplay.stageLabel || displayRunStageLabel
   const runDisplayBadgeLabel = streamRunActive
     ? 'Running'
-    : skippedRun
+    : skippedRunDisplay.badgeLabel || (skippedRun
       ? 'Waiting'
       : runningRun
         ? 'Running'
@@ -495,7 +503,7 @@ export default function Dashboard() {
             ? 'Failed'
             : abortedRun
               ? 'Aborted'
-              : 'Idle'
+              : 'Idle')
   const streamCheckerElapsedSeconds = streamCheckerRunDisplay.streamCheckerElapsedSeconds
   const liveRunDurationSeconds = runningRun
     ? elapsedSecondsSince(runStatus.started_at, dashboardNow) ?? runStatus.duration_seconds

@@ -3,6 +3,7 @@ import {
   getDashboardActionStates,
   getAutomationStageCards,
   getRunDurationValue,
+  getSkippedRunDisplay,
   getStreamCheckerRunDisplay,
   preferLiveRunSeconds,
 } from './dashboard-run-display.js'
@@ -283,6 +284,34 @@ describe('dashboard stream checker run display', () => {
     })
 
     expect(value).toBeNull()
+  })
+
+  it('uses explicit idle wording for skipped no-due automation runs', () => {
+    const display = getSkippedRunDisplay({
+      skippedRun: true,
+      runStatusMessage: 'No active automation periods were due',
+    })
+
+    expect(display).toEqual({
+      badgeLabel: 'Idle',
+      message: 'Waiting for next scheduled run',
+      progressDetail: 'No active automation periods were due',
+      stageLabel: 'No Due Periods',
+    })
+  })
+
+  it('does not override skipped automation wording during manual stream checks', () => {
+    const display = getSkippedRunDisplay({
+      skippedRun: true,
+      streamRunActive: true,
+      streamQueueActive: true,
+      runStatusMessage: 'No active automation periods were due',
+    })
+
+    expect(display.badgeLabel).toBeNull()
+    expect(display.message).toBeNull()
+    expect(display.progressDetail).toBeNull()
+    expect(display.stageLabel).toBeNull()
   })
 
   it('keeps UDI reload available during stream checks but blocks conflicting automation starts', () => {
