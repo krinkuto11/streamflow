@@ -1,5 +1,5 @@
 const WAIT_REASON_LABELS = {
-  checking_capacity: 'Checker slots',
+  checking_capacity: 'Check slots full',
   global_worker_limit: 'Global workers',
   provider_capacity: 'Provider capacity',
   provider_capacity_unavailable: 'Provider capacity',

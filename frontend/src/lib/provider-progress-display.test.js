@@ -9,7 +9,7 @@ describe('getProviderWaitReasonDisplay', () => {
       wait_reason_counts: { checking_capacity: 3 },
     })).toEqual({
       code: 'checking_capacity',
-      text: 'Checker slots (3)',
+      text: 'Check slots full (3)',
       title: 'checking_capacity: 3',
     })
   })
