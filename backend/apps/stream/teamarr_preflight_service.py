@@ -38,7 +38,7 @@ CONTROLLED_CHECK_DEFERRAL_REASONS = {
     "max_streams_reached",
     "connectivity_guard",
 }
-MANUAL_FORCE_ALLOWED_STATES = {"due", "scheduled", "already_attempted"}
+MANUAL_FORCE_ALLOWED_STATES = {"due", "scheduled", "already_attempted", "past"}
 MANUAL_FORCE_ERROR_MESSAGES = {
     "event_not_found": "Managed event was not found",
     "filtered": "Managed event is filtered by the current preflight configuration",
@@ -370,17 +370,40 @@ class TeamarrPreflightService:
 
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
+            recent_events = list(self._events)[:25]
+            upcoming_events = self._attach_recent_events_to_upcoming(self._upcoming, recent_events)
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
                 "last_scan_at": self._last_scan_at,
                 "last_error": self._last_error,
                 "active_checks": list(self._active_checks.values()),
-                "upcoming_events": list(self._upcoming),
-                "recent_events": list(self._events)[:25],
+                "upcoming_events": upcoming_events,
+                "recent_events": recent_events,
                 "filter_options": dict(self._filter_options),
                 "config": public_config(self._config, self._default_profile_metadata()),
             }
+
+    @staticmethod
+    def _attach_recent_events_to_upcoming(
+        upcoming_events: Iterable[Dict[str, Any]],
+        recent_events: Iterable[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        latest_by_identity: Dict[str, Dict[str, Any]] = {}
+        for recent in recent_events:
+            identity = str(recent.get("identity") or "").strip()
+            if identity and identity not in latest_by_identity:
+                latest_by_identity[identity] = recent
+
+        enriched = []
+        for event in upcoming_events:
+            public_event = dict(event)
+            identity = str(public_event.get("identity") or "").strip()
+            latest = latest_by_identity.get(identity)
+            if latest:
+                public_event["last_preflight_event"] = deepcopy(latest)
+            enriched.append(public_event)
+        return enriched
 
     def run_once(self, *, force: bool = False) -> Dict[str, Any]:
         config = self.get_config(include_secret=True)

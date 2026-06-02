@@ -463,6 +463,35 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(recent[0]["type"], "preflight_completed")
         self.assertEqual(recent[0]["details"]["bucket"], "manual")
+        upcoming_after = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming_after[0]["last_preflight_event"]["type"], "preflight_completed")
+        self.assertEqual(upcoming_after[0]["last_preflight_event"]["details"]["bucket"], "manual")
+
+    def test_manual_force_launches_past_event_as_manual_check(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2026-05-28T20:00:00+00:00")],
+            checker=checker,
+        )
+
+        scan_result = service.run_once(force=True)
+        self.assertTrue(scan_result["success"])
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "past")
+
+        result = service.force_check_event(upcoming[0]["identity"])
+        self.assertTrue(result["success"])
+        self.assertTrue(result["launched"])
+        self.assertEqual(result["event"]["trigger_bucket"], "manual")
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(len(checker.calls), 1)
+        args, kwargs = checker.calls[0]
+        self.assertEqual(args[0], 77)
+        self.assertEqual(kwargs["program_name"], "Home vs Away")
 
     def test_manual_force_rejects_filtered_event_without_launching_check(self):
         checker = FakeChecker()

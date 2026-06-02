@@ -107,7 +107,7 @@ const formatOffset = (seconds) => {
 
 const eventLabel = (type) => eventLabels[type] || type || 'Unknown'
 const stateLabel = (state) => stateLabels[state] || state || 'Unknown'
-const forceableStates = new Set(['due', 'scheduled', 'already_attempted'])
+const forceableStates = new Set(['due', 'scheduled', 'already_attempted', 'past'])
 
 const titleizeCode = (value) => (
   String(value || '')
@@ -152,7 +152,7 @@ const forceEventTooltip = (event) => {
   if (!event?.dispatcharr_channel_id) return 'No Dispatcharr channel'
   if (event?.state === 'waiting_for_channel_sync') return 'Channel syncing'
   if (event?.state === 'filtered') return 'Filtered'
-  if (event?.state === 'past') return 'Past grace window'
+  if (event?.state === 'past') return 'Run manual check'
   if (!forceableStates.has(String(event?.state || ''))) return 'Unavailable'
   return 'Force event preflight'
 }
@@ -672,48 +672,69 @@ export default function TeamarrPreflight() {
               ) : (
                 <TooltipProvider delayDuration={200}>
                   <div className="space-y-3">
-                  {upcomingEvents.slice(0, 12).map(event => (
-                    <div key={`${event.identity}-${event.trigger_bucket || 'none'}`} className="rounded-md border border-border p-3">
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate font-medium">{event.event_name}</p>
-                          <p className="text-sm text-muted-foreground">{formatDateTime(event.event_date)}</p>
+                  {upcomingEvents.slice(0, 12).map(event => {
+                    const lastPreflightEvent = event.last_preflight_event || null
+                    const lastPreflightDetails = recentEventDetailParts(lastPreflightEvent)
+                    return (
+                      <div key={`${event.identity}-${event.trigger_bucket || 'none'}`} className="rounded-md border border-border p-3">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate font-medium">{event.event_name}</p>
+                            <p className="text-sm text-muted-foreground">{formatDateTime(event.event_date)}</p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <Badge variant={event.state === 'due' ? 'default' : 'secondary'}>
+                              {stateLabel(event.state)}
+                            </Badge>
+                            {lastPreflightEvent ? (
+                              <Badge variant={recentEventBadgeVariant(lastPreflightEvent.type)}>
+                                {eventLabel(lastPreflightEvent.type)}
+                              </Badge>
+                            ) : (
+                              <Badge variant="outline">No Check</Badge>
+                            )}
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <span className="inline-flex">
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="icon"
+                                    className="h-8 w-8"
+                                    disabled={!canForceEvent(event) || actionLoading !== ''}
+                                    onClick={() => setForceEvent(event)}
+                                    aria-label={`Force event preflight for ${event.event_name || 'managed event'}`}
+                                  >
+                                    {actionLoading === `force:${event.identity}` ? (
+                                      <Loader2 className="h-4 w-4 animate-spin" />
+                                    ) : (
+                                      <PlayCircle className="h-4 w-4" />
+                                    )}
+                                  </Button>
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent>{forceEventTooltip(event)}</TooltipContent>
+                            </Tooltip>
+                          </div>
                         </div>
-                        <div className="flex shrink-0 items-center gap-2">
-                          <Badge variant={event.state === 'due' ? 'default' : 'secondary'}>
-                            {stateLabel(event.state)}
-                          </Badge>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className="inline-flex">
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="icon"
-                                  className="h-8 w-8"
-                                  disabled={!canForceEvent(event) || actionLoading !== ''}
-                                  onClick={() => setForceEvent(event)}
-                                  aria-label={`Force event preflight for ${event.event_name || 'managed event'}`}
-                                >
-                                  {actionLoading === `force:${event.identity}` ? (
-                                    <Loader2 className="h-4 w-4 animate-spin" />
-                                  ) : (
-                                    <PlayCircle className="h-4 w-4" />
-                                  )}
-                                </Button>
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent>{forceEventTooltip(event)}</TooltipContent>
-                          </Tooltip>
+                        <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
+                          <span>{event.channel_name || `Channel ${event.dispatcharr_channel_id || 'N/A'}`}</span>
+                          <span>{event.sport || 'Sport N/A'}</span>
+                          <span>{event.league || 'League N/A'}</span>
                         </div>
+                        {lastPreflightEvent ? (
+                          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                            <span className="mr-1 text-xs text-muted-foreground">Last check {formatTimestamp(lastPreflightEvent.timestamp)}</span>
+                            {lastPreflightDetails.map(part => (
+                              <Badge key={part} variant="outline" className="text-[10px] font-medium text-muted-foreground">
+                                {part}
+                              </Badge>
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
-                      <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
-                        <span>{event.channel_name || `Channel ${event.dispatcharr_channel_id || 'N/A'}`}</span>
-                        <span>{event.sport || 'Sport N/A'}</span>
-                        <span>{event.league || 'League N/A'}</span>
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                   </div>
                 </TooltipProvider>
               )}
