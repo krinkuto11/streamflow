@@ -29,6 +29,7 @@ logger = setup_logging(__name__)
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/data"))
 CONFIG_FILE = CONFIG_DIR / "teamarr_preflight_config.json"
 MAX_EVENTS = 120
+TEAMARR_PREFLIGHT_QUEUE_PRIORITY = 100
 
 READY_SYNC_STATES = {"in_sync", "synced", "ready"}
 DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME = "Teamarr Event Preflight"
@@ -241,6 +242,7 @@ class TeamarrPreflightService:
         self._ensure_default_profile()
         self._events: deque[Dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._upcoming: List[Dict[str, Any]] = []
+        self._filter_options: Dict[str, Any] = {"sports": [], "leagues": [], "source": "events"}
         self._attempted_buckets: Dict[str, float] = {}
         self._active_checks: Dict[str, Dict[str, Any]] = {}
         self._last_scan_at: Optional[float] = None
@@ -376,6 +378,7 @@ class TeamarrPreflightService:
                 "active_checks": list(self._active_checks.values()),
                 "upcoming_events": list(self._upcoming),
                 "recent_events": list(self._events)[:25],
+                "filter_options": dict(self._filter_options),
                 "config": public_config(self._config, self._default_profile_metadata()),
             }
 
@@ -388,6 +391,7 @@ class TeamarrPreflightService:
             raw_events = self._fetch_managed_events(config)
             now = datetime.fromtimestamp(self.clock(), tz=timezone.utc)
             candidates = self._build_candidates(raw_events, config, now)
+            filter_options = self._build_filter_options(config, raw_events)
             launched = 0
             skipped = 0
             for event in candidates:
@@ -403,6 +407,7 @@ class TeamarrPreflightService:
                 self._last_scan_at = self.clock()
                 self._last_error = None
                 self._upcoming = candidates[:50]
+                self._filter_options = filter_options
 
             return {
                 "success": True,
@@ -434,6 +439,7 @@ class TeamarrPreflightService:
             raw_events = self._fetch_managed_events(config)
             now = datetime.fromtimestamp(self.clock(), tz=timezone.utc)
             candidates = self._build_candidates(raw_events, config, now)
+            filter_options = self._build_filter_options(config, raw_events)
             target = next(
                 (
                     event
@@ -447,6 +453,7 @@ class TeamarrPreflightService:
                 self._last_scan_at = self.clock()
                 self._last_error = None
                 self._upcoming = candidates[:50]
+                self._filter_options = filter_options
 
             if target is None:
                 return {
@@ -505,6 +512,18 @@ class TeamarrPreflightService:
             self._stop_event.wait(interval)
 
     def _fetch_managed_events(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        payload = self._fetch_teamarr_json(config, "/api/v1/channels/managed")
+        if isinstance(payload, dict):
+            for key in ("items", "channels", "data", "results"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+            return []
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
+
+    def _fetch_teamarr_json(self, config: Dict[str, Any], path: str) -> Any:
         base_url = str(config.get("teamarr_base_url") or "").rstrip("/")
         if not base_url:
             raise ValueError("Teamarr base URL is required")
@@ -515,21 +534,154 @@ class TeamarrPreflightService:
             headers[str(config.get("api_key_header") or DEFAULT_CONFIG["api_key_header"])] = api_key
 
         response = self.http_get(
-            f"{base_url}/api/v1/channels/managed",
+            f"{base_url}{path}",
             headers=headers,
             timeout=20,
         )
         response.raise_for_status()
-        payload = response.json()
-        if isinstance(payload, dict):
-            for key in ("items", "channels", "data", "results"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    return [item for item in value if isinstance(item, dict)]
+        return response.json()
+
+    def _build_filter_options(self, config: Dict[str, Any], events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+        fallback = self._event_filter_options(events)
+        try:
+            subscription = self._fetch_teamarr_json(config, "/api/v1/sports-subscription")
+            sports_catalog = self._fetch_teamarr_json(config, "/api/v1/cache/sports")
+            leagues_catalog = self._fetch_teamarr_json(config, "/api/v1/cache/leagues")
+            selected_leagues = self._selected_league_slugs(subscription)
+            if not selected_leagues:
+                return fallback
+
+            sports_by_slug = self._sports_catalog_by_slug(sports_catalog)
+            leagues_by_slug = self._leagues_catalog_by_slug(leagues_catalog)
+            league_options = []
+            selected_sports = set()
+
+            for league_slug in selected_leagues:
+                league = leagues_by_slug.get(league_slug, {})
+                sport_slug = str(league.get("sport") or "").strip().lower()
+                if sport_slug:
+                    selected_sports.add(sport_slug)
+                elif league_slug in sports_by_slug:
+                    selected_sports.add(league_slug)
+                league_options.append({
+                    "value": league_slug,
+                    "label": str(league.get("name") or league.get("league_alias") or league_slug).strip(),
+                    "sport": sport_slug,
+                })
+
+            for event_sport in fallback.get("sports", []):
+                value = event_sport.get("value") if isinstance(event_sport, dict) else event_sport
+                if value:
+                    selected_sports.add(str(value).strip().lower())
+
+            sport_options = [
+                {
+                    "value": sport_slug,
+                    "label": sports_by_slug.get(sport_slug) or self._titleize_slug(sport_slug),
+                }
+                for sport_slug in sorted(selected_sports)
+                if sport_slug
+            ]
+            league_options.sort(key=lambda item: item.get("label") or item.get("value") or "")
+
+            return {
+                "sports": sport_options,
+                "leagues": league_options,
+                "source": "teamarr_subscription",
+            }
+        except Exception as exc:
+            logger.debug("Teamarr preflight filter options fell back to managed events: %s", exc)
+            fallback["error"] = "Teamarr subscription options unavailable"
+            return fallback
+
+    @staticmethod
+    def _event_filter_options(events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+        sports = set()
+        leagues = set()
+        for event in events:
+            sport = str(event.get("sport") or "").strip().lower()
+            league = str(event.get("league") or "").strip().lower()
+            if sport:
+                sports.add(sport)
+            if league:
+                leagues.add(league)
+        return {
+            "sports": [{"value": value, "label": TeamarrPreflightService._titleize_slug(value)} for value in sorted(sports)],
+            "leagues": [{"value": value, "label": value.upper()} for value in sorted(leagues)],
+            "source": "events",
+        }
+
+    @staticmethod
+    def _selected_league_slugs(subscription: Any) -> List[str]:
+        if isinstance(subscription, dict):
+            values = subscription.get("leagues") or subscription.get("selected_leagues") or []
+        elif isinstance(subscription, list):
+            values = subscription
+        else:
             return []
-        if isinstance(payload, list):
-            return [item for item in payload if isinstance(item, dict)]
-        return []
+        if not isinstance(values, list):
+            return []
+
+        selected = []
+        def add_slug(raw_value: Any) -> None:
+            slug = str(raw_value or "").strip().lower()
+            if slug and slug not in selected:
+                selected.append(slug)
+
+        for value in values:
+            if isinstance(value, dict):
+                nested = value.get("leagues") or value.get("selected_leagues")
+                if isinstance(nested, list):
+                    for nested_value in nested:
+                        add_slug(nested_value)
+                    continue
+                for key in ("slug", "league_slug", "league", "value", "id", "name"):
+                    if value.get(key):
+                        add_slug(value.get(key))
+                        break
+                continue
+            add_slug(value)
+        return selected
+
+    @staticmethod
+    def _sports_catalog_by_slug(payload: Any) -> Dict[str, str]:
+        sports = payload.get("sports") if isinstance(payload, dict) else {}
+        if isinstance(sports, dict):
+            return {
+                str(slug).strip().lower(): str(label).strip()
+                for slug, label in sports.items()
+                if str(slug).strip() and str(label).strip()
+            }
+        if isinstance(sports, list):
+            by_slug = {}
+            for sport in sports:
+                if not isinstance(sport, dict):
+                    continue
+                slug = str(sport.get("slug") or sport.get("value") or sport.get("id") or "").strip().lower()
+                label = str(sport.get("name") or sport.get("label") or slug).strip()
+                if slug and label:
+                    by_slug[slug] = label
+            return by_slug
+        return {}
+
+    @staticmethod
+    def _leagues_catalog_by_slug(payload: Any) -> Dict[str, Dict[str, Any]]:
+        leagues = payload.get("leagues") if isinstance(payload, dict) else []
+        if not isinstance(leagues, list):
+            return {}
+        by_slug = {}
+        for league in leagues:
+            if not isinstance(league, dict):
+                continue
+            slug = str(league.get("slug") or "").strip().lower()
+            if slug:
+                by_slug[slug] = league
+        return by_slug
+
+    @staticmethod
+    def _titleize_slug(value: Any) -> str:
+        text = str(value or "").replace("_", " ").replace("-", " ").replace(".", " ").strip()
+        return " ".join(part.capitalize() for part in text.split()) if text else ""
 
     def _build_candidates(
         self,
@@ -643,13 +795,15 @@ class TeamarrPreflightService:
         if not channel_id:
             self._record_event("no_dispatcharr_channel", event, {})
             return False
-        if self._automation_or_quality_checker_active(config):
+        if self._automation_active(config):
             self._record_event("deferred_automation_active", event, {"bucket": event.get("trigger_bucket")})
             return False
         if not self._channel_has_streams(channel_id):
             self._mark_attempted(event)
             self._record_event("no_streams_yet", event, {"bucket": event.get("trigger_bucket")})
             return False
+        if self._stream_checker_active():
+            return self._queue_check(event, config)
 
         with self._lock:
             if len(self._active_checks) >= int(config["max_concurrent_checks"]):
@@ -677,6 +831,37 @@ class TeamarrPreflightService:
         self._record_event("preflight_started", event, {"bucket": event.get("trigger_bucket")})
         thread.start()
         return True
+
+    def _queue_check(self, event: Dict[str, Any], config: Dict[str, Any]) -> bool:
+        channel_id = event.get("dispatcharr_channel_id")
+        if not channel_id:
+            return False
+
+        forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
+        checker = self.stream_checker_provider()
+        metadata = {
+            "source": "teamarr_preflight",
+            "program_name": event.get("event_name"),
+            "is_epg_scheduled": True,
+            "forced_profile_id": forced_profile_id,
+        }
+        queued = bool(checker.queue_channel(
+            int(channel_id),
+            priority=TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
+            force_check=True,
+            metadata=metadata,
+        ))
+        if queued:
+            self._mark_attempted(event)
+            self._record_event(
+                "preflight_queued",
+                event,
+                {
+                    "bucket": event.get("trigger_bucket"),
+                    "priority": TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
+                },
+            )
+        return queued
 
     def _run_check(self, key: str, event: Dict[str, Any], config: Dict[str, Any]) -> None:
         try:
@@ -749,7 +934,7 @@ class TeamarrPreflightService:
         with self._lock:
             return self._default_profile_id or None
 
-    def _automation_or_quality_checker_active(self, config: Dict[str, Any]) -> bool:
+    def _automation_active(self, config: Dict[str, Any]) -> bool:
         if not config.get("skip_during_quality_check", True):
             return False
         try:
@@ -760,7 +945,9 @@ class TeamarrPreflightService:
 
         if automation_status.get("active") or automation_status.get("state") == "running":
             return True
+        return False
 
+    def _stream_checker_active(self) -> bool:
         try:
             checker = self.stream_checker_provider()
             status = checker.get_status() if checker else {}

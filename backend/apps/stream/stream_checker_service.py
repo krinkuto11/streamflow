@@ -292,22 +292,50 @@ class StreamCheckerService:
                 # can legitimately request abort in that narrow handoff window.
                 self.abort_current_check.clear()
                 logger.debug("Worker waiting for next channel from queue...")
-                channel_id = self.check_queue.get_next_channel(timeout=1.0)
-                if channel_id is None:
+                queue_entry = self.check_queue.get_next_entry(timeout=1.0)
+                if queue_entry is None:
                     # No channel in queue - check if we should finalize a batch
                     if self.batch_start_time is not None:
                         # Queue is empty and we have an active batch - finalize it
                         self._finalize_batch_changelog()
                     logger.debug("No channel in queue (timeout)")
                     continue
+                channel_id = queue_entry.get('channel_id')
+                queue_metadata = queue_entry.get('metadata') or {}
                 
-                # Start a new batch if not already started
-                if self.batch_start_time is None:
+                single_check_metadata = bool(
+                    queue_metadata.get('is_epg_scheduled')
+                    or queue_metadata.get('source') == 'teamarr_preflight'
+                )
+
+                # Start a new batch if not already started. Specialized single-channel
+                # queue entries keep their own changelog path and should not create an
+                # otherwise empty batch.
+                if self.batch_start_time is None and not single_check_metadata:
                     self._start_batch_changelog()
                 
                 logger.debug(f"Worker processing channel {channel_id}")
                 # Check this channel
-                self._check_channel(channel_id)
+                forced_profile_id = queue_metadata.get('forced_profile_id')
+                if single_check_metadata:
+                    result = self.check_single_channel(
+                        channel_id,
+                        program_name=queue_metadata.get('program_name'),
+                        is_epg_scheduled=bool(queue_metadata.get('is_epg_scheduled')),
+                        forced_profile_id=forced_profile_id,
+                    )
+                    if isinstance(result, dict) and result.get('success') is False:
+                        self.check_queue.mark_failed(
+                            channel_id,
+                            result.get('error') or result.get('reason') or 'single channel check failed',
+                        )
+                    else:
+                        self.check_queue.mark_completed(channel_id)
+                else:
+                    check_kwargs = {}
+                    if forced_profile_id:
+                        check_kwargs['forced_profile_id'] = forced_profile_id
+                    self._check_channel(channel_id, **check_kwargs)
                 logger.debug(f"Worker completed channel {channel_id}")
                 
             except Exception as e:
@@ -4030,13 +4058,14 @@ class StreamCheckerService:
             }
         }
     
-    def queue_channel(self, channel_id: int, priority: int = 10, force_check: bool = False) -> bool:
+    def queue_channel(self, channel_id: int, priority: int = 10, force_check: bool = False, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Manually queue a channel for checking.
         
         Args:
             channel_id: ID of the channel to queue
             priority: Priority for queue ordering (higher = earlier)
             force_check: If True, marks channel for force checking (bypasses 2-hour immunity)
+            metadata: Optional queue metadata used by specialized callers
             
         Returns:
             True if channel was successfully queued, False otherwise
@@ -4062,7 +4091,7 @@ class StreamCheckerService:
             pass # We'll modify add_channel signature to handle this cleanly.
         
         # Calling modified add_channel
-        return self.check_queue.add_channel(channel_id, priority, stream_count=stream_count)
+        return self.check_queue.add_channel(channel_id, priority, stream_count=stream_count, metadata=metadata)
     
     def queue_channels(self, channel_ids: List[int], priority: int = 10, force_check: bool = False) -> int:
         """Manually queue multiple channels for checking.

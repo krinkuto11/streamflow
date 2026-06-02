@@ -564,7 +564,9 @@ class StreamCheckQueue:
         self.queue = queue.PriorityQueue(maxsize=max_size)
         self._queue_sequence = 0
         self.queued = {}  # Track channels already in queue dict(channel_id -> stream_count)
+        self.queued_metadata = {}  # Optional channel_id -> metadata for specialized queue entries
         self.in_progress = {} # dict(channel_id -> stream_count)
+        self.in_progress_metadata = {}
         self.completed = set()
         self.failed = {}
         self.lock = threading.Lock()
@@ -584,7 +586,7 @@ class StreamCheckQueue:
             'queue_size': 0
         }
     
-    def add_channel(self, channel_id: int, priority: int = 0, stream_count: int = 1):
+    def add_channel(self, channel_id: int, priority: int = 0, stream_count: int = 1, metadata: Optional[Dict[str, Any]] = None):
         """Add a channel to the checking queue."""
         with self.lock:
             # Check if channel is already queued, in progress, or completed.
@@ -599,6 +601,7 @@ class StreamCheckQueue:
                 self.stats['total_completed'] = 0
                 self.stats['total_failed'] = 0
                 self.queued.clear()
+                self.queued_metadata.clear()
                 self.failed.clear()
                 self.batch_started_at = datetime.now()
                 self.last_cleared_at = None
@@ -614,6 +617,8 @@ class StreamCheckQueue:
                 self.queue.put((-normalized_priority, sequence, channel_id), block=False)
                 # We default to 1 stream roughly if unknown, but add_channels will pass precise length
                 self.queued[channel_id] = stream_count
+                if metadata:
+                    self.queued_metadata[channel_id] = dict(metadata)
                 self.stats['total_queued'] += 1
                 self.stats['queue_size'] = self.queue.qsize()
                 logger.debug(f"Added channel {channel_id} to queue (priority: {priority})")
@@ -650,8 +655,8 @@ class StreamCheckQueue:
                 return True
         return False
     
-    def get_next_channel(self, timeout: float = 1.0) -> Optional[int]:
-        """Get the next channel to check."""
+    def get_next_entry(self, timeout: float = 1.0) -> Optional[Dict[str, Any]]:
+        """Get the next queue entry to check."""
         try:
             item = self.queue.get(timeout=timeout)
             if len(item) == 3:
@@ -667,13 +672,24 @@ class StreamCheckQueue:
                     return None
 
                 stream_count = self.queued.pop(channel_id)  # Remove from queued dict
+                metadata = self.queued_metadata.pop(channel_id, {})
                 self.in_progress[channel_id] = stream_count
+                if metadata:
+                    self.in_progress_metadata[channel_id] = metadata
                 self.channel_start_times[channel_id] = datetime.now()
                 self.stats['current_channel'] = channel_id
                 self.stats['queue_size'] = self.queue.qsize()
-            return channel_id
+            return {
+                'channel_id': channel_id,
+                'metadata': metadata,
+            }
         except queue.Empty:
             return None
+
+    def get_next_channel(self, timeout: float = 1.0) -> Optional[int]:
+        """Get the next channel to check."""
+        entry = self.get_next_entry(timeout=timeout)
+        return entry.get('channel_id') if entry else None
     
     def mark_completed(self, channel_id: int) -> bool:
         """Mark a channel check as completed.
@@ -700,6 +716,7 @@ class StreamCheckQueue:
 
             if channel_id in self.in_progress:
                 del self.in_progress[channel_id]
+            self.in_progress_metadata.pop(channel_id, None)
             self.completed.add(channel_id)
             self.stats['total_completed'] += 1
             if self.stats['current_channel'] == channel_id:
@@ -724,6 +741,7 @@ class StreamCheckQueue:
                 
             if channel_id in self.in_progress:
                 del self.in_progress[channel_id]
+            self.in_progress_metadata.pop(channel_id, None)
             self.failed[channel_id] = {
                 'error': error,
                 'timestamp': datetime.now().isoformat()
@@ -787,7 +805,9 @@ class StreamCheckQueue:
                 except queue.Empty:
                     break
             self.queued.clear()
+            self.queued_metadata.clear()
             self.in_progress.clear()
+            self.in_progress_metadata.clear()
             self.completed.clear()
             self.failed.clear()
             self.channel_start_times.clear()

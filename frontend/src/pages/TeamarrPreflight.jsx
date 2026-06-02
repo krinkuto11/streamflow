@@ -8,6 +8,7 @@ import { Switch } from '@/components/ui/switch.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog.jsx'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip.jsx'
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
@@ -15,6 +16,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import {
   Activity,
   CalendarCheck,
+  ChevronDown,
   CheckCircle2,
   Clock,
   Loader2,
@@ -37,6 +39,7 @@ const eventLabels = {
   preflight_completed: 'Completed',
   preflight_failed: 'Failed',
   preflight_deferred: 'Deferred',
+  preflight_queued: 'Queued',
   deferred_automation_active: 'Deferred',
   manual_preflight_rejected: 'Rejected',
   no_streams_yet: 'No Streams',
@@ -153,6 +156,47 @@ const forceEventTooltip = (event) => {
   return 'Force event preflight'
 }
 
+const normalizeFilterOption = (option) => {
+  if (option && typeof option === 'object') {
+    const rawValue = option.value ?? option.slug ?? option.id ?? option.name ?? option.label
+    const value = String(rawValue || '').trim().toLowerCase()
+    if (!value) return null
+    const label = String(option.label ?? option.name ?? option.league_alias ?? rawValue ?? value).trim()
+    return {
+      value,
+      label: label || titleizeCode(value),
+      sport: option.sport ? String(option.sport).trim().toLowerCase() : undefined,
+    }
+  }
+
+  const value = String(option || '').trim().toLowerCase()
+  if (!value) return null
+  return {
+    value,
+    label: titleizeCode(value),
+  }
+}
+
+const mergeFilterOptions = (primaryOptions = [], fallbackOptions = [], selectedValues = []) => {
+  const byValue = new Map()
+  const addOption = (option) => {
+    const normalized = normalizeFilterOption(option)
+    if (normalized && !byValue.has(normalized.value)) {
+      byValue.set(normalized.value, normalized)
+    }
+  }
+
+  primaryOptions.forEach(addOption)
+  fallbackOptions.forEach(addOption)
+  selectedValues.flatMap(parseFilterCsv).forEach(value => addOption(value))
+
+  return [...byValue.values()].sort((a, b) => a.label.localeCompare(b.label))
+}
+
+const filterLabelForValue = (value, options) => (
+  options.find(option => option.value === value)?.label || titleizeCode(value)
+)
+
 export default function TeamarrPreflight() {
   const [config, setConfig] = useState(null)
   const [editedConfig, setEditedConfig] = useState(null)
@@ -178,10 +222,25 @@ export default function TeamarrPreflight() {
   const recentEvents = status?.recent_events || []
   const activeChecks = status?.active_checks || []
   const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
-  const filterOptions = useMemo(
+  const eventFilterOptions = useMemo(
     () => collectTeamarrFilterOptions([...upcomingEvents, ...recentEvents]),
     [upcomingEvents, recentEvents]
   )
+  const filterOptions = useMemo(() => {
+    const serverOptions = status?.filter_options || {}
+    return {
+      sports: mergeFilterOptions(
+        serverOptions.sports || [],
+        eventFilterOptions.sports || [],
+        [includeSports, excludeSports],
+      ),
+      leagues: mergeFilterOptions(
+        serverOptions.leagues || [],
+        eventFilterOptions.leagues || [],
+        [includeLeagues, excludeLeagues],
+      ),
+    }
+  }, [status?.filter_options, eventFilterOptions, includeSports, excludeSports, includeLeagues, excludeLeagues])
   const profileOptions = useMemo(() => {
     const items = [...profiles]
     const defaultProfileId = editedConfig?.default_profile_id ? String(editedConfig.default_profile_id) : ''
@@ -335,23 +394,56 @@ export default function TeamarrPreflight() {
 
   const running = Boolean(status?.running)
   const enabled = Boolean(editedConfig?.enabled)
-  const renderFilterChips = (value, setValue, options) => {
-    if (!options.length) return null
+  const renderFilterDropdown = (label, value, setValue, options) => {
     const selected = new Set(parseFilterCsv(value))
+    const selectedValues = [...selected]
+    const buttonLabel = selectedValues.length === 0
+      ? 'Any'
+      : `${selectedValues.length} selected`
+
     return (
-      <div className="flex flex-wrap gap-2">
-        {options.map(option => (
-          <Button
-            key={option}
-            type="button"
-            size="sm"
-            variant={selected.has(option) ? 'default' : 'outline'}
-            className="h-8 px-2 text-xs"
-            onClick={() => setValue(toggleFilterCsvTerm(value, option))}
-          >
-            {option}
-          </Button>
-        ))}
+      <div className="space-y-2">
+        <Label>{label}</Label>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" variant="outline" className="h-10 w-full justify-between font-normal">
+              <span className="truncate">{buttonLabel}</span>
+              <ChevronDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="max-h-72 w-[--radix-dropdown-menu-trigger-width] overflow-y-auto">
+            {options.length === 0 ? (
+              <DropdownMenuItem disabled>No options</DropdownMenuItem>
+            ) : (
+              options.map(option => (
+                <DropdownMenuCheckboxItem
+                  key={option.value}
+                  checked={selected.has(option.value)}
+                  onCheckedChange={() => setValue(toggleFilterCsvTerm(value, option.value))}
+                  onSelect={(event) => event.preventDefault()}
+                >
+                  <span className="truncate">{option.label}</span>
+                </DropdownMenuCheckboxItem>
+              ))
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+        {selectedValues.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {selectedValues.map(optionValue => (
+              <Button
+                key={optionValue}
+                type="button"
+                size="sm"
+                variant="outline"
+                className="h-8 max-w-full px-2 text-xs"
+                onClick={() => setValue(toggleFilterCsvTerm(value, optionValue))}
+              >
+                <span className="truncate">{filterLabelForValue(optionValue, options)}</span>
+              </Button>
+            ))}
+          </div>
+        ) : null}
       </div>
     )
   }
@@ -542,26 +634,10 @@ export default function TeamarrPreflight() {
             <Separator />
 
             <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label>Include Sports</Label>
-                <Input value={includeSports} onChange={(event) => setIncludeSports(event.target.value)} />
-                {renderFilterChips(includeSports, setIncludeSports, filterOptions.sports)}
-              </div>
-              <div className="space-y-2">
-                <Label>Exclude Sports</Label>
-                <Input value={excludeSports} onChange={(event) => setExcludeSports(event.target.value)} />
-                {renderFilterChips(excludeSports, setExcludeSports, filterOptions.sports)}
-              </div>
-              <div className="space-y-2">
-                <Label>Include Leagues</Label>
-                <Input value={includeLeagues} onChange={(event) => setIncludeLeagues(event.target.value)} />
-                {renderFilterChips(includeLeagues, setIncludeLeagues, filterOptions.leagues)}
-              </div>
-              <div className="space-y-2">
-                <Label>Exclude Leagues</Label>
-                <Input value={excludeLeagues} onChange={(event) => setExcludeLeagues(event.target.value)} />
-                {renderFilterChips(excludeLeagues, setExcludeLeagues, filterOptions.leagues)}
-              </div>
+              {renderFilterDropdown('Include Sports', includeSports, setIncludeSports, filterOptions.sports)}
+              {renderFilterDropdown('Exclude Sports', excludeSports, setExcludeSports, filterOptions.sports)}
+              {renderFilterDropdown('Include Leagues', includeLeagues, setIncludeLeagues, filterOptions.leagues)}
+              {renderFilterDropdown('Exclude Leagues', excludeLeagues, setExcludeLeagues, filterOptions.leagues)}
             </div>
           </CardContent>
         </Card>

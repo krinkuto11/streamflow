@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.stream.teamarr_preflight_service import (
     DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
+    TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
     TeamarrPreflightService,
     normalize_config,
 )
@@ -34,9 +35,14 @@ class FakeResponse:
 class FakeChecker:
     def __init__(self):
         self.calls = []
+        self.queued = []
 
     def get_status(self):
         return {"stream_checking_mode": False, "queue": {"queue_size": 0, "in_progress": 0}}
+
+    def queue_channel(self, *args, **kwargs):
+        self.queued.append((args, kwargs))
+        return True
 
     def check_single_channel(self, *args, **kwargs):
         self.calls.append((args, kwargs))
@@ -62,6 +68,11 @@ class SequencedChecker(FakeChecker):
         if self.results:
             return self.results.pop(0)
         return super().check_single_channel(*args, **kwargs)
+
+
+class BusyChecker(FakeChecker):
+    def get_status(self):
+        return {"stream_checking_mode": True, "queue": {"queue_size": 0, "in_progress": 1}}
 
 
 class FakeUdi:
@@ -121,12 +132,12 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def make_service(self, events, *, checker=None, udi=None, automation_config=None, automation_status=None):
+    def make_service(self, events, *, checker=None, udi=None, automation_config=None, automation_status=None, http_get=None):
         checker = checker or FakeChecker()
         udi = udi or FakeUdi()
         automation_config = automation_config or FakeAutomationConfig()
         automation_status = automation_status or {}
-        http_get = Mock(return_value=FakeResponse(events))
+        http_get = http_get or Mock(return_value=FakeResponse(events))
         service = TeamarrPreflightService(
             config_file=self.config_file,
             http_get=http_get,
@@ -213,10 +224,9 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(kwargs["program_name"], "Home vs Away")
         self.assertTrue(kwargs["is_epg_scheduled"])
         self.assertEqual(kwargs["forced_profile_id"], "42")
-        http_get.assert_called_once()
-        called_url = http_get.call_args[0][0]
-        self.assertEqual(called_url, "http://teamarr.test/api/v1/channels/managed")
-        self.assertEqual(http_get.call_args.kwargs["headers"]["X-Teamarr-Key"], "secret")
+        managed_call = http_get.call_args_list[0]
+        self.assertEqual(managed_call[0][0], "http://teamarr.test/api/v1/channels/managed")
+        self.assertEqual(managed_call.kwargs["headers"]["X-Teamarr-Key"], "secret")
 
         deadline = time.time() + 2
         recent = []
@@ -306,6 +316,66 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["type"], "deferred_automation_active")
         upcoming = service.get_status()["upcoming_events"]
         self.assertEqual(upcoming[0]["state"], "due")
+
+    def test_active_stream_checker_queues_teamarr_event_with_preflight_context(self):
+        checker = BusyChecker()
+        service, _, _ = self.make_service([make_event()], checker=checker)
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(checker.calls, [])
+        self.assertEqual(len(checker.queued), 1)
+
+        args, kwargs = checker.queued[0]
+        self.assertEqual(args[0], 77)
+        self.assertEqual(kwargs["priority"], TEAMARR_PREFLIGHT_QUEUE_PRIORITY)
+        self.assertTrue(kwargs["force_check"])
+        self.assertEqual(kwargs["metadata"]["source"], "teamarr_preflight")
+        self.assertEqual(kwargs["metadata"]["program_name"], "Home vs Away")
+        self.assertTrue(kwargs["metadata"]["is_epg_scheduled"])
+        self.assertEqual(kwargs["metadata"]["forced_profile_id"], "42")
+
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["type"], "preflight_queued")
+        self.assertEqual(recent[0]["details"]["priority"], TEAMARR_PREFLIGHT_QUEUE_PRIORITY)
+
+    def test_filter_options_use_teamarr_subscription_and_cache_catalogs(self):
+        def http_get(url, **kwargs):
+            if url.endswith("/api/v1/channels/managed"):
+                return FakeResponse([make_event()])
+            if url.endswith("/api/v1/sports-subscription"):
+                return FakeResponse({"leagues": ["mlb", "nhl", "uefa.europa", "ufc"]})
+            if url.endswith("/api/v1/cache/sports"):
+                return FakeResponse({"sports": {
+                    "baseball": "Baseball",
+                    "hockey": "Hockey",
+                    "mma": "MMA",
+                    "soccer": "Soccer",
+                }})
+            if url.endswith("/api/v1/cache/leagues"):
+                return FakeResponse({"leagues": [
+                    {"slug": "mlb", "name": "Major League Baseball", "sport": "baseball"},
+                    {"slug": "nhl", "name": "National Hockey League", "sport": "hockey"},
+                    {"slug": "uefa.europa", "name": "UEFA Europa League", "sport": "soccer"},
+                    {"slug": "ufc", "name": "UFC", "sport": "mma"},
+                ]})
+            raise AssertionError(f"Unexpected URL {url}")
+
+        service, _, _ = self.make_service([make_event()], http_get=Mock(side_effect=http_get))
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+
+        options = service.get_status()["filter_options"]
+        self.assertEqual(options["source"], "teamarr_subscription")
+        self.assertEqual(
+            [item["value"] for item in options["sports"]],
+            ["baseball", "hockey", "mma", "soccer"],
+        )
+        league_labels = {item["value"]: item["label"] for item in options["leagues"]}
+        self.assertEqual(league_labels["mlb"], "Major League Baseball")
+        self.assertEqual(league_labels["uefa.europa"], "UEFA Europa League")
 
     def test_default_automation_status_provider_uses_running_main_module(self):
         class FakeAutomationManager:

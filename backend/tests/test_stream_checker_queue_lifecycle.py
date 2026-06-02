@@ -31,6 +31,31 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 203)
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 201)
 
+    def test_queue_entries_preserve_metadata_with_priority_ordering(self):
+        check_queue = StreamCheckQueue(max_size=10)
+
+        self.assertTrue(check_queue.add_channel(301, priority=5, stream_count=1))
+        self.assertTrue(check_queue.add_channel(
+            302,
+            priority=100,
+            stream_count=2,
+            metadata={
+                'source': 'teamarr_preflight',
+                'program_name': 'Home vs Away',
+                'is_epg_scheduled': True,
+                'forced_profile_id': '42',
+            },
+        ))
+
+        entry = check_queue.get_next_entry(timeout=0.1)
+        self.assertEqual(entry['channel_id'], 302)
+        self.assertEqual(entry['metadata']['source'], 'teamarr_preflight')
+        self.assertEqual(entry['metadata']['program_name'], 'Home vs Away')
+        self.assertTrue(entry['metadata']['is_epg_scheduled'])
+        self.assertEqual(entry['metadata']['forced_profile_id'], '42')
+
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 301)
+
     def test_equal_priority_channels_keep_fifo_order(self):
         check_queue = StreamCheckQueue(max_size=10)
 
@@ -144,20 +169,60 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service._finalize_batch_changelog = Mock()
         seen_abort_states = []
 
-        def pull_channel(timeout):
+        def pull_entry(timeout):
             service.abort_current_check.set()
-            return 105
+            return {'channel_id': 105, 'metadata': {}}
 
         def check_channel(channel_id):
             seen_abort_states.append(service.abort_current_check.is_set())
             service.running = False
 
-        service.check_queue.get_next_channel.side_effect = pull_channel
+        service.check_queue.get_next_entry.side_effect = pull_entry
         service._check_channel = check_channel
 
         service._worker_loop()
 
         self.assertEqual(seen_abort_states, [True])
+
+    def test_worker_uses_single_channel_path_for_teamarr_queue_metadata(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.running = True
+        service.batch_start_time = None
+        service.abort_current_check = threading.Event()
+        service.check_queue = Mock()
+        service._start_batch_changelog = Mock()
+        service._finalize_batch_changelog = Mock()
+        service._check_channel = Mock()
+        service.check_single_channel = Mock(return_value={'success': True})
+
+        def pull_entry(timeout):
+            service.running = False
+            return {
+                'channel_id': 8441,
+                'metadata': {
+                    'source': 'teamarr_preflight',
+                    'program_name': 'Home vs Away',
+                    'is_epg_scheduled': True,
+                    'forced_profile_id': '42',
+                },
+            }
+
+        service.check_queue.get_next_entry.side_effect = pull_entry
+        service.check_queue.mark_completed = Mock()
+        service.check_queue.mark_failed = Mock()
+
+        service._worker_loop()
+
+        service._start_batch_changelog.assert_not_called()
+        service._check_channel.assert_not_called()
+        service.check_single_channel.assert_called_once_with(
+            8441,
+            program_name='Home vs Away',
+            is_epg_scheduled=True,
+            forced_profile_id='42',
+        )
+        service.check_queue.mark_completed.assert_called_once_with(8441)
+        service.check_queue.mark_failed.assert_not_called()
 
     def test_clear_queue_resets_active_sync_batch_state(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
