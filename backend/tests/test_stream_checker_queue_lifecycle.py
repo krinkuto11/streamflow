@@ -20,6 +20,28 @@ from apps.stream.stream_checker_service import StreamCheckerService  # noqa: E40
 
 
 class TestStreamCheckQueueLifecycle(unittest.TestCase):
+    def test_higher_priority_channels_are_checked_first(self):
+        check_queue = StreamCheckQueue(max_size=10)
+
+        self.assertTrue(check_queue.add_channel(201, priority=5, stream_count=1))
+        self.assertTrue(check_queue.add_channel(202, priority=100, stream_count=1))
+        self.assertTrue(check_queue.add_channel(203, priority=10, stream_count=1))
+
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 202)
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 203)
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 201)
+
+    def test_equal_priority_channels_keep_fifo_order(self):
+        check_queue = StreamCheckQueue(max_size=10)
+
+        self.assertTrue(check_queue.add_channel(211, priority=10, stream_count=1))
+        self.assertTrue(check_queue.add_channel(212, priority=10, stream_count=1))
+        self.assertTrue(check_queue.add_channel(213, priority=10, stream_count=1))
+
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 211)
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 212)
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 213)
+
     def test_clear_prevents_late_completion_from_repopulating_status(self):
         check_queue = StreamCheckQueue(max_size=10)
         self.assertTrue(check_queue.add_channel(101, priority=10, stream_count=3))

@@ -561,7 +561,8 @@ class StreamCheckQueue:
     """Queue manager for channel stream checking."""
     
     def __init__(self, max_size=1000):
-        self.queue = queue.Queue(maxsize=max_size)
+        self.queue = queue.PriorityQueue(maxsize=max_size)
+        self._queue_sequence = 0
         self.queued = {}  # Track channels already in queue dict(channel_id -> stream_count)
         self.in_progress = {} # dict(channel_id -> stream_count)
         self.completed = set()
@@ -604,7 +605,13 @@ class StreamCheckQueue:
                 self.last_clear_reason = None
 
             try:
-                self.queue.put((priority, channel_id), block=False)
+                try:
+                    normalized_priority = int(priority)
+                except (TypeError, ValueError):
+                    normalized_priority = 0
+                sequence = self._queue_sequence
+                self._queue_sequence += 1
+                self.queue.put((-normalized_priority, sequence, channel_id), block=False)
                 # We default to 1 stream roughly if unknown, but add_channels will pass precise length
                 self.queued[channel_id] = stream_count
                 self.stats['total_queued'] += 1
@@ -646,7 +653,11 @@ class StreamCheckQueue:
     def get_next_channel(self, timeout: float = 1.0) -> Optional[int]:
         """Get the next channel to check."""
         try:
-            priority, channel_id = self.queue.get(timeout=timeout)
+            item = self.queue.get(timeout=timeout)
+            if len(item) == 3:
+                _, _, channel_id = item
+            else:
+                _, channel_id = item
             with self.lock:
                 if channel_id not in self.queued:
                     logger.debug(
