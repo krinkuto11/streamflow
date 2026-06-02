@@ -190,6 +190,28 @@ class TestActiveStreamDetection(unittest.TestCase):
             # Profile 5 belongs to account 1
             count = self.manager.get_active_streams_for_profile(5)
             self.assertEqual(count, 1)
+
+    def test_get_active_streams_for_profile_does_not_count_sibling_profiles(self):
+        """Profile-level counts should not include other profiles on the account."""
+        mock_proxy_status = {
+            'channel-uuid-1': {
+                'channel_id': 'channel-uuid-1',
+                'state': 'active',
+                'm3u_profile_id': 5,
+                'client_count': 1
+            },
+            'channel-uuid-2': {
+                'channel_id': 'channel-uuid-2',
+                'state': 'active',
+                'm3u_profile_id': 6,
+                'client_count': 1
+            },
+        }
+
+        with patch.object(self.manager, '_get_proxy_status', return_value=mock_proxy_status):
+            self.assertEqual(self.manager.get_active_streams_for_account(1), 2)
+            self.assertEqual(self.manager.get_active_streams_for_profile(5), 1)
+            self.assertEqual(self.manager.get_active_streams_for_profile(6), 1)
     
     def test_find_account_for_profile(self):
         """Test finding the account for a given profile."""

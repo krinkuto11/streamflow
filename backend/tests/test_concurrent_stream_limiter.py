@@ -440,6 +440,130 @@ class TestSmartStreamScheduler(unittest.TestCase):
         self.assertEqual(len(free_result), 1)
         self.assertEqual(free_result[0]['status'], 'OK')
 
+    def test_parallel_checks_reserve_distinct_profiles(self):
+        """Concurrent checks for one account should not reuse the same credential."""
+        class FakeUDI:
+            account = {
+                'id': 1,
+                'name': 'Provider A',
+                'profiles': [
+                    {'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True},
+                    {'id': 11, 'name': 'Credential 2', 'max_streams': 1, 'is_active': True},
+                ],
+            }
+
+            def get_active_streams_for_account(self, _account_id):
+                return 0
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def check_stream_can_run(self, _stream):
+                return (True, None)
+
+            def apply_profile_url_transformation(self, stream, profile=None):
+                profile_id = profile.get('id') if profile else 'none'
+                return f"{stream['url']}?profile={profile_id}"
+
+            def get_stream_by_id(self, _stream_id):
+                return None
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(
+            1,
+            0,
+            profiles=[
+                {'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True},
+                {'id': 11, 'name': 'Credential 2', 'max_streams': 1, 'is_active': True},
+            ],
+        )
+        scheduler = SmartStreamScheduler(limiter, global_limit=2)
+
+        started_urls = []
+        both_started = threading.Event()
+        lock = threading.Lock()
+
+        def mock_check(**kwargs):
+            with lock:
+                started_urls.append(kwargs['stream_url'])
+                if len(started_urls) == 2:
+                    both_started.set()
+            both_started.wait(0.5)
+            return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+        results = scheduler.check_streams_with_limits(
+            streams=[
+                {'id': 1, 'name': 'Stream 1', 'url': 'http://test.com/1', 'm3u_account': 1},
+                {'id': 2, 'name': 'Stream 2', 'url': 'http://test.com/2', 'm3u_account': 1},
+            ],
+            check_function=mock_check,
+            provider_wait_timeout=0.1,
+        )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(sorted(url.rsplit('=', 1)[-1] for url in started_urls), ['10', '11'])
+
+    def test_active_profile_does_not_block_free_sibling_profile(self):
+        """A viewer on one credential should still leave a sibling credential usable."""
+        class FakeUDI:
+            account = {
+                'id': 1,
+                'name': 'Provider A',
+                'profiles': [
+                    {'id': 10, 'name': 'Busy Credential', 'max_streams': 1, 'is_active': True},
+                    {'id': 11, 'name': 'Free Credential', 'max_streams': 1, 'is_active': True},
+                ],
+            }
+
+            def get_active_streams_for_account(self, _account_id):
+                return 1
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {10: 1, 11: 0}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def check_stream_can_run(self, _stream):
+                return (True, None)
+
+            def apply_profile_url_transformation(self, stream, profile=None):
+                profile_id = profile.get('id') if profile else 'none'
+                return f"{stream['url']}?profile={profile_id}"
+
+            def get_stream_by_id(self, _stream_id):
+                return None
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(
+            1,
+            0,
+            profiles=[
+                {'id': 10, 'name': 'Busy Credential', 'max_streams': 1, 'is_active': True},
+                {'id': 11, 'name': 'Free Credential', 'max_streams': 1, 'is_active': True},
+            ],
+        )
+        scheduler = SmartStreamScheduler(limiter, global_limit=1)
+
+        checked_urls = []
+
+        def mock_check(**kwargs):
+            checked_urls.append(kwargs['stream_url'])
+            return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+        results = scheduler.check_streams_with_limits(
+            streams=[{'id': 1, 'name': 'Stream 1', 'url': 'http://test.com/1', 'm3u_account': 1}],
+            check_function=mock_check,
+            provider_wait_timeout=0.1,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['status'], 'OK')
+        self.assertEqual(checked_urls, ['http://test.com/1?profile=11'])
+
     def test_deferred_provider_stream_runs_after_capacity_frees(self):
         """A deferred stream should run once provider capacity becomes available."""
         self.limiter.set_account_limit(1, 1)

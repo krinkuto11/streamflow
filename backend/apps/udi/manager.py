@@ -1799,8 +1799,8 @@ class UDIManager:
             logger.warning(f"Profile {profile_id} not found in any M3U account")
             return 0
         
-        # Count active streams for this account
-        active_count = self._count_active_streams(account_id)
+        profile_counts = self.get_active_streams_count_per_profile(account_id)
+        active_count = profile_counts.get(profile_id, 0)
         logger.debug(f"Profile {profile_id} has {active_count} active streams")
         return active_count
     
