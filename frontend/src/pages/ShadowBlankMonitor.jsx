@@ -422,17 +422,19 @@ export default function ShadowBlankMonitor() {
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="excluded_channel_ids">Excluded Channel IDs</Label>
+                <Label htmlFor="excluded_channel_ids">Exclude Channel IDs</Label>
                 <Input
                   id="excluded_channel_ids"
+                  placeholder="None"
                   value={excludedIds}
                   onChange={(event) => setExcludedIds(event.target.value)}
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="excluded_channel_uuids">Excluded Channel UUIDs</Label>
+                <Label htmlFor="excluded_channel_uuids">Exclude Channel UUIDs</Label>
                 <Input
                   id="excluded_channel_uuids"
+                  placeholder="None"
                   value={excludedUuids}
                   onChange={(event) => setExcludedUuids(event.target.value)}
                 />
