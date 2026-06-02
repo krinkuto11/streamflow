@@ -27,9 +27,27 @@ def test_progress_update_builds_provider_progress_counters():
             status='analyzing',
             streams_detail=[
                 {'id': 1, 'name': 'A1', 'm3u_account': 'Provider A', 'status': 'checking'},
-                {'id': 2, 'name': 'A2', 'm3u_account': 'Provider A', 'status': 'waiting_provider_limit'},
-                {'id': 3, 'name': 'A3', 'm3u_account': 'Provider A', 'status': 'provider_limit_wait_timeout'},
-                {'id': 7, 'name': 'A4', 'm3u_account': 'Provider A', 'status': 'viewer_preempted'},
+                {
+                    'id': 2,
+                    'name': 'A2',
+                    'm3u_account': 'Provider A',
+                    'status': 'waiting_provider_limit',
+                    'reason_detail': 'checking_capacity',
+                },
+                {
+                    'id': 3,
+                    'name': 'A3',
+                    'm3u_account': 'Provider A',
+                    'status': 'provider_limit_wait_timeout',
+                    'reason_detail': 'active_viewers',
+                },
+                {
+                    'id': 7,
+                    'name': 'A4',
+                    'm3u_account': 'Provider A',
+                    'status': 'viewer_preempted',
+                    'reason_detail': 'viewer_preempted',
+                },
                 {'id': 4, 'name': 'B1', 'm3u_account': 'Provider B', 'status': 'completed'},
                 {'id': 5, 'name': 'B2', 'm3u_account': 'Provider B', 'status': 'pending'},
                 {'id': 6, 'name': 'B3', 'm3u_account': 'Provider B', 'status': 'dead'},
@@ -45,6 +63,12 @@ def test_progress_update_builds_provider_progress_counters():
     assert provider_a['skipped'] == 2
     assert provider_a['finished'] == 2
     assert provider_a['state'] == 'waiting_provider_limit'
+    assert provider_a['wait_reason_counts'] == {
+        'active_viewers': 1,
+        'checking_capacity': 1,
+        'viewer_preempted': 1,
+    }
+    assert provider_a['dominant_wait_reason'] == 'active_viewers'
 
     assert provider_b['pending'] == 1
     assert provider_b['completed'] == 1

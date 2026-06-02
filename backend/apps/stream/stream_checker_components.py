@@ -834,14 +834,24 @@ class StreamCheckerProgress:
                     'name': account_name,
                     'total': 0,
                     'status_counts': Counter(),
+                    'wait_reason_counts': Counter(),
                 },
             )
             provider['total'] += 1
             provider['status_counts'][status] += 1
+            if status in {'waiting_provider_limit', 'provider_limit_wait_timeout', 'viewer_preempted'}:
+                reason = (
+                    stream.get('reason_detail')
+                    or stream.get('quality_reason_detail')
+                    or stream.get('skipped_reason')
+                )
+                if reason and reason != 'none':
+                    provider['wait_reason_counts'][str(reason)] += 1
 
         provider_progress: List[Dict[str, Any]] = []
         for provider in grouped.values():
             counts = provider['status_counts']
+            wait_reason_counts = provider['wait_reason_counts']
             checking = counts.get('checking', 0) + counts.get('probing', 0)
             waiting = counts.get('waiting_provider_limit', 0)
             pending = counts.get('pending', 0)
@@ -849,6 +859,12 @@ class StreamCheckerProgress:
             skipped = counts.get('provider_limit_wait_timeout', 0) + counts.get('viewer_preempted', 0)
             failed = sum(counts.get(status, 0) for status in failed_statuses)
             finished = completed + skipped + failed
+            dominant_wait_reason = None
+            if wait_reason_counts:
+                dominant_wait_reason = sorted(
+                    wait_reason_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[0][0]
 
             if waiting:
                 state = 'waiting_provider_limit'
@@ -875,6 +891,8 @@ class StreamCheckerProgress:
                 'finished': finished,
                 'state': state,
                 'status_counts': dict(sorted(counts.items())),
+                'wait_reason_counts': dict(sorted(wait_reason_counts.items())),
+                'dominant_wait_reason': dominant_wait_reason,
             })
 
         return sorted(

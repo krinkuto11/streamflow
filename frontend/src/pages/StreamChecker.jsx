@@ -15,6 +15,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { getHardwareAnalysisPathDisplay } from '@/lib/hardware-status-display.js'
+import { getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
 import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
   Activity,
@@ -634,6 +635,7 @@ export default function StreamChecker() {
                   <div className="divide-y">
                     {providerProgress.map((provider) => {
                       const finishedPercent = provider.total > 0 ? Math.round((provider.finished / provider.total) * 100) : 0
+                      const waitReason = getProviderWaitReasonDisplay(provider)
                       return (
                         <div key={provider.name} className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 px-3 py-2 text-sm">
                           <div className="min-w-0">
@@ -647,6 +649,15 @@ export default function StreamChecker() {
                               {provider.state === 'checking' && (
                                 <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">
                                   Active
+                                </Badge>
+                              )}
+                              {waitReason && (
+                                <Badge
+                                  variant="outline"
+                                  className="shrink-0 text-[10px] text-muted-foreground"
+                                  title={waitReason.title}
+                                >
+                                  {waitReason.text}
                                 </Badge>
                               )}
                             </div>
