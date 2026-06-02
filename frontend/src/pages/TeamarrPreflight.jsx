@@ -640,11 +640,31 @@ export default function TeamarrPreflight() {
             </div>
 
             <Accordion
-              type="single"
-              collapsible
-              defaultValue={parseFilterCsv(includeSports).length || parseFilterCsv(includeLeagues).length ? 'include-filters' : undefined}
+              type="multiple"
+              defaultValue={parseFilterCsv(includeSports).length || parseFilterCsv(includeLeagues).length ? ['include-filters'] : []}
               className="rounded-md border border-border px-3"
             >
+              <AccordionItem value="operational-notes">
+                <AccordionTrigger className="py-3 text-sm hover:no-underline">
+                  Operational Notes
+                </AccordionTrigger>
+                <AccordionContent>
+                  <div className="grid gap-3 pb-3 text-sm text-muted-foreground md:grid-cols-3">
+                    <div>
+                      <p className="font-medium text-foreground">Busy Handling</p>
+                      <p>Automation phases defer event checks; Stream Checker conflicts enter the priority queue and continue after the current channel.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-foreground">Event Status</p>
+                      <p>Managed Events show both schedule state and the latest preflight result, so completed or deferred checks are visible in the event list.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-foreground">Manual Checks</p>
+                      <p>Past events can still be checked manually with the selected preflight profile and the same viewer, concurrency, and stream guards.</p>
+                    </div>
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
               <AccordionItem value="include-filters" className="border-b-0">
                 <AccordionTrigger className="py-3 text-sm hover:no-underline">
                   Advanced Include Filters
