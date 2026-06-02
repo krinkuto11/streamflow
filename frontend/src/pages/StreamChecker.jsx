@@ -14,6 +14,7 @@ import { Pagination, PaginationContent, PaginationItem, PaginationLink, Paginati
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
+import { getHardwareAnalysisPathDisplay } from '@/lib/hardware-status-display.js'
 import {
   Activity,
   CheckCircle2,
@@ -391,6 +392,7 @@ export default function StreamChecker() {
   const ffmpegMethodsLabel = Array.isArray(hardwareStatus?.ffmpeg_hwaccels) && hardwareStatus.ffmpeg_hwaccels.length > 0
     ? hardwareStatus.ffmpeg_hwaccels.join(', ')
     : (hardwareStatus?.config?.enabled ? 'No methods reported' : 'Not checked')
+  const analysisPathDisplay = getHardwareAnalysisPathDisplay(hardwareStatus)
 
   return (
     <div className="space-y-6">
@@ -1055,7 +1057,7 @@ export default function StreamChecker() {
                         </div>
                       </div>
 
-                      <div className="grid gap-3 text-xs md:grid-cols-3">
+                      <div className="grid gap-3 text-xs md:grid-cols-4">
                         <div className="rounded-md border border-border px-3 py-2">
                           <div className="text-muted-foreground">Runtime Device</div>
                           <div className="mt-1 font-medium text-foreground">{detectedGpuLabel}</div>
@@ -1074,6 +1076,17 @@ export default function StreamChecker() {
                         <div className="rounded-md border border-border px-3 py-2">
                           <div className="text-muted-foreground">FFmpeg Methods</div>
                           <div className="mt-1 font-medium text-foreground">{ffmpegMethodsLabel}</div>
+                        </div>
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">Analysis Path</div>
+                          <div className="mt-1 flex flex-col gap-1">
+                            <Badge variant={analysisPathDisplay.variant} className="w-fit">
+                              {analysisPathDisplay.label}
+                            </Badge>
+                            <div className="text-muted-foreground">
+                              {analysisPathDisplay.description}
+                            </div>
+                          </div>
                         </div>
                       </div>
                     </div>
