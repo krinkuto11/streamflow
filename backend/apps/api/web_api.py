@@ -152,6 +152,7 @@ from apps.api.shadow_blank_monitor_handlers import (
     update_shadow_blank_monitor_config_response,
 )
 from apps.api.teamarr_preflight_handlers import (
+    force_teamarr_preflight_event_response,
     get_teamarr_preflight_config_response,
     get_teamarr_preflight_status_response,
     run_teamarr_preflight_once_response,
@@ -1445,6 +1446,14 @@ def stop_teamarr_preflight():
 def run_teamarr_preflight_once():
     """Run one Teamarr managed-event preflight scan."""
     return run_teamarr_preflight_once_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/events/force-check', methods=['POST'])
+def force_teamarr_preflight_event():
+    """Force a manual preflight check for one managed event."""
+    return force_teamarr_preflight_event_response(
+        payload=request.get_json(silent=True),
         get_service=get_teamarr_preflight_service,
     )
 

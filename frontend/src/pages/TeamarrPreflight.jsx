@@ -6,6 +6,8 @@ import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog.jsx'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
@@ -34,6 +36,9 @@ const eventLabels = {
   preflight_started: 'Started',
   preflight_completed: 'Completed',
   preflight_failed: 'Failed',
+  preflight_deferred: 'Deferred',
+  deferred_automation_active: 'Deferred',
+  manual_preflight_rejected: 'Rejected',
   no_streams_yet: 'No Streams',
   deferred_quality_check_active: 'Deferred',
   concurrency_limit: 'Limit',
@@ -92,6 +97,22 @@ const formatOffset = (seconds) => {
 
 const eventLabel = (type) => eventLabels[type] || type || 'Unknown'
 const stateLabel = (state) => stateLabels[state] || state || 'Unknown'
+const forceableStates = new Set(['due', 'scheduled', 'already_attempted'])
+
+const canForceEvent = (event) => (
+  Boolean(event?.identity)
+  && Boolean(event?.dispatcharr_channel_id)
+  && forceableStates.has(String(event?.state || ''))
+)
+
+const forceEventTooltip = (event) => {
+  if (!event?.dispatcharr_channel_id) return 'No Dispatcharr channel'
+  if (event?.state === 'waiting_for_channel_sync') return 'Channel syncing'
+  if (event?.state === 'filtered') return 'Filtered'
+  if (event?.state === 'past') return 'Past grace window'
+  if (!forceableStates.has(String(event?.state || ''))) return 'Unavailable'
+  return 'Force event preflight'
+}
 
 export default function TeamarrPreflight() {
   const [config, setConfig] = useState(null)
@@ -105,6 +126,7 @@ export default function TeamarrPreflight() {
   const [profiles, setProfiles] = useState([])
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
+  const [forceEvent, setForceEvent] = useState(null)
   const { toast } = useToast()
 
   useEffect(() => {
@@ -234,6 +256,29 @@ export default function TeamarrPreflight() {
       toast({
         title: 'Error',
         description: err.response?.data?.error || 'Teamarr preflight action failed',
+        variant: 'destructive',
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
+  const forceEventCheck = async (event) => {
+    if (!event) return
+    try {
+      setActionLoading(`force:${event.identity}`)
+      const response = await teamarrPreflightAPI.forceEventCheck(event.identity)
+      await loadData()
+      toast({
+        title: response.data?.launched ? 'Started' : 'Requested',
+        description: response.data?.launched
+          ? 'Manual event preflight started'
+          : 'Manual event preflight request was recorded',
+      })
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Manual event preflight failed',
         variant: 'destructive',
       })
     } finally {
@@ -492,7 +537,8 @@ export default function TeamarrPreflight() {
               {upcomingEvents.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No events found</p>
               ) : (
-                <div className="space-y-3">
+                <TooltipProvider delayDuration={200}>
+                  <div className="space-y-3">
                   {upcomingEvents.slice(0, 12).map(event => (
                     <div key={`${event.identity}-${event.trigger_bucket || 'none'}`} className="rounded-md border border-border p-3">
                       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -500,9 +546,33 @@ export default function TeamarrPreflight() {
                           <p className="truncate font-medium">{event.event_name}</p>
                           <p className="text-sm text-muted-foreground">{formatDateTime(event.event_date)}</p>
                         </div>
-                        <Badge variant={event.state === 'due' ? 'default' : 'secondary'}>
-                          {stateLabel(event.state)}
-                        </Badge>
+                        <div className="flex shrink-0 items-center gap-2">
+                          <Badge variant={event.state === 'due' ? 'default' : 'secondary'}>
+                            {stateLabel(event.state)}
+                          </Badge>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  size="icon"
+                                  className="h-8 w-8"
+                                  disabled={!canForceEvent(event) || actionLoading !== ''}
+                                  onClick={() => setForceEvent(event)}
+                                  aria-label={`Force event preflight for ${event.event_name || 'managed event'}`}
+                                >
+                                  {actionLoading === `force:${event.identity}` ? (
+                                    <Loader2 className="h-4 w-4 animate-spin" />
+                                  ) : (
+                                    <PlayCircle className="h-4 w-4" />
+                                  )}
+                                </Button>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>{forceEventTooltip(event)}</TooltipContent>
+                          </Tooltip>
+                        </div>
                       </div>
                       <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
                         <span>{event.channel_name || `Channel ${event.dispatcharr_channel_id || 'N/A'}`}</span>
@@ -511,7 +581,8 @@ export default function TeamarrPreflight() {
                       </div>
                     </div>
                   ))}
-                </div>
+                  </div>
+                </TooltipProvider>
               )}
             </CardContent>
           </Card>
@@ -541,6 +612,32 @@ export default function TeamarrPreflight() {
           </Card>
         </div>
       </div>
+
+      <AlertDialog open={Boolean(forceEvent)} onOpenChange={(open) => {
+        if (!open) setForceEvent(null)
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Force Event Preflight</AlertDialogTitle>
+            <AlertDialogDescription>
+              Run the Teamarr preflight profile now for {forceEvent?.event_name || 'this managed event'}. Automation,
+              Stream Checker activity, concurrency, and stream availability guards still apply.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const selectedEvent = forceEvent
+                setForceEvent(null)
+                forceEventCheck(selectedEvent)
+              }}
+            >
+              Force Check
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

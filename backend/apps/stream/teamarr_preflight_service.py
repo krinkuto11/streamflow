@@ -37,6 +37,15 @@ CONTROLLED_CHECK_DEFERRAL_REASONS = {
     "max_streams_reached",
     "connectivity_guard",
 }
+MANUAL_FORCE_ALLOWED_STATES = {"due", "scheduled", "already_attempted"}
+MANUAL_FORCE_ERROR_MESSAGES = {
+    "event_not_found": "Managed event was not found",
+    "filtered": "Managed event is filtered by the current preflight configuration",
+    "no_dispatcharr_channel": "Managed event has no Dispatcharr channel yet",
+    "past": "Managed event is outside the post-start grace window",
+    "waiting_for_channel_sync": "Managed event channel is still syncing",
+    "unavailable": "Managed event is not available for manual preflight",
+}
 DEFAULT_TEAMARR_PREFLIGHT_PROFILE: Dict[str, Any] = {
     "name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
     "description": (
@@ -411,6 +420,78 @@ class TeamarrPreflightService:
             self._record_event("scan_failed", {}, {"error": safe_error})
             return {"success": False, "error": safe_error}
 
+    def force_check_event(self, identity: Any) -> Dict[str, Any]:
+        requested_identity = str(identity or "").strip()
+        if not requested_identity:
+            return {
+                "success": False,
+                "error": "Managed event identity is required",
+                "code": "missing_identity",
+            }
+
+        config = self.get_config(include_secret=True)
+        try:
+            raw_events = self._fetch_managed_events(config)
+            now = datetime.fromtimestamp(self.clock(), tz=timezone.utc)
+            candidates = self._build_candidates(raw_events, config, now)
+            target = next(
+                (
+                    event
+                    for event in candidates
+                    if str(event.get("identity") or "") == requested_identity
+                ),
+                None,
+            )
+
+            with self._lock:
+                self._last_scan_at = self.clock()
+                self._last_error = None
+                self._upcoming = candidates[:50]
+
+            if target is None:
+                return {
+                    "success": False,
+                    "error": MANUAL_FORCE_ERROR_MESSAGES["event_not_found"],
+                    "code": "event_not_found",
+                    "identity": requested_identity,
+                }
+
+            blocked_reason = self._manual_force_block_reason(target)
+            if blocked_reason:
+                self._record_event(
+                    "manual_preflight_rejected",
+                    target,
+                    {"reason": blocked_reason, "state": target.get("state")},
+                )
+                return {
+                    "success": False,
+                    "error": MANUAL_FORCE_ERROR_MESSAGES.get(
+                        blocked_reason,
+                        MANUAL_FORCE_ERROR_MESSAGES["unavailable"],
+                    ),
+                    "code": blocked_reason,
+                    "event": target,
+                }
+
+            manual_event = dict(target)
+            manual_event["state"] = "due"
+            manual_event["trigger_bucket"] = "manual"
+            launched = self._launch_check(manual_event, config, force=True)
+            return {
+                "success": True,
+                "launched": launched,
+                "event": manual_event,
+                "reason": None if launched else "not_launched",
+            }
+        except Exception as exc:
+            logger.error(f"Teamarr manual preflight failed: {exc}", exc_info=True)
+            safe_error = "Teamarr manual preflight failed"
+            with self._lock:
+                self._last_scan_at = self.clock()
+                self._last_error = safe_error
+            self._record_event("scan_failed", {}, {"error": safe_error})
+            return {"success": False, "error": safe_error, "code": "scan_failed"}
+
     def _worker(self) -> None:
         while not self._stop_event.is_set():
             with self._lock:
@@ -544,6 +625,18 @@ class TeamarrPreflightService:
         if league and league in exclude_leagues:
             return False
         return True
+
+    @staticmethod
+    def _manual_force_block_reason(event: Dict[str, Any]) -> Optional[str]:
+        if not event.get("dispatcharr_channel_id"):
+            return "no_dispatcharr_channel"
+
+        state = str(event.get("state") or "").strip()
+        if state in MANUAL_FORCE_ALLOWED_STATES:
+            return None
+        if state in MANUAL_FORCE_ERROR_MESSAGES:
+            return state
+        return "unavailable"
 
     def _launch_check(self, event: Dict[str, Any], config: Dict[str, Any], *, force: bool = False) -> bool:
         channel_id = event.get("dispatcharr_channel_id")

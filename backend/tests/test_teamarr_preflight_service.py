@@ -345,6 +345,62 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         upcoming = service.get_status()["upcoming_events"]
         self.assertEqual(upcoming[0]["state"], "filtered")
 
+    def test_manual_force_launches_scheduled_event_with_manual_bucket(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2030-01-01T00:00:00+00:00")],
+            checker=checker,
+        )
+
+        scan_result = service.run_once(force=True)
+        self.assertTrue(scan_result["success"])
+        self.assertEqual(scan_result["launched"], 0)
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "scheduled")
+
+        result = service.force_check_event(upcoming[0]["identity"])
+        self.assertTrue(result["success"])
+        self.assertTrue(result["launched"])
+        self.assertEqual(result["event"]["trigger_bucket"], "manual")
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(len(checker.calls), 1)
+        args, kwargs = checker.calls[0]
+        self.assertEqual(args[0], 77)
+        self.assertEqual(kwargs["program_name"], "Home vs Away")
+
+        deadline = time.time() + 2
+        recent = []
+        while time.time() < deadline:
+            recent = service.get_status()["recent_events"]
+            if recent and recent[0]["type"] == "preflight_completed":
+                break
+            time.sleep(0.01)
+        self.assertEqual(recent[0]["type"], "preflight_completed")
+        self.assertEqual(recent[0]["details"]["bucket"], "manual")
+
+    def test_manual_force_rejects_filtered_event_without_launching_check(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service([make_event(sport="basketball")], checker=checker)
+        service.update_config({"include_sports": ["soccer"]})
+
+        scan_result = service.run_once(force=True)
+        self.assertTrue(scan_result["success"])
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "filtered")
+
+        result = service.force_check_event(upcoming[0]["identity"])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "filtered")
+        self.assertEqual(checker.calls, [])
+
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["type"], "manual_preflight_rejected")
+        self.assertEqual(recent[0]["details"]["reason"], "filtered")
+
 
 if __name__ == "__main__":
     unittest.main()
