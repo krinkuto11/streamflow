@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Button } from '@/components/ui/button.jsx'
-import { Progress } from '@/components/ui/progress.jsx'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { automationAPI } from '@/services/api.js'
 import { useToast } from '@/hooks/use-toast.js'
@@ -11,7 +10,7 @@ import { Calendar, Clock, RefreshCw, Filter, Loader2 } from 'lucide-react'
 const EVENTS_AUTO_REFRESH_MS = 300000
 const NEXT_EVENT_REFRESH_DELAY_MS = 15000
 
-export default function UpcomingAutomationEvents({ udiInitialization = null }) {
+export default function UpcomingAutomationEvents() {
   const [events, setEvents] = useState([])
   const [allPeriods, setAllPeriods] = useState([])
   const [loading, setLoading] = useState(true)
@@ -22,18 +21,8 @@ export default function UpcomingAutomationEvents({ udiInitialization = null }) {
   const [automationEnabled, setAutomationEnabled] = useState(true)
   const [loadError, setLoadError] = useState('')
   const { toast } = useToast()
-  const udiInitializing = Boolean(udiInitialization?.inProgress)
-  const udiProgress = Number.isFinite(Number(udiInitialization?.percentage))
-    ? Math.max(0, Math.min(100, Number(udiInitialization.percentage)))
-    : 0
 
   useEffect(() => {
-    if (udiInitializing) {
-      setLoading(false)
-      setRefreshing(false)
-      return undefined
-    }
-
     loadData()
     loadPeriods()
 
@@ -42,10 +31,10 @@ export default function UpcomingAutomationEvents({ udiInitialization = null }) {
     }, EVENTS_AUTO_REFRESH_MS)
 
     return () => clearInterval(interval)
-  }, [timeRangeFilter, periodFilter, udiInitializing])
+  }, [timeRangeFilter, periodFilter])
 
   useEffect(() => {
-    if (udiInitializing || events.length === 0) {
+    if (events.length === 0) {
       return undefined
     }
 
@@ -60,7 +49,7 @@ export default function UpcomingAutomationEvents({ udiInitialization = null }) {
     }, delay)
 
     return () => clearTimeout(timer)
-  }, [events, timeRangeFilter, periodFilter, udiInitializing])
+  }, [events, timeRangeFilter, periodFilter])
 
   const loadData = async (forceRefresh = false) => {
     try {
@@ -204,29 +193,6 @@ export default function UpcomingAutomationEvents({ udiInitialization = null }) {
           <div className="flex items-center justify-center py-8">
             <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
           </div>
-        </CardContent>
-      </Card>
-    )
-  }
-
-  if (udiInitializing) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Upcoming Automation Events</CardTitle>
-          <CardDescription>Waiting for Dispatcharr cache startup</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex items-center justify-between gap-3 text-sm">
-            <span className="text-muted-foreground">
-              {udiInitialization?.message || 'Loading channels, streams, playlists and profiles'}
-            </span>
-            <span className="tabular-nums text-muted-foreground">{Math.round(udiProgress)}%</span>
-          </div>
-          <Progress value={udiProgress} className="h-2" />
-          <p className="text-sm text-muted-foreground">
-            Automation events will load automatically when the cache is ready.
-          </p>
         </CardContent>
       </Card>
     )

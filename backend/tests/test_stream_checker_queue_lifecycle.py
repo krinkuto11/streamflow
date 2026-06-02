@@ -31,6 +31,40 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 203)
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 201)
 
+    def test_late_teamarr_priority_entry_does_not_reorder_active_channel(self):
+        check_queue = StreamCheckQueue(max_size=10)
+
+        self.assertTrue(check_queue.add_channel(401, priority=10, stream_count=1))
+        self.assertTrue(check_queue.add_channel(402, priority=10, stream_count=1))
+
+        active_entry = check_queue.get_next_entry(timeout=0.1)
+        self.assertEqual(active_entry["channel_id"], 401)
+
+        self.assertFalse(check_queue.add_channel(401, priority=100, stream_count=1))
+        self.assertTrue(check_queue.add_channel(
+            403,
+            priority=100,
+            stream_count=2,
+            metadata={
+                "source": "teamarr_preflight",
+                "program_name": "Late Event Stream",
+                "is_epg_scheduled": True,
+                "forced_profile_id": "42",
+            },
+        ))
+
+        status = check_queue.get_status()
+        self.assertEqual(status["current_channel"], 401)
+        self.assertEqual(status["in_progress"], 1)
+        self.assertEqual(status["queued"], 2)
+
+        teamarr_entry = check_queue.get_next_entry(timeout=0.1)
+        self.assertEqual(teamarr_entry["channel_id"], 403)
+        self.assertEqual(teamarr_entry["metadata"]["source"], "teamarr_preflight")
+        self.assertEqual(teamarr_entry["metadata"]["program_name"], "Late Event Stream")
+
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 402)
+
     def test_queue_entries_preserve_metadata_with_priority_ordering(self):
         check_queue = StreamCheckQueue(max_size=10)
 

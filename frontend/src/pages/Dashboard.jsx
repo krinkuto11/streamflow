@@ -35,6 +35,7 @@ import {
   DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu.jsx'
 import UpcomingAutomationEvents from '@/components/Dashboard/UpcomingAutomationEvents.jsx'
+import StreamFlowInitializingScreen from '@/components/Dashboard/StreamFlowInitializingScreen.jsx'
 
 const AUTOMATION_STAGES = [
   { id: 'settings', label: 'Preparing' },
@@ -628,6 +629,10 @@ export default function Dashboard() {
     percentage: udiStats?.percentage ?? udiInitProgress?.percentage ?? 0,
     message: udiStats?.message || udiInitProgress?.message || '',
   }
+  if (udiInitializing) {
+    return <StreamFlowInitializingScreen initialization={udiInitialization} />
+  }
+
   const runBadgeClass = failedRun
     ? 'bg-destructive text-destructive-foreground border-transparent'
     : abortedRun
@@ -1210,7 +1215,7 @@ export default function Dashboard() {
       </div>
 
       {/* Upcoming Automation Events */}
-      <UpcomingAutomationEvents udiInitialization={udiInitialization} />
+      <UpcomingAutomationEvents />
 
       {/* Available Playlists */}
       <Card>

@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
-import { Navigate, Routes, Route, useNavigate } from 'react-router-dom'
+import { Navigate, Routes, Route, useLocation, useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils.js'
 import { Sidebar } from '@/components/layout/Sidebar.jsx'
 import { Toaster } from '@/components/ui/toaster.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { api } from '@/services/api.js'
 import { AppErrorBoundary } from '@/components/AppErrorBoundary.jsx'
+import StreamFlowInitializingScreen from '@/components/Dashboard/StreamFlowInitializingScreen.jsx'
 
 // Page imports
 import Dashboard from '@/pages/Dashboard'
@@ -25,8 +26,11 @@ function App() {
   const [setupStatus, setSetupStatus] = useState(null)
   const [loading, setLoading] = useState(true)
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const [udiInitialization, setUdiInitialization] = useState(null)
+  const [udiInitializationChecked, setUdiInitializationChecked] = useState(false)
   const { toast } = useToast()
   const navigate = useNavigate()
+  const location = useLocation()
 
   useEffect(() => {
     checkSetupStatus()
@@ -55,6 +59,59 @@ function App() {
   }
 
   const setupComplete = setupStatus?.setup_complete || false
+  const udiInitializing = Boolean(setupComplete && udiInitialization?.inProgress)
+  const udiStatusPending = Boolean(setupComplete && !udiInitializationChecked)
+  const startupGateActive = Boolean(udiStatusPending || udiInitializing)
+
+  useEffect(() => {
+    if (!setupComplete) {
+      setUdiInitialization(null)
+      setUdiInitializationChecked(false)
+      return undefined
+    }
+
+    let cancelled = false
+
+    const pollInitializationStatus = async () => {
+      try {
+        const response = await api.get('/dispatcharr/initialization-status')
+        if (cancelled) return
+
+        const data = response.data || {}
+        setUdiInitialization({
+          inProgress: data.status === 'in_progress',
+          status: data.status || 'unknown',
+          percentage: data.percentage ?? 0,
+          message: data.message || '',
+        })
+        setUdiInitializationChecked(true)
+      } catch (err) {
+        console.error('Failed to check initialization status:', err)
+        if (!cancelled) {
+          setUdiInitialization({ inProgress: false, status: 'unknown', percentage: 0, message: '' })
+          setUdiInitializationChecked(true)
+        }
+      }
+    }
+
+    pollInitializationStatus()
+    const interval = setInterval(pollInitializationStatus, 3000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
+  }, [setupComplete])
+
+  useEffect(() => {
+    if (
+      startupGateActive &&
+      location.pathname !== '/' &&
+      location.pathname !== '/dashboard'
+    ) {
+      navigate('/', { replace: true })
+    }
+  }, [location.pathname, navigate, startupGateActive])
 
   if (loading) {
     return (
@@ -92,30 +149,43 @@ function App() {
 
   return (
     <div className="flex min-h-screen bg-background">
-      <Sidebar isCollapsed={isCollapsed} setIsCollapsed={setIsCollapsed} />
+      <Sidebar
+        isCollapsed={isCollapsed}
+        setIsCollapsed={setIsCollapsed}
+        navigationDisabled={startupGateActive}
+      />
 
       <main className={cn(
         "flex-1 p-6 transition-all duration-300 ease-in-out",
         isCollapsed ? "lg:ml-20" : "lg:ml-64"
       )}>
         <div className="max-w-7xl mx-auto pt-12 lg:pt-0">
-          <AppErrorBoundary>
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/stream-checker" element={<StreamChecker />} />
-              <Route path="/stream-monitoring" element={<StreamMonitoring />} />
-              <Route path="/shadow-monitor" element={<ShadowBlankMonitor />} />
-              <Route path="/teamarr-preflight" element={<TeamarrPreflight />} />
-              <Route path="/channels" element={<ChannelConfiguration />} />
-              <Route path="/settings" element={<AutomationSettings />} />
-              <Route path="/automation/profiles/:profileId" element={<AutomationProfileEditor />} />
-              <Route path="/scheduling" element={<Scheduling />} />
-              <Route path="/stats" element={<StatsDashboard />} />
-              <Route path="/changelog" element={<Changelog />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </AppErrorBoundary>
+          {startupGateActive ? (
+            <StreamFlowInitializingScreen
+              initialization={udiInitialization || {
+                percentage: 0,
+                message: 'Checking startup status...',
+              }}
+            />
+          ) : (
+            <AppErrorBoundary>
+              <Routes>
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/stream-checker" element={<StreamChecker />} />
+                <Route path="/stream-monitoring" element={<StreamMonitoring />} />
+                <Route path="/shadow-monitor" element={<ShadowBlankMonitor />} />
+                <Route path="/teamarr-preflight" element={<TeamarrPreflight />} />
+                <Route path="/channels" element={<ChannelConfiguration />} />
+                <Route path="/settings" element={<AutomationSettings />} />
+                <Route path="/automation/profiles/:profileId" element={<AutomationProfileEditor />} />
+                <Route path="/scheduling" element={<Scheduling />} />
+                <Route path="/stats" element={<StatsDashboard />} />
+                <Route path="/changelog" element={<Changelog />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </AppErrorBoundary>
+          )}
         </div>
       </main>
 
