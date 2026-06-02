@@ -8,6 +8,7 @@ import { Switch } from '@/components/ui/switch.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
+import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import {
   Activity,
@@ -116,6 +117,10 @@ export default function TeamarrPreflight() {
   const recentEvents = status?.recent_events || []
   const activeChecks = status?.active_checks || []
   const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
+  const filterOptions = useMemo(
+    () => collectTeamarrFilterOptions([...upcomingEvents, ...recentEvents]),
+    [upcomingEvents, recentEvents]
+  )
   const profileOptions = useMemo(() => {
     const items = [...profiles]
     const defaultProfileId = editedConfig?.default_profile_id ? String(editedConfig.default_profile_id) : ''
@@ -195,10 +200,10 @@ export default function TeamarrPreflight() {
       const payload = {
         ...(editedConfig || {}),
         retry_offsets_minutes: parseCsv(retryOffsets).map(item => Number(item)).filter(Number.isFinite),
-        include_sports: parseCsv(includeSports),
-        exclude_sports: parseCsv(excludeSports),
-        include_leagues: parseCsv(includeLeagues),
-        exclude_leagues: parseCsv(excludeLeagues),
+        include_sports: parseFilterCsv(includeSports),
+        exclude_sports: parseFilterCsv(excludeSports),
+        include_leagues: parseFilterCsv(includeLeagues),
+        exclude_leagues: parseFilterCsv(excludeLeagues),
         ...extra,
       }
       const response = await teamarrPreflightAPI.updateConfig(payload)
@@ -246,6 +251,27 @@ export default function TeamarrPreflight() {
 
   const running = Boolean(status?.running)
   const enabled = Boolean(editedConfig?.enabled)
+  const renderFilterChips = (value, setValue, options) => {
+    if (!options.length) return null
+    const selected = new Set(parseFilterCsv(value))
+    return (
+      <div className="flex flex-wrap gap-2">
+        {options.map(option => (
+          <Button
+            key={option}
+            type="button"
+            size="sm"
+            variant={selected.has(option) ? 'default' : 'outline'}
+            className="h-8 px-2 text-xs"
+            onClick={() => setValue(toggleFilterCsvTerm(value, option))}
+          >
+            {option}
+          </Button>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
@@ -435,18 +461,22 @@ export default function TeamarrPreflight() {
               <div className="space-y-2">
                 <Label>Include Sports</Label>
                 <Input value={includeSports} onChange={(event) => setIncludeSports(event.target.value)} />
+                {renderFilterChips(includeSports, setIncludeSports, filterOptions.sports)}
               </div>
               <div className="space-y-2">
                 <Label>Exclude Sports</Label>
                 <Input value={excludeSports} onChange={(event) => setExcludeSports(event.target.value)} />
+                {renderFilterChips(excludeSports, setExcludeSports, filterOptions.sports)}
               </div>
               <div className="space-y-2">
                 <Label>Include Leagues</Label>
                 <Input value={includeLeagues} onChange={(event) => setIncludeLeagues(event.target.value)} />
+                {renderFilterChips(includeLeagues, setIncludeLeagues, filterOptions.leagues)}
               </div>
               <div className="space-y-2">
                 <Label>Exclude Leagues</Label>
                 <Input value={excludeLeagues} onChange={(event) => setExcludeLeagues(event.target.value)} />
+                {renderFilterChips(excludeLeagues, setExcludeLeagues, filterOptions.leagues)}
               </div>
             </div>
           </CardContent>
