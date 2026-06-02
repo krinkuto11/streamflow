@@ -45,6 +45,12 @@ const eventLabels = {
   scan_failed: 'Scan Failed',
 }
 
+const reasonLabels = {
+  active_viewers: 'Active viewers',
+  connectivity_guard: 'Connectivity guard',
+  max_streams_reached: 'Provider limit',
+}
+
 const stateLabels = {
   due: 'Due',
   scheduled: 'Scheduled',
@@ -98,6 +104,39 @@ const formatOffset = (seconds) => {
 const eventLabel = (type) => eventLabels[type] || type || 'Unknown'
 const stateLabel = (state) => stateLabels[state] || state || 'Unknown'
 const forceableStates = new Set(['due', 'scheduled', 'already_attempted'])
+
+const titleizeCode = (value) => (
+  String(value || '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, char => char.toUpperCase())
+)
+
+const reasonLabel = (reason) => reasonLabels[reason] || titleizeCode(reason)
+
+const recentEventBadgeVariant = (type) => {
+  if (type === 'preflight_completed') return 'default'
+  if (['preflight_failed', 'manual_preflight_rejected', 'scan_failed'].includes(type)) return 'destructive'
+  return 'secondary'
+}
+
+const recentEventDetailParts = (event) => {
+  const details = event?.details || {}
+  const stats = details.stats || {}
+  const parts = []
+
+  if (details.bucket) parts.push(`Bucket ${details.bucket}`)
+  if (details.reason) parts.push(reasonLabel(details.reason))
+  if (details.error) parts.push(details.error)
+  if (stats.total_streams !== undefined) parts.push(`${stats.total_streams} streams`)
+  if (stats.dead_streams !== undefined) parts.push(`${stats.dead_streams} dead`)
+  if (stats.duration || stats.duration_seconds !== undefined) parts.push(stats.duration || `${stats.duration_seconds}s`)
+  if (stats.avg_resolution) parts.push(stats.avg_resolution)
+  if (stats.avg_fps) parts.push(stats.avg_fps)
+
+  return parts.filter(Boolean)
+}
 
 const canForceEvent = (event) => (
   Boolean(event?.identity)
@@ -597,15 +636,35 @@ export default function TeamarrPreflight() {
                 <p className="text-sm text-muted-foreground">No events recorded</p>
               ) : (
                 <div className="space-y-3">
-                  {recentEvents.slice(0, 10).map((event, index) => (
-                    <div key={`${event.timestamp}-${index}`} className="flex items-start justify-between gap-4 border-b border-border pb-3 last:border-b-0 last:pb-0">
-                      <div className="min-w-0">
-                        <p className="truncate font-medium">{eventLabel(event.type)}</p>
-                        <p className="truncate text-sm text-muted-foreground">{event.event_name || event.channel_name || 'Managed Event'}</p>
+                  {recentEvents.slice(0, 10).map((event, index) => {
+                    const detailParts = recentEventDetailParts(event)
+                    return (
+                      <div key={`${event.timestamp}-${index}`} className="grid gap-3 border-b border-border pb-3 last:border-b-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_4.75rem]">
+                        <div className="min-w-0 space-y-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Badge variant={recentEventBadgeVariant(event.type)} className="shrink-0">
+                              {eventLabel(event.type)}
+                            </Badge>
+                            <p className="min-w-0 truncate font-medium">{event.event_name || event.channel_name || 'Managed Event'}</p>
+                          </div>
+                          <div className="grid gap-1 text-sm text-muted-foreground sm:grid-cols-2">
+                            <span className="truncate">{event.channel_name || `Channel ${event.dispatcharr_channel_id || 'N/A'}`}</span>
+                            <span className="truncate">{[event.sport, event.league].filter(Boolean).join(' / ') || 'Event metadata N/A'}</span>
+                          </div>
+                          {detailParts.length > 0 ? (
+                            <div className="flex flex-wrap gap-1.5">
+                              {detailParts.map(part => (
+                                <Badge key={part} variant="outline" className="text-[10px] font-medium text-muted-foreground">
+                                  {part}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                        <span className="shrink-0 justify-self-start text-sm text-muted-foreground sm:justify-self-end">{formatTimestamp(event.timestamp)}</span>
                       </div>
-                      <span className="shrink-0 text-sm text-muted-foreground">{formatTimestamp(event.timestamp)}</span>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </CardContent>
