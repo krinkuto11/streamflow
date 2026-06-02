@@ -1332,6 +1332,7 @@ class AutomatedStreamManager:
         self.automation_thread = None
         self.automation_running = False
         self.automation_wake_event = threading.Event()
+        self._manual_stop_requested = threading.Event()
         self.force_next_run = False
         self.forced_period_id = None
         
@@ -1582,6 +1583,8 @@ class AutomatedStreamManager:
             self._run_status_lock = threading.RLock()
         if not hasattr(self, "_run_sequence"):
             self._run_sequence = 0
+        if not hasattr(self, "_manual_stop_requested"):
+            self._manual_stop_requested = threading.Event()
         if not hasattr(self, "_run_status"):
             self._run_status = self._build_run_status(
                 run_id=None,
@@ -1593,6 +1596,7 @@ class AutomatedStreamManager:
 
     def _start_run_status(self, *, forced: bool = False, forced_period_id: Optional[str] = None) -> None:
         self._ensure_run_status_fields()
+        self._manual_stop_requested.clear()
         with self._run_status_lock:
             self._run_sequence += 1
             run_id = f"automation-{int(time.time())}-{self._run_sequence}"
@@ -1842,6 +1846,28 @@ class AutomatedStreamManager:
                 if stage_item["key"] == active_stage and stage_item["status"] == "running":
                     stage_item["status"] = "completed" if final_state == "completed" else final_state
 
+    def _manual_stop_message(self) -> str:
+        return "Automation run was stopped by the user"
+
+    def _is_manual_stop_requested(self) -> bool:
+        self._ensure_run_status_fields()
+        return self._manual_stop_requested.is_set()
+
+    def _abort_run_if_manual_stop_requested(self) -> bool:
+        if not self._is_manual_stop_requested():
+            return False
+
+        message = self._manual_stop_message()
+        self._finish_run_status(
+            state="aborted",
+            stage="aborted",
+            stage_label="Aborted",
+            message=message,
+            error=message,
+        )
+        self._manual_stop_requested.clear()
+        return True
+
     def _finish_cycle_outcome(
         self,
         *,
@@ -1849,6 +1875,9 @@ class AutomatedStreamManager:
         cycle_abort_message: Optional[str],
         cycle_failed_message: Optional[str] = None,
     ) -> str:
+        if not cycle_abort_message and self._is_manual_stop_requested():
+            cycle_abort_message = self._manual_stop_message()
+
         if refresh_success and not cycle_abort_message and not cycle_failed_message:
             self._finish_run_status(
                 state="completed",
@@ -3486,6 +3515,8 @@ class AutomatedStreamManager:
             stage_label="Preparing Automation",
             message="Reading automation configuration",
         )
+        if self._abort_run_if_manual_stop_requested():
+            return
             
         # 1. Check Global Automation Switch
         from apps.automation.automation_config_manager import get_automation_config_manager
@@ -3557,6 +3588,9 @@ class AutomatedStreamManager:
         automation_busy_guard.set_automation_busy()
 
         try:
+            if self._abort_run_if_manual_stop_requested():
+                return
+
             # 2. Determine which playlists to update and group channels by period
             self._update_run_status(
                 stage="period_discovery",
@@ -3628,6 +3662,8 @@ class AutomatedStreamManager:
             )
             logger.info(f"Processing {channels_with_periods} channel assignments across {len(active_periods)} active period(s)")
             logger.info(f"UDI cache {udi.get_cache_age_description()}")
+            if self._abort_run_if_manual_stop_requested():
+                return
             
             # Determine playlists to update
             playlists_to_update = set()
@@ -3746,6 +3782,8 @@ class AutomatedStreamManager:
                     else "Current cache selected for stream matching"
                 ),
             )
+            if self._abort_run_if_manual_stop_requested():
+                return
 
             validation_details = []
             assignment_details = []
@@ -4396,6 +4434,7 @@ class AutomatedStreamManager:
         finally:
             self._m3u_accounts_cache = None
             automation_busy_guard.clear_automation_busy()
+            self._manual_stop_requested.clear()
 
             # Background UDI sync — pull all writes from this cycle back into cache.
             # Only fires when the cycle actually completed matching/checking work.
@@ -4458,6 +4497,8 @@ class AutomatedStreamManager:
             return
             
         logger.info("Starting automation service...")
+        self._ensure_run_status_fields()
+        self._manual_stop_requested.clear()
         self.automation_running = True
         self.running = True
         self.automation_start_time = datetime.now()
@@ -4469,6 +4510,16 @@ class AutomatedStreamManager:
     def stop_automation(self):
         """Stop the automation background thread."""
         logger.info("Stopping automation service...")
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            active_run = bool(
+                self._run_status.get("active") or self._run_status.get("state") == "running"
+            )
+        if active_run:
+            self._manual_stop_requested.set()
+            self._update_run_status(
+                message="Stop requested; automation is shutting down",
+            )
         self.automation_running = False
         self.running = False
         self.automation_wake_event.set()  # Wake up thread to exit

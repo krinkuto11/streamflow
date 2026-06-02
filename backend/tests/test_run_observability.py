@@ -11,6 +11,12 @@ class AutomationRunStatusTests(unittest.TestCase):
         manager = AutomatedStreamManager.__new__(AutomatedStreamManager)
         manager._run_status_lock = threading.RLock()
         manager._run_sequence = 0
+        manager._manual_stop_requested = threading.Event()
+        manager.automation_thread = None
+        manager.automation_running = False
+        manager.running = False
+        manager.automation_wake_event = threading.Event()
+        manager.automation_start_time = None
         manager._run_status = manager._build_run_status(
             run_id=None,
             state="idle",
@@ -145,6 +151,58 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["stage"], "failed")
         self.assertEqual(status["stage_label"], "Failed")
         self.assertEqual(status["last_error"], "Quality check stage failed: boom")
+
+    def test_manual_stop_request_finishes_cycle_as_aborted(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._update_run_status(stage="stream_matching", stage_label="Matching Streams")
+        manager._manual_stop_requested.set()
+        outcome = manager._finish_cycle_outcome(
+            refresh_success=True,
+            cycle_abort_message=None,
+        )
+
+        status = manager.get_run_status()
+        self.assertEqual(outcome, "aborted")
+        self.assertEqual(status["state"], "aborted")
+        self.assertEqual(status["stage"], "aborted")
+        self.assertEqual(status["message"], "Automation run was stopped by the user")
+        self.assertEqual(status["last_error"], "Automation run was stopped by the user")
+
+    def test_stop_automation_requests_abort_for_active_run(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager.automation_running = True
+        manager.running = True
+        manager.stop_automation()
+
+        status = manager.get_run_status()
+        self.assertTrue(manager._manual_stop_requested.is_set())
+        self.assertFalse(manager.automation_running)
+        self.assertFalse(manager.running)
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(status["message"], "Stop requested; automation is shutting down")
+
+    def test_stop_automation_does_not_rewrite_completed_run(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._finish_run_status(
+            state="completed",
+            stage="completed",
+            stage_label="Completed",
+            message="Automation cycle completed",
+        )
+        manager.automation_running = True
+        manager.running = True
+        manager.stop_automation()
+
+        status = manager.get_run_status()
+        self.assertFalse(manager._manual_stop_requested.is_set())
+        self.assertEqual(status["state"], "completed")
+        self.assertEqual(status["message"], "Automation cycle completed")
 
     def test_quality_summary_flags_connectivity_abort_and_incomplete_run(self):
         summary = AutomatedStreamManager._summarize_quality_check_results(
