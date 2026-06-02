@@ -34,6 +34,7 @@ EXECUTED_EVENTS_FILE = CONFIG_DIR / 'executed_events.json'
 # Constants
 DUPLICATE_DETECTION_WINDOW_SECONDS = 300  # 5 minutes window for detecting duplicate events
 EXECUTED_EVENTS_RETENTION_DAYS = 7  # Keep executed events history for 7 days
+DEFAULT_UDI_REFRESH_INTERVAL_MINUTES = 240
 
 
 # ── SCH-002 ────────────────────────────────────────────────────────────────
@@ -101,7 +102,7 @@ class SchedulingService:
         default_config = {
             'epg_schedule': {'type': 'interval', 'value': 60},
             'epg_refresh_interval_minutes': 60,
-            'udi_refresh_schedule': None,
+            'udi_refresh_schedule': {'type': 'interval', 'value': DEFAULT_UDI_REFRESH_INTERVAL_MINUTES},
             'enabled': True
         }
         from apps.database.connection import get_session
@@ -125,7 +126,10 @@ class SchedulingService:
 
                 # Ensure udi_refresh_schedule key exists in older configs
                 if 'udi_refresh_schedule' not in config:
-                    config['udi_refresh_schedule'] = None
+                    config['udi_refresh_schedule'] = {
+                        'type': 'interval',
+                        'value': DEFAULT_UDI_REFRESH_INTERVAL_MINUTES
+                    }
                     needs_save = True
                 if 'epg_refresh_interval_minutes' not in config:
                     config['epg_refresh_interval_minutes'] = int(

@@ -12,12 +12,18 @@ import { automationAPI, streamCheckerAPI, dispatcharrAPI, sessionSettingsAPI, sc
 import AutomationProfileStudio from '@/components/Automation/AutomationProfileStudio.jsx'
 import AutomationPeriods from '@/components/Automation/AutomationPeriods.jsx'
 
+const DEFAULT_UDI_REFRESH_INTERVAL_MINUTES = 240
+
 export default function AutomationSettings() {
   const [config, setConfig] = useState(null)
   const [streamCheckerConfig, setStreamCheckerConfig] = useState(null)
   const [dispatcharrConfig, setDispatcharrConfig] = useState(null)
   const [sessionConfig, setSessionConfig] = useState({ review_duration: 60 })
-  const [schedulingConfig, setSchedulingConfig] = useState({ epg_schedule: { type: 'interval', value: 60 }, udi_refresh_schedule: null, enabled: true })
+  const [schedulingConfig, setSchedulingConfig] = useState({
+    epg_schedule: { type: 'interval', value: 60 },
+    udi_refresh_schedule: { type: 'interval', value: DEFAULT_UDI_REFRESH_INTERVAL_MINUTES },
+    enabled: true
+  })
   const [orchestratorConfig, setOrchestratorConfig] = useState({ host: '', port: 8000, has_api_key: false, api_key: '' })
   const [testingConnection, setTestingConnection] = useState(false)
   const [connectionTestResult, setConnectionTestResult] = useState(null)
@@ -276,7 +282,7 @@ export default function AutomationSettings() {
                       max="720"
                       step="15"
                       className="max-w-[120px]"
-                      value={schedulingConfig?.udi_refresh_schedule?.value || 0}
+                      value={schedulingConfig?.udi_refresh_schedule?.value ?? 0}
                       onChange={(e) => {
                         const raw = parseInt(e.target.value) || 0
                         const snapped = Math.floor(Math.min(Math.max(raw, 0), 720) / 15) * 15
