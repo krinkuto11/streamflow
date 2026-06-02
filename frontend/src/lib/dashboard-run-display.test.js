@@ -373,6 +373,20 @@ describe('dashboard stream checker run display', () => {
     expect(actions.runAutomation.reason).toMatch(/stream check/i)
   })
 
+  it('blocks automation actions while Dispatcharr cache startup is running', () => {
+    const actions = getDashboardActionStates({
+      actionLoading: '',
+      isStreamCheckerProcessing: false,
+      udiInitializing: true,
+      udiSyncing: false,
+    })
+
+    expect(actions.reloadUdi.disabled).toBe(true)
+    expect(actions.reloadUdi.reason).toMatch(/cache startup/i)
+    expect(actions.runAutomation.disabled).toBe(true)
+    expect(actions.runAutomation.reason).toMatch(/cache is ready/i)
+  })
+
   it('blocks dashboard actions while another action is already running', () => {
     const actions = getDashboardActionStates({
       actionLoading: 'udi',

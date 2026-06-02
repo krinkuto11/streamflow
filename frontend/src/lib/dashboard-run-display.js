@@ -199,15 +199,20 @@ export const shouldShowAutomationRunCard = ({
 export const getDashboardActionStates = ({
   actionLoading = '',
   isStreamCheckerProcessing = false,
+  udiInitializing = false,
   udiSyncing = false,
 } = {}) => {
   const actionBusy = actionLoading !== ''
   const reloadUdiReason = udiSyncing
     ? 'UDI sync is already running.'
+    : udiInitializing
+      ? 'Dispatcharr cache startup is still running.'
     : actionBusy
       ? 'Another dashboard action is running.'
       : null
-  const runAutomationReason = isStreamCheckerProcessing
+  const runAutomationReason = udiInitializing
+    ? 'Automation can start after the Dispatcharr cache is ready.'
+    : isStreamCheckerProcessing
     ? 'Automation cannot start while a stream check is already active.'
     : actionBusy
       ? 'Another dashboard action is running.'
@@ -215,11 +220,11 @@ export const getDashboardActionStates = ({
 
   return {
     reloadUdi: {
-      disabled: udiSyncing || actionBusy,
+      disabled: udiSyncing || udiInitializing || actionBusy,
       reason: reloadUdiReason,
     },
     runAutomation: {
-      disabled: isStreamCheckerProcessing || actionBusy,
+      disabled: udiInitializing || isStreamCheckerProcessing || actionBusy,
       reason: runAutomationReason,
     },
   }

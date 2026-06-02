@@ -190,9 +190,11 @@ export default function Dashboard() {
       }
       const hasCounts = Object.values(counts).some(value => value != null)
 
-      if (hasCounts || data.status === 'completed' || data.status === 'failed') {
+      if (data.status || hasCounts) {
         setUdiStats({
           syncStatus: data.status || 'unknown',
+          percentage: data.percentage ?? null,
+          message: data.message || '',
           ...counts,
         })
       }
@@ -614,6 +616,18 @@ export default function Dashboard() {
     completed,
     runCounts,
   })
+  const syncStatus = udiStats?.syncStatus
+  const udiInitProgress = status?.udi_status?.init_progress || {}
+  const udiInitializing = Boolean(
+    udiSyncing ||
+    status?.udi_status?.init_in_progress ||
+    syncStatus === 'in_progress'
+  )
+  const udiInitialization = {
+    inProgress: udiInitializing,
+    percentage: udiStats?.percentage ?? udiInitProgress?.percentage ?? 0,
+    message: udiStats?.message || udiInitProgress?.message || '',
+  }
   const runBadgeClass = failedRun
     ? 'bg-destructive text-destructive-foreground border-transparent'
     : abortedRun
@@ -626,6 +640,7 @@ export default function Dashboard() {
   const actionStates = getDashboardActionStates({
     actionLoading,
     isStreamCheckerProcessing: isProcessing,
+    udiInitializing,
     udiSyncing,
   })
   const showStopRunAction = displayRunningRun || isProcessing
@@ -639,7 +654,6 @@ export default function Dashboard() {
   const visibleViewerChannels = viewerChannels.slice(0, 6)
   const hiddenViewerChannelCount = Math.max(0, viewerChannels.length - visibleViewerChannels.length)
 
-  const syncStatus = udiStats?.syncStatus
   const syncBadgeClass =
     syncStatus === 'completed' ? 'bg-green-600 text-white border-transparent' :
     syncStatus === 'failed'    ? 'bg-destructive text-destructive-foreground border-transparent' :
@@ -1196,7 +1210,7 @@ export default function Dashboard() {
       </div>
 
       {/* Upcoming Automation Events */}
-      <UpcomingAutomationEvents />
+      <UpcomingAutomationEvents udiInitialization={udiInitialization} />
 
       {/* Available Playlists */}
       <Card>
