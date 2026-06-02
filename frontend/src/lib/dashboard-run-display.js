@@ -206,7 +206,7 @@ export const getDashboardActionStates = ({
   const reloadUdiReason = udiSyncing
     ? 'UDI sync is already running.'
     : udiInitializing
-      ? 'Dispatcharr cache startup is still running.'
+      ? 'Dispatcharr cache refresh is still running.'
     : actionBusy
       ? 'Another dashboard action is running.'
       : null

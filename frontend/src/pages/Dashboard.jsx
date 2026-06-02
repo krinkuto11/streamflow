@@ -619,17 +619,22 @@ export default function Dashboard() {
   })
   const syncStatus = udiStats?.syncStatus
   const udiInitProgress = status?.udi_status?.init_progress || {}
-  const udiInitializing = Boolean(
-    udiSyncing ||
+  const udiCacheHasCompleted = Boolean(
+    status?.udi_status?.last_refresh_time ||
+    udiInitProgress?.last_refresh_time
+  )
+  const udiBackendRefreshing = Boolean(
     status?.udi_status?.init_in_progress ||
     syncStatus === 'in_progress'
   )
+  const udiRefreshing = Boolean(udiSyncing || udiBackendRefreshing)
+  const udiBootstrapInitializing = Boolean(udiBackendRefreshing && !udiCacheHasCompleted)
   const udiInitialization = {
-    inProgress: udiInitializing,
+    inProgress: udiBootstrapInitializing,
     percentage: udiStats?.percentage ?? udiInitProgress?.percentage ?? 0,
     message: udiStats?.message || udiInitProgress?.message || '',
   }
-  if (udiInitializing) {
+  if (udiBootstrapInitializing) {
     return <StreamFlowInitializingScreen initialization={udiInitialization} />
   }
 
@@ -645,7 +650,7 @@ export default function Dashboard() {
   const actionStates = getDashboardActionStates({
     actionLoading,
     isStreamCheckerProcessing: isProcessing,
-    udiInitializing,
+    udiInitializing: udiRefreshing,
     udiSyncing,
   })
   const showStopRunAction = displayRunningRun || isProcessing
@@ -662,6 +667,7 @@ export default function Dashboard() {
   const syncBadgeClass =
     syncStatus === 'completed' ? 'bg-green-600 text-white border-transparent' :
     syncStatus === 'failed'    ? 'bg-destructive text-destructive-foreground border-transparent' :
+    udiRefreshing              ? 'bg-blue-600 text-white border-transparent' :
     ''
 
   return (
@@ -1033,7 +1039,7 @@ export default function Dashboard() {
                 <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                   Dispatcharr Cache
                 </span>
-                {udiSyncing ? (
+                {udiRefreshing ? (
                   <Badge variant="outline" className="text-xs gap-1 border-blue-400 text-blue-400">
                     <Loader2 className="h-3 w-3 animate-spin" />Syncing
                   </Badge>
@@ -1081,7 +1087,7 @@ export default function Dashboard() {
               </div>
 
               <p className="text-[11px] text-muted-foreground">
-                {udiSyncing
+                {udiRefreshing
                   ? 'Fetching data from Dispatcharr...'
                   : udiStats
                     ? 'Counts reflect the last completed sync'
@@ -1097,10 +1103,10 @@ export default function Dashboard() {
                 className="w-full"
                 title={actionStates.reloadUdi.reason || 'Reload Dispatcharr cache'}
               >
-                {udiSyncing
+                {udiRefreshing
                   ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   : <RefreshCw className="mr-2 h-4 w-4" />}
-                {udiSyncing ? 'Syncing...' : 'Reload UDI'}
+                {udiRefreshing ? 'Syncing...' : 'Reload UDI'}
               </Button>
 
               <DropdownMenu>

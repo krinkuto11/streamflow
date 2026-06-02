@@ -78,8 +78,9 @@ function App() {
         if (cancelled) return
 
         const data = response.data || {}
+        const hasCompletedCache = Boolean(data.last_refresh_time)
         setUdiInitialization({
-          inProgress: data.status === 'in_progress',
+          inProgress: data.status === 'in_progress' && !hasCompletedCache,
           status: data.status || 'unknown',
           percentage: data.percentage ?? 0,
           message: data.message || '',
