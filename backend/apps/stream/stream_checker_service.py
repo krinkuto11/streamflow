@@ -324,6 +324,20 @@ class StreamCheckerService:
                         is_epg_scheduled=bool(queue_metadata.get('is_epg_scheduled')),
                         forced_profile_id=forced_profile_id,
                     )
+                    if queue_metadata.get('source') == 'teamarr_preflight':
+                        try:
+                            from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+
+                            get_teamarr_preflight_service().record_queued_check_result(
+                                queue_metadata,
+                                result,
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "Failed to record queued Teamarr preflight result for channel %s: %s",
+                                channel_id,
+                                exc,
+                            )
                     if isinstance(result, dict) and result.get('success') is False:
                         self.check_queue.mark_failed(
                             channel_id,

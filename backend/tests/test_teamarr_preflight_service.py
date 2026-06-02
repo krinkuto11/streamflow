@@ -335,10 +335,22 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(kwargs["metadata"]["program_name"], "Home vs Away")
         self.assertTrue(kwargs["metadata"]["is_epg_scheduled"])
         self.assertEqual(kwargs["metadata"]["forced_profile_id"], "42")
+        self.assertEqual(kwargs["metadata"]["event"]["identity"], "id:100:2026-05-28T22:10:00+00:00")
+        self.assertEqual(kwargs["metadata"]["event"]["event_name"], "Home vs Away")
 
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["type"], "preflight_queued")
         self.assertEqual(recent[0]["details"]["priority"], TEAMARR_PREFLIGHT_QUEUE_PRIORITY)
+
+        service.record_queued_check_result(
+            kwargs["metadata"],
+            {"success": True, "stats": {"total_streams": 2, "duration_seconds": 11}},
+        )
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["type"], "preflight_completed")
+        self.assertEqual(recent[0]["event_name"], "Home vs Away")
+        self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 2)
+        self.assertNotIn("priority", recent[0]["details"])
 
     def test_filter_options_use_teamarr_subscription_and_cache_catalogs(self):
         def http_get(url, **kwargs):

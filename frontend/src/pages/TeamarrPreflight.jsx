@@ -9,6 +9,7 @@ import { Separator } from '@/components/ui/separator.jsx'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog.jsx'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip.jsx'
 import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu.jsx'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
@@ -394,11 +395,11 @@ export default function TeamarrPreflight() {
 
   const running = Boolean(status?.running)
   const enabled = Boolean(editedConfig?.enabled)
-  const renderFilterDropdown = (label, value, setValue, options) => {
+  const renderFilterDropdown = (label, value, setValue, options, emptyLabel = 'Any') => {
     const selected = new Set(parseFilterCsv(value))
     const selectedValues = [...selected]
     const buttonLabel = selectedValues.length === 0
-      ? 'Any'
+      ? emptyLabel
       : `${selectedValues.length} selected`
 
     return (
@@ -634,11 +635,28 @@ export default function TeamarrPreflight() {
             <Separator />
 
             <div className="grid gap-4 md:grid-cols-2">
-              {renderFilterDropdown('Include Sports', includeSports, setIncludeSports, filterOptions.sports)}
-              {renderFilterDropdown('Exclude Sports', excludeSports, setExcludeSports, filterOptions.sports)}
-              {renderFilterDropdown('Include Leagues', includeLeagues, setIncludeLeagues, filterOptions.leagues)}
-              {renderFilterDropdown('Exclude Leagues', excludeLeagues, setExcludeLeagues, filterOptions.leagues)}
+              {renderFilterDropdown('Exclude Sports', excludeSports, setExcludeSports, filterOptions.sports, 'None')}
+              {renderFilterDropdown('Exclude Leagues', excludeLeagues, setExcludeLeagues, filterOptions.leagues, 'None')}
             </div>
+
+            <Accordion
+              type="single"
+              collapsible
+              defaultValue={parseFilterCsv(includeSports).length || parseFilterCsv(includeLeagues).length ? 'include-filters' : undefined}
+              className="rounded-md border border-border px-3"
+            >
+              <AccordionItem value="include-filters" className="border-b-0">
+                <AccordionTrigger className="py-3 text-sm hover:no-underline">
+                  Advanced Include Filters
+                </AccordionTrigger>
+                <AccordionContent>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    {renderFilterDropdown('Include Sports', includeSports, setIncludeSports, filterOptions.sports, 'All Teamarr')}
+                    {renderFilterDropdown('Include Leagues', includeLeagues, setIncludeLeagues, filterOptions.leagues, 'All Teamarr')}
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
           </CardContent>
         </Card>
 

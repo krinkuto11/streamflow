@@ -839,11 +839,25 @@ class TeamarrPreflightService:
 
         forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
         checker = self.stream_checker_provider()
+        bucket = event.get("trigger_bucket") or "manual"
+        attempted_key = f"{event['identity']}:{bucket}"
         metadata = {
             "source": "teamarr_preflight",
             "program_name": event.get("event_name"),
             "is_epg_scheduled": True,
             "forced_profile_id": forced_profile_id,
+            "trigger_bucket": event.get("trigger_bucket"),
+            "attempted_key": attempted_key,
+            "event": {
+                "identity": event.get("identity"),
+                "event_name": event.get("event_name"),
+                "channel_name": event.get("channel_name"),
+                "dispatcharr_channel_id": event.get("dispatcharr_channel_id"),
+                "sport": event.get("sport"),
+                "league": event.get("league"),
+                "seconds_to_start": event.get("seconds_to_start"),
+                "trigger_bucket": event.get("trigger_bucket"),
+            },
         }
         queued = bool(checker.queue_channel(
             int(channel_id),
@@ -862,6 +876,50 @@ class TeamarrPreflightService:
                 },
             )
         return queued
+
+    def record_queued_check_result(self, metadata: Dict[str, Any], result: Any) -> None:
+        """Record the eventual result of a Teamarr preflight check run through the queue."""
+        event = dict(metadata.get("event") or {})
+        if not event:
+            event = {
+                "identity": metadata.get("identity"),
+                "event_name": metadata.get("program_name"),
+                "channel_name": metadata.get("channel_name"),
+                "dispatcharr_channel_id": metadata.get("dispatcharr_channel_id"),
+                "sport": metadata.get("sport"),
+                "league": metadata.get("league"),
+                "seconds_to_start": metadata.get("seconds_to_start"),
+            }
+        event["trigger_bucket"] = metadata.get("trigger_bucket")
+
+        result = result if isinstance(result, dict) else {}
+        deferral_reason = self._controlled_deferral_reason(result)
+        if deferral_reason:
+            attempted_key = str(metadata.get("attempted_key") or "").strip()
+            if attempted_key:
+                self._clear_attempted(attempted_key)
+            self._record_event(
+                "preflight_deferred",
+                event,
+                {
+                    "bucket": metadata.get("trigger_bucket"),
+                    "reason": deferral_reason,
+                    "stats": self._public_check_stats(result.get("stats")),
+                },
+            )
+            return
+
+        event_type = "preflight_completed" if result.get("success") else "preflight_failed"
+        self._record_event(
+            event_type,
+            event,
+            {
+                "bucket": metadata.get("trigger_bucket"),
+                "error": "Preflight check failed" if result.get("error") else None,
+                "reason": result.get("reason"),
+                "stats": self._public_check_stats(result.get("stats")),
+            },
+        )
 
     def _run_check(self, key: str, event: Dict[str, Any], config: Dict[str, Any]) -> None:
         try:

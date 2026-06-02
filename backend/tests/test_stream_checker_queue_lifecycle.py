@@ -194,6 +194,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service._finalize_batch_changelog = Mock()
         service._check_channel = Mock()
         service.check_single_channel = Mock(return_value={'success': True})
+        teamarr_service = Mock()
 
         def pull_entry(timeout):
             service.running = False
@@ -211,7 +212,11 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.check_queue.mark_completed = Mock()
         service.check_queue.mark_failed = Mock()
 
-        service._worker_loop()
+        with patch(
+            'apps.stream.teamarr_preflight_service.get_teamarr_preflight_service',
+            return_value=teamarr_service,
+        ):
+            service._worker_loop()
 
         service._start_batch_changelog.assert_not_called()
         service._check_channel.assert_not_called()
@@ -221,6 +226,10 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             is_epg_scheduled=True,
             forced_profile_id='42',
         )
+        teamarr_service.record_queued_check_result.assert_called_once()
+        queued_metadata, result = teamarr_service.record_queued_check_result.call_args.args
+        self.assertEqual(queued_metadata['source'], 'teamarr_preflight')
+        self.assertEqual(result, {'success': True})
         service.check_queue.mark_completed.assert_called_once_with(8441)
         service.check_queue.mark_failed.assert_not_called()
 
