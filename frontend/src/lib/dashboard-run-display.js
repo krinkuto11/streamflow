@@ -122,12 +122,15 @@ export const getStreamCheckerRunDisplay = ({
   now = Date.now(),
 } = {}) => {
   const isProcessing = Boolean(streamCheckerStatus?.stream_checking_mode)
-  const qualityStageActive = runStage === 'quality_checking' && batchTotal > 0
+  const activeBatchTotal = isProcessing ? batchTotal : 0
+  const qualityStageActive = runStage === 'quality_checking' && activeBatchTotal > 0
   const streamCheckerOnlyActive = isProcessing && runState !== 'running'
-  const streamQueueActive = (qualityStageActive || streamCheckerOnlyActive) && batchTotal > 0
-  const queueStartedAt = parseTimestamp(streamCheckerStatus?.queue?.started_at)
-  const currentStreamStartedAt = earliestStreamStart(streamCheckerStatus?.progress?.streams_detail || [])
-  const progressTimestamp = parseTimestamp(streamCheckerStatus?.progress?.timestamp)
+  const streamQueueActive = (qualityStageActive || streamCheckerOnlyActive) && activeBatchTotal > 0
+  const queueStartedAt = isProcessing ? parseTimestamp(streamCheckerStatus?.queue?.started_at) : null
+  const currentStreamStartedAt = isProcessing
+    ? earliestStreamStart(streamCheckerStatus?.progress?.streams_detail || [])
+    : null
+  const progressTimestamp = isProcessing ? parseTimestamp(streamCheckerStatus?.progress?.timestamp) : null
   const streamCheckerStartedAt = queueStartedAt ?? currentStreamStartedAt ?? progressTimestamp
   const streamCheckerElapsedSeconds = streamCheckerStartedAt !== null
     ? Math.max(0, Math.floor((now - streamCheckerStartedAt) / 1000))

@@ -439,6 +439,7 @@ export default function Dashboard() {
   const queueSize     = streamCheckerStatus?.queue?.queue_size || 0
   const completed     = streamCheckerStatus?.queue?.completed  || 0
   const inProgress    = streamCheckerStatus?.queue?.in_progress || 0
+  const queueState    = streamCheckerStatus?.queue?.state || 'idle'
   const totalProcessed = completed
   const batchTotal    = completed + inProgress + queueSize
   const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
@@ -451,6 +452,8 @@ export default function Dashboard() {
     now: dashboardNow,
   })
   const isProcessing = streamCheckerRunDisplay.isProcessing
+  const queueHistoryOnly = !isProcessing && queueState === 'completed' && totalProcessed > 0
+  const totalProcessedLabel = queueHistoryOnly ? 'Last Batch:' : 'Total Processed:'
   const streamQueueActive = streamCheckerRunDisplay.streamQueueActive
   const streamCheckerOnlyActive = streamCheckerRunDisplay.streamCheckerOnlyActive
   const streamRunActive = streamCheckerOnlyActive
@@ -1132,8 +1135,8 @@ export default function Dashboard() {
                 <dd><Badge variant={queueSize > 0 ? "default" : "secondary"}>{queueSize}</Badge></dd>
               </div>
               <div className="flex justify-between items-center">
-                <dt className="text-muted-foreground">Total Processed:</dt>
-                <dd><Badge variant="outline">{totalProcessed}</Badge></dd>
+                <dt className="text-muted-foreground">{totalProcessedLabel}</dt>
+                <dd><Badge variant={queueHistoryOnly ? 'secondary' : 'outline'}>{totalProcessed}</Badge></dd>
               </div>
               {queueSize > 0 && (
                 <div className="pt-2">

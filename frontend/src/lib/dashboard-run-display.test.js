@@ -138,6 +138,33 @@ describe('dashboard stream checker run display', () => {
     expect(display.streamCheckerElapsedSeconds).toBe(60)
   })
 
+  it('ignores completed queue history when the stream checker is idle', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'skipped',
+      runStage: 'quality_checking',
+      batchTotal: 5,
+      completed: 5,
+      now: Date.parse('2026-06-02T12:00:00Z'),
+      streamCheckerStatus: {
+        stream_checking_mode: false,
+        queue: {
+          state: 'completed',
+          queue_size: 0,
+          in_progress: 0,
+          completed: 5,
+          failed: 0,
+          started_at: '2026-06-02T11:46:33Z',
+        },
+      },
+    })
+
+    expect(display.isProcessing).toBe(false)
+    expect(display.streamCheckerOnlyActive).toBe(false)
+    expect(display.streamQueueActive).toBe(false)
+    expect(display.streamCheckerElapsedSeconds).toBeNull()
+    expect(display.stageCards).toEqual([])
+  })
+
   it('uses live stage timing while an automation stage is active', () => {
     expect(preferLiveRunSeconds({
       active: true,
