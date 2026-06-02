@@ -26,7 +26,7 @@ export default function StreamFlowInitializingScreen({ initialization = null }) 
           </div>
           <Progress value={progress} className="h-2" />
           <p className="text-sm text-muted-foreground">
-            The dashboard will load automatically when startup is complete.
+            The dashboard will load automatically when startup is complete. Large playlists can take a few minutes.
           </p>
         </CardContent>
       </Card>
