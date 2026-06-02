@@ -53,16 +53,12 @@ export const getAutomationStageCards = ({
     const backendStage = backendStages.get(stage.id)
     let status = backendStage?.status
 
-    if (!status || status === 'pending') {
-      if (streamRunActive && displayCurrentStageIndex >= 0) {
-        if (index < displayCurrentStageIndex) {
-          status = 'completed'
-        } else if (index === displayCurrentStageIndex) {
-          status = displayRunningRun ? 'running' : 'completed'
-        } else {
-          status = 'pending'
-        }
-      } else if (completedRun) {
+    if (streamRunActive) {
+      status = stage.id === normalizedDisplayStageId
+        ? (displayRunningRun ? 'running' : 'completed')
+        : 'pending'
+    } else if (!status || status === 'pending') {
+      if (completedRun) {
         status = 'completed'
       } else if (displayRunningRun && displayCurrentStageIndex >= 0 && index < displayCurrentStageIndex) {
         status = 'completed'
@@ -94,11 +90,6 @@ export const getRunDurationValue = ({
   displayRunStageElapsedSeconds = null,
   stages = [],
 } = {}) => {
-  const reportedSeconds = runDurations?.[durationKey]
-  if (reportedSeconds !== null && reportedSeconds !== undefined) {
-    return reportedSeconds
-  }
-
   const normalizedStageId = normalizeRunStageKey(stageId)
   const normalizedDisplayStageId = normalizeRunStageKey(displayRunStageId)
 
@@ -107,11 +98,12 @@ export const getRunDurationValue = ({
       return streamCheckerElapsedSeconds
     }
 
-    const stageIndex = stages.findIndex(stage => stage.id === normalizedStageId)
-    const currentIndex = stages.findIndex(stage => stage.id === normalizedDisplayStageId)
-    if (stageIndex >= 0 && currentIndex >= 0 && stageIndex < currentIndex) {
-      return 0
-    }
+    return null
+  }
+
+  const reportedSeconds = runDurations?.[durationKey]
+  if (reportedSeconds !== null && reportedSeconds !== undefined) {
+    return reportedSeconds
   }
 
   if (displayRunningRun && normalizedStageId === normalizedDisplayStageId) {

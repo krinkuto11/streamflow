@@ -196,16 +196,23 @@ describe('dashboard stream checker run display', () => {
     expect(cards.find(stage => stage.id === 'quality_checking').status).toBe('aborted')
   })
 
-  it('synthesizes completed predecessors for manual stream checker runs', () => {
+  it('keeps automation-only stages neutral for manual stream checker runs', () => {
     const cards = getAutomationStageCards({
       stages,
+      runStatusStages: [
+        { key: 'settings', status: 'completed' },
+        { key: 'm3u_refresh', status: 'completed' },
+        { key: 'stream_matching', status: 'completed' },
+      ],
       displayRunStageId: 'quality_checking',
       displayRunningRun: true,
       streamRunActive: true,
     })
 
-    expect(cards[0].status).toBe('completed')
-    expect(cards[5].status).toBe('completed')
+    expect(cards[0].status).toBe('pending')
+    expect(cards[2].status).toBe('pending')
+    expect(cards[4].status).toBe('pending')
+    expect(cards[5].status).toBe('pending')
     expect(cards[6].status).toBe('running')
     expect(cards[7].status).toBe('pending')
   })
@@ -238,9 +245,9 @@ describe('dashboard stream checker run display', () => {
     expect(value).toBe(128)
   })
 
-  it('shows zero-second placeholders for synthetic manual predecessors', () => {
+  it('keeps manual stream checker predecessor durations neutral', () => {
     const value = getRunDurationValue({
-      runDurations: {},
+      runDurations: { m3u_refresh_seconds: 0 },
       durationKey: 'm3u_refresh_seconds',
       stageId: 'm3u_refresh',
       displayRunStageId: 'quality_checking',
@@ -248,7 +255,7 @@ describe('dashboard stream checker run display', () => {
       stages,
     })
 
-    expect(value).toBe(0)
+    expect(value).toBeNull()
   })
 
   it('keeps UDI reload available during stream checks but blocks conflicting automation starts', () => {
