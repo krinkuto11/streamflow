@@ -105,13 +105,13 @@ function App() {
 
   useEffect(() => {
     if (
-      startupGateActive &&
+      udiInitializing &&
       location.pathname !== '/' &&
       location.pathname !== '/dashboard'
     ) {
       navigate('/', { replace: true })
     }
-  }, [location.pathname, navigate, startupGateActive])
+  }, [location.pathname, navigate, udiInitializing])
 
   if (loading) {
     return (
