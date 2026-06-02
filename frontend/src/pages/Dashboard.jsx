@@ -18,6 +18,7 @@ import {
   getStreamCheckerRunDisplay,
   normalizeRunStageKey,
   preferLiveRunSeconds,
+  shouldShowAutomationRunCard,
 } from '@/lib/dashboard-run-display.js'
 import { formatDuration as formatDurationValue, formatLatency as formatLatencyValue } from '@/lib/time-format.js'
 import {
@@ -484,6 +485,10 @@ export default function Dashboard() {
       ? (streamProgress.channel_name || streamProgress.step || 'Single channel check in progress')
       : skippedRunDisplay.progressDetail || runProgress.message || runStatus.message || 'Waiting for progress'
   const showRunProgress = isProcessing || runState !== 'idle' || Object.keys(runProgress).length > 0
+  const showAutomationRunCard = shouldShowAutomationRunCard({
+    showRunProgress,
+    skippedRunDisplay,
+  })
   const displayRunMessage = streamRunActive
     ? 'Running manual quality checks'
     : skippedRunDisplay.message || runProgress.message || runStatus.message || 'Automation run status'
@@ -626,7 +631,7 @@ export default function Dashboard() {
         <p className="text-muted-foreground">Monitor and control your stream automation</p>
       </div>
 
-      {showRunProgress && (
+      {showAutomationRunCard && (
         <Card>
           <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="space-y-1">

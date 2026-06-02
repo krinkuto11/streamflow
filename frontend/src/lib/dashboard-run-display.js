@@ -186,6 +186,16 @@ export const getSkippedRunDisplay = ({
   }
 }
 
+export const shouldShowAutomationRunCard = ({
+  showRunProgress = false,
+  skippedRunDisplay = {},
+} = {}) => {
+  const idleNoDueRun = skippedRunDisplay?.badgeLabel === 'Idle'
+    && skippedRunDisplay?.stageLabel === 'No Due Periods'
+
+  return Boolean(showRunProgress && !idleNoDueRun)
+}
+
 export const getDashboardActionStates = ({
   actionLoading = '',
   isStreamCheckerProcessing = false,

@@ -191,6 +191,7 @@ export default function ShadowBlankMonitor() {
   const dryRun = Boolean(editedConfig?.dry_run)
   const watchMode = editedConfig?.watch_mode || 'periodic'
   const hasKey = Boolean(config?.has_watcher_api_key)
+  const continuousWatcherActive = running && watchMode === 'continuous'
 
   return (
     <div className="space-y-6">
@@ -226,14 +227,16 @@ export default function ShadowBlankMonitor() {
               Start
             </Button>
           )}
-          <Button
-            variant="outline"
-            onClick={() => runAction('scan', shadowBlankMonitorAPI.runOnce, 'Shadow monitor scan completed')}
-            disabled={actionLoading !== ''}
-          >
-            {actionLoading === 'scan' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-            Scan Now
-          </Button>
+          {!continuousWatcherActive && (
+            <Button
+              variant="outline"
+              onClick={() => runAction('scan', shadowBlankMonitorAPI.runOnce, 'Shadow monitor scan completed')}
+              disabled={actionLoading !== ''}
+            >
+              {actionLoading === 'scan' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+              Scan Now
+            </Button>
+          )}
         </div>
       </div>
 

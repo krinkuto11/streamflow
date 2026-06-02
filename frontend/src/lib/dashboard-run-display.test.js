@@ -6,6 +6,7 @@ import {
   getSkippedRunDisplay,
   getStreamCheckerRunDisplay,
   preferLiveRunSeconds,
+  shouldShowAutomationRunCard,
 } from './dashboard-run-display.js'
 
 const stages = [
@@ -336,6 +337,28 @@ describe('dashboard stream checker run display', () => {
     expect(display.message).toBeNull()
     expect(display.progressDetail).toBeNull()
     expect(display.stageLabel).toBeNull()
+  })
+
+  it('hides the automation run card for idle no-due runs', () => {
+    const display = getSkippedRunDisplay({
+      skippedRun: true,
+      runStatusMessage: 'No active automation periods were due',
+    })
+
+    expect(shouldShowAutomationRunCard({
+      showRunProgress: true,
+      skippedRunDisplay: display,
+    })).toBe(false)
+  })
+
+  it('keeps the automation run card visible for real progress', () => {
+    expect(shouldShowAutomationRunCard({
+      showRunProgress: true,
+      skippedRunDisplay: {
+        badgeLabel: null,
+        stageLabel: null,
+      },
+    })).toBe(true)
   })
 
   it('keeps UDI reload available during stream checks but blocks conflicting automation starts', () => {
