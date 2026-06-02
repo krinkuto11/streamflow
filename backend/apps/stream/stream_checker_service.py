@@ -862,6 +862,30 @@ class StreamCheckerService:
             logger.warning("Failed to refresh dead stream reason for stream %s: %s", stream_id, exc)
             return False
     
+    @staticmethod
+    def _get_stream_m3u_account_id(stream: Dict) -> Optional[Any]:
+        """Return a stream's M3U account id across legacy and SQL payloads."""
+        if not isinstance(stream, dict):
+            return None
+        account_id = stream.get('m3u_account_id')
+        if account_id in (None, ''):
+            account_id = stream.get('m3u_account')
+        try:
+            return int(account_id) if account_id not in (None, '') else None
+        except (TypeError, ValueError):
+            return account_id
+
+    @staticmethod
+    def _get_priority_account_rank(account_id: Any, priority_m3u_ids: Optional[List[Any]]) -> Optional[int]:
+        """Return account priority rank using type-stable id comparison."""
+        if account_id in (None, '') or not priority_m3u_ids:
+            return None
+        account_key = str(account_id)
+        for index, priority_id in enumerate(priority_m3u_ids):
+            if str(priority_id) == account_key:
+                return index
+        return None
+
     def _get_m3u_account_name(self, stream_id: int, udi=None) -> Optional[str]:
         """Get the M3U account name for a stream.
         
@@ -880,7 +904,7 @@ class StreamCheckerService:
             if not stream_data:
                 return None
             
-            m3u_account_id = stream_data.get('m3u_account')
+            m3u_account_id = self._get_stream_m3u_account_id(stream_data)
             if not m3u_account_id:
                 return None
             
@@ -1261,7 +1285,7 @@ class StreamCheckerService:
         blocked_reasons = []
         
         for stream in streams:
-            m3u_account = stream.get('m3u_account')
+            m3u_account = self._get_stream_m3u_account_id(stream)
             if not m3u_account:
                 # Custom stream without M3U account - can always check
                 has_available_slot = True
@@ -2541,17 +2565,17 @@ class StreamCheckerService:
                 'dead_streams': [{
                     'id': s, 
                     'name': next((st.get('name') for st in streams if st['id'] == s), f'Stream {s}'),
-                    'm3u_account': next((st.get('m3u_account') for st in streams if st['id'] == s), None)
+                    'm3u_account': next((self._get_stream_m3u_account_id(st) for st in streams if st['id'] == s), None)
                 } for s in dead_stream_ids],
                 'revived_streams': [{
                     'id': s, 
                     'name': next((st.get('name') for st in streams if st['id'] == s), f'Stream {s}'),
-                    'm3u_account': next((st.get('m3u_account') for st in streams if st['id'] == s), None)
+                    'm3u_account': next((self._get_stream_m3u_account_id(st) for st in streams if st['id'] == s), None)
                 } for s in revived_stream_ids],
                 'preempted_streams': [{
                     'id': s,
                     'name': next((st.get('name') for st in streams if st['id'] == s), f'Stream {s}'),
-                    'm3u_account': next((st.get('m3u_account') for st in streams if st['id'] == s), None)
+                    'm3u_account': next((self._get_stream_m3u_account_id(st) for st in streams if st['id'] == s), None)
                 } for s in preempted_stream_ids],
                 'skipped_streams': [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked],
                 'checked_streams': stream_stats,
@@ -3476,12 +3500,12 @@ class StreamCheckerService:
                 'dead_streams': [{
                     'id': s, 
                     'name': next((st.get('name') for st in streams if st['id'] == s), f'Stream {s}'),
-                    'm3u_account': next((st.get('m3u_account') for st in streams if st['id'] == s), None)
+                    'm3u_account': next((self._get_stream_m3u_account_id(st) for st in streams if st['id'] == s), None)
                 } for s in dead_stream_ids],
                 'revived_streams': [{
                     'id': s, 
                     'name': next((st.get('name') for st in streams if st['id'] == s), f'Stream {s}'),
-                    'm3u_account': next((st.get('m3u_account') for st in streams if st['id'] == s), None)
+                    'm3u_account': next((self._get_stream_m3u_account_id(st) for st in streams if st['id'] == s), None)
                 } for s in revived_stream_ids],
                 'skipped_streams': [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked],
                 'checked_streams': stream_stats,
@@ -3872,15 +3896,16 @@ class StreamCheckerService:
             if not stream:
                 return 0.0
             
-            m3u_account_id = stream.get('m3u_account')
+            m3u_account_id = self._get_stream_m3u_account_id(stream)
             if not m3u_account_id:
                 return 0.0
             
+            priority_rank = self._get_priority_account_rank(m3u_account_id, priority_m3u_ids)
             # Check if this account is in the priority list
-            if m3u_account_id in priority_m3u_ids:
+            if priority_rank is not None:
                 # Calculate boost based on position (index)
                 # Lower index = higher priority
-                index = priority_m3u_ids.index(m3u_account_id)
+                index = priority_rank
                 total_accounts = len(priority_m3u_ids)
                 
                 if priority_mode == 'equal':
@@ -3946,9 +3971,10 @@ class StreamCheckerService:
             udi = get_udi_manager()
             stream = udi.get_stream_by_id(stream_id)
             if stream:
-                m3u_id = stream.get('m3u_account')
-                if m3u_id in priority_m3u_ids:
-                    account_rank = priority_m3u_ids.index(m3u_id)
+                m3u_id = self._get_stream_m3u_account_id(stream)
+                priority_rank = self._get_priority_account_rank(m3u_id, priority_m3u_ids)
+                if priority_rank is not None:
+                    account_rank = priority_rank
         
         # 2. Resolution Tier (0 = highest)
         res_tier = self._get_resolution_tier(stream_data.get('resolution'))
@@ -4510,7 +4536,7 @@ class StreamCheckerService:
             account_ids = set()
             if current_streams:
                 for stream in current_streams:
-                    m3u_account = stream.get('m3u_account')
+                    m3u_account = self._get_stream_m3u_account_id(stream)
                     if m3u_account:
                         account_ids.add(m3u_account)
             
@@ -4523,7 +4549,7 @@ class StreamCheckerService:
                 if stream_id:
                     stream = udi.get_stream_by_id(stream_id)
                     if stream:
-                        m3u_account = stream.get('m3u_account')
+                        m3u_account = self._get_stream_m3u_account_id(stream)
                         if m3u_account:
                             account_ids.add(m3u_account)
                             logger.info(
@@ -4884,7 +4910,7 @@ class StreamCheckerService:
                     m3u_account_name = analyzed.get('m3u_account')
                 else:
                     m3u_account_name = None
-                    m3u_account_id = stream.get('m3u_account')
+                    m3u_account_id = self._get_stream_m3u_account_id(stream)
                     if m3u_account_id:
                         m3u_account_name = self._get_m3u_account_name(stream.get('id'), udi)
                 

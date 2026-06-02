@@ -344,7 +344,7 @@ class UDIManager:
         self._stream_account_id = {}
         for st in self._streams_cache:
             sid = st.get('id')
-            aid = st.get('m3u_account')
+            aid = self._get_stream_m3u_account_id(st)
             if sid is not None and aid is not None:
                 self._stream_account_id[sid] = aid
                 self._streams_by_account_id.setdefault(aid, []).append(st)
@@ -372,6 +372,19 @@ class UDIManager:
             gid = ch.get('channel_group_id')
             if gid is not None:
                 self._channels_by_group_id.setdefault(gid, []).append(ch)
+
+    @staticmethod
+    def _get_stream_m3u_account_id(stream: Dict[str, Any]) -> Optional[Any]:
+        """Return a stream's M3U account id across legacy and SQL payloads."""
+        if not isinstance(stream, dict):
+            return None
+        account_id = stream.get('m3u_account_id')
+        if account_id in (None, ''):
+            account_id = stream.get('m3u_account')
+        try:
+            return int(account_id) if account_id not in (None, '') else None
+        except (TypeError, ValueError):
+            return account_id
 
     # === Data Access Methods ===
     
@@ -1050,7 +1063,7 @@ class UDIManager:
             new_stream_account_id: Dict[int, int] = {}
             for st in new_streams:
                 sid = st.get('id')
-                aid = st.get('m3u_account')
+                aid = self._get_stream_m3u_account_id(st)
                 if sid is not None and aid is not None:
                     new_stream_account_id[sid] = aid
                     new_streams_by_account.setdefault(aid, []).append(st)
@@ -1239,7 +1252,7 @@ class UDIManager:
                 if st.get('url'):
                     self._streams_by_url[st['url']] = st
                 self._valid_stream_ids.add(sid)
-                aid = st.get('m3u_account')
+                aid = self._get_stream_m3u_account_id(st)
                 if aid is not None:
                     self._stream_account_id[sid] = aid
                     self._streams_by_account_id.setdefault(aid, []).append(st)
@@ -1394,7 +1407,7 @@ class UDIManager:
                 self._stream_account_id = {}
                 for st in result.items:
                     sid = st.get('id')
-                    aid = st.get('m3u_account')
+                    aid = self._get_stream_m3u_account_id(st)
                     if sid is not None and aid is not None:
                         self._stream_account_id[sid] = aid
                         self._streams_by_account_id.setdefault(aid, []).append(st)
@@ -1986,7 +1999,7 @@ class UDIManager:
         """
         self._ensure_initialized()
         
-        account_id = stream.get('m3u_account')
+        account_id = self._get_stream_m3u_account_id(stream)
         stream_id = stream.get('id')
         
         if not account_id:
@@ -2070,7 +2083,7 @@ class UDIManager:
         """
         self._ensure_initialized()
         
-        account_id = stream.get('m3u_account')
+        account_id = self._get_stream_m3u_account_id(stream)
         if not account_id:
             # Custom stream without M3U account - can always run
             return (True, None)

@@ -28,6 +28,19 @@ from apps.core.logging_config import setup_logging
 logger = setup_logging(__name__)
 
 
+def _get_stream_m3u_account_id(stream: Dict[str, Any]) -> Optional[Any]:
+    """Return a stream's M3U account id across legacy and SQL payloads."""
+    if not isinstance(stream, dict):
+        return None
+    account_id = stream.get('m3u_account_id')
+    if account_id in (None, ''):
+        account_id = stream.get('m3u_account')
+    try:
+        return int(account_id) if account_id not in (None, '') else None
+    except (TypeError, ValueError):
+        return account_id
+
+
 class AcquireResult(tuple):
     """Tuple-compatible acquire result that remains truthy/falsey by success."""
 
@@ -290,7 +303,7 @@ class AccountStreamLimiter:
         protect individual credentials so concurrent checks do not all reuse the
         first free profile while another profile is available.
         """
-        account_id = stream.get('m3u_account')
+        account_id = _get_stream_m3u_account_id(stream)
         if not account_id or not self.udi_manager:
             return (True, 'acquired', None)
 
@@ -512,7 +525,7 @@ class SmartStreamScheduler:
         # Group streams by account for better logging
         account_groups = defaultdict(list)
         for stream in streams:
-            account_id = stream.get('m3u_account')
+            account_id = _get_stream_m3u_account_id(stream)
             account_groups[account_id].append(stream)
         
         logger.info(f"Streams grouped by account: {dict((k, len(v)) for k, v in account_groups.items())}")
@@ -559,7 +572,7 @@ class SmartStreamScheduler:
             
             def submit_stream_check(stream: Dict[str, Any]):
                 """Submit a stream check with provider-aware limit enforcement."""
-                account_id = stream.get('m3u_account')
+                account_id = _get_stream_m3u_account_id(stream)
 
                 def provider_wait_result(reason_detail: str) -> Dict[str, Any]:
                     cached_stats = {}
