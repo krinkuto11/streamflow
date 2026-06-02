@@ -1,6 +1,8 @@
+import io
 import threading
 import time
 
+from apps.stream import shadow_blank_monitor_service as shadow_module
 from apps.stream.shadow_blank_monitor_service import (
     ShadowBlankMonitorService,
     normalize_config,
@@ -100,6 +102,117 @@ def test_freeze_detection_config_and_probe_command():
     assert any("freezedetect=n=0.002:d=7.0" in arg for arg in command)
     assert config["freeze_detection_enabled"] is True
     assert config["freeze_ratio_threshold"] == 0.9
+
+
+def test_continuous_probe_command_keeps_connection_open():
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "probe_duration_seconds": 8,
+    })
+
+    periodic_command, _ = ShadowBlankMonitorService._blank_probe_command(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+    )
+    continuous_command, _ = ShadowBlankMonitorService._blank_probe_command(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+        continuous=True,
+    )
+
+    assert "-t" in periodic_command
+    assert "-t" not in continuous_command
+
+
+def test_continuous_probe_holds_ffmpeg_until_viewer_leaves(tmp_path, monkeypatch):
+    processes = []
+    commands = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO("")
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            return None, ""
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    current_time = {"value": 100.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.1
+        return current_time["value"]
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[{"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"}],
+                )
+            },
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=lambda *args, **kwargs: True,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+    }
+
+    result = service._run_blank_probe_until_viewer_left(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+        udi,
+        target,
+    )
+
+    assert result["viewer_left"] is True
+    assert processes[0].terminated is True
+    assert "-t" not in commands[0]
 
 
 def test_discovers_real_clients_and_hides_raw_channel_identifiers(tmp_path):

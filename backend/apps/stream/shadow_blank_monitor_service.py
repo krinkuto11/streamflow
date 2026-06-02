@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -20,7 +21,17 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.api_utils import change_channel_stream
 from apps.core.logging_config import setup_logging
-from apps.stream.stream_check_utils import _parse_blank_detection, _parse_freeze_detection
+from apps.stream.stream_check_utils import (
+    BLACK_DURATION_RE,
+    BLACK_END_RE,
+    BLACK_START_RE,
+    FREEZE_DURATION_RE,
+    FREEZE_END_RE,
+    FREEZE_START_RE,
+    _parse_blank_detection,
+    _parse_ffmpeg_progress_time,
+    _parse_freeze_detection,
+)
 from apps.udi import get_udi_manager
 
 logger = setup_logging(__name__)
@@ -586,7 +597,7 @@ class ShadowBlankMonitorService:
         return f"{base_url}/proxy/ts/stream/{channel_uuid}"
 
     @staticmethod
-    def _blank_probe_command(url: str, config: Dict[str, Any]) -> tuple[List[str], int]:
+    def _blank_probe_command(url: str, config: Dict[str, Any], *, continuous: bool = False) -> tuple[List[str], int]:
         duration = int(config["probe_duration_seconds"])
         headers = ""
         api_key = config.get("watcher_api_key")
@@ -619,8 +630,6 @@ class ShadowBlankMonitorService:
             [
                 "-i",
                 url,
-                "-t",
-                str(duration),
                 "-vf",
                 ",".join(video_filters),
                 "-an",
@@ -629,6 +638,9 @@ class ShadowBlankMonitorService:
                 "-",
             ]
         )
+        if not continuous:
+            input_index = command.index("-vf")
+            command[input_index:input_index] = ["-t", str(duration)]
         return command, duration
 
     def _run_blank_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -678,59 +690,219 @@ class ShadowBlankMonitorService:
         udi: Any,
         target: Dict[str, Any],
     ) -> Dict[str, Any]:
-        command, duration = self._blank_probe_command(url, config)
-        deadline = time.monotonic() + duration + 15
+        command, duration = self._blank_probe_command(url, config, continuous=True)
         viewer_left = False
-        timed_out = False
+        stopped = False
+        detected_reason = ""
+        detected_duration = 0.0
+        lines: List[str] = []
+        line_queue: queue.Queue[str] = queue.Queue()
         process = subprocess.Popen(
             command,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,
         )
 
+        def read_stderr() -> None:
+            if process.stderr is None:
+                return
+            try:
+                for line in iter(process.stderr.readline, ""):
+                    line_queue.put(line)
+            except Exception as exc:
+                logger.debug(f"Shadow blank monitor stderr reader stopped: {exc}")
+
+        reader = threading.Thread(
+            target=read_stderr,
+            name=f"ShadowBlankProbeReader-{str(target.get('channel_uuid') or '')[:8]}",
+            daemon=True,
+        )
+        reader.start()
+
         try:
-            while process.poll() is None:
-                if time.monotonic() >= deadline:
-                    timed_out = True
-                    process.kill()
+            blank_required = max(
+                float(config.get("blank_min_duration_seconds", DEFAULT_CONFIG["blank_min_duration_seconds"])),
+                float(duration) * float(config.get("blank_ratio_threshold", DEFAULT_CONFIG["blank_ratio_threshold"])),
+            )
+            freeze_required = max(
+                float(config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])),
+                float(duration) * float(config.get("freeze_ratio_threshold", DEFAULT_CONFIG["freeze_ratio_threshold"])),
+            )
+            last_media_time = 0.0
+            active_blank_start: Optional[float] = None
+            active_blank_wall: Optional[float] = None
+            active_freeze_start: Optional[float] = None
+            active_freeze_wall: Optional[float] = None
+            last_viewer_poll = 0.0
+
+            def observed_duration(media_start: Optional[float], wall_start: Optional[float]) -> float:
+                media_duration = 0.0
+                if media_start is not None:
+                    media_duration = max(0.0, last_media_time - media_start)
+                wall_duration = 0.0
+                if wall_start is not None:
+                    wall_duration = max(0.0, time.monotonic() - wall_start)
+                return max(media_duration, wall_duration)
+
+            def mark_detection(reason: str, event_duration: float) -> bool:
+                nonlocal detected_reason, detected_duration
+                detected_reason = reason
+                detected_duration = max(0.0, event_duration)
+                if process.poll() is None:
+                    process.terminate()
+                return True
+
+            while process.poll() is None and not self._stop_event.is_set():
+                now = time.monotonic()
+                while True:
+                    try:
+                        line = line_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    lines.append(line)
+
+                    progress_time = _parse_ffmpeg_progress_time(line)
+                    if progress_time is not None:
+                        last_media_time = max(last_media_time, progress_time)
+
+                    blank_start_match = BLACK_START_RE.search(line)
+                    if blank_start_match:
+                        try:
+                            active_blank_start = max(0.0, float(blank_start_match.group("start")))
+                            active_blank_wall = now
+                        except (TypeError, ValueError):
+                            active_blank_start = None
+                            active_blank_wall = None
+
+                    blank_end_match = BLACK_END_RE.search(line)
+                    if blank_end_match:
+                        segment_duration = None
+                        duration_match = BLACK_DURATION_RE.search(line)
+                        if duration_match:
+                            try:
+                                segment_duration = max(0.0, float(duration_match.group("duration")))
+                            except (TypeError, ValueError):
+                                segment_duration = None
+                        if segment_duration is None and active_blank_start is not None:
+                            try:
+                                segment_duration = max(0.0, float(blank_end_match.group("end")) - active_blank_start)
+                            except (TypeError, ValueError):
+                                segment_duration = 0.0
+                        active_blank_start = None
+                        active_blank_wall = None
+                        if segment_duration is not None and segment_duration >= blank_required:
+                            if mark_detection("blank", segment_duration):
+                                break
+
+                    freeze_start_match = FREEZE_START_RE.search(line)
+                    if freeze_start_match:
+                        try:
+                            active_freeze_start = max(0.0, float(freeze_start_match.group("start")))
+                            active_freeze_wall = now
+                        except (TypeError, ValueError):
+                            active_freeze_start = None
+                            active_freeze_wall = None
+
+                    freeze_end_match = FREEZE_END_RE.search(line)
+                    if freeze_end_match:
+                        segment_duration = None
+                        duration_match = FREEZE_DURATION_RE.search(line)
+                        if duration_match:
+                            try:
+                                segment_duration = max(0.0, float(duration_match.group("duration")))
+                            except (TypeError, ValueError):
+                                segment_duration = None
+                        if segment_duration is None and active_freeze_start is not None:
+                            try:
+                                segment_duration = max(0.0, float(freeze_end_match.group("end")) - active_freeze_start)
+                            except (TypeError, ValueError):
+                                segment_duration = 0.0
+                        active_freeze_start = None
+                        active_freeze_wall = None
+                        if segment_duration is not None and segment_duration >= freeze_required:
+                            if mark_detection("freeze", segment_duration):
+                                break
+
+                if detected_reason:
+                    break
+
+                if (
+                    active_blank_start is not None
+                    and observed_duration(active_blank_start, active_blank_wall) >= blank_required
+                ):
+                    mark_detection("blank", observed_duration(active_blank_start, active_blank_wall))
+                    break
+
+                if (
+                    active_freeze_start is not None
+                    and observed_duration(active_freeze_start, active_freeze_wall) >= freeze_required
+                ):
+                    mark_detection("freeze", observed_duration(active_freeze_start, active_freeze_wall))
                     break
 
                 try:
-                    fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                    if self._real_client_count(fresh_status, config) <= 0:
-                        viewer_left = True
-                        process.terminate()
-                        break
+                    if now - last_viewer_poll >= 1.0:
+                        last_viewer_poll = now
+                        fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                        if self._real_client_count(fresh_status, config) <= 0:
+                            viewer_left = True
+                            process.terminate()
+                            break
                 except Exception as exc:
                     logger.warning(f"Shadow blank monitor viewer poll failed: {exc}")
 
-                time.sleep(1)
+                time.sleep(0.2)
+
+            if self._stop_event.is_set() and process.poll() is None:
+                stopped = True
+                process.terminate()
 
             try:
-                _, stderr = process.communicate(timeout=5)
+                process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
-                _, stderr = process.communicate()
-                timed_out = True
+                process.wait(timeout=5)
+                stopped = True
 
-            output = stderr or ""
+            while True:
+                try:
+                    lines.append(line_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            output = "".join(lines)
+            observed_probe_duration = max(
+                duration,
+                int(last_media_time) if last_media_time else 0,
+                int(detected_duration) if detected_duration else 0,
+            )
             parsed = _parse_blank_detection(
                 output,
-                duration,
+                observed_probe_duration,
                 blank_ratio_threshold=float(config["blank_ratio_threshold"]),
             )
             if config.get("freeze_detection_enabled"):
                 parsed.update(_parse_freeze_detection(
                     output,
-                    duration,
+                    observed_probe_duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
             parsed["returncode"] = process.returncode
+            if detected_reason == "blank":
+                parsed["blank_detected"] = True
+                parsed["blank_duration_secs"] = round(detected_duration, 3)
+                parsed["blank_ratio"] = round(min(1.0, detected_duration / float(duration or 1)), 4)
+            elif detected_reason == "freeze":
+                parsed.setdefault("blank_detected", False)
+                parsed["freeze_detected"] = True
+                parsed["freeze_duration_secs"] = round(detected_duration, 3)
+                parsed["freeze_ratio"] = round(min(1.0, detected_duration / float(duration or 1)), 4)
             if viewer_left:
                 parsed["viewer_left"] = True
-            if timed_out:
-                parsed["timeout"] = True
+            if stopped:
+                parsed["stopped"] = True
             return parsed
         finally:
             if process.poll() is None:
