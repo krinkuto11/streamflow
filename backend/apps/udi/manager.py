@@ -23,15 +23,19 @@ Usage:
     udi.refresh_all()
 """
 
+import json
+import os
 import threading
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
 
 from apps.udi.fetcher import UDIFetcher, FetchResult
 from apps.udi.cache import UDICache
+from apps.udi.storage import UDIStorage
 from apps.core.auth import _get_auth_headers
 
 from apps.core.logging_config import setup_logging
@@ -125,6 +129,7 @@ class UDIManager:
         # The scheduled UDI refresh worker checks this before firing to avoid
         # replacing the cache mid-pipeline. Cleared before any background sync fires.
         self._automation_busy: bool = False
+        self._automation_busy_count: int = 0
         self._automation_busy_lock = threading.Lock()
         self._automation_busy_since: Optional[datetime] = None
         # If busy flag is not cleared within this window (e.g. due to a crash),
@@ -257,6 +262,72 @@ class UDIManager:
 
         logger.warning("Timed out waiting for concurrent UDI initialization to complete")
         return False
+
+    def _load_legacy_storage_snapshot(self) -> bool:
+        """Load old single-file UDI storage for compatibility tests/migrations.
+
+        Runtime V2 data is intentionally in-memory and refreshed from Dispatcharr.
+        This fallback only activates for an overridden storage directory, or when
+        explicitly enabled, so a normal container does not silently prefer stale
+        `/app/data/udi_data.json` over the live API.
+        """
+        try:
+            from apps.udi import storage as udi_storage
+
+            storage_dir = Path(getattr(udi_storage, "CONFIG_DIR", Path("/app/data")))
+            if (
+                storage_dir == Path("/app/data")
+                and os.environ.get("STREAMFLOW_ENABLE_LEGACY_UDI_STORAGE") != "1"
+            ):
+                return False
+
+            snapshot_path = storage_dir / "udi_data.json"
+            if not snapshot_path.exists():
+                return False
+
+            data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return False
+
+            self._channels_cache = data.get("channels", []) if isinstance(data.get("channels"), list) else []
+            self._streams_cache = data.get("streams", []) if isinstance(data.get("streams"), list) else []
+            self._channel_groups_cache = (
+                data.get("channel_groups", []) if isinstance(data.get("channel_groups"), list) else []
+            )
+            self._logos_cache = data.get("logos", []) if isinstance(data.get("logos"), list) else []
+            self._m3u_accounts_cache = (
+                data.get("m3u_accounts", []) if isinstance(data.get("m3u_accounts"), list) else []
+            )
+            channel_profiles = data.get("channel_profiles", data.get("profiles", []))
+            self._channel_profiles_cache = channel_profiles if isinstance(channel_profiles, list) else []
+            profile_channels = data.get("profile_channels", {})
+            self._profile_channels_cache = profile_channels if isinstance(profile_channels, dict) else {}
+
+            self._build_indexes()
+            self._initialized = True
+            self._network_ready = False
+            self._last_refresh_time = None
+            self._init_progress.update(
+                {
+                    "status": "completed",
+                    "percentage": 100,
+                    "message": "Loaded legacy UDI storage snapshot",
+                    "current_step": "legacy_storage",
+                    "entity_counts": {
+                        "channels": {"received": len(self._channels_cache), "expected": None},
+                        "streams": {"received": len(self._streams_cache), "expected": None},
+                        "groups": {"received": len(self._channel_groups_cache), "expected": None},
+                        "logos": {"received": len(self._logos_cache), "expected": None},
+                        "m3u_accounts": {"received": len(self._m3u_accounts_cache), "expected": None},
+                        "profiles": {"received": len(self._channel_profiles_cache), "expected": None},
+                    },
+                }
+            )
+            logger.info("Loaded legacy UDI storage snapshot from %s", snapshot_path)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to load legacy UDI storage snapshot: %s", exc)
+            return False
     
     def _build_indexes(self) -> None:
         """Build index caches for fast lookups."""
@@ -454,8 +525,10 @@ class UDIManager:
         any post-completion background sync fires.
         """
         with self._automation_busy_lock:
+            self._automation_busy_count += 1
             self._automation_busy = True
-            self._automation_busy_since = datetime.now()
+            if self._automation_busy_since is None:
+                self._automation_busy_since = datetime.now()
 
     def clear_automation_busy(self) -> None:
         """Clear the automation busy flag.
@@ -465,8 +538,10 @@ class UDIManager:
         thread, so the sync does not hold the busy flag.
         """
         with self._automation_busy_lock:
-            self._automation_busy = False
-            self._automation_busy_since = None
+            self._automation_busy_count = max(0, self._automation_busy_count - 1)
+            if self._automation_busy_count == 0:
+                self._automation_busy = False
+                self._automation_busy_since = None
 
     def is_automation_busy(self) -> bool:
         """Return True if a cycle or single-channel check is currently running.
@@ -488,6 +563,7 @@ class UDIManager:
                         "This usually means automation crashed without calling clear_automation_busy()."
                     )
                     self._automation_busy = False
+                    self._automation_busy_count = 0
                     self._automation_busy_since = None
                     return False
             return True
@@ -515,7 +591,30 @@ class UDIManager:
             List of channel dictionaries.
         """
         self._ensure_initialized()
-        return list(self._channels_cache)
+        result: List[Dict[str, Any]] = []
+        positions_by_id: Dict[Any, int] = {}
+        duplicate_count = 0
+
+        for channel in self._channels_cache:
+            channel_id = channel.get('id')
+            if channel_id is None:
+                result.append(channel)
+                continue
+
+            if channel_id in positions_by_id:
+                result[positions_by_id[channel_id]] = channel
+                duplicate_count += 1
+            else:
+                positions_by_id[channel_id] = len(result)
+                result.append(channel)
+
+        if duplicate_count:
+            logger.warning(
+                "UDI channels cache deduplicated %s duplicate channel entries",
+                duplicate_count,
+            )
+
+        return result
     
     def get_channel_by_id(self, channel_id: int, fetch_if_missing: bool = True) -> Optional[Dict[str, Any]]:
         """Get a specific channel by ID.
@@ -771,6 +870,8 @@ class UDIManager:
             True if at least one custom stream exists
         """
         self._ensure_initialized()
+        if not self._has_custom_streams and self._streams_cache:
+            self._has_custom_streams = any(st.get('is_custom', False) for st in self._streams_cache)
         return self._has_custom_streams
 
     def get_stream_count(self) -> int:
@@ -1738,13 +1839,52 @@ class UDIManager:
         # Get real-time proxy status
         proxy_status = self._get_proxy_status()
         
-        # Check if this channel is in the proxy status
+        # Dispatcharr proxy status has existed in both numeric-ID keyed and
+        # UUID-keyed shapes. Match both so active viewers reliably protect the
+        # channel from quality checks.
         channel_id_str = str(channel_id)
-        if channel_id_str in proxy_status:
-            status = proxy_status[channel_id_str]
+        channel = self._channels_by_id.get(channel_id)
+        channel_uuid = None
+        if isinstance(channel, dict):
+            channel_uuid = channel.get('uuid') or channel.get('channel_uuid')
+            if channel_uuid is not None:
+                channel_uuid = str(channel_uuid)
+
+        candidate_keys = {channel_id_str}
+        if channel_uuid:
+            candidate_keys.add(channel_uuid)
+
+        for key in candidate_keys:
+            if key not in proxy_status:
+                continue
+            status = proxy_status[key]
             is_active = self._is_channel_status_active(status)
-            logger.debug(f"Channel {channel_id} is {'active' if is_active else 'inactive'} (from proxy status)")
+            logger.debug(
+                f"Channel {channel_id} is {'active' if is_active else 'inactive'} "
+                f"(from proxy status key {key})"
+            )
             return is_active
+
+        for key, status in proxy_status.items():
+            if not isinstance(status, dict):
+                continue
+            status_identifiers = {
+                str(value)
+                for value in (
+                    status.get('channel_id'),
+                    status.get('channel_uuid'),
+                    status.get('uuid'),
+                    status.get('id'),
+                )
+                if value not in (None, '')
+            }
+            if channel_id_str in status_identifiers or (channel_uuid and channel_uuid in status_identifiers):
+                is_active = self._is_channel_status_active(status)
+                logger.debug(
+                    f"Channel {channel_id} is {'active' if is_active else 'inactive'} "
+                    f"(from proxy status entry {key})"
+                )
+                return is_active
         
         logger.debug(f"Channel {channel_id} is not in proxy status, assuming inactive")
         return False
@@ -2039,6 +2179,8 @@ class UDIManager:
             config = get_dispatcharr_config()
             if not config.is_configured():
                 logger.warning("UDI Manager not initialized and Dispatcharr not configured — skipping auto-init.")
+                return
+            if self._load_legacy_storage_snapshot():
                 return
             logger.info("UDI Manager not initialized, auto-initializing from API...")
             self.initialize()

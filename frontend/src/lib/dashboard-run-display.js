@@ -16,7 +16,7 @@ const parseTimestamp = (value) => {
 const STAGE_KEY_ALIASES = {
   preparing: 'settings',
   schedule: 'period_discovery',
-  cache_sync: 'udi_sync',
+  udi_sync: 'cache_sync',
   matching: 'stream_matching',
   quality_check: 'quality_checking',
 }

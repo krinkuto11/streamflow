@@ -1,6 +1,6 @@
 """Stream checker API handler functions extracted from web_api."""
 
-from typing import Any, Callable
+from typing import Any, Callable, Dict
 
 from flask import jsonify
 
@@ -12,6 +12,46 @@ from apps.stream.queue_start import (
 )
 
 logger = setup_logging(__name__)
+
+
+def _sanitize_hardware_acceleration_status(status: Any) -> Dict[str, Any]:
+    """Return hardware diagnostics without host-specific error or device inventory details."""
+    if not isinstance(status, dict):
+        return {}
+
+    safe: Dict[str, Any] = {}
+
+    if isinstance(status.get("config"), dict):
+        safe["config"] = dict(status["config"])
+
+    for key in (
+        "ffmpeg_available",
+        "mode_supported",
+        "nvidia_checked",
+        "nvidia_visible_devices_set",
+        "nvidia_smi_available",
+        "nvidia_smi_ok",
+    ):
+        safe[key] = bool(status.get(key))
+
+    ffmpeg_hwaccels = status.get("ffmpeg_hwaccels")
+    if isinstance(ffmpeg_hwaccels, list):
+        safe["ffmpeg_hwaccels"] = [
+            str(method)
+            for method in ffmpeg_hwaccels
+            if isinstance(method, (str, int, float)) and str(method).strip()
+        ]
+    else:
+        safe["ffmpeg_hwaccels"] = []
+
+    nvidia_gpus = status.get("nvidia_gpus")
+    safe["nvidia_gpu_count"] = len(nvidia_gpus) if isinstance(nvidia_gpus, list) else 0
+
+    safe["diagnostics_available"] = not bool(status.get("error"))
+    safe["ffmpeg_diagnostics_available"] = not bool(status.get("ffmpeg_error"))
+    safe["nvidia_diagnostics_available"] = not bool(status.get("nvidia_error"))
+
+    return safe
 
 
 def start_stream_checker_response(*, get_stream_checker_service: Callable[[], Any]):
@@ -99,6 +139,17 @@ def get_stream_checker_config_response(*, get_stream_checker_service: Callable[[
         return jsonify(service.config.config)
     except Exception as exc:
         logger.error(f"Error getting stream checker config: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def get_stream_checker_hardware_status_response(*, get_stream_checker_service: Callable[[], Any]):
+    """Handle retrieval of optional hardware acceleration runtime status."""
+    try:
+        service = get_stream_checker_service()
+        status = service.get_hardware_acceleration_status()
+        return jsonify(_sanitize_hardware_acceleration_status(status))
+    except Exception as exc:
+        logger.error("Error getting stream checker hardware status", exc_info=True)
         return jsonify({"error": "Internal Server Error"}), 500
 
 
@@ -243,7 +294,7 @@ def update_stream_checker_config_response(
                     service.start()
                     logger.info("Stream checker service auto-started after config update")
 
-                if regular_automation_enabled and not manager.automation_running:
+                if not manager.automation_running:
                     manager.start_automation()
                     logger.info("Automation service auto-started after config update")
 
@@ -295,7 +346,7 @@ def check_single_channel_now_response(
         service = get_stream_checker_service()
         result = service.check_single_channel(channel_id, forced_profile_id=forced_profile_id)
 
-        if result.get("success"):
+        if result.get("success") or result.get("skipped"):
             return jsonify(result), 200
 
         # no_profile: user configuration error — channel has no automation profile.
@@ -304,7 +355,11 @@ def check_single_channel_now_response(
         if result.get("error") == "no_profile":
             return jsonify(result), 400
 
-        return jsonify(result), 500
+        logger.warning(
+            "Single-channel check failed; returning sanitized error response for channel %s",
+            channel_id,
+        )
+        return jsonify({"success": False, "error": "Internal Server Error"}), 500
 
     except Exception as exc:
         logger.error(f"Error checking single channel: {exc}")

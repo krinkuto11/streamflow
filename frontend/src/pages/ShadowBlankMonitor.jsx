@@ -318,17 +318,6 @@ export default function ShadowBlankMonitor() {
 
               <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
                 <div>
-                  <Label className="text-sm font-medium">Quality Check Guard</Label>
-                  <p className="text-xs text-muted-foreground">Skip channels currently being checked</p>
-                </div>
-                <Switch
-                  checked={Boolean(editedConfig.skip_during_quality_check)}
-                  onCheckedChange={(value) => updateConfigValue('skip_during_quality_check', value)}
-                />
-              </div>
-
-              <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
-                <div>
                   <Label className="text-sm font-medium">Freeze Detection</Label>
                   <p className="text-xs text-muted-foreground">Switch when the active picture is stuck but not black</p>
                 </div>

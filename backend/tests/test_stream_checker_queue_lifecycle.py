@@ -5,7 +5,7 @@ import os
 import sys
 import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from flask import Flask
 
@@ -201,6 +201,64 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['queue']['started_at'], '2026-05-29T18:03:41')
         self.assertTrue(status['stream_checking_mode'])
 
+    def test_get_status_clears_stale_progress_when_no_check_is_active(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.running = True
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: default
+        service.connectivity_guard_status = {'ok': True}
+        service.progress = Mock()
+        service.progress.get.return_value = {
+            'status': 'analyzing',
+            'channel_id': 1946,
+            'streams_detail': [{'id': 1, 'status': 'checking'}],
+        }
+        service.update_tracker = Mock()
+        service.update_tracker.get_last_global_check.return_value = None
+
+        status = service.get_status()
+
+        self.assertFalse(status['stream_checking_mode'])
+        self.assertIsNone(status['progress'])
+        service.progress.clear.assert_called_once()
+
+    def test_sync_batch_invokes_progress_callback_after_each_channel(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.update_tracker = Mock()
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: True if key == 'concurrent_streams.enabled' else default
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel_concurrent = Mock(side_effect=[
+            {'success': True, 'channel_name': 'One'},
+            {'success': True, 'channel_name': 'Two'},
+        ])
+
+        udi = Mock()
+        udi.get_channel_by_id.side_effect = lambda channel_id: {'streams': [{'id': f'{channel_id}-a'}]}
+        progress_events = []
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            result = service.check_channels_synchronously(
+                [101, 102],
+                progress_callback=lambda completed, total, payload: progress_events.append(
+                    (completed, total, payload.get('channel_name'))
+                ),
+            )
+
+        self.assertEqual(list(result.keys()), [101, 102])
+        self.assertEqual(progress_events, [(1, 2, 'One'), (2, 2, 'Two')])
+        self.assertFalse(service.sync_batch_state['active'])
+
 
 class TestStreamCheckerQueueHandlers(unittest.TestCase):
     def setUp(self):
@@ -235,6 +293,8 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             def __init__(self):
                 self.update_tracker = UpdateTracker()
                 self.queued = None
+                self.config = Mock()
+                self.config.get.side_effect = lambda key, default=None: default
 
             def queue_channels(self, channel_ids, priority=10, force_check=False):
                 self.queued = {

@@ -18,6 +18,7 @@ API_ENDPOINTS = [
 def test_fetch_channels(monkeypatch):
     base_url = "http://100.107.251.48:9191"
     monkeypatch.setenv("DISPATCHARR_BASE_URL", base_url)
+    monkeypatch.setenv("DISPATCHARR_TOKEN", "test-token")
     with patch("backend.api_utils.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = {"results": []}
@@ -29,6 +30,7 @@ def test_fetch_channel_streams(monkeypatch):
     base_url = "http://mockserver"
     channel_id = 123
     monkeypatch.setenv("DISPATCHARR_BASE_URL", base_url)
+    monkeypatch.setenv("DISPATCHARR_TOKEN", "test-token")
     with patch("backend.api_utils.requests.get") as mock_get:
         mock_get.return_value.status_code = 200
         mock_get.return_value.json.return_value = []

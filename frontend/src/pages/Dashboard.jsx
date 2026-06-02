@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Link } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
@@ -8,7 +8,8 @@ import { Alert, AlertDescription } from '@/components/ui/alert.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
-import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { getDashboardRunCounts } from '@/lib/dashboard-run-counts.js'
 import {
   getAutomationStageCards,
   getRunDurationValue,
@@ -16,11 +17,11 @@ import {
   normalizeRunStageKey,
   preferLiveRunSeconds,
 } from '@/lib/dashboard-run-display.js'
-import { formatDuration as formatDurationValue } from '@/lib/time-format.js'
+import { formatDuration as formatDurationValue, formatLatency as formatLatencyValue } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
   Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
-  Clock3, AlertCircle, ListChecks, Timer, Eye
+  Clock3, AlertCircle, ListChecks, Timer, Eye, Users
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -36,15 +37,23 @@ const AUTOMATION_STAGES = [
   { id: 'settings', label: 'Preparing' },
   { id: 'period_discovery', label: 'Schedule' },
   { id: 'm3u_refresh', label: 'M3U Refresh' },
-  { id: 'udi_sync', label: 'Cache Sync' },
+  { id: 'cache_sync', label: 'Cache Sync' },
   { id: 'stream_matching', label: 'Matching' },
   { id: 'quality_queueing', label: 'Queueing' },
   { id: 'quality_checking', label: 'Quality Check' },
   { id: 'finalizing', label: 'Finalizing' },
 ]
 
+const LIVE_STATUS_POLL_MS = 1000
+const BACKGROUND_DATA_POLL_MS = 30000
+
 const formatDuration = (seconds) => {
   const formatted = formatDurationValue(seconds)
+  return formatted || 'N/A'
+}
+
+const formatLatency = (seconds) => {
+  const formatted = formatLatencyValue(seconds)
   return formatted || 'N/A'
 }
 
@@ -55,11 +64,11 @@ const formatTime = (value) => {
   return date.toLocaleTimeString()
 }
 
-const elapsedSecondsSince = (value) => {
+const elapsedSecondsSince = (value, now = Date.now()) => {
   if (!value) return null
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return null
-  return Math.max(0, (Date.now() - date.getTime()) / 1000)
+  return Math.max(0, (now - date.getTime()) / 1000)
 }
 
 const formatShadowEvent = (eventType) => {
@@ -75,6 +84,7 @@ export default function Dashboard() {
   const [automationConfig, setAutomationConfig] = useState(null)
   const [streamCheckerStatus, setStreamCheckerStatus] = useState(null)
   const [shadowMonitorStatus, setShadowMonitorStatus] = useState(null)
+  const [viewerActivityStatus, setViewerActivityStatus] = useState(null)
   const [playlists, setPlaylists] = useState([])
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
@@ -82,36 +92,55 @@ export default function Dashboard() {
   const [periods, setPeriods] = useState([])
   const [udiStats, setUdiStats] = useState(null)
   const [udiSyncing, setUdiSyncing] = useState(false)
+  const [dashboardNow, setDashboardNow] = useState(() => Date.now())
+  const statusPollInFlight = useRef(false)
   // debug_mode gates the fault injection panel (Phase 5 — not yet built)
   const [debugMode, setDebugMode] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
+    setDashboardNow(Date.now())
     loadStatus()
     loadPlaylists()
     loadPeriods()
     loadEnvironment()
     loadUdiStats()
-    const interval = setInterval(() => {
+
+    const statusInterval = setInterval(() => {
+      setDashboardNow(Date.now())
+      loadStatus()
+    }, LIVE_STATUS_POLL_MS)
+
+    const backgroundInterval = setInterval(() => {
       loadStatus()
       loadPlaylists()
       loadUdiStats()
-    }, 30000)
-    return () => clearInterval(interval)
+    }, BACKGROUND_DATA_POLL_MS)
+
+    return () => {
+      clearInterval(statusInterval)
+      clearInterval(backgroundInterval)
+    }
   }, [])
 
   const loadStatus = async () => {
+    if (statusPollInFlight.current) {
+      return
+    }
+    statusPollInFlight.current = true
     try {
-      const [automationResponse, streamCheckerResponse, automationConfigResponse, shadowMonitorResponse] = await Promise.all([
+      const [automationResponse, streamCheckerResponse, automationConfigResponse, shadowMonitorResponse, viewerActivityResponse] = await Promise.all([
         automationAPI.getStatus(),
         streamCheckerAPI.getStatus(),
         automationAPI.getConfig(),
         shadowBlankMonitorAPI.getStatus().catch(() => ({ data: null })),
+        viewerActivityAPI.getStatus().catch(() => ({ data: null })),
       ])
       setStatus(automationResponse.data)
       setStreamCheckerStatus(streamCheckerResponse.data)
       setAutomationConfig(automationConfigResponse.data || {})
       setShadowMonitorStatus(shadowMonitorResponse.data)
+      setViewerActivityStatus(viewerActivityResponse.data)
     } catch (err) {
       console.error('Failed to load status:', err)
       toast({
@@ -120,6 +149,7 @@ export default function Dashboard() {
         variant: "destructive"
       })
     } finally {
+      statusPollInFlight.current = false
       setLoading(false)
     }
   }
@@ -367,6 +397,7 @@ export default function Dashboard() {
   const runProgress = runStatus.progress || {}
   const runningRun = runState === 'running'
   const failedRun = runState === 'failed'
+  const abortedRun = runState === 'aborted'
   const completedRun = runState === 'completed'
   const skippedRun = runState === 'skipped'
   const queueSize     = streamCheckerStatus?.queue?.queue_size || 0
@@ -381,6 +412,7 @@ export default function Dashboard() {
     runStage,
     batchTotal,
     completed,
+    now: dashboardNow,
   })
   const isProcessing = streamCheckerRunDisplay.isProcessing
   const streamQueueActive = streamCheckerRunDisplay.streamQueueActive
@@ -416,20 +448,26 @@ export default function Dashboard() {
           ? 'Completed'
           : failedRun
             ? 'Failed'
-            : 'Idle'
+            : abortedRun
+              ? 'Aborted'
+              : 'Idle'
   const streamCheckerElapsedSeconds = streamCheckerRunDisplay.streamCheckerElapsedSeconds
   const liveRunDurationSeconds = runningRun
-    ? elapsedSecondsSince(runStatus.started_at) ?? runStatus.duration_seconds
+    ? elapsedSecondsSince(runStatus.started_at, dashboardNow) ?? runStatus.duration_seconds
     : runStatus.duration_seconds
   const liveStageDurationSeconds = runningRun
-    ? elapsedSecondsSince(runStatus.stage_started_at) ?? runStatus.stage_duration_seconds
+    ? elapsedSecondsSince(runStatus.stage_started_at, dashboardNow) ?? runStatus.stage_duration_seconds
     : runStatus.stage_duration_seconds
   const displayRunUpdatedAt = streamRunActive
     ? (streamCheckerStatus?.queue?.started_at || streamCheckerStatus?.progress?.timestamp || runStatus.updated_at)
     : runStatus.updated_at
   const displayRunElapsedSeconds = streamRunActive
     ? streamCheckerElapsedSeconds
-    : (runStatus.elapsed_seconds ?? runProgress.elapsed_seconds ?? liveRunDurationSeconds)
+    : preferLiveRunSeconds({
+        active: runningRun,
+        reportedSeconds: runStatus.elapsed_seconds ?? runProgress.elapsed_seconds,
+        liveSeconds: liveRunDurationSeconds,
+      })
   const displayRunStageElapsedSeconds = streamRunActive
     ? streamCheckerElapsedSeconds
     : preferLiveRunSeconds({
@@ -459,7 +497,7 @@ export default function Dashboard() {
   const cacheSyncDuration = getRunDurationValue({
     runDurations,
     durationKey: 'udi_sync_seconds',
-    stageId: 'udi_sync',
+    stageId: 'cache_sync',
     displayRunStageId,
     displayRunningRun,
     streamRunActive,
@@ -489,20 +527,18 @@ export default function Dashboard() {
     displayRunStageElapsedSeconds,
     stages: AUTOMATION_STAGES,
   })
-  const qualityCheckedCount = streamQueueActive
-    ? completed
-    : (runCounts.quality_checked ?? 0)
-  const displayRunCounts = {
-    channels: streamQueueActive ? batchTotal : (runCounts.channels_with_periods ?? 0),
-    playlists: runCounts.refreshed_playlists ?? 0,
-    matched: runCounts.assigned_channels ?? 0,
-    checked: qualityCheckedCount,
-    dead: runCounts.dead_streams ?? 0,
-    blank: runCounts.blank_streams ?? 0,
-  }
+  const displayRunCounts = getDashboardRunCounts({
+    streamCheckerStatus,
+    streamQueueActive,
+    batchTotal,
+    completed,
+    runCounts,
+  })
   const runBadgeClass = failedRun
     ? 'bg-destructive text-destructive-foreground border-transparent'
-    : completedRun
+    : abortedRun
+      ? 'bg-amber-600 text-white border-transparent'
+      : completedRun
       ? 'bg-green-600 text-white border-transparent'
       : displayRunningRun
         ? 'bg-blue-600 text-white border-transparent'
@@ -510,6 +546,13 @@ export default function Dashboard() {
   const shouldDisableActions = isProcessing || actionLoading !== ''
   const shadowWatchedCount = shadowMonitorStatus?.watched_count || shadowMonitorStatus?.watched_channels?.length || 0
   const shadowLastEvent = shadowMonitorStatus?.recent_events?.[0]
+  const viewerChannels = viewerActivityStatus?.channels || []
+  const realWatchedCount = viewerActivityStatus?.real_watched_count || 0
+  const watcherOnlyCount = viewerActivityStatus?.watcher_only_count || 0
+  const totalRealClients = viewerActivityStatus?.total_real_clients || 0
+  const totalWatcherClients = viewerActivityStatus?.total_watcher_clients || 0
+  const visibleViewerChannels = viewerChannels.slice(0, 6)
+  const hiddenViewerChannelCount = Math.max(0, viewerChannels.length - visibleViewerChannels.length)
 
   const syncStatus = udiStats?.syncStatus
   const syncBadgeClass =
@@ -553,6 +596,7 @@ export default function Dashboard() {
             <Badge variant="outline" className={`w-fit gap-1 ${runBadgeClass}`}>
               {displayRunningRun && <Loader2 className="h-3 w-3 animate-spin" />}
               {failedRun && <AlertCircle className="h-3 w-3" />}
+              {abortedRun && <AlertCircle className="h-3 w-3" />}
               {completedRun && <CheckCircle2 className="h-3 w-3" />}
               {runDisplayBadgeLabel}
             </Badge>
@@ -600,9 +644,9 @@ export default function Dashboard() {
                   API p95 / p99
                 </div>
                 <div className="mt-1 text-lg font-semibold">
-                  {apiTiming.p95_seconds != null ? formatDuration(apiTiming.p95_seconds) : 'N/A'}
+                  {apiTiming.p95_seconds != null ? formatLatency(apiTiming.p95_seconds) : 'N/A'}
                   <span className="mx-1 text-muted-foreground">/</span>
-                  {apiTiming.p99_seconds != null ? formatDuration(apiTiming.p99_seconds) : 'N/A'}
+                  {apiTiming.p99_seconds != null ? formatLatency(apiTiming.p99_seconds) : 'N/A'}
                 </div>
               </div>
             </div>
@@ -619,11 +663,14 @@ export default function Dashboard() {
               {displayStageCards.map((stage) => {
                 const isCurrent = stage.id === displayRunStageId && stage.status === 'running'
                 const isDone = stage.status === 'completed'
+                const isAborted = stage.status === 'aborted'
                 const stageClass = isCurrent
                   ? 'border-primary bg-primary/10 text-primary'
                   : isDone
                     ? 'border-green-500/50 bg-green-500/10 text-green-600 dark:text-green-400'
-                    : 'border-border bg-background text-muted-foreground'
+                    : isAborted
+                      ? 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                      : 'border-border bg-background text-muted-foreground'
                 return (
                   <div key={stage.id} className={`rounded-md border px-3 py-2 text-xs font-medium ${stageClass}`}>
                     <div className="flex items-center gap-2">
@@ -631,6 +678,8 @@ export default function Dashboard() {
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : isDone ? (
                         <CheckCircle2 className="h-3.5 w-3.5" />
+                      ) : isAborted ? (
+                        <AlertCircle className="h-3.5 w-3.5" />
                       ) : (
                         <Activity className="h-3.5 w-3.5" />
                       )}
@@ -641,7 +690,7 @@ export default function Dashboard() {
               })}
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">Channels</div>
                 <div className="text-xl font-semibold">{displayRunCounts.channels}</div>
@@ -665,6 +714,10 @@ export default function Dashboard() {
               <div className="rounded-md border p-3">
                 <div className="text-xs text-muted-foreground">Blank</div>
                 <div className="text-xl font-semibold">{displayRunCounts.blank}</div>
+              </div>
+              <div className="rounded-md border p-3">
+                <div className="text-xs text-muted-foreground">Freeze</div>
+                <div className="text-xl font-semibold">{displayRunCounts.freeze}</div>
               </div>
             </div>
 
@@ -772,6 +825,91 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-1">
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Users className="h-5 w-5 text-muted-foreground" />
+              Watched Channels
+            </CardTitle>
+            <CardDescription>Current viewer and watcher playback</CardDescription>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant={realWatchedCount > 0 ? 'default' : 'secondary'}>
+              {realWatchedCount} viewer channels
+            </Badge>
+            <Badge variant={watcherOnlyCount > 0 ? 'outline' : 'secondary'}>
+              {watcherOnlyCount} watcher-only channels
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Viewer Clients</div>
+              <div className="mt-1 text-2xl font-semibold">{totalRealClients}</div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Watcher Clients</div>
+              <div className="mt-1 text-2xl font-semibold">{totalWatcherClients}</div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Active Channels</div>
+              <div className="mt-1 text-2xl font-semibold">{viewerChannels.length}</div>
+            </div>
+          </div>
+
+          {viewerChannels.length === 0 ? (
+            <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+              No active channel playback detected
+            </div>
+          ) : (
+            <div className="grid gap-2 lg:grid-cols-2 xl:grid-cols-3">
+              {visibleViewerChannels.map((channel) => (
+                <div
+                  key={`${channel.channel_uuid || channel.channel_id}-${channel.stream_id || 'stream'}`}
+                  className="rounded-md border bg-background p-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{channel.channel_name || 'Unknown Channel'}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {channel.state || 'active'}
+                        {channel.stream_id ? ` · Stream ${channel.stream_id}` : ''}
+                      </div>
+                    </div>
+                    {channel.has_real_clients ? (
+                      <Badge className="shrink-0 bg-green-600 text-white">Viewer active</Badge>
+                    ) : (
+                      <Badge variant="outline" className="shrink-0">Watcher only</Badge>
+                    )}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                    <Badge variant="secondary">{channel.real_client_count || 0} viewers</Badge>
+                    <Badge variant="outline">{channel.watcher_client_count || 0} watchers</Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {hiddenViewerChannelCount > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {hiddenViewerChannelCount} more active channels are not shown in this summary
+            </p>
+          )}
+
+          {viewerChannels.length > 0 && realWatchedCount === 0 && shadowMonitorStatus?.running && (
+            <Alert>
+              <Eye className="h-4 w-4" />
+              <AlertDescription>
+                Only watcher clients are active; no real viewer clients are currently detected.
+              </AlertDescription>
+            </Alert>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Quick Actions */}
       <Card>

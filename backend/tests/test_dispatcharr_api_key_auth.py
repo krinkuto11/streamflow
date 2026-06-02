@@ -22,6 +22,8 @@ class FakeDB:
 def test_legacy_credentials_config_remains_configured(monkeypatch):
     from apps.config import dispatcharr_config as config_module
 
+    monkeypatch.delenv("DISPATCHARR_API_KEY", raising=False)
+
     fake_db = FakeDB({
         "base_url": "http://dispatcharr.test",
         "username": "admin",
@@ -40,6 +42,10 @@ def test_legacy_credentials_config_remains_configured(monkeypatch):
 
 def test_api_key_config_can_be_configured_without_username_password(monkeypatch):
     from apps.config import dispatcharr_config as config_module
+
+    monkeypatch.delenv("DISPATCHARR_USER", raising=False)
+    monkeypatch.delenv("DISPATCHARR_PASS", raising=False)
+    monkeypatch.delenv("DISPATCHARR_TOKEN", raising=False)
 
     fake_db = FakeDB({
         "base_url": "http://dispatcharr.test",

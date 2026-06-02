@@ -46,6 +46,8 @@ class TestDeadStreamRemovalFiltering(unittest.TestCase):
         config_file = self.config_dir / 'stream_checker_config.json'
         with open(config_file, 'w') as f:
             json.dump(config, f)
+        from apps.database.manager import get_db_manager
+        get_db_manager().set_system_setting('stream_checker_config', config)
     
     def test_stream_checker_respects_removal_disabled(self):
         """Test that stream checker passes allow_dead_streams=True when removal is disabled."""

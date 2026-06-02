@@ -56,9 +56,9 @@ class TestParseBitrateValue(unittest.TestCase):
         self.assertIsNone(parse_bitrate_value(None))
     
     def test_parse_zero(self):
-        """Test parsing zero."""
-        self.assertIsNone(parse_bitrate_value(0))
-        self.assertIsNone(parse_bitrate_value("0"))
+        """Test parsing explicit zero bitrate."""
+        self.assertEqual(parse_bitrate_value(0), 0.0)
+        self.assertEqual(parse_bitrate_value("0"), 0.0)
 
 
 class TestFormatBitrate(unittest.TestCase):

@@ -28,7 +28,8 @@ UI available at **http://localhost:5000** (default port).
 - **EPG Scheduling** — schedule channel checks from live EPG program data. See [docs/automation.md](docs/automation.md).
 - **Global Action** — manually trigger a full update cycle across all channels.
 - **Changelog** — timestamped activity log with per-channel and per-stream detail.
-- **REST API** — full API for all operations. See [docs/api.md](docs/api.md).
+- **Operations Guide** — practical setup, profile, monitoring, and troubleshooting guidance. See [docs/operations-guide.md](docs/operations-guide.md).
+- **REST API** — full API for all operations. See [docs/API.md](docs/API.md).
 
 ## Documentation
 
@@ -38,7 +39,8 @@ UI available at **http://localhost:5000** (default port).
 | [docs/stream-matching.md](docs/stream-matching.md)     | Regex patterns, TVG-ID, mass assignment, validation         |
 | [docs/stream-checking.md](docs/stream-checking.md)     | Quality checking, scoring, dead streams, concurrency limits |
 | [docs/stream-monitoring.md](docs/stream-monitoring.md) | Live monitoring, sessions, timeline, screenshots            |
-| [docs/api.md](docs/api.md)                             | REST API reference                                          |
+| [docs/operations-guide.md](docs/operations-guide.md)   | Setup, profiles, monitoring, troubleshooting                |
+| [docs/API.md](docs/API.md)                             | REST API reference                                          |
 | [DEVELOPMENT.md](DEVELOPMENT.md)                       | Local dev setup                                             |
 
 ## License

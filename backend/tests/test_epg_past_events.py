@@ -316,11 +316,12 @@ class TestEPGPastEvents(unittest.TestCase):
         # Replace EPG cache with only program2 (simulating EPG update)
         self.service._epg_cache = [program2]
         
-        # Run matching again - should update existing event, not create duplicate
+        # Run matching again - exact start time is the de-duplication key, so
+        # nearby programs are preserved as distinct events.
         result = self.service.match_programs_to_rules()
         events = self.service.get_scheduled_events()
-        self.assertEqual(len(events), 1, "Should still have only one event (duplicate detection)")
-        self.assertEqual(result['created'], 0)
+        self.assertEqual(len(events), 2, "Should preserve nearby programs as separate events")
+        self.assertEqual(result['created'], 1)
         
         # Create third program 10 minutes after the original (outside 5-minute window from original)
         program3 = {
@@ -336,7 +337,7 @@ class TestEPGPastEvents(unittest.TestCase):
         # Run matching again - should create a second event
         result = self.service.match_programs_to_rules()
         events = self.service.get_scheduled_events()
-        self.assertEqual(len(events), 2, "Should create second event (outside duplicate window)")
+        self.assertEqual(len(events), 3, "Should create another event for the distinct start time")
         self.assertEqual(result['created'], 1)
     
     def test_executed_events_prevent_recreation(self):

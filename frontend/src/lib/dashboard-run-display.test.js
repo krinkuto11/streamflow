@@ -10,7 +10,7 @@ const stages = [
   { id: 'settings', label: 'Preparing' },
   { id: 'period_discovery', label: 'Schedule' },
   { id: 'm3u_refresh', label: 'M3U Refresh' },
-  { id: 'udi_sync', label: 'Cache Sync' },
+  { id: 'cache_sync', label: 'Cache Sync' },
   { id: 'stream_matching', label: 'Matching' },
   { id: 'quality_queueing', label: 'Queueing' },
   { id: 'quality_checking', label: 'Quality Check' },
@@ -137,7 +137,7 @@ describe('dashboard stream checker run display', () => {
         { key: 'matching', status: 'completed' },
         { key: 'quality_check', status: 'running' },
       ],
-      displayRunStageId: 'quality_check',
+      displayRunStageId: 'quality_checking',
       displayRunningRun: true,
     })
 
@@ -151,6 +151,21 @@ describe('dashboard stream checker run display', () => {
       'running',
       'pending',
     ])
+  })
+
+  it('preserves aborted backend stages for dashboard rendering', () => {
+    const cards = getAutomationStageCards({
+      stages,
+      runStatusStages: [
+        { key: 'settings', status: 'completed' },
+        { key: 'm3u_refresh', status: 'completed' },
+        { key: 'quality_checking', status: 'aborted' },
+      ],
+      displayRunStageId: 'aborted',
+      displayRunningRun: false,
+    })
+
+    expect(cards.find(stage => stage.id === 'quality_checking').status).toBe('aborted')
   })
 
   it('synthesizes completed predecessors for manual stream checker runs', () => {
@@ -172,7 +187,7 @@ describe('dashboard stream checker run display', () => {
       runDurations: {},
       durationKey: 'stream_matching_seconds',
       stageId: 'stream_matching',
-      displayRunStageId: 'matching',
+      displayRunStageId: 'stream_matching',
       displayRunningRun: true,
       displayRunStageElapsedSeconds: 91,
       stages,

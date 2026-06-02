@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDuration, parseDurationSeconds } from './time-format.js'
+import { formatDuration, formatLatency, parseDurationSeconds } from './time-format.js'
 
 describe('time formatting', () => {
   it('formats seconds, minutes, and hours', () => {
@@ -18,5 +18,12 @@ describe('time formatting', () => {
   it('returns unknown strings unchanged', () => {
     expect(parseDurationSeconds('N/A')).toBeNull()
     expect(formatDuration('N/A')).toBe('N/A')
+  })
+
+  it('formats sub-second latency as milliseconds', () => {
+    expect(formatLatency(0.0529)).toBe('53ms')
+    expect(formatLatency(0.1603)).toBe('160ms')
+    expect(formatLatency(1.2)).toBe('1s')
+    expect(formatLatency(null)).toBe('')
   })
 })

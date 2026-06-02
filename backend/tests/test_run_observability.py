@@ -45,6 +45,47 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["durations"]["m3u_refresh_seconds"], 1.235)
         self.assertIsNotNone(status["completed_at"])
         self.assertIsNotNone(status["duration_seconds"])
+        self.assertEqual(
+            [stage["key"] for stage in status["stages"]],
+            [
+                "settings",
+                "period_discovery",
+                "m3u_refresh",
+                "cache_sync",
+                "stream_matching",
+                "quality_queueing",
+                "quality_checking",
+                "finalizing",
+            ],
+        )
+
+    def test_run_status_marks_prior_stages_completed(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._update_run_status(
+            stage="settings",
+            stage_label="Preparing Automation",
+            message="Reading configuration",
+        )
+        manager._update_run_status(
+            stage="stream_matching",
+            stage_label="Matching Streams",
+            message="Matching streams",
+            progress={"current": 2, "total": 4, "message": "Matching streams"},
+        )
+
+        status = manager.get_run_status()
+        stages = {stage["key"]: stage for stage in status["stages"]}
+
+        self.assertEqual(stages["settings"]["status"], "completed")
+        self.assertEqual(stages["period_discovery"]["status"], "completed")
+        self.assertEqual(stages["m3u_refresh"]["status"], "completed")
+        self.assertEqual(stages["cache_sync"]["status"], "completed")
+        self.assertEqual(stages["stream_matching"]["status"], "running")
+        self.assertEqual(stages["stream_matching"]["current"], 2)
+        self.assertEqual(stages["stream_matching"]["total"], 4)
+        self.assertEqual(stages["quality_queueing"]["status"], "pending")
 
     def test_run_status_returns_copy(self):
         manager = self._manager()
@@ -69,6 +110,41 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertGreaterEqual(status["duration_seconds"], 119)
         self.assertGreaterEqual(status["stage_duration_seconds"], 44)
         self.assertNotEqual(status["updated_at"], manager._run_status["updated_at"])
+
+    def test_cycle_abort_finishes_as_aborted_not_failed(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._update_run_status(stage="quality_checking", stage_label="Quality Checking")
+        outcome = manager._finish_cycle_outcome(
+            refresh_success=True,
+            cycle_abort_message="Quality check stage stopped before completion (0/212 channels checked)",
+        )
+
+        status = manager.get_run_status()
+        self.assertEqual(outcome, "aborted")
+        self.assertEqual(status["state"], "aborted")
+        self.assertEqual(status["stage"], "aborted")
+        self.assertEqual(status["stage_label"], "Aborted")
+        self.assertEqual(status["last_error"], "Quality check stage stopped before completion (0/212 channels checked)")
+
+    def test_cycle_quality_exception_finishes_as_failed(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._update_run_status(stage="quality_checking", stage_label="Quality Checking")
+        outcome = manager._finish_cycle_outcome(
+            refresh_success=True,
+            cycle_abort_message=None,
+            cycle_failed_message="Quality check stage failed: boom",
+        )
+
+        status = manager.get_run_status()
+        self.assertEqual(outcome, "failed")
+        self.assertEqual(status["state"], "failed")
+        self.assertEqual(status["stage"], "failed")
+        self.assertEqual(status["stage_label"], "Failed")
+        self.assertEqual(status["last_error"], "Quality check stage failed: boom")
 
     def test_quality_summary_flags_connectivity_abort_and_incomplete_run(self):
         summary = AutomatedStreamManager._summarize_quality_check_results(

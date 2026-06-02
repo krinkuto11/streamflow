@@ -39,6 +39,7 @@ export default function StreamChecker() {
   const [status, setStatus] = useState(null)
   const [progress, setProgress] = useState(null)
   const [config, setConfig] = useState(null)
+  const [hardwareStatus, setHardwareStatus] = useState(null)
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
   const [tick, setTick] = useState(0) // drives countdown re-renders — value never rendered
@@ -84,14 +85,16 @@ export default function StreamChecker() {
 
   const loadData = async () => {
     try {
-      const [statusResponse, progressResponse, configResponse] = await Promise.all([
+      const [statusResponse, progressResponse, configResponse, hardwareStatusResponse] = await Promise.all([
         streamCheckerAPI.getStatus(),
         streamCheckerAPI.getProgress(),
-        streamCheckerAPI.getConfig()
+        streamCheckerAPI.getConfig(),
+        streamCheckerAPI.getHardwareStatus()
       ])
       setStatus(statusResponse.data)
       setProgress(progressResponse.data)
       setConfig(configResponse.data)
+      setHardwareStatus(hardwareStatusResponse.data)
       if (!editedConfig && configResponse.data) {
         setEditedConfig(configResponse.data)
       }
@@ -364,6 +367,9 @@ export default function StreamChecker() {
   const queued = status?.queue?.queued || 0
   const totalBatch = queued + inProgress + completed + failed
   const batchProgress = totalBatch > 0 ? ((completed + failed) / totalBatch) * 100 : 0
+  const providerProgress = progress?.provider_progress || []
+  const providerSummary = progress?.provider_summary || {}
+  const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
   const selectedStartChannel = startChannels.find(channel => String(channel.id) === String(queueStartChannelId))
   const firstStartChannel = startChannels[0]
   const lastStartChannel = startChannels[startChannels.length - 1]
@@ -373,7 +379,18 @@ export default function StreamChecker() {
       ? (selectedStartChannel?.name || 'Select a channel')
       : (firstStartChannel?.name || 'First channel')
   const queueAllDisabled = isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || (queueStartMode === 'channel' && !queueStartChannelId)
-  const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
+  const detectedGpuCount = Number.isFinite(Number(hardwareStatus?.nvidia_gpu_count)) ? Number(hardwareStatus?.nvidia_gpu_count) : 0
+  const detectedGpuLabel = detectedGpuCount > 0
+    ? `${detectedGpuCount} detected`
+    : hardwareStatus?.nvidia_checked
+      ? 'No GPU reported'
+      : 'Not checked'
+  const ffmpegModeLabel = hardwareStatus?.config?.enabled
+    ? (hardwareStatus?.mode_supported ? 'Available' : 'Not reported')
+    : 'Disabled'
+  const ffmpegMethodsLabel = Array.isArray(hardwareStatus?.ffmpeg_hwaccels) && hardwareStatus.ffmpeg_hwaccels.length > 0
+    ? hardwareStatus.ffmpeg_hwaccels.join(', ')
+    : (hardwareStatus?.config?.enabled ? 'No methods reported' : 'Not checked')
 
   return (
     <div className="space-y-6">
@@ -584,6 +601,67 @@ export default function StreamChecker() {
               )}
             </div>
 
+            {providerProgress.length > 0 && (
+              <div className="space-y-3">
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Accounts</div>
+                    <div className="text-lg font-semibold">{providerSummary.total_providers || providerProgress.length}</div>
+                  </div>
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Checking</div>
+                    <div className="text-lg font-semibold">{providerSummary.checking_streams || 0}</div>
+                  </div>
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Waiting</div>
+                    <div className="text-lg font-semibold text-amber-600 dark:text-amber-400">{providerSummary.waiting_streams || 0}</div>
+                  </div>
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Skipped</div>
+                    <div className="text-lg font-semibold">{providerSummary.skipped_streams || 0}</div>
+                  </div>
+                </div>
+                <div className="rounded-md border overflow-hidden">
+                  <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground">
+                    <span>Account</span>
+                    <span className="text-right">Checking</span>
+                    <span className="text-right">Waiting</span>
+                    <span className="text-right">Done</span>
+                  </div>
+                  <div className="divide-y">
+                    {providerProgress.map((provider) => {
+                      const finishedPercent = provider.total > 0 ? Math.round((provider.finished / provider.total) * 100) : 0
+                      return (
+                        <div key={provider.name} className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 px-3 py-2 text-sm">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="truncate font-medium" title={provider.name}>{provider.name}</span>
+                              {provider.state === 'waiting_provider_limit' && (
+                                <Badge variant="outline" className="border-amber-500/40 bg-amber-100 text-[10px] text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+                                  Waiting
+                                </Badge>
+                              )}
+                              {provider.state === 'checking' && (
+                                <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">
+                                  Active
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="mt-1 h-1.5 rounded-full bg-muted">
+                              <div className="h-1.5 rounded-full bg-primary" style={{ width: `${finishedPercent}%` }} />
+                            </div>
+                          </div>
+                          <span className="text-right font-mono">{provider.checking}</span>
+                          <span className="text-right font-mono text-amber-600 dark:text-amber-400">{provider.waiting}</span>
+                          <span className="text-right font-mono">{provider.finished}/{provider.total}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Streams Detail Progress List */}
             {progress.streams_detail && progress.streams_detail.length > 0 && (() => {
               // Phase-aware sort: loop testing phase floats probing streams to top;
@@ -591,7 +669,7 @@ export default function StreamChecker() {
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
                 ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
-                : { completed: 0, checking: 1, pending: 2, error: 3, low_quality: 4, blank: 5, freeze: 6, dead: 7 }
+                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, provider_limit_wait_timeout: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -650,6 +728,11 @@ export default function StreamChecker() {
                                 <div className="font-medium max-w-[200px] truncate" title={stream.name}>
                                   {stream.name}
                                 </div>
+                                {stream.reason_detail && (
+                                  <div className="max-w-[200px] truncate text-[10px] text-muted-foreground" title={stream.reason_detail}>
+                                    {stream.reason_detail}
+                                  </div>
+                                )}
                               </td>
                               <td className="px-3 py-1.5 align-middle">
                                 <div className="text-xs text-muted-foreground max-w-[150px] truncate" title={stream.m3u_account}>
@@ -659,6 +742,8 @@ export default function StreamChecker() {
                               <td className="px-3 py-1.5 align-middle text-center">
                                 {stream.status === 'pending' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Pending</Badge>}
                                 {stream.status === 'checking' && <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">Checking</Badge>}
+                                {stream.status === 'waiting_provider_limit' && <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Waiting</Badge>}
+                                {stream.status === 'provider_limit_wait_timeout' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Skipped</Badge>}
                                 {stream.status === 'completed' && <Badge variant="outline" className="text-[10px] bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Completed</Badge>}
                                 {stream.status === 'error' && <Badge variant="destructive" className="text-[10px]">Error</Badge>}
                                 {stream.status === 'dead' && <Badge variant="destructive" className="text-[10px]">Dead</Badge>}
@@ -769,7 +854,7 @@ export default function StreamChecker() {
 
               {/* Tabs for Configuration Sections */}
               <Tabs defaultValue="analysis" className="w-full">
-                <TabsList className="grid h-auto min-h-10 w-full grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-4">
+                <TabsList className="grid h-auto min-h-10 w-full grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-5">
                   <TabsTrigger value="analysis">Stream Analysis</TabsTrigger>
                   <TabsTrigger value="queue">Queue</TabsTrigger>
                   <TabsTrigger value="concurrent">Concurrent Checking</TabsTrigger>
@@ -889,6 +974,107 @@ export default function StreamChecker() {
                       <p className="text-xs text-muted-foreground">
                         User agent string for ffmpeg/ffprobe (for strict stream providers)
                       </p>
+                    </div>
+
+                    <div className="space-y-4 rounded-md border border-border p-4 md:col-span-2">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="hardware_acceleration_enabled">Hardware Acceleration</Label>
+                          <p className="text-xs text-muted-foreground">
+                            Optional ffmpeg acceleration; CPU is used by default
+                          </p>
+                        </div>
+                        <Switch
+                          id="hardware_acceleration_enabled"
+                          checked={editedConfig?.stream_analysis?.hardware_acceleration?.enabled === true}
+                          onCheckedChange={(checked) => updateConfigValue('stream_analysis.hardware_acceleration.enabled', checked)}
+                          disabled={!configEditing}
+                        />
+                      </div>
+
+                      <div className="grid gap-4 md:grid-cols-3">
+                        <div className="space-y-2">
+                          <Label htmlFor="hardware_acceleration_mode">Mode</Label>
+                          <Select
+                            value={editedConfig?.stream_analysis?.hardware_acceleration?.mode || 'auto'}
+                            onValueChange={(value) => updateConfigValue('stream_analysis.hardware_acceleration.mode', value)}
+                            disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
+                          >
+                            <SelectTrigger id="hardware_acceleration_mode">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="auto">Auto</SelectItem>
+                              <SelectItem value="cuda">CUDA</SelectItem>
+                              <SelectItem value="vaapi">VAAPI</SelectItem>
+                              <SelectItem value="qsv">QSV</SelectItem>
+                              <SelectItem value="d3d11va">D3D11VA</SelectItem>
+                              <SelectItem value="dxva2">DXVA2</SelectItem>
+                              <SelectItem value="vdpau">VDPAU</SelectItem>
+                              <SelectItem value="videotoolbox">VideoToolbox</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <p className="text-xs text-muted-foreground">
+                            Use CUDA for NVIDIA containers when available
+                          </p>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="hardware_acceleration_device">Device</Label>
+                          <Input
+                            id="hardware_acceleration_device"
+                            type="text"
+                            value={editedConfig?.stream_analysis?.hardware_acceleration?.device || ''}
+                            onChange={(e) => updateConfigValue('stream_analysis.hardware_acceleration.device', e.target.value)}
+                            disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
+                            maxLength={200}
+                            placeholder="Default"
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            Optional ffmpeg device path or index
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Detected GPU: {detectedGpuLabel}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2">
+                          <div className="space-y-0.5">
+                            <Label htmlFor="hardware_acceleration_fallback">CPU Fallback</Label>
+                            <p className="text-xs text-muted-foreground">
+                              Retry without acceleration if ffmpeg rejects it
+                            </p>
+                          </div>
+                          <Switch
+                            id="hardware_acceleration_fallback"
+                            checked={editedConfig?.stream_analysis?.hardware_acceleration?.allow_fallback !== false}
+                            onCheckedChange={(checked) => updateConfigValue('stream_analysis.hardware_acceleration.allow_fallback', checked)}
+                            disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 text-xs md:grid-cols-3">
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">Runtime Device</div>
+                          <div className="mt-1 font-medium text-foreground">{detectedGpuLabel}</div>
+                        </div>
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">Selected Mode</div>
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <span className="font-medium text-foreground">
+                              {hardwareStatus?.config?.mode || 'auto'}
+                            </span>
+                            <Badge variant={hardwareStatus?.mode_supported ? 'default' : 'secondary'}>
+                              {ffmpegModeLabel}
+                            </Badge>
+                          </div>
+                        </div>
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">FFmpeg Methods</div>
+                          <div className="mt-1 font-medium text-foreground">{ffmpegMethodsLabel}</div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </TabsContent>
@@ -1011,6 +1197,22 @@ export default function StreamChecker() {
                       Delay between starting each concurrent check to prevent overload
                     </p>
                   </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="provider_wait_timeout">Provider Wait Timeout (seconds)</Label>
+                    <Input
+                      id="provider_wait_timeout"
+                      type="number"
+                      value={editedConfig?.concurrent_streams?.provider_wait_timeout ?? 180}
+                      onChange={(e) => updateConfigValue('concurrent_streams.provider_wait_timeout', parseInt(e.target.value))}
+                      disabled={!configEditing || !editedConfig?.concurrent_streams?.enabled}
+                      min={30}
+                      max={900}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Maximum wait when provider capacity is held by active viewers before preserving existing stream state
+                    </p>
+                  </div>
                 </TabsContent>
 
 
@@ -1031,7 +1233,7 @@ export default function StreamChecker() {
                     />
                   </div>
 
-                  <div className="grid gap-4 md:grid-cols-3">
+                  <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                     <div className="space-y-2">
                       <Label htmlFor="connectivity_guard_timeout">Connectivity Timeout (seconds)</Label>
                       <Input
@@ -1079,6 +1281,22 @@ export default function StreamChecker() {
                       />
                       <p className="text-xs text-muted-foreground">
                         Pause between transient retry attempts
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_stale_recheck">Recovery Recheck (seconds)</Label>
+                      <Input
+                        id="connectivity_guard_stale_recheck"
+                        type="number"
+                        value={editedConfig?.connectivity_guard?.stale_recheck_interval_seconds ?? 60}
+                        onChange={(e) => updateConfigValue('connectivity_guard.stale_recheck_interval_seconds', parseInt(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={10}
+                        max={3600}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        How often an idle stale failure is rechecked
                       </p>
                     </div>
                   </div>

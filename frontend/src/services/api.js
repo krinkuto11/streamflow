@@ -189,6 +189,7 @@ export const streamCheckerAPI = {
   addToQueue: (data) => api.post('/stream-checker/queue/add', data),
   clearQueue: () => api.post('/stream-checker/queue/clear'),
   getConfig: () => api.get('/stream-checker/config'),
+  getHardwareStatus: () => api.get('/stream-checker/hardware-status'),
   updateConfig: (config) => api.put('/stream-checker/config', config),
   getProgress: () => api.get('/stream-checker/progress'),
   checkChannel: (channelId) => api.post('/stream-checker/check-channel', { channel_id: channelId }),
@@ -209,6 +210,19 @@ export const shadowBlankMonitorAPI = {
   start: () => api.post('/shadow-blank-monitor/start'),
   stop: () => api.post('/shadow-blank-monitor/stop'),
   runOnce: () => api.post('/shadow-blank-monitor/run-once'),
+};
+
+export const viewerActivityAPI = {
+  getStatus: () => api.get('/viewer-activity/status'),
+};
+
+export const teamarrPreflightAPI = {
+  getConfig: () => api.get('/teamarr-preflight/config'),
+  updateConfig: (config) => api.put('/teamarr-preflight/config', config),
+  getStatus: () => api.get('/teamarr-preflight/status'),
+  start: () => api.post('/teamarr-preflight/start'),
+  stop: () => api.post('/teamarr-preflight/stop'),
+  runOnce: () => api.post('/teamarr-preflight/run-once'),
 };
 
 export const changelogAPI = {

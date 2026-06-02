@@ -5,6 +5,7 @@ Handles fetching data from the Dispatcharr API for initial load and refresh oper
 """
 
 import math
+import os
 import threading
 import time
 import json
@@ -306,6 +307,13 @@ class UDIFetcher:
                 resp = requests.get(url, headers=_get_auth_headers(), timeout=GET_TIMEOUT_SECONDS)
                 elapsed = time.time() - start_time
                 log_api_response(logger, "GET", url, resp.status_code, elapsed)
+                self._record_request_timing(
+                    method="GET",
+                    url=url,
+                    elapsed=elapsed,
+                    status_code=resp.status_code,
+                    success=resp.status_code < 400,
+                )
 
                 resp.raise_for_status()
                 return resp.json()
@@ -314,7 +322,16 @@ class UDIFetcher:
                 if status_code == 401:
                     if _refresh_token():
                         logger.info("Retrying request with new token...")
+                        retry_start = time.time()
                         resp = requests.get(url, headers=_get_auth_headers(), timeout=GET_TIMEOUT_SECONDS)
+                        retry_elapsed = time.time() - retry_start
+                        self._record_request_timing(
+                            method="GET",
+                            url=url,
+                            elapsed=retry_elapsed,
+                            status_code=resp.status_code,
+                            success=resp.status_code < 400,
+                        )
                         resp.raise_for_status()
                         return resp.json()
 
@@ -329,6 +346,13 @@ class UDIFetcher:
                 logger.error(f"Error fetching {url}: {e}")
                 return None
             except requests.exceptions.RequestException as e:
+                self._record_request_timing(
+                    method="GET",
+                    url=url,
+                    elapsed=time.time() - start_time if 'start_time' in locals() else 0,
+                    status_code=None,
+                    success=False,
+                )
                 if attempt < GET_RETRY_ATTEMPTS:
                     logger.warning(
                         f"Transient error fetching {url}: {e}; retrying "

@@ -138,6 +138,22 @@ class TestStreamStatsHandling(unittest.TestCase):
         self.assertEqual(fps, 60)
         self.assertEqual(bitrate, 5000)
 
+    def test_score_fallback_handles_none_video_codec(self):
+        """Score calculation should tolerate persisted stats with video_codec=None."""
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service._is_stream_dead = Mock(return_value=(False, 'none'))
+        service.config = Mock()
+        service.config.get = Mock(side_effect=lambda key, default=None: default)
+
+        score = service._calculate_stream_score({
+            'resolution': '1280x720',
+            'fps': 25,
+            'video_codec': None,
+            'bitrate_kbps': 3000,
+        })
+
+        self.assertGreaterEqual(score, 0.0)
+
 
 class TestProgressTracking(unittest.TestCase):
     """Test progress tracking and variable initialization."""

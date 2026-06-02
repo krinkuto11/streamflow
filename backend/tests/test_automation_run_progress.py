@@ -8,39 +8,55 @@ def test_run_progress_tracks_active_stage():
     manager = AutomatedStreamManager()
 
     manager._start_run_status(forced=True, forced_period_id="period-1")
-    manager._update_run_stage("matching", message="Matching streams", current=25, total=100)
+    manager._update_run_status(
+        stage="stream_matching",
+        stage_label="Matching Streams",
+        message="Matching streams",
+        progress={"current": 25, "total": 100, "message": "Matching streams"},
+    )
 
     status = manager.get_run_status()
 
-    assert status["active"] is True
-    assert status["status"] == "running"
-    assert status["stage"] == "matching"
-    assert status["stage_label"] == "Matching"
-    assert status["current"] == 25
-    assert status["total"] == 100
-    assert status["percent"] == 25
+    assert status["state"] == "running"
+    assert status["stage"] == "stream_matching"
+    assert status["stage_label"] == "Matching Streams"
+    assert status["message"] == "Matching streams"
+    assert status["progress"]["current"] == 25
+    assert status["progress"]["total"] == 100
+    assert status["progress"]["percent"] == 25
     assert status["forced"] is True
     assert status["forced_period_id"] == "period-1"
-    assert status["stages"][0]["status"] == "completed"
-    assert status["stages"][4]["status"] == "running"
 
 
-def test_skipped_stage_keeps_run_active_until_finish():
+def test_stage_duration_updates_when_stage_changes():
     manager = AutomatedStreamManager()
 
-    manager._start_run_status()
-    manager._update_run_stage("m3u_refresh", status="skipped", message="No refresh needed")
+    manager._start_run_status(forced=False, forced_period_id=None)
+    manager._update_run_status(
+        stage="m3u_refresh",
+        stage_label="M3U Refresh",
+        message="Refreshing playlists",
+        progress={"current": 1, "total": 4, "message": "Refreshing playlists"},
+    )
 
     status = manager.get_run_status()
-    assert status["active"] is True
-    assert status["status"] == "running"
-    assert status["stages"][2]["status"] == "skipped"
+    assert status["stage"] == "m3u_refresh"
+    assert status["stage_started_at"] is not None
+    assert status["stage_duration_seconds"] is not None
 
-    manager._finish_run_status("completed", "Done")
+    manager._finish_run_status(
+        state="completed",
+        stage="completed",
+        stage_label="Completed",
+        message="Done",
+    )
+
     status = manager.get_run_status()
+    assert status["state"] == "completed"
     assert status["active"] is False
     assert status["status"] == "completed"
     assert status["message"] == "Done"
+    assert status["stage_duration_seconds"] is not None
 
 
 def test_automation_duration_start_variables_are_defined_before_use():
@@ -90,3 +106,18 @@ def test_automation_duration_start_variables_are_defined_before_use():
     ]
 
     assert missing == []
+
+
+def test_automation_run_status_tracks_freeze_stream_counts():
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "apps"
+        / "automation"
+        / "automated_stream_manager.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "'freeze_streams': 0" in source
+    assert "freeze_streams_count += ch_freeze" in source
+    assert "'freeze_streams_count': ch_freeze" in source
+    assert '"freeze_streams": freeze_streams_count' in source

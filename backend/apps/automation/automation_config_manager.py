@@ -119,6 +119,7 @@ class AutomationConfigManager:
         if not per: return None
         cron_val = per.cron_schedule or ""
         sched_type = "interval" if cron_val.isdigit() else "cron"
+        sched_value = int(cron_val) if sched_type == "interval" and cron_val else cron_val
         res = {
             "id": str(per.id),
             "name": per.name,
@@ -128,7 +129,7 @@ class AutomationConfigManager:
             "exclude_regex": per.exclude_regex,
             "matching_type": per.matching_type,
             "automation_type": per.automation_type,
-            "schedule": {"type": sched_type, "value": cron_val}
+            "schedule": {"type": sched_type, "value": sched_value}
         }
         extra = self._normalize_extra_settings(per.extra_settings)
         if extra:
@@ -871,11 +872,14 @@ class AutomationConfigManager:
         res = []
         for pid, profile_id in pid_profile.items():
             period = self.get_period(pid)
-            if period:
-                period_with_profile = period.copy()
-                period_with_profile["profile"] = self.get_profile(profile_id)
-                period_with_profile["profile_id"] = profile_id
-                res.append(period_with_profile)
+            if not period:
+                continue
+            if period.get("enabled") is False:
+                continue
+            period_with_profile = period.copy()
+            period_with_profile["profile"] = self.get_profile(profile_id)
+            period_with_profile["profile_id"] = profile_id
+            res.append(period_with_profile)
         return res
 
     def get_effective_configuration(self, channel_id: int, group_id: Optional[int] = None) -> Optional[Dict]:

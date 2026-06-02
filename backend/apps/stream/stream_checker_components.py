@@ -1,9 +1,12 @@
 """Support components used by the stream checker service."""
 
 import copy
+import json
 import queue
 import threading
+from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from apps.udi import get_udi_manager
@@ -46,6 +49,12 @@ class StreamCheckConfig:
             'freeze_check_min_duration': 5.0,  # seconds of frozen video before freezedetect logs a segment
             'freeze_check_noise_threshold': 0.001,  # freezedetect noise threshold
             'freeze_check_ratio_threshold': 0.80,  # probe-window ratio that marks a stream frozen
+            'hardware_acceleration': {
+                'enabled': False,
+                'mode': 'auto',
+                'device': '',
+                'allow_fallback': True
+            },
             'user_agent': 'VLC/3.0.14'  # user agent for ffmpeg/ffprobe
         },
         'scoring': {
@@ -68,7 +77,10 @@ class StreamCheckConfig:
         'concurrent_streams': {
             'global_limit': 10,  # Maximum concurrent stream checks globally (0 = unlimited)
             'enabled': True,  # Enable concurrent checking via Celery
-            'stagger_delay': 1.0  # Delay in seconds between dispatching tasks to prevent simultaneous starts
+            'stagger_delay': 1.0,  # Delay in seconds between dispatching tasks to prevent simultaneous starts
+            # Max wait for externally unavailable capacity (for example active viewers).
+            # Checker-owned provider slots wait until their current probes finish.
+            'provider_wait_timeout': 180
         },
         'dead_stream_handling': {
             'enabled': True,  # Enable dead stream removal
@@ -89,6 +101,7 @@ class StreamCheckConfig:
             'timeout_seconds': 3.0,
             'retry_attempts': 2,
             'retry_backoff_seconds': 1.0,
+            'stale_recheck_interval_seconds': 60,
             'internet_probe_urls': [
                 'https://www.google.com/generate_204',
                 'https://cloudflare.com/cdn-cgi/trace',
@@ -102,6 +115,7 @@ class StreamCheckConfig:
         """
         from apps.database.manager import get_db_manager
         self.db = get_db_manager()
+        self.config_file = Path(config_file) if config_file is not None else None
         self.config = self._load_config()
     
     def _load_config(self) -> Dict[str, Any]:
@@ -128,6 +142,15 @@ class StreamCheckConfig:
                     defaults[key] = value
             return defaults
 
+        if self.config_file is not None and self.config_file.exists():
+            try:
+                with open(self.config_file, 'r', encoding='utf-8') as fh:
+                    loaded_file = json.load(fh) or {}
+                config = copy.deepcopy(self.DEFAULT_CONFIG)
+                return deep_merge(config, loaded_file)
+            except Exception as exc:
+                logger.warning(f"Could not load stream checker config file {self.config_file}: {exc}")
+
         loaded = self.db.get_system_setting('stream_checker_config', {})
         if loaded:
             logger.debug(f"Loaded config from DB with {len(loaded)} top-level keys")
@@ -153,6 +176,11 @@ class StreamCheckConfig:
         """
         if config is None:
             config = self.config
+        if self.config_file is not None:
+            self.config_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_file, 'w', encoding='utf-8') as fh:
+                json.dump(config, fh, indent=2)
+            return
         
         self.db.set_system_setting('stream_checker_config', config)
     
@@ -395,6 +423,15 @@ class ChannelUpdateTracker:
                 
                 if profile and profile.get('stream_checking', {}).get('enabled', False):
                     filtered_channels.append(cid)
+                elif profile is None:
+                    try:
+                        existing_profiles = automation_config.get_all_profiles(include_inactive=True)
+                    except TypeError:
+                        existing_profiles = automation_config.get_all_profiles()
+                    except Exception:
+                        existing_profiles = []
+                    if not existing_profiles:
+                        filtered_channels.append(cid)
             
             excluded_count = len(channels) - len(filtered_channels)
             
@@ -764,12 +801,99 @@ class StreamCheckQueue:
 class StreamCheckerProgress:
     """Manages progress tracking for stream checker operations."""
     
-    def __init__(self):
+    def __init__(self, progress_file: Optional[Any] = None):
         self.lock = threading.Lock()
+        self.progress_file = progress_file
+
+    @staticmethod
+    def _build_provider_progress(streams_detail: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+        """Build compact per-account progress counters from per-stream rows."""
+        if not streams_detail:
+            return []
+
+        failed_statuses = {'error', 'dead', 'blank', 'freeze', 'low_quality', 'loop_detected'}
+        grouped: Dict[str, Dict[str, Any]] = {}
+
+        for stream in streams_detail:
+            account_name = stream.get('m3u_account') or 'Unknown'
+            status = stream.get('status') or 'pending'
+            provider = grouped.setdefault(
+                account_name,
+                {
+                    'name': account_name,
+                    'total': 0,
+                    'status_counts': Counter(),
+                },
+            )
+            provider['total'] += 1
+            provider['status_counts'][status] += 1
+
+        provider_progress: List[Dict[str, Any]] = []
+        for provider in grouped.values():
+            counts = provider['status_counts']
+            checking = counts.get('checking', 0) + counts.get('probing', 0)
+            waiting = counts.get('waiting_provider_limit', 0)
+            pending = counts.get('pending', 0)
+            completed = counts.get('completed', 0)
+            skipped = counts.get('provider_limit_wait_timeout', 0)
+            failed = sum(counts.get(status, 0) for status in failed_statuses)
+            finished = completed + skipped + failed
+
+            if waiting:
+                state = 'waiting_provider_limit'
+            elif checking:
+                state = 'checking'
+            elif pending:
+                state = 'pending'
+            elif failed:
+                state = 'attention'
+            elif finished >= provider['total']:
+                state = 'complete'
+            else:
+                state = 'idle'
+
+            provider_progress.append({
+                'name': provider['name'],
+                'total': provider['total'],
+                'checking': checking,
+                'waiting': waiting,
+                'pending': pending,
+                'completed': completed,
+                'skipped': skipped,
+                'failed': failed,
+                'finished': finished,
+                'state': state,
+                'status_counts': dict(sorted(counts.items())),
+            })
+
+        return sorted(
+            provider_progress,
+            key=lambda item: (
+                0 if item['checking'] or item['waiting'] else 1,
+                -item['waiting'],
+                -item['checking'],
+                item['name'].lower(),
+            ),
+        )
+
+    @staticmethod
+    def _build_provider_summary(provider_progress: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Build aggregate provider scheduling counters for the progress API."""
+        return {
+            'total_providers': len(provider_progress),
+            'active_providers': sum(1 for item in provider_progress if item.get('checking', 0) > 0),
+            'waiting_providers': sum(1 for item in provider_progress if item.get('waiting', 0) > 0),
+            'checking_streams': sum(item.get('checking', 0) for item in provider_progress),
+            'waiting_streams': sum(item.get('waiting', 0) for item in provider_progress),
+            'pending_streams': sum(item.get('pending', 0) for item in provider_progress),
+            'completed_streams': sum(item.get('completed', 0) for item in provider_progress),
+            'skipped_streams': sum(item.get('skipped', 0) for item in provider_progress),
+            'failed_streams': sum(item.get('failed', 0) for item in provider_progress),
+        }
     
     def update(self, channel_id: int, channel_name: str, current: int, total: int,
                current_stream: str = '', status: str = 'checking', step: str = '', step_detail: str = '',
-               streams_detail: Optional[Dict] = None, stream_duration: Optional[int] = None,
+               streams_detail: Optional[List[Dict[str, Any]]] = None, stream_duration: Optional[int] = None,
                is_single_channel_check: bool = False):
         """Update progress information."""
         from apps.database.manager import get_db_manager
@@ -790,12 +914,26 @@ class StreamCheckerProgress:
             }
             if streams_detail is not None:
                 progress_data['streams_detail'] = streams_detail
+                provider_progress = self._build_provider_progress(streams_detail)
+                if provider_progress:
+                    progress_data['provider_progress'] = provider_progress
+                    progress_data['provider_summary'] = self._build_provider_summary(provider_progress)
             
             try:
                 db = get_db_manager()
                 db.set_system_setting('stream_checker_progress', progress_data)
             except Exception as e:
                 logger.warning(f"Failed to write progress to database: {e}")
+            if self.progress_file:
+                try:
+                    import json
+                    from pathlib import Path
+
+                    path = Path(self.progress_file)
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(progress_data), encoding='utf-8')
+                except Exception as e:
+                    logger.warning(f"Failed to write progress to file: {e}")
     
     def clear(self):
         """Clear progress tracking."""
@@ -806,6 +944,13 @@ class StreamCheckerProgress:
                 db.set_system_setting('stream_checker_progress', {})
             except Exception as e:
                 logger.warning(f"Failed to clear progress in database: {e}")
+            if self.progress_file:
+                try:
+                    from pathlib import Path
+
+                    Path(self.progress_file).write_text("{}", encoding='utf-8')
+                except Exception as e:
+                    logger.warning(f"Failed to clear progress file: {e}")
     
     def get(self) -> Optional[Dict]:
         """Get current progress."""
@@ -814,6 +959,19 @@ class StreamCheckerProgress:
             try:
                 db = get_db_manager()
                 data = db.get_system_setting('stream_checker_progress', {})
-                return data if data else None
+                if data:
+                    return data
             except Exception:
-                return None
+                pass
+            if self.progress_file:
+                try:
+                    import json
+                    from pathlib import Path
+
+                    path = Path(self.progress_file)
+                    if path.exists():
+                        data = json.loads(path.read_text(encoding='utf-8'))
+                        return data if data else None
+                except Exception:
+                    return None
+            return None

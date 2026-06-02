@@ -54,6 +54,16 @@ def _normalize_profile_payload(data: Dict[str, Any]) -> Dict[str, Any]:
             field_name=f"stream_checking.{bool_field}",
         )
 
+    if "max_loop_duration" in normalized_stream_checking:
+        raw_value = normalized_stream_checking["max_loop_duration"]
+        if isinstance(raw_value, bool):
+            raise ValidationError("stream_checking.max_loop_duration must be an integer")
+        try:
+            max_loop_duration = int(raw_value)
+        except (TypeError, ValueError):
+            raise ValidationError("stream_checking.max_loop_duration must be an integer") from None
+        normalized_stream_checking["max_loop_duration"] = max(10, min(240, max_loop_duration))
+
     normalized["stream_checking"] = normalized_stream_checking
     return normalized
 

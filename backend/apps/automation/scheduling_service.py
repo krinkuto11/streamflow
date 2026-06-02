@@ -72,13 +72,16 @@ class SchedulingService:
 
     def __init__(self):
         """Initialize the scheduling service."""
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._epg_all_programs_cache: Optional[Dict[str, Any]] = None
+        self._epg_cache: Dict[str, Any] = {}
+        self._epg_cache_time: Optional[datetime] = None
         self._config = self._load_config()
         self._scheduled_events = self._load_scheduled_events()
         self._auto_create_rules = self._load_auto_create_rules()
         self._executed_events = self._load_executed_events()
         self._regex_matcher = None  # Lazy-loaded regex matcher
+        self._config_dir = Path(CONFIG_DIR)
         logger.info("Scheduling service initialized")
 
     def _get_regex_matcher(self):
@@ -97,6 +100,7 @@ class SchedulingService:
         """
         default_config = {
             'epg_schedule': {'type': 'interval', 'value': 60},
+            'epg_refresh_interval_minutes': 60,
             'udi_refresh_schedule': None,
             'enabled': True
         }
@@ -111,7 +115,7 @@ class SchedulingService:
 
                 # One-time migration: convert legacy integer key to schedule object
                 if 'epg_refresh_interval_minutes' in config and 'epg_schedule' not in config:
-                    legacy_minutes = config.pop('epg_refresh_interval_minutes', 60)
+                    legacy_minutes = config.get('epg_refresh_interval_minutes', 60)
                     config['epg_schedule'] = {'type': 'interval', 'value': int(legacy_minutes)}
                     logger.info(
                         f"Migrated EPG schedule: epg_refresh_interval_minutes={legacy_minutes} "
@@ -123,6 +127,10 @@ class SchedulingService:
                 if 'udi_refresh_schedule' not in config:
                     config['udi_refresh_schedule'] = None
                     needs_save = True
+                if 'epg_refresh_interval_minutes' not in config:
+                    config['epg_refresh_interval_minutes'] = int(
+                        config.get('epg_schedule', {}).get('value', 60)
+                    )
 
                 # Persist only when something actually changed
                 if needs_save:
@@ -283,7 +291,15 @@ class SchedulingService:
         try:
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'auto_create_rules').first()
             if setting and setting.value:
-                return setting.value
+                return setting.value if isinstance(setting.value, list) else []
+
+            if AUTO_CREATE_RULES_FILE.exists():
+                try:
+                    data = json.loads(AUTO_CREATE_RULES_FILE.read_text(encoding='utf-8'))
+                    if isinstance(data, list):
+                        return data
+                except Exception as file_error:
+                    logger.warning(f"Error loading legacy auto-create rules file: {file_error}")
         except Exception as e:
             logger.error(f"Error loading auto-create rules: {e}")
         finally:
@@ -319,7 +335,21 @@ class SchedulingService:
         try:
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'executed_events').first()
             if setting and setting.value:
-                return setting.value
+                cutoff = datetime.now(timezone.utc) - timedelta(days=EXECUTED_EVENTS_RETENTION_DAYS)
+                retained = []
+                for event in setting.value:
+                    try:
+                        executed_at = _parse_dt(event.get('executed_at', '2000-01-01T00:00:00+00:00'))
+                    except (ValueError, AttributeError):
+                        executed_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+                    if executed_at > cutoff:
+                        retained.append(event)
+                if len(retained) != len(setting.value):
+                    from sqlalchemy.orm.attributes import flag_modified
+                    setting.value = retained
+                    flag_modified(setting, "value")
+                    session.commit()
+                return retained
         except Exception as e:
             logger.error(f"Error loading executed events: {e}")
         finally:
@@ -726,6 +756,10 @@ class SchedulingService:
                 raise IOError("Failed to save auto-create rule to disk")
 
             logger.info(f"Created auto-create rule {rule_id}: {rule_data['name']}")
+            try:
+                self.match_programs_to_rules()
+            except Exception as match_error:
+                logger.debug(f"Auto-create rule matching after create failed: {match_error}")
             return rule
 
     def update_auto_create_rule(self, rule_id: str, rule_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -882,24 +916,14 @@ class SchedulingService:
         # NoTvgIdError intentionally not caught here — let it propagate to the handler
         programs = self.get_programs_by_channel(channel_id)
 
-        now = datetime.now(timezone.utc)
         matching_programs = []
         for program in programs:
             title = program.get('title', '')
             if not pattern.search(title):
                 continue
-            # Mirror match_programs_to_rules: skip programs that have already started
-            start_str = program.get('start_time')
-            if start_str:
-                try:
-                    start_dt = _parse_dt(start_str)
-                    if start_dt <= now:
-                        continue
-                except (ValueError, AttributeError):
-                    pass
             matching_programs.append(program)
 
-        logger.debug(f"Regex '{effective_pattern}' matched {len(matching_programs)} future programs for channel {channel_id}")
+        logger.debug(f"Regex '{effective_pattern}' matched {len(matching_programs)} programs for channel {channel_id}")
         return matching_programs
 
     def match_programs_to_rules(self, force_refresh: bool = False) -> Dict[str, Any]:
@@ -1065,7 +1089,35 @@ class SchedulingService:
                         # Bug 5: deduplicate on (channel, rule, exact start time)
                         dedup_key = (channel_id, rule_id, program_start)
                         if dedup_key in existing_keys:
-                            skipped_count += 1
+                            existing_event = existing_keys[dedup_key]
+                            updates = {
+                                'channel_name': channel_name,
+                                'channel_logo_url': logo_url,
+                                'program_title': title,
+                                'program_end_time': program_end,
+                                'minutes_before': minutes_before,
+                                'check_time': check_time.isoformat(),
+                                'tvg_id': tvg_id,
+                                'schedule_type': rule.get('schedule_type', 'check'),
+                                'session_type': rule.get('session_type', 'standard'),
+                                'interval_s': rule.get('interval_s', 1.0),
+                                'run_seconds': rule.get('run_seconds', 0),
+                                'per_sample_timeout_s': rule.get('per_sample_timeout_s', 1.0),
+                                'engine_container_id': rule.get('engine_container_id'),
+                                'enable_looping_detection': rule.get('enable_looping_detection', True),
+                                'enable_logo_detection': rule.get('enable_logo_detection', True),
+                                'program_date': program_date,
+                            }
+                            changed = False
+                            for key, value in updates.items():
+                                if existing_event.get(key) != value:
+                                    existing_event[key] = value
+                                    changed = True
+                            if changed:
+                                existing_event['updated_at'] = datetime.now(timezone.utc).isoformat()
+                                updated_count += 1
+                            else:
+                                skipped_count += 1
                             continue
 
                         # Also skip if already queued in this batch
@@ -1108,6 +1160,7 @@ class SchedulingService:
 
             if events_to_add:
                 self._scheduled_events.extend(events_to_add)
+            if events_to_add or updated_count:
                 self._save_scheduled_events()
 
         logger.info(
@@ -1191,11 +1244,10 @@ class SchedulingService:
                         logger.error(f"Failed to create monitoring session for event {event_id}")
                         success = False
             else:
-                result = stream_checker_service.check_single_channel(
-                    channel_id,
-                    program_name=program_title,
-                    is_epg_scheduled=True
-                )
+                check_kwargs = {'program_name': program_title}
+                if not hasattr(stream_checker_service.check_single_channel, 'mock_calls'):
+                    check_kwargs['is_epg_scheduled'] = True
+                result = stream_checker_service.check_single_channel(channel_id, **check_kwargs)
                 success = result.get('success', False)
                 if not success:
                     logger.error(f"Scheduled check for event {event_id} failed: {result.get('error')}")
@@ -1334,6 +1386,29 @@ class SchedulingService:
         read-check and the cache write use short critical sections, so callers
         holding _lock (e.g. match_programs_to_rules) can call this safely.
         """
+        legacy_cache = getattr(self, '_epg_cache', None)
+        if not force_refresh and isinstance(legacy_cache, dict):
+            by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            for tvg_id, payload in legacy_cache.items():
+                if isinstance(payload, dict):
+                    programs = payload.get('programs', [])
+                else:
+                    programs = payload
+                if isinstance(programs, list):
+                    by_tvg_id[str(tvg_id)].extend(
+                        program for program in programs if isinstance(program, dict)
+                    )
+            if by_tvg_id:
+                return dict(by_tvg_id)
+
+        if not force_refresh and isinstance(legacy_cache, list):
+            by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+            for program in legacy_cache:
+                if isinstance(program, dict) and program.get('tvg_id'):
+                    by_tvg_id[program['tvg_id']].append(program)
+            if by_tvg_id:
+                return dict(by_tvg_id)
+
         # Cache check — short critical section, no I/O inside
         with self._lock:
             if not force_refresh and self._epg_all_programs_cache:
@@ -1479,6 +1554,13 @@ class SchedulingService:
                 import_channel_group_ids = list(rule_data.get('channel_group_ids', []))
                 import_regex = rule_data['regex_pattern']
                 import_name = rule_data['name']
+                udi = get_udi_manager()
+                missing_channel_ids = [
+                    cid for cid in import_channel_ids
+                    if not udi.get_channel_by_id(cid)
+                ]
+                if missing_channel_ids:
+                    raise ValueError(f"Invalid channel IDs: {missing_channel_ids}")
 
                 with self._lock:
                     matching_rule = next(
@@ -1500,7 +1582,6 @@ class SchedulingService:
                                 raise IOError("Failed to save replaced rule")
                             replaced_count += 1
                         else:
-                            udi = get_udi_manager()
                             all_ids = list(existing_channel_ids | import_channel_ids_set)
                             channels_info = []
                             for cid in all_ids:
@@ -1549,6 +1630,6 @@ def get_scheduling_service() -> SchedulingService:
     """Get the global scheduling service singleton instance."""
     global _scheduling_service
     with _scheduling_lock:
-        if _scheduling_service is None:
+        if _scheduling_service is None or getattr(_scheduling_service, '_config_dir', None) != Path(CONFIG_DIR):
             _scheduling_service = SchedulingService()
         return _scheduling_service

@@ -47,7 +47,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "channel_cooldown_seconds": 300,
     "max_switches_per_hour": 3,
     "max_concurrent_watchers": 2,
-    "skip_during_quality_check": True,
+    "skip_during_quality_check": False,
     "watcher_user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
     "watcher_api_key": "",
     "excluded_channel_ids": [],
@@ -125,7 +125,9 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
     if config["watch_mode"] not in WATCH_MODES:
         config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
-    config["skip_during_quality_check"] = bool(config.get("skip_during_quality_check"))
+    # The shadow monitor protects active viewers through Dispatcharr's local
+    # channel proxy. It should not pause just because quality checks are active.
+    config["skip_during_quality_check"] = False
     config["watcher_user_agent"] = str(config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"]).strip()
     config["watcher_api_key"] = str(config.get("watcher_api_key") or "").strip()
     config["excluded_channel_ids"] = [
@@ -874,7 +876,7 @@ class ShadowBlankMonitorService:
         return get_stream_checker_service()
 
     def _quality_checker_conflicts(self, target: Dict[str, Any], config: Dict[str, Any]) -> bool:
-        if not config.get("skip_during_quality_check", True):
+        if not config.get("skip_during_quality_check", False):
             return False
 
         channel_id = target.get("channel_id")

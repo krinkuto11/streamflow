@@ -1,6 +1,7 @@
 import os
 import socket
 import sys
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 import requests
@@ -252,6 +253,51 @@ def test_idle_status_marks_previous_connectivity_failure_as_stale():
         status = service.get_status()
 
     assert status["stream_checking_mode"] is False
+    assert status["connectivity_guard"]["active_failure"] is False
+    assert status["connectivity_guard"]["stale_failure"] is True
+
+
+def test_idle_stale_connectivity_failure_rechecks_and_clears_after_interval():
+    service = StreamCheckerService()
+    service.checking = False
+    service.config.config["connectivity_guard"]["stale_recheck_interval_seconds"] = 10
+    service.connectivity_guard_status = {
+        "ok": False,
+        "reason": "connectivity_timeout",
+        "message": "internet connectivity probe timed out",
+        "checked_at": (datetime.now() - timedelta(seconds=30)).isoformat(),
+    }
+    service.connectivity_guard.check = Mock(
+        return_value=ConnectivityCheckResult(ok=True, reason="ok", message="Connectivity verified")
+    )
+
+    with patch.object(service.progress, "get", return_value=None):
+        status = service.get_status()
+
+    service.connectivity_guard.check.assert_called_once()
+    assert status["stream_checking_mode"] is False
+    assert status["connectivity_guard"]["ok"] is True
+    assert status["connectivity_guard"]["phase"] == "stale_failure_recovery"
+    assert status["connectivity_guard"]["active_failure"] is False
+    assert status["connectivity_guard"]["stale_failure"] is False
+
+
+def test_idle_stale_connectivity_failure_waits_for_recheck_interval():
+    service = StreamCheckerService()
+    service.checking = False
+    service.config.config["connectivity_guard"]["stale_recheck_interval_seconds"] = 60
+    service.connectivity_guard_status = {
+        "ok": False,
+        "reason": "connectivity_timeout",
+        "message": "internet connectivity probe timed out",
+        "checked_at": (datetime.now() - timedelta(seconds=10)).isoformat(),
+    }
+    service.connectivity_guard.check = Mock()
+
+    with patch.object(service.progress, "get", return_value=None):
+        status = service.get_status()
+
+    service.connectivity_guard.check.assert_not_called()
     assert status["connectivity_guard"]["active_failure"] is False
     assert status["connectivity_guard"]["stale_failure"] is True
 
