@@ -15,6 +15,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { getHardwareAnalysisPathDisplay } from '@/lib/hardware-status-display.js'
+import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
   Activity,
   CheckCircle2,
@@ -723,6 +724,8 @@ export default function StreamChecker() {
                               )
                             }
                           }
+                          const qualityReason = getQualityReasonDisplay(stream)
+                          const showMeasuredSpecs = ['completed', 'loop_detected', 'low_quality', 'dead', 'blank', 'freeze'].includes(stream.status)
 
                           return (
                             <tr key={stream.id} className="hover:bg-muted/50 transition-colors bg-card">
@@ -730,9 +733,9 @@ export default function StreamChecker() {
                                 <div className="font-medium max-w-[200px] truncate" title={stream.name}>
                                   {stream.name}
                                 </div>
-                                {stream.reason_detail && (
-                                  <div className="max-w-[200px] truncate text-[10px] text-muted-foreground" title={stream.reason_detail}>
-                                    {stream.reason_detail}
+                                {qualityReason && (
+                                  <div className="max-w-[200px] truncate text-[10px] text-muted-foreground" title={qualityReason.title}>
+                                    {qualityReason.text}
                                   </div>
                                 )}
                               </td>
@@ -764,7 +767,7 @@ export default function StreamChecker() {
                                 {countdownCell}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right text-xs text-muted-foreground whitespace-nowrap">
-                                {stream.status === 'completed' || stream.status === 'loop_detected' ? (
+                                {showMeasuredSpecs ? (
                                   <div className="flex flex-col items-end gap-0.5">
                                     <span>{stream.video_codec || 'N/A'} • <span className="text-foreground">{stream.fps || 0} fps </span></span>
                                     {(stream.resolution || stream.bitrate) && (

@@ -645,6 +645,21 @@ class StreamCheckerService:
         
         # Use centralized utility for the check
         return utils_is_stream_dead(stream_data, check_config)
+
+    @staticmethod
+    def _apply_quality_classification(stream_data: Dict[str, Any], result: Any) -> None:
+        """Stamp machine-readable quality classification details onto a stream."""
+        reason = getattr(result, 'reason', result[1] if isinstance(result, tuple) and len(result) > 1 else 'none')
+        reason_detail = getattr(result, 'reason_detail', reason)
+        details = getattr(result, 'details', {}) or {}
+
+        stream_data['quality_reason'] = reason
+        stream_data['quality_reason_detail'] = reason_detail
+        stream_data['quality_reason_context'] = details
+        if result and reason != 'none':
+            stream_data['dead_reason'] = reason
+            stream_data['dead_reason_detail'] = reason_detail
+            stream_data['dead_reason_context'] = details
     
     def _calculate_channel_averages(self, analyzed_streams: List[Dict], dead_stream_ids: set) -> Dict[str, str]:
         """Calculate channel-level average statistics from analyzed streams.
@@ -873,6 +888,9 @@ class StreamCheckerService:
             "audio_bitrate": stream_data.get("audio_bitrate"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
             "quality_score": stream_data.get("score"),
+            "quality_reason": stream_data.get("quality_reason"),
+            "quality_reason_detail": stream_data.get("quality_reason_detail"),
+            "quality_reason_context": stream_data.get("quality_reason_context"),
             # PRESERVE_FALSE: emit False (not None) so the None-filter below keeps these
             # fields in the payload even when the probe ran but found no loop.
             # Without this, Dispatcharr's PATCH merge leaves a stale loop_probe_ran: true
@@ -987,6 +1005,9 @@ class StreamCheckerService:
             "audio_bitrate": stream_data.get("audio_bitrate"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
             "quality_score": stream_data.get("score"),
+            "quality_reason": stream_data.get("quality_reason"),
+            "quality_reason_detail": stream_data.get("quality_reason_detail"),
+            "quality_reason_context": stream_data.get("quality_reason_context"),
             # PRESERVE_FALSE: emit False (not None) so the None-filter below keeps these
             # fields in the payload even when the probe ran but found no loop.
             # Without this, Dispatcharr's PATCH merge leaves a stale loop_probe_ran: true
@@ -1016,9 +1037,17 @@ class StreamCheckerService:
             "freeze_probe_ran",
             "freeze_detected",
         }
+        QUALITY_FIELDS = {
+            "quality_reason",
+            "quality_reason_detail",
+            "quality_reason_context",
+        }
         stream_stats_payload = {
             k: v for k, v in stream_stats_payload.items()
-            if v not in [None, "N/A"] or (v is None and k not in PRESERVE_FALSE)
+            if (
+                v not in [None, "N/A"]
+                or (v is None and k not in PRESERVE_FALSE and k not in QUALITY_FIELDS)
+            )
         }
         for k in PRESERVE_FALSE:
             if k in stream_stats_payload or stream_data.get(k) is False:
@@ -1821,12 +1850,16 @@ class StreamCheckerService:
                 if stream_id in stream_statuses:
                     if result.get('provider_limit_skipped'):
                         reason_detail = result.get('reason_detail')
+                        skipped_reason = result.get('skipped_reason') or reason_detail
                         stream_statuses[stream_id]['status'] = (
                             'viewer_preempted'
                             if reason_detail == 'viewer_preempted'
                             else 'provider_limit_wait_timeout'
                         )
-                        stream_statuses[stream_id]['reason_detail'] = result.get('reason_detail')
+                        stream_statuses[stream_id]['reason_detail'] = skipped_reason
+                        stream_statuses[stream_id]['quality_reason'] = 'provider_capacity'
+                        stream_statuses[stream_id]['quality_reason_detail'] = skipped_reason
+                        stream_statuses[stream_id]['quality_reason_context'] = {}
                         stream_statuses[stream_id]['score'] = None
                     elif result.get('status') == 'ERROR':
                         stream_statuses[stream_id]['status'] = 'error'
@@ -1836,13 +1869,29 @@ class StreamCheckerService:
                         temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights)
 
                         # Update stream status based on result
-                        is_dead, _dead_reason = self._is_stream_dead(result, channel_id, threshold_config=_threshold_config)
+                        dead_result = self._is_stream_dead(result, channel_id, threshold_config=_threshold_config)
+                        self._apply_quality_classification(result, dead_result)
+                        is_dead, _dead_reason = dead_result
+                        _dead_reason_detail = getattr(dead_result, 'reason_detail', _dead_reason)
+                        _dead_reason_context = getattr(dead_result, 'details', {}) or {}
 
                         if is_dead:
                             stream_statuses[stream_id]['status'] = _dead_reason if _dead_reason in ('low_quality', 'blank', 'freeze') else 'dead'
                             stream_statuses[stream_id]['score'] = 0.0
+                            stream_statuses[stream_id]['reason_detail'] = _dead_reason_detail
+                            stream_statuses[stream_id]['quality_reason'] = _dead_reason
+                            stream_statuses[stream_id]['quality_reason_detail'] = _dead_reason_detail
+                            stream_statuses[stream_id]['quality_reason_context'] = _dead_reason_context
+                            stream_statuses[stream_id]['resolution'] = result.get('resolution', '0x0')
+                            stream_statuses[stream_id]['video_codec'] = result.get('video_codec', 'N/A')
+                            stream_statuses[stream_id]['fps'] = result.get('fps', 0)
+                            stream_statuses[stream_id]['bitrate'] = result.get('bitrate_kbps')
+                            stream_statuses[stream_id]['hdr_format'] = result.get('hdr_format')
                         else:
                             stream_statuses[stream_id]['status'] = 'completed'
+                            stream_statuses[stream_id]['quality_reason'] = 'none'
+                            stream_statuses[stream_id]['quality_reason_detail'] = 'none'
+                            stream_statuses[stream_id]['quality_reason_context'] = {}
                             # Optional: record score or resolution
                             stream_statuses[stream_id]['score'] = temp_score
                             stream_statuses[stream_id]['resolution'] = result.get('resolution', '0x0')
@@ -1986,7 +2035,18 @@ class StreamCheckerService:
                         analyzed_streams.append(analyzed)
                         continue
 
-                    # Prepare stats for batch update
+                    # Check if stream is dead using pre-resolved threshold config
+                    # so forced_profile_id selections are honoured.
+                    dead_result = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
+                    self._apply_quality_classification(analyzed, dead_result)
+                    is_dead, dead_reason = dead_result
+                    stream_id = analyzed.get('stream_id')
+                    stream_url = analyzed.get('stream_url', '')
+                    stream_name = analyzed.get('stream_name', 'Unknown')
+                    was_dead = self.dead_streams_tracker.is_dead(stream_url)
+
+                    # Prepare stats for batch update after classification so
+                    # quality reason fields are persisted with the probe stats.
                     if batch_enabled:
                         stats_item = self._prepare_stream_stats_for_batch(analyzed)
                         if stats_item:
@@ -1994,16 +2054,6 @@ class StreamCheckerService:
                     else:
                         # Fall back to individual updates if batching is disabled
                         self._update_stream_stats(analyzed)
-                    
-                    # Check if stream is dead using pre-resolved threshold config
-                    # so forced_profile_id selections are honoured.
-                    is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
-                    stream_id = analyzed.get('stream_id')
-                    stream_url = analyzed.get('stream_url', '')
-                    stream_name = analyzed.get('stream_name', 'Unknown')
-                    was_dead = self.dead_streams_tracker.is_dead(stream_url)
-                    if is_dead:
-                        analyzed['dead_reason'] = dead_reason
                     
                     if is_dead and not was_dead:
                         failed_connectivity = self._require_quality_check_connectivity(
@@ -2356,7 +2406,7 @@ class StreamCheckerService:
                     
                     # Mark dead streams as "dead" instead of showing score:0
                     if is_dead:
-                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') in ('blank', 'freeze') else 'dead'
+                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') in ('blank', 'freeze', 'low_quality') else 'dead'
                     elif is_revived:
                         stream_stat['status'] = 'revived'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
@@ -2364,6 +2414,11 @@ class StreamCheckerService:
                         stream_stat['status'] = 'viewer_preempted'
                     else:
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
+
+                    if analyzed.get('quality_reason') and analyzed.get('quality_reason') != 'none':
+                        stream_stat['quality_reason'] = analyzed.get('quality_reason')
+                        stream_stat['quality_reason_detail'] = analyzed.get('quality_reason_detail')
+                        stream_stat['quality_reason_context'] = analyzed.get('quality_reason_context')
 
                     # Include loop detection results if the probe ran
                     if analyzed.get('loop_probe_ran'):
@@ -2832,16 +2887,17 @@ class StreamCheckerService:
                     hardware_acceleration=analysis_params.get('hardware_acceleration')
                 )
                 
+                # Check if stream is dead using pre-resolved threshold config
+                dead_result = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
+                self._apply_quality_classification(analyzed, dead_result)
+                is_dead, dead_reason = dead_result
+
                 # Update stream stats on dispatcharr with ffmpeg-extracted data
                 self._update_stream_stats(analyzed)
-                
-                # Check if stream is dead using pre-resolved threshold config
-                is_dead, dead_reason = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
+
                 stream_url = stream.get('url', '')
                 stream_name = stream.get('name', 'Unknown')
                 was_dead = self.dead_streams_tracker.is_dead(stream_url)
-                if is_dead:
-                    analyzed['dead_reason'] = dead_reason
                 
                 if is_dead and not was_dead:
                     failed_connectivity = self._require_quality_check_connectivity(
@@ -2929,9 +2985,21 @@ class StreamCheckerService:
                     elif is_dead:
                         stream_statuses[stream['id']]['status'] = dead_reason if dead_reason in ('low_quality', 'blank', 'freeze') else 'dead'
                         stream_statuses[stream['id']]['score'] = 0.0
+                        stream_statuses[stream['id']]['reason_detail'] = analyzed.get('quality_reason_detail')
+                        stream_statuses[stream['id']]['quality_reason'] = analyzed.get('quality_reason')
+                        stream_statuses[stream['id']]['quality_reason_detail'] = analyzed.get('quality_reason_detail')
+                        stream_statuses[stream['id']]['quality_reason_context'] = analyzed.get('quality_reason_context')
+                        stream_statuses[stream['id']]['resolution'] = analyzed.get('resolution', '0x0')
+                        stream_statuses[stream['id']]['video_codec'] = analyzed.get('video_codec', 'N/A')
+                        stream_statuses[stream['id']]['fps'] = analyzed.get('fps', 0)
+                        stream_statuses[stream['id']]['bitrate'] = analyzed.get('bitrate_kbps')
+                        stream_statuses[stream['id']]['hdr_format'] = analyzed.get('hdr_format')
                     else:
                         stream_statuses[stream['id']]['status'] = 'completed'
                         stream_statuses[stream['id']]['score'] = score
+                        stream_statuses[stream['id']]['quality_reason'] = 'none'
+                        stream_statuses[stream['id']]['quality_reason_detail'] = 'none'
+                        stream_statuses[stream['id']]['quality_reason_context'] = {}
                         stream_statuses[stream['id']]['resolution'] = analyzed.get('resolution', '0x0')
                         stream_statuses[stream['id']]['video_codec'] = analyzed.get('video_codec', 'N/A')
                         stream_statuses[stream['id']]['fps'] = analyzed.get('fps', 0)
@@ -3275,7 +3343,7 @@ class StreamCheckerService:
                     }
 
                     if is_dead:
-                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') in ('blank', 'freeze') else 'dead'
+                        stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') in ('blank', 'freeze', 'low_quality') else 'dead'
                     elif is_revived:
                         stream_stat['status'] = 'revived'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
@@ -3283,6 +3351,11 @@ class StreamCheckerService:
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                         if 'status' in analyzed:
                             stream_stat['analysis_status'] = analyzed.get('status')
+
+                    if analyzed.get('quality_reason') and analyzed.get('quality_reason') != 'none':
+                        stream_stat['quality_reason'] = analyzed.get('quality_reason')
+                        stream_stat['quality_reason_detail'] = analyzed.get('quality_reason_detail')
+                        stream_stat['quality_reason_context'] = analyzed.get('quality_reason_context')
 
                     # Include loop detection results if the probe ran
                     if analyzed.get('loop_probe_ran'):
