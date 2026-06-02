@@ -41,6 +41,7 @@ export const getAutomationStageCards = ({
   displayRunStageId = 'idle',
   displayRunningRun = false,
   completedRun = false,
+  neutralRun = false,
   streamRunActive = false,
 } = {}) => {
   const normalizedDisplayStageId = normalizeRunStageKey(displayRunStageId)
@@ -53,7 +54,9 @@ export const getAutomationStageCards = ({
     const backendStage = backendStages.get(stage.id)
     let status = backendStage?.status
 
-    if (streamRunActive) {
+    if (neutralRun && !streamRunActive) {
+      status = 'pending'
+    } else if (streamRunActive) {
       status = stage.id === normalizedDisplayStageId
         ? (displayRunningRun ? 'running' : 'completed')
         : 'pending'

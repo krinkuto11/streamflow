@@ -245,6 +245,30 @@ describe('dashboard stream checker run display', () => {
     expect(cards[7].status).toBe('pending')
   })
 
+  it('keeps no-due skipped automation stages neutral', () => {
+    const cards = getAutomationStageCards({
+      stages,
+      runStatusStages: [
+        { key: 'settings', status: 'completed' },
+        { key: 'period_discovery', status: 'pending' },
+      ],
+      displayRunStageId: 'skipped',
+      displayRunningRun: false,
+      neutralRun: true,
+    })
+
+    expect(cards.map(stage => stage.status)).toEqual([
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+    ])
+  })
+
   it('uses live stage timing while a duration card is actively running', () => {
     const value = getRunDurationValue({
       runDurations: {},

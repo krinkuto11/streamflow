@@ -534,6 +534,7 @@ export default function Dashboard() {
     displayRunStageId,
     displayRunningRun,
     completedRun,
+    neutralRun: Boolean(skippedRunDisplay.stageLabel),
     streamRunActive,
   })
   const m3uRefreshDuration = getRunDurationValue({
