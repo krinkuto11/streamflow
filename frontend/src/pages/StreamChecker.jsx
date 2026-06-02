@@ -625,17 +625,17 @@ export default function StreamChecker() {
                   </div>
                 </div>
                 <div className="rounded-md border overflow-hidden">
-                  <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground">
+                  <div className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground">
                     <span>Account</span>
-                    <span className="text-right">Checking</span>
-                    <span className="text-right">Waiting</span>
-                    <span className="text-right">Done</span>
+                    <span className="justify-self-end text-right">Checking</span>
+                    <span className="justify-self-end text-right">Waiting</span>
+                    <span className="justify-self-end text-right">Done</span>
                   </div>
                   <div className="divide-y">
                     {providerProgress.map((provider) => {
                       const finishedPercent = provider.total > 0 ? Math.round((provider.finished / provider.total) * 100) : 0
                       return (
-                        <div key={provider.name} className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 px-3 py-2 text-sm">
+                        <div key={provider.name} className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 px-3 py-2 text-sm">
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="truncate font-medium" title={provider.name}>{provider.name}</span>
@@ -654,9 +654,9 @@ export default function StreamChecker() {
                               <div className="h-1.5 rounded-full bg-primary" style={{ width: `${finishedPercent}%` }} />
                             </div>
                           </div>
-                          <span className="text-right font-mono">{provider.checking}</span>
-                          <span className="text-right font-mono text-amber-600 dark:text-amber-400">{provider.waiting}</span>
-                          <span className="text-right font-mono">{provider.finished}/{provider.total}</span>
+                          <span className="justify-self-end text-right font-mono tabular-nums">{provider.checking}</span>
+                          <span className="justify-self-end text-right font-mono tabular-nums text-amber-600 dark:text-amber-400">{provider.waiting}</span>
+                          <span className="justify-self-end text-right font-mono tabular-nums">{provider.finished}/{provider.total}</span>
                         </div>
                       )
                     })}
