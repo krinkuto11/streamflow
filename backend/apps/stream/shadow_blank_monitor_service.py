@@ -356,7 +356,8 @@ class ShadowBlankMonitorService:
             real_clients = self._real_client_count(raw_status, config)
             if real_clients <= 0:
                 continue
-            watcher_clients = self._watcher_client_count(raw_status, config)
+            watcher_details = self._watcher_client_details(raw_status, config)
+            watcher_clients = int(watcher_details.get("watcher_client_count") or 0)
 
             stream_id = self._extract_stream_id(raw_status)
             target = {
@@ -370,6 +371,7 @@ class ShadowBlankMonitorService:
                 "state": raw_status.get("state") or "active",
                 "cooldown_seconds": self._cooldown_remaining(channel_uuid),
             }
+            target.update(watcher_details)
             targets.append(target)
             watched[channel_uuid] = dict(target)
 
@@ -438,7 +440,7 @@ class ShadowBlankMonitorService:
 
                 target = dict(target)
                 target["real_client_count"] = self._real_client_count(fresh_status, config)
-                target["watcher_client_count"] = self._watcher_client_count(fresh_status, config)
+                target.update(self._watcher_client_details(fresh_status, config))
                 stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
                 target["stream_id"] = stream_id
                 target["stream_ref"] = _ref("stream", stream_id)
@@ -994,15 +996,45 @@ class ShadowBlankMonitorService:
         return 1 if self._is_status_active(status) else 0
 
     def _watcher_client_count(self, status: Dict[str, Any], config: Dict[str, Any]) -> int:
+        return int(self._watcher_client_details(status, config).get("watcher_client_count") or 0)
+
+    def _watcher_client_details(self, status: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
         marker = str(config.get("watcher_user_agent") or "").lower()
         if not marker:
-            return 0
+            return {"watcher_client_count": 0}
         clients = status.get("clients")
         if isinstance(clients, dict):
             clients = list(clients.values())
         if not isinstance(clients, list):
-            return 0
-        return sum(1 for client in clients if marker in self._client_text(client).lower())
+            return {"watcher_client_count": 0}
+
+        watcher_clients = [
+            (index, client)
+            for index, client in enumerate(clients)
+            if marker in self._client_text(client).lower()
+        ]
+        details: Dict[str, Any] = {"watcher_client_count": len(watcher_clients)}
+        if not watcher_clients:
+            return details
+
+        index, client = watcher_clients[0]
+        raw_client_id: Any = None
+        connected_at: Any = None
+        if isinstance(client, dict):
+            raw_client_id = client.get("client_id") or client.get("id") or client.get("session_id")
+            connected_at = client.get("connected_at") or client.get("started_at")
+        if raw_client_id is None:
+            raw_client_id = f"{index}:{self._client_text(client)}"
+
+        details["watcher_client_ref"] = _ref("client", raw_client_id)
+        try:
+            connected_at_float = float(connected_at)
+        except (TypeError, ValueError):
+            connected_at_float = None
+        if connected_at_float is not None:
+            details["watcher_connected_at"] = connected_at_float
+            details["watcher_uptime_seconds"] = max(0, int(self.clock() - connected_at_float))
+        return details
 
     def _cooldown_remaining(self, channel_uuid: str) -> int:
         with self._lock:
@@ -1083,6 +1115,10 @@ class ShadowBlankMonitorService:
             "channel_ref",
             "stream_ref",
             "real_client_count",
+            "watcher_client_count",
+            "watcher_client_ref",
+            "watcher_connected_at",
+            "watcher_uptime_seconds",
             "state",
             "cooldown_seconds",
             "last_probe",

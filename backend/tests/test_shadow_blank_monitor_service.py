@@ -509,6 +509,36 @@ def test_existing_watcher_client_prevents_duplicate_probe(tmp_path):
     assert status["recent_events"][0]["type"] == "probe_ok"
 
 
+def test_watched_status_includes_sanitized_watcher_identity(tmp_path):
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[
+                    {"user_agent": "VLC"},
+                    {
+                        "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                        "client_id": "raw-watcher-client-id",
+                        "connected_at": 970.0,
+                    },
+                ],
+            ),
+        }],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: 1000.0)
+    service.update_config({"enabled": False, "dry_run": False})
+
+    status = service.run_once(force=True)
+    watched = status["watched_channels"][0]
+
+    assert watched["watcher_client_count"] == 1
+    assert watched["watcher_client_ref"].startswith("client-")
+    assert watched["watcher_connected_at"] == 970.0
+    assert watched["watcher_uptime_seconds"] == 30
+    assert "raw-watcher-client-id" not in repr(status)
+
+
 def test_continuous_mode_starts_uncovered_target_when_another_has_watcher(tmp_path):
     probe_urls = []
     udi = FakeUdi(

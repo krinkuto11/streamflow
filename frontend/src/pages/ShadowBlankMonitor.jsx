@@ -69,6 +69,16 @@ const formatTime = (timestamp) => {
   return new Date(timestamp * 1000).toLocaleTimeString()
 }
 
+const formatDuration = (seconds) => {
+  const value = Number(seconds)
+  if (!Number.isFinite(value) || value < 0) return null
+  if (value < 60) return `${Math.floor(value)}s`
+  const minutes = Math.floor(value / 60)
+  const hours = Math.floor(minutes / 60)
+  if (hours > 0) return `${hours}h ${minutes % 60}m`
+  return `${minutes}m`
+}
+
 const formatEvent = (event) => eventLabels[event?.type] || event?.type || 'Unknown'
 
 export default function ShadowBlankMonitor() {
@@ -464,10 +474,19 @@ export default function ShadowBlankMonitor() {
                     <div key={channel.channel_ref} className="rounded-md border p-3">
                       <div className="flex items-center justify-between gap-3">
                         <span className="font-mono text-xs">{channel.channel_ref}</span>
-                        <Badge variant="outline">{channel.real_client_count || 0} viewers</Badge>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                          <Badge variant="outline">{channel.real_client_count || 0} viewers</Badge>
+                          {(channel.watcher_client_count || 0) > 0 && (
+                            <Badge variant="secondary">{channel.watcher_client_count} watcher{channel.watcher_client_count === 1 ? '' : 's'}</Badge>
+                          )}
+                        </div>
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         <span>{channel.stream_ref}</span>
+                        {channel.watcher_client_ref && <span>{channel.watcher_client_ref}</span>}
+                        {formatDuration(channel.watcher_uptime_seconds) && (
+                          <span>watching for {formatDuration(channel.watcher_uptime_seconds)}</span>
+                        )}
                         {channel.last_event && <Badge variant="secondary">{formatEvent(channel.last_event)}</Badge>}
                         {channel.last_probe?.freeze_detected && <Badge variant="outline">Frozen</Badge>}
                         {channel.last_probe?.blank_detected && <Badge variant="outline">Blank</Badge>}
