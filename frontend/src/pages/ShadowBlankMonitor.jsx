@@ -348,6 +348,9 @@ export default function ShadowBlankMonitor() {
                     Continuous
                   </Button>
                 </div>
+                <div className="mt-3 rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+                  Continuous mode keeps watching active viewer sessions as they appear. Use excludes for channels the watcher should ignore; `Scan Now` is hidden while continuous watching is already active.
+                </div>
               </div>
             </div>
 

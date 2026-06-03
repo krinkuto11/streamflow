@@ -1109,6 +1109,14 @@ export default function StreamChecker() {
 
                 {/* Queue Tab */}
                 <TabsContent value="queue" className="mt-4 space-y-4">
+                  <Alert>
+                    <List className="h-4 w-4" />
+                    <AlertTitle>Priority Queue</AlertTitle>
+                    <AlertDescription>
+                      Higher-priority waiting channels run before lower-priority work, but the channel already being checked is allowed to finish. Teamarr uses this server-side path for event checks; normal users do not edit that priority value here.
+                    </AlertDescription>
+                  </Alert>
+
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="default_queue_start_mode">Default Run Start</Label>
@@ -1178,6 +1186,14 @@ export default function StreamChecker() {
 
                 {/* Concurrent Checking Tab */}
                 <TabsContent value="concurrent" className="mt-4 space-y-4">
+                  <Alert>
+                    <Activity className="h-4 w-4" />
+                    <AlertTitle>Check Capacity</AlertTitle>
+                    <AlertDescription>
+                      `Check slots full` means the checker is waiting for global workers, provider/profile slots, or viewer-protected capacity. Viewer-preempted probes are skipped safely and can be checked again later.
+                    </AlertDescription>
+                  </Alert>
+
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
                       <Label htmlFor="concurrent_enabled">Enable Concurrent Checking</Label>

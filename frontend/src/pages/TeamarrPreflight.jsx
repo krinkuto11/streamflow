@@ -652,7 +652,7 @@ export default function TeamarrPreflight() {
                   <div className="grid gap-3 pb-3 text-sm text-muted-foreground md:grid-cols-3">
                     <div>
                       <p className="font-medium text-foreground">Busy Handling</p>
-                      <p>Automation phases defer event checks; Stream Checker conflicts enter the priority queue and continue after the current channel.</p>
+                      <p>Automation phases defer event checks; Stream Checker conflicts enter the server-side priority queue and continue after the current channel.</p>
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Event Status</p>
@@ -660,7 +660,7 @@ export default function TeamarrPreflight() {
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Manual Checks</p>
-                      <p>Past events can still be checked manually with the selected preflight profile and the same viewer, concurrency, and stream guards.</p>
+                      <p>Past events can still be checked manually. The selected profile controls the check rules; Teamarr priority is not a user setting.</p>
                     </div>
                   </div>
                 </AccordionContent>
