@@ -666,7 +666,7 @@ export default function TeamarrPreflight() {
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Manual Checks</p>
-                      <p>Past events can still be checked manually. The selected profile controls the check rules; Teamarr priority is not a user setting.</p>
+                      <p>Past events can still be checked manually. The selected profile controls the check rules used for that run.</p>
                     </div>
                   </div>
                 </AccordionContent>
