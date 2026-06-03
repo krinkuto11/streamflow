@@ -28,9 +28,17 @@ describe('operatorHelpSections', () => {
     expect(streamChecker.items.join(' ')).toMatch(/Dead, Blank, and Frozen/)
     expect(streamChecker.items.join(' ')).toMatch(/cumulative stream results/)
 
+    const shadowMonitor = operatorHelpSections.find(section => section.id === 'shadow-monitor')
+    expect(shadowMonitor.items.join(' ')).toMatch(/Channel Switch Limit/)
+    expect(shadowMonitor.items.join(' ')).toMatch(/per-channel rolling-hour guard/)
+
     const hardware = operatorHelpSections.find(section => section.id === 'hardware')
     expect(hardware.items.join(' ')).toMatch(/Intel\/DRI/)
     expect(hardware.items.join(' ')).toMatch(/VAAPI, QSV, or DRI/)
+
+    const troubleshooting = operatorHelpSections.find(section => section.id === 'troubleshooting')
+    expect(troubleshooting.items.join(' ')).toMatch(/After setup or image updates/)
+    expect(troubleshooting.items.join(' ')).toMatch(/post-start checks/)
   })
 
   it('does not expose internal planning or priority wording', () => {

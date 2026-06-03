@@ -54,6 +54,7 @@ export const operatorHelpSections = [
       'Continuous mode watches active viewer channels without needing repeated Scan Now actions.',
       'Excluded channel IDs and UUIDs are the normal way to keep a viewer-visible channel out of watcher checks.',
       'Watched Now shows watcher continuity with anonymized watcher references and uptime.',
+      'Channel Switch Limit is a per-channel rolling-hour guard; Channel Cooldown is only the same-channel wait between switch attempts.',
     ],
     links: [
       { label: 'Shadow Monitor', to: '/shadow-monitor' },
@@ -79,9 +80,11 @@ export const operatorHelpSections = [
     title: 'Troubleshooting',
     summary: 'Start with the live status panels, then narrow the problem by run type and active stage.',
     items: [
+      'After setup or image updates, confirm startup/cache readiness, Stream Checker hardware status, and Teamarr Preflight status before starting automation.',
       'If the dashboard is idle, upcoming events and automation status should refresh without manual clicks.',
       'If a run is stopped, the dashboard should show an aborted state instead of completed or failed.',
       'For stream failures, check the displayed reason text before changing provider or profile settings.',
+      'For event channels that appear at kickoff, use post-start checks instead of letting early failed checks demote streams.',
     ],
     links: [
       { label: 'Changelog', to: '/changelog' },
