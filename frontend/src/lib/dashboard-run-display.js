@@ -1,3 +1,5 @@
+import { formatDuration } from './time-format.js'
+
 export const earliestStreamStart = (streams = []) => {
   const startedAtValues = streams
     .map(stream => Date.parse(stream?.started_at))
@@ -114,6 +116,35 @@ export const getRunDurationValue = ({
   }
 
   return reportedSeconds
+}
+
+export const isM3uRefreshSkipped = ({
+  runCounts = {},
+  streamRunActive = false,
+} = {}) => {
+  if (streamRunActive) {
+    return false
+  }
+
+  const playlistsToRefresh = runCounts.playlists_to_refresh
+  const refreshedPlaylists = runCounts.refreshed_playlists ?? 0
+
+  return refreshedPlaylists === 0 && (
+    playlistsToRefresh === 0 ||
+    playlistsToRefresh === '0' ||
+    playlistsToRefresh === false
+  )
+}
+
+export const getRunDurationCardValue = ({
+  seconds = null,
+  skipped = false,
+} = {}) => {
+  if (skipped) {
+    return 'Skipped'
+  }
+
+  return formatDuration(seconds) || 'N/A'
 }
 
 export const getStreamCheckerRunDisplay = ({

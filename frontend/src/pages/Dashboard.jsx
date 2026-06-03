@@ -13,9 +13,11 @@ import { getDashboardRunMetrics } from '@/lib/dashboard-run-counts.js'
 import {
   getDashboardActionStates,
   getAutomationStageCards,
+  getRunDurationCardValue,
   getRunDurationValue,
   getSkippedRunDisplay,
   getStreamCheckerRunDisplay,
+  isM3uRefreshSkipped,
   normalizeRunStageKey,
   preferLiveRunSeconds,
   shouldShowAutomationRunCard,
@@ -610,6 +612,35 @@ export default function Dashboard() {
     displayRunStageElapsedSeconds,
     stages: AUTOMATION_STAGES,
   })
+  const m3uRefreshSkipped = isM3uRefreshSkipped({
+    runCounts,
+    streamRunActive,
+  })
+  const cacheSyncSkipped = m3uRefreshSkipped && cacheSyncDuration == null
+  const durationCards = [
+    {
+      label: 'M3U Refresh',
+      value: getRunDurationCardValue({
+        seconds: m3uRefreshDuration,
+        skipped: m3uRefreshSkipped,
+      }),
+    },
+    {
+      label: 'Cache Sync',
+      value: getRunDurationCardValue({
+        seconds: cacheSyncDuration,
+        skipped: cacheSyncSkipped,
+      }),
+    },
+    {
+      label: 'Stream Matching',
+      value: getRunDurationCardValue({ seconds: streamMatchingDuration }),
+    },
+    {
+      label: 'Quality Check',
+      value: getRunDurationCardValue({ seconds: qualityCheckDuration }),
+    },
+  ]
   const displayRunMetrics = getDashboardRunMetrics({
     streamCheckerStatus,
     streamQueueActive,
@@ -816,22 +847,12 @@ export default function Dashboard() {
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">M3U Refresh</div>
-                <div className="text-base font-semibold">{formatDuration(m3uRefreshDuration)}</div>
-              </div>
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Cache Sync</div>
-                <div className="text-base font-semibold">{formatDuration(cacheSyncDuration)}</div>
-              </div>
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Stream Matching</div>
-                <div className="text-base font-semibold">{formatDuration(streamMatchingDuration)}</div>
-              </div>
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Quality Check</div>
-                <div className="text-base font-semibold">{formatDuration(qualityCheckDuration)}</div>
-              </div>
+              {durationCards.map((card) => (
+                <div key={card.label} className="rounded-md border p-3">
+                  <div className="text-xs text-muted-foreground">{card.label}</div>
+                  <div className="text-base font-semibold">{card.value}</div>
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>

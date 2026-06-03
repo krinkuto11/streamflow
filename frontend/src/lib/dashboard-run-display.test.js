@@ -2,9 +2,11 @@ import { describe, expect, it } from 'vitest'
 import {
   getDashboardActionStates,
   getAutomationStageCards,
+  getRunDurationCardValue,
   getRunDurationValue,
   getSkippedRunDisplay,
   getStreamCheckerRunDisplay,
+  isM3uRefreshSkipped,
   preferLiveRunSeconds,
   shouldShowAutomationRunCard,
 } from './dashboard-run-display.js'
@@ -309,6 +311,40 @@ describe('dashboard stream checker run display', () => {
     })
 
     expect(value).toBeNull()
+  })
+
+  it('marks M3U refresh as skipped when no playlist refresh was requested', () => {
+    expect(isM3uRefreshSkipped({
+      runCounts: {
+        playlists_to_refresh: 0,
+        refreshed_playlists: 0,
+      },
+    })).toBe(true)
+  })
+
+  it('does not mark M3U refresh as skipped when playlists were requested', () => {
+    expect(isM3uRefreshSkipped({
+      runCounts: {
+        playlists_to_refresh: 2,
+        refreshed_playlists: 0,
+      },
+    })).toBe(false)
+  })
+
+  it('does not apply M3U skipped semantics to manual stream checker runs', () => {
+    expect(isM3uRefreshSkipped({
+      streamRunActive: true,
+      runCounts: {
+        playlists_to_refresh: 0,
+        refreshed_playlists: 0,
+      },
+    })).toBe(false)
+  })
+
+  it('renders duration cards as skipped or formatted duration', () => {
+    expect(getRunDurationCardValue({ skipped: true, seconds: 0 })).toBe('Skipped')
+    expect(getRunDurationCardValue({ seconds: 61 })).toBe('1m 1s')
+    expect(getRunDurationCardValue({ seconds: null })).toBe('N/A')
   })
 
   it('uses explicit idle wording for skipped no-due automation runs', () => {
