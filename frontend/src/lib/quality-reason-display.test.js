@@ -26,4 +26,22 @@ describe('getQualityReasonDisplay', () => {
       text: 'Provider capacity unavailable',
     })
   })
+
+  it('falls back to viewer-preempted status wording when no detail exists', () => {
+    expect(getQualityReasonDisplay({
+      status: 'viewer_preempted',
+    })).toMatchObject({
+      code: 'viewer_preempted',
+      text: 'Viewer needed this profile',
+    })
+  })
+
+  it('falls back to provider wait timeout status wording when no detail exists', () => {
+    expect(getQualityReasonDisplay({
+      status: 'provider_limit_wait_timeout',
+    })).toMatchObject({
+      code: 'provider_wait_timeout',
+      text: 'Provider wait timed out',
+    })
+  })
 })

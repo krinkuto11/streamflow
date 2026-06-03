@@ -18,6 +18,12 @@ const REASON_LABELS = {
   provider_wait_timeout: 'Provider wait timed out',
 }
 
+const STATUS_REASON_FALLBACKS = {
+  viewer_preempted: 'viewer_preempted',
+  provider_limit_wait_timeout: 'provider_wait_timeout',
+  waiting_provider_limit: 'provider_capacity_unavailable',
+}
+
 const formatNumber = (value, suffix = '') => {
   if (value === null || value === undefined || value === '') return null
   const numeric = Number(value)
@@ -41,7 +47,9 @@ const titleizeCode = (code) => {
 }
 
 export function getQualityReasonDisplay(stream = {}) {
-  const code = stream.quality_reason_detail || stream.reason_detail
+  const code = stream.quality_reason_detail
+    || stream.reason_detail
+    || STATUS_REASON_FALLBACKS[stream.status]
   if (!code || code === 'none') return null
 
   const context = stream.quality_reason_context || {}
