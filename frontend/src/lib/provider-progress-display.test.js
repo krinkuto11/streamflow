@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { getProviderWaitReasonDisplay } from './provider-progress-display'
+import { getProfileSlotDisplay, getProviderWaitReasonDisplay } from './provider-progress-display'
 
 describe('getProviderWaitReasonDisplay', () => {
   it('uses concise operator wording for checker-owned capacity waits', () => {
@@ -36,5 +36,36 @@ describe('getProviderWaitReasonDisplay', () => {
 
   it('returns null without a dominant wait reason', () => {
     expect(getProviderWaitReasonDisplay({})).toBeNull()
+  })
+
+  it('formats bounded profile slot usage', () => {
+    expect(getProfileSlotDisplay({
+      id: 50,
+      name: 'Sibling',
+      active_viewers: 1,
+      checking: 1,
+      used: 2,
+      limit: 2,
+      available: 0,
+      full: true,
+    })).toMatchObject({
+      id: 50,
+      text: 'Sibling: 2/2',
+      title: 'Sibling: 1 viewer, 1 checking, 0 free',
+      full: true,
+    })
+  })
+
+  it('formats unlimited profile slots as open', () => {
+    expect(getProfileSlotDisplay({
+      name: 'Default',
+      unlimited: true,
+      checking: 2,
+      active_viewers: 0,
+    })).toMatchObject({
+      text: 'Default: open',
+      title: 'Default: 0 viewer, 2 checking, unlimited capacity',
+      unlimited: true,
+    })
   })
 })

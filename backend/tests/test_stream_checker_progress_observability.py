@@ -26,11 +26,18 @@ def test_progress_update_builds_provider_progress_counters():
             total=7,
             status='analyzing',
             streams_detail=[
-                {'id': 1, 'name': 'A1', 'm3u_account': 'Provider A', 'status': 'checking'},
+                {
+                    'id': 1,
+                    'name': 'A1',
+                    'm3u_account': 'Provider A',
+                    'm3u_account_id': 5,
+                    'status': 'checking',
+                },
                 {
                     'id': 2,
                     'name': 'A2',
                     'm3u_account': 'Provider A',
+                    'm3u_account_id': 5,
                     'status': 'waiting_provider_limit',
                     'reason_detail': 'checking_capacity',
                 },
@@ -38,6 +45,7 @@ def test_progress_update_builds_provider_progress_counters():
                     'id': 3,
                     'name': 'A3',
                     'm3u_account': 'Provider A',
+                    'm3u_account_id': 5,
                     'status': 'provider_limit_wait_timeout',
                     'reason_detail': 'active_viewers',
                 },
@@ -45,6 +53,7 @@ def test_progress_update_builds_provider_progress_counters():
                     'id': 7,
                     'name': 'A4',
                     'm3u_account': 'Provider A',
+                    'm3u_account_id': 5,
                     'status': 'viewer_preempted',
                     'reason_detail': 'viewer_preempted',
                 },
@@ -52,6 +61,32 @@ def test_progress_update_builds_provider_progress_counters():
                 {'id': 5, 'name': 'B2', 'm3u_account': 'Provider B', 'status': 'pending'},
                 {'id': 6, 'name': 'B3', 'm3u_account': 'Provider B', 'status': 'dead'},
             ],
+            provider_profile_slots={
+                '5': [
+                    {
+                        'id': 50,
+                        'name': 'Primary',
+                        'limit': 1,
+                        'unlimited': False,
+                        'active_viewers': 0,
+                        'checking': 1,
+                        'used': 1,
+                        'available': 0,
+                        'full': True,
+                    },
+                    {
+                        'id': 51,
+                        'name': 'Sibling',
+                        'limit': 1,
+                        'unlimited': False,
+                        'active_viewers': 0,
+                        'checking': 0,
+                        'used': 0,
+                        'available': 1,
+                        'full': False,
+                    },
+                ],
+            },
         )
 
     saved = fake_db.settings['stream_checker_progress']
@@ -69,6 +104,31 @@ def test_progress_update_builds_provider_progress_counters():
         'viewer_preempted': 1,
     }
     assert provider_a['dominant_wait_reason'] == 'active_viewers'
+    assert provider_a['account_id'] == 5
+    assert provider_a['profile_slots'] == [
+        {
+            'id': 50,
+            'name': 'Primary',
+            'limit': 1,
+            'unlimited': False,
+            'active_viewers': 0,
+            'checking': 1,
+            'used': 1,
+            'available': 0,
+            'full': True,
+        },
+        {
+            'id': 51,
+            'name': 'Sibling',
+            'limit': 1,
+            'unlimited': False,
+            'active_viewers': 0,
+            'checking': 0,
+            'used': 0,
+            'available': 1,
+            'full': False,
+        },
+    ]
 
     assert provider_b['pending'] == 1
     assert provider_b['completed'] == 1

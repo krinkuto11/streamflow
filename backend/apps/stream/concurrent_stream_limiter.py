@@ -408,6 +408,88 @@ class AccountStreamLimiter:
                     f"but checking count is already 0"
                 )
 
+    def get_profile_slot_snapshot(self, account_id: Optional[int]) -> List[Dict[str, Any]]:
+        """Return a compact slot snapshot for active profiles on an account."""
+        if account_id is None or not self.udi_manager:
+            return []
+
+        try:
+            account_id = int(account_id)
+        except (TypeError, ValueError):
+            return []
+
+        try:
+            account_getter = getattr(self.udi_manager, 'get_m3u_account_by_id', None)
+            account = account_getter(account_id) if callable(account_getter) else None
+        except Exception as e:
+            logger.warning(f"Could not get account {account_id} while building profile slot snapshot: {e}")
+            return []
+
+        profiles = account.get('profiles', []) if isinstance(account, dict) else []
+        if not profiles:
+            return []
+
+        try:
+            usage_getter = getattr(self.udi_manager, 'get_active_streams_count_per_profile', None)
+            active_usage = usage_getter(account_id) if callable(usage_getter) else {}
+            if not isinstance(active_usage, dict):
+                active_usage = {}
+        except Exception as e:
+            logger.warning(f"Could not get active profile usage for account {account_id}: {e}")
+            active_usage = {}
+
+        with self.lock:
+            checking_counts = dict(self.profile_checking_counts)
+
+        def read_count(mapping: Dict[Any, Any], key: Any) -> int:
+            candidates = [key, str(key)]
+            try:
+                candidates.append(int(key))
+            except (TypeError, ValueError):
+                pass
+
+            for candidate in candidates:
+                if candidate in mapping:
+                    try:
+                        return int(mapping.get(candidate, 0) or 0)
+                    except (TypeError, ValueError):
+                        return 0
+            return 0
+
+        snapshots: List[Dict[str, Any]] = []
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+
+            profile_id = profile.get('id')
+            if profile_id is None or not profile.get('is_active', True):
+                continue
+
+            try:
+                max_streams = int(profile.get('max_streams', 0) or 0)
+            except (TypeError, ValueError):
+                max_streams = 0
+
+            active_count = read_count(active_usage, profile_id)
+            checking_count = read_count(checking_counts, profile_id)
+            used = active_count + checking_count
+            unlimited = max_streams == 0
+            available = None if unlimited else max(0, max_streams - used)
+
+            snapshots.append({
+                'id': profile_id,
+                'name': profile.get('name') or f'Profile {profile_id}',
+                'limit': max_streams,
+                'unlimited': unlimited,
+                'active_viewers': active_count,
+                'checking': checking_count,
+                'used': used,
+                'available': available,
+                'full': False if unlimited else used >= max_streams,
+            })
+
+        return sorted(snapshots, key=lambda item: str(item.get('name', '')).lower())
+
     def should_preempt_profile_for_viewer(self, profile: Optional[Dict[str, Any]]) -> bool:
         """Return True when a real viewer needs the reserved profile slot."""
         if not profile or not self.udi_manager:
@@ -717,7 +799,7 @@ class SmartStreamScheduler:
                         if start_callback:
                             try:
                                 with lock:
-                                    start_callback(stream)
+                                    start_callback(stream, acquired_profile)
                             except Exception as e:
                                 logger.error(f"Error in start_callback for stream {stream['id']}: {e}")
 

@@ -133,6 +133,53 @@ class TestM3uAccountIdPriority(unittest.TestCase):
         self.assertEqual(profile["id"], 70)
         udi.get_m3u_account_by_id.assert_called_with(7)
 
+    def test_profile_slot_snapshot_exposes_sibling_capacity(self):
+        from apps.stream.concurrent_stream_limiter import AccountStreamLimiter
+
+        udi = Mock()
+        udi.get_m3u_account_by_id.return_value = {
+            "id": 7,
+            "name": "Provider",
+            "profiles": [
+                {"id": 70, "name": "Primary", "max_streams": 2, "is_active": True},
+                {"id": 71, "name": "Sibling", "max_streams": 1, "is_active": True},
+                {"id": 72, "name": "Inactive", "max_streams": 1, "is_active": False},
+            ],
+        }
+        udi.get_active_streams_count_per_profile.return_value = {"70": 1, "71": 0}
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.profile_checking_counts[70] = 1
+
+        snapshot = limiter.get_profile_slot_snapshot(7)
+
+        self.assertEqual(
+            snapshot,
+            [
+                {
+                    "id": 70,
+                    "name": "Primary",
+                    "limit": 2,
+                    "unlimited": False,
+                    "active_viewers": 1,
+                    "checking": 1,
+                    "used": 2,
+                    "available": 0,
+                    "full": True,
+                },
+                {
+                    "id": 71,
+                    "name": "Sibling",
+                    "limit": 1,
+                    "unlimited": False,
+                    "active_viewers": 0,
+                    "checking": 0,
+                    "used": 0,
+                    "available": 1,
+                    "full": False,
+                },
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

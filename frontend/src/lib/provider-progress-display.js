@@ -30,3 +30,30 @@ export function getProviderWaitReasonDisplay(provider = {}) {
     title: count ? `${code}: ${count}` : code,
   }
 }
+
+export function getProfileSlotDisplay(slot = {}) {
+  const name = slot.name || (slot.id != null ? `Profile ${slot.id}` : 'Profile')
+  const activeViewers = Number(slot.active_viewers || 0)
+  const checking = Number(slot.checking || 0)
+  const used = Number(slot.used ?? (activeViewers + checking))
+  const unlimited = Boolean(slot.unlimited)
+  const limit = Number(slot.limit || 0)
+  const available = slot.available == null ? null : Number(slot.available)
+
+  const capacityText = unlimited ? 'open' : `${used}/${limit}`
+  const freeText = unlimited
+    ? 'unlimited capacity'
+    : `${Number.isFinite(available) ? available : 0} free`
+
+  return {
+    id: slot.id,
+    name,
+    text: `${name}: ${capacityText}`,
+    title: `${name}: ${activeViewers} viewer, ${checking} checking, ${freeText}`,
+    full: Boolean(slot.full),
+    checking,
+    activeViewers,
+    used,
+    unlimited,
+  }
+}

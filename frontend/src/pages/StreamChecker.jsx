@@ -16,7 +16,7 @@ import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js
 import { formatDuration } from '@/lib/time-format.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote } from '@/lib/hardware-status-display.js'
-import { getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
+import { getProfileSlotDisplay, getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
 import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
   Activity,
@@ -637,8 +637,9 @@ export default function StreamChecker() {
                     {providerProgress.map((provider) => {
                       const finishedPercent = provider.total > 0 ? Math.round((provider.finished / provider.total) * 100) : 0
                       const waitReason = getProviderWaitReasonDisplay(provider)
+                      const profileSlots = (provider.profile_slots || []).map(getProfileSlotDisplay)
                       return (
-                        <div key={provider.name} className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 px-3 py-2 text-sm">
+                        <div key={provider.account_id ?? provider.name} className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 px-3 py-2 text-sm">
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="truncate font-medium" title={provider.name}>{provider.name}</span>
@@ -665,6 +666,30 @@ export default function StreamChecker() {
                             <div className="mt-1 h-1.5 rounded-full bg-muted">
                               <div className="h-1.5 rounded-full bg-primary" style={{ width: `${finishedPercent}%` }} />
                             </div>
+                            {profileSlots.length > 0 && (
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {profileSlots.slice(0, 5).map((slot) => (
+                                  <span
+                                    key={slot.id ?? slot.name}
+                                    className={`max-w-[12rem] truncate rounded border px-1.5 py-0.5 text-[10px] leading-none ${
+                                      slot.full
+                                        ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                                        : slot.checking > 0
+                                          ? 'border-blue-500/30 bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
+                                          : 'border-border text-muted-foreground'
+                                    }`}
+                                    title={slot.title}
+                                  >
+                                    {slot.text}
+                                  </span>
+                                ))}
+                                {profileSlots.length > 5 && (
+                                  <span className="rounded border px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                                    +{profileSlots.length - 5}
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           </div>
                           <span className="justify-self-end text-right font-mono tabular-nums">{provider.checking}</span>
                           <span className="justify-self-end text-right font-mono tabular-nums text-amber-600 dark:text-amber-400">{provider.waiting}</span>
@@ -755,6 +780,14 @@ export default function StreamChecker() {
                                 <div className="text-xs text-muted-foreground max-w-[150px] truncate" title={stream.m3u_account}>
                                   {stream.m3u_account}
                                 </div>
+                                {stream.reserved_profile_name && (
+                                  <div
+                                    className="text-[10px] text-muted-foreground/80 max-w-[150px] truncate"
+                                    title={`Profile: ${stream.reserved_profile_name}`}
+                                  >
+                                    {stream.reserved_profile_name}
+                                  </div>
+                                )}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-center">
                                 {stream.status === 'pending' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Pending</Badge>}

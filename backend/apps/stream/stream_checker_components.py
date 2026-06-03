@@ -837,7 +837,10 @@ class StreamCheckerProgress:
         self.progress_file = progress_file
 
     @staticmethod
-    def _build_provider_progress(streams_detail: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    def _build_provider_progress(
+        streams_detail: Optional[List[Dict[str, Any]]],
+        provider_profile_slots: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> List[Dict[str, Any]]:
         """Build compact per-account progress counters from per-stream rows."""
         if not streams_detail:
             return []
@@ -847,10 +850,13 @@ class StreamCheckerProgress:
 
         for stream in streams_detail:
             account_name = stream.get('m3u_account') or 'Unknown'
+            account_id = stream.get('m3u_account_id')
+            account_key = str(account_id) if account_id not in (None, '') else account_name
             status = stream.get('status') or 'pending'
             provider = grouped.setdefault(
-                account_name,
+                account_key,
                 {
+                    'account_id': account_id,
                     'name': account_name,
                     'total': 0,
                     'status_counts': Counter(),
@@ -900,6 +906,7 @@ class StreamCheckerProgress:
                 state = 'idle'
 
             provider_progress.append({
+                'account_id': provider.get('account_id'),
                 'name': provider['name'],
                 'total': provider['total'],
                 'checking': checking,
@@ -914,6 +921,13 @@ class StreamCheckerProgress:
                 'wait_reason_counts': dict(sorted(wait_reason_counts.items())),
                 'dominant_wait_reason': dominant_wait_reason,
             })
+            if provider_profile_slots:
+                account_id = provider.get('account_id')
+                profile_slots = provider_profile_slots.get(str(account_id)) if account_id not in (None, '') else None
+                if not profile_slots:
+                    profile_slots = provider_profile_slots.get(provider['name'])
+                if profile_slots:
+                    provider_progress[-1]['profile_slots'] = profile_slots
 
         return sorted(
             provider_progress,
@@ -943,7 +957,8 @@ class StreamCheckerProgress:
     def update(self, channel_id: int, channel_name: str, current: int, total: int,
                current_stream: str = '', status: str = 'checking', step: str = '', step_detail: str = '',
                streams_detail: Optional[List[Dict[str, Any]]] = None, stream_duration: Optional[int] = None,
-               is_single_channel_check: bool = False):
+               is_single_channel_check: bool = False,
+               provider_profile_slots: Optional[Dict[str, List[Dict[str, Any]]]] = None):
         """Update progress information."""
         from apps.database.manager import get_db_manager
         with self.lock:
@@ -963,7 +978,7 @@ class StreamCheckerProgress:
             }
             if streams_detail is not None:
                 progress_data['streams_detail'] = streams_detail
-                provider_progress = self._build_provider_progress(streams_detail)
+                provider_progress = self._build_provider_progress(streams_detail, provider_profile_slots)
                 if provider_progress:
                     progress_data['provider_progress'] = provider_progress
                     progress_data['provider_summary'] = self._build_provider_summary(provider_progress)

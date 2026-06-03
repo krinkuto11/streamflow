@@ -1878,13 +1878,37 @@ class StreamCheckerService:
                     'id': s['id'],
                     'name': s.get('name', f"Stream {s['id']}"),
                     'status': 'pending',
+                    'm3u_account_id': self._get_stream_m3u_account_id(s),
                     'm3u_account': self._get_m3u_account_name(s.get('id'), udi) if hasattr(self, '_get_m3u_account_name') else 'N/A'
                 }
                 for s in streams_to_check
             }
+
+            profile_slot_account_ids = sorted({
+                account_id
+                for account_id in (self._get_stream_m3u_account_id(s) for s in streams_to_check)
+                if account_id not in (None, '')
+            }, key=lambda value: str(value))
+
+            def build_provider_profile_slots():
+                snapshots = {}
+                limiter = get_account_limiter()
+                for account_id in profile_slot_account_ids:
+                    try:
+                        slots = limiter.get_profile_slot_snapshot(account_id)
+                    except Exception as exc:
+                        logger.debug(
+                            "Could not build profile slot snapshot for account %s: %s",
+                            account_id,
+                            exc,
+                        )
+                        slots = []
+                    if slots:
+                        snapshots[str(account_id)] = slots
+                return snapshots
             
             # Start callback for parallel checker
-            def start_callback(stream):
+            def start_callback(stream, profile=None):
                 if self.abort_current_check.is_set():
                     return
 
@@ -1892,6 +1916,12 @@ class StreamCheckerService:
                 if stream_id in stream_statuses:
                     stream_statuses[stream_id]['status'] = 'checking'
                     stream_statuses[stream_id]['started_at'] = datetime.now().isoformat()
+                    if isinstance(profile, dict):
+                        stream_statuses[stream_id]['reserved_profile_id'] = profile.get('id')
+                        stream_statuses[stream_id]['reserved_profile_name'] = (
+                            profile.get('name') or f"Profile {profile.get('id')}"
+                        )
+                        stream_statuses[stream_id]['reserved_profile_limit'] = profile.get('max_streams', 0)
                     self.progress.update(
                         channel_id=channel_id,
                         channel_name=channel_name,
@@ -1902,7 +1932,8 @@ class StreamCheckerService:
                         step='Analyzing streams with account limits',
                         step_detail=f'Started checking {stream.get("name", "Unknown")}',
                         streams_detail=list(stream_statuses.values()),
-                        stream_duration=analysis_params.get('ffmpeg_duration', 30)
+                        stream_duration=analysis_params.get('ffmpeg_duration', 30),
+                        provider_profile_slots=build_provider_profile_slots(),
                     )
             
             def progress_callback(completed, total, result):
@@ -1977,7 +2008,8 @@ class StreamCheckerService:
                     step='Analyzing streams with account limits',
                     step_detail=f'Completed {completed}/{total}',
                     streams_detail=list(stream_statuses.values()),
-                    stream_duration=analysis_params.get('ffmpeg_duration', 30)
+                    stream_duration=analysis_params.get('ffmpeg_duration', 30),
+                    provider_profile_slots=build_provider_profile_slots(),
                 )
 
             def defer_callback(stream, reason):
@@ -1998,7 +2030,8 @@ class StreamCheckerService:
                         step='Analyzing streams with account limits',
                         step_detail=f'Waiting for provider capacity: {stream.get("name", "Unknown")}',
                         streams_detail=list(stream_statuses.values()),
-                        stream_duration=analysis_params.get('ffmpeg_duration', 30)
+                        stream_duration=analysis_params.get('ffmpeg_duration', 30),
+                        provider_profile_slots=build_provider_profile_slots(),
                     )
             
             if streams_to_check:
@@ -2032,7 +2065,8 @@ class StreamCheckerService:
                                 step='Analyzing streams with account limits',
                                 step_detail='Checking streams...',
                                 streams_detail=list(stream_statuses.values()),
-                                stream_duration=analysis_params.get('ffmpeg_duration', 30)
+                                stream_duration=analysis_params.get('ffmpeg_duration', 30),
+                                provider_profile_slots=build_provider_profile_slots(),
                             )
                         except Exception:
                             pass  # never let the heartbeat crash the check
