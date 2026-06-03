@@ -66,6 +66,15 @@ const stateLabels = {
 }
 
 const DEFAULT_PROFILE_SELECT_VALUE = '__teamarr_default_profile__'
+const DEFAULT_PREFLIGHT_STREAM_CHECKING = {
+  enabled: true,
+  remove_dead_streams: false,
+  blank_check_enabled: false,
+  treat_blank_as_dead: false,
+  freeze_check_enabled: false,
+  treat_freeze_as_dead: false,
+  loop_check_enabled: false,
+}
 
 const parseCsv = (value) => (
   String(value || '')
@@ -265,6 +274,49 @@ export default function TeamarrPreflight() {
     const profileId = editedConfig?.forced_profile_id || editedConfig?.default_profile_id || ''
     return profileId ? String(profileId) : DEFAULT_PROFILE_SELECT_VALUE
   }, [editedConfig])
+  const selectedQualityProfile = useMemo(
+    () => profileOptions.find(profile => String(profile.id) === String(selectedProfileValue)) || null,
+    [profileOptions, selectedProfileValue]
+  )
+  const selectedProfileUsesDefaultRules = selectedProfileValue === String(editedConfig?.default_profile_id || '')
+  const selectedStreamChecking = selectedQualityProfile?.stream_checking
+    || (selectedProfileUsesDefaultRules ? DEFAULT_PREFLIGHT_STREAM_CHECKING : null)
+  const qualityRuleSummary = useMemo(() => {
+    if (!selectedStreamChecking) return []
+    const blankEnabled = Boolean(selectedStreamChecking.blank_check_enabled)
+    const freezeEnabled = Boolean(selectedStreamChecking.freeze_check_enabled)
+    return [
+      {
+        label: 'Quality check',
+        value: selectedStreamChecking.enabled === false ? 'Disabled' : 'Enabled',
+        variant: selectedStreamChecking.enabled === false ? 'secondary' : 'default',
+      },
+      {
+        label: 'Dead removal',
+        value: selectedStreamChecking.remove_dead_streams ? 'Removes dead streams' : 'Keeps dead streams',
+        variant: selectedStreamChecking.remove_dead_streams ? 'destructive' : 'secondary',
+      },
+      {
+        label: 'Blank detection',
+        value: blankEnabled
+          ? (selectedStreamChecking.treat_blank_as_dead ? 'Marks dead' : 'Detects only')
+          : 'Off',
+        variant: blankEnabled ? 'destructive' : 'secondary',
+      },
+      {
+        label: 'Freeze detection',
+        value: freezeEnabled
+          ? (selectedStreamChecking.treat_freeze_as_dead ? 'Marks dead' : 'Detects only')
+          : 'Off',
+        variant: freezeEnabled ? 'destructive' : 'secondary',
+      },
+      {
+        label: 'Loop check',
+        value: selectedStreamChecking.loop_check_enabled ? 'On' : 'Off',
+        variant: selectedStreamChecking.loop_check_enabled ? 'destructive' : 'secondary',
+      },
+    ]
+  }, [selectedStreamChecking])
 
   const hydrateInputs = (nextConfig) => {
     setRetryOffsets((nextConfig.retry_offsets_minutes || []).join(', '))
@@ -614,6 +666,18 @@ export default function TeamarrPreflight() {
                 <p className="text-xs text-muted-foreground">
                   Create or edit profiles in Automation Settings; Save stores the selection here.
                 </p>
+                {qualityRuleSummary.length > 0 && (
+                  <div className="grid gap-2 pt-2 sm:grid-cols-2">
+                    {qualityRuleSummary.map(rule => (
+                      <div key={rule.label} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
+                        <span className="min-w-0 text-xs text-muted-foreground">{rule.label}</span>
+                        <Badge variant={rule.variant} className="shrink-0 text-[10px]">
+                          {rule.value}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
 
