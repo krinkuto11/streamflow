@@ -18,6 +18,7 @@ describe('Teamarr preflight event search helpers', () => {
       sport: 'baseball',
       league: 'mlb',
       state: 'past',
+      bucket: 'manual',
       details: { reason: 'active_viewers' },
     },
   ]
@@ -31,6 +32,7 @@ describe('Teamarr preflight event search helpers', () => {
     expect(filterTeamarrEventsBySearch(events, 'soccer ppv')).toEqual([events[0]])
     expect(filterTeamarrEventsBySearch(events, 'baseball')).toEqual([events[1]])
     expect(filterTeamarrEventsBySearch(events, 'past')).toEqual([events[1]])
+    expect(filterTeamarrEventsBySearch(events, 'manual')).toEqual([events[1]])
   })
 
   it('matches latest preflight and decision detail fields', () => {

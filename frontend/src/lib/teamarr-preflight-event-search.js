@@ -12,6 +12,7 @@ const eventSearchFields = (event = {}) => {
     event.sport,
     event.league,
     event.state,
+    event.bucket,
     event.trigger_bucket,
     event.identity,
     event.type,

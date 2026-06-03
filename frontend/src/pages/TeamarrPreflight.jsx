@@ -70,6 +70,7 @@ const stateLabels = {
 const DEFAULT_PROFILE_SELECT_VALUE = '__teamarr_default_profile__'
 const MANAGED_EVENT_DISPLAY_LIMIT = 50
 const RECENT_EVENT_DISPLAY_LIMIT = 50
+const ACTIVE_CHECK_DISPLAY_LIMIT = 20
 const DEFAULT_PREFLIGHT_STREAM_CHECKING = {
   enabled: true,
   remove_dead_streams: false,
@@ -251,8 +252,13 @@ export default function TeamarrPreflight() {
     () => filterTeamarrEventsBySearch(recentEvents, eventSearch),
     [recentEvents, eventSearch]
   )
+  const filteredActiveChecks = useMemo(
+    () => filterTeamarrEventsBySearch(activeChecks, eventSearch),
+    [activeChecks, eventSearch]
+  )
   const displayedUpcomingEvents = filteredUpcomingEvents.slice(0, MANAGED_EVENT_DISPLAY_LIMIT)
   const displayedRecentEvents = filteredRecentEvents.slice(0, RECENT_EVENT_DISPLAY_LIMIT)
+  const displayedActiveChecks = filteredActiveChecks.slice(0, ACTIVE_CHECK_DISPLAY_LIMIT)
   const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
   const eventFilterOptions = useMemo(
     () => collectTeamarrFilterOptions([...upcomingEvents, ...recentEvents]),
@@ -877,6 +883,46 @@ export default function TeamarrPreflight() {
                   ) : null}
                   </div>
                 </TooltipProvider>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Active Event Checks</CardTitle>
+              <CardDescription>
+                {eventSearch.trim()
+                  ? `${filteredActiveChecks.length} of ${activeChecks.length} running checks`
+                  : `${activeChecks.length} running checks`}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {activeChecks.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No active event checks</p>
+              ) : filteredActiveChecks.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No active checks match this search</p>
+              ) : (
+                <div className="space-y-3">
+                  {displayedActiveChecks.map((check, index) => (
+                    <div key={`${check.identity || check.dispatcharr_channel_id || index}-${check.bucket || 'active'}`} className="rounded-md border border-border p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{check.event_name || 'Managed Event'}</p>
+                          <p className="text-sm text-muted-foreground">{check.channel_name || `Channel ${check.dispatcharr_channel_id || 'N/A'}`}</p>
+                        </div>
+                        <Badge variant="secondary">{check.bucket || 'manual'}</Badge>
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        Started {formatTimestamp(check.started_at)}
+                      </p>
+                    </div>
+                  ))}
+                  {filteredActiveChecks.length > displayedActiveChecks.length ? (
+                    <p className="text-xs text-muted-foreground">
+                      Showing {displayedActiveChecks.length} of {filteredActiveChecks.length} matching active checks
+                    </p>
+                  ) : null}
+                </div>
               )}
             </CardContent>
           </Card>
