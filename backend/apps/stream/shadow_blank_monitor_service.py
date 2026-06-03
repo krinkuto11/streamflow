@@ -188,6 +188,7 @@ class ShadowBlankMonitorService:
         self._config = self._load_config()
         self._events: deque[Dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._watched: Dict[str, Dict[str, Any]] = {}
+        self._watcher_absences: Dict[str, Dict[str, Any]] = {}
         self._blank_counts: Dict[str, int] = defaultdict(int)
         self._cooldowns: Dict[str, float] = {}
         self._switch_history: Dict[str, deque[float]] = defaultdict(deque)
@@ -257,6 +258,7 @@ class ShadowBlankMonitorService:
                 self._save_config()
             self._stop_event.set()
             self._watched = {}
+            self._watcher_absences = {}
             thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=5)
@@ -336,6 +338,19 @@ class ShadowBlankMonitorService:
 
         targets: List[Dict[str, Any]] = []
         watched: Dict[str, Dict[str, Any]] = {}
+        continuity_events: List[tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        continuous_mode = config.get("watch_mode") == "continuous"
+        now = self.clock()
+        with self._lock:
+            previous_watched = {
+                channel_uuid: dict(target)
+                for channel_uuid, target in self._watched.items()
+            }
+            previous_absences = {
+                channel_uuid: dict(absence)
+                for channel_uuid, absence in self._watcher_absences.items()
+            }
+        next_absences: Dict[str, Dict[str, Any]] = {}
 
         for key, raw_status in proxy_status.items():
             if not self._is_status_active(raw_status):
@@ -372,11 +387,74 @@ class ShadowBlankMonitorService:
                 "cooldown_seconds": self._cooldown_remaining(channel_uuid),
             }
             target.update(watcher_details)
+            if continuous_mode:
+                previous_target = previous_watched.get(channel_uuid) or {}
+                previous_absence = previous_absences.get(channel_uuid)
+                previous_watcher_count = int(previous_target.get("watcher_client_count") or 0)
+                previous_watcher_ref = previous_target.get("watcher_client_ref")
+                watcher_ref = target.get("watcher_client_ref")
+                if watcher_clients > 0:
+                    target["watcher_state"] = "watching"
+                    if previous_absence:
+                        since = float(previous_absence.get("since") or now)
+                        recovered_after = max(0, int(now - since))
+                        target["watcher_recovered_after_seconds"] = recovered_after
+                        continuity_events.append((
+                            "watcher_recovered",
+                            dict(target),
+                            {
+                                "downtime_seconds": recovered_after,
+                                "last_watcher_client_ref": previous_absence.get("last_watcher_client_ref"),
+                                "watcher_client_ref": target.get("watcher_client_ref"),
+                            },
+                        ))
+                    elif (
+                        previous_watcher_count > 0
+                        and previous_watcher_ref
+                        and watcher_ref
+                        and watcher_ref != previous_watcher_ref
+                    ):
+                        target["watcher_recovered_after_seconds"] = 0
+                        continuity_events.append((
+                            "watcher_recovered",
+                            dict(target),
+                            {
+                                "downtime_seconds": 0,
+                                "last_watcher_client_ref": previous_watcher_ref,
+                                "watcher_client_ref": watcher_ref,
+                            },
+                        ))
+                elif previous_watcher_count > 0 or previous_absence:
+                    absence = previous_absence or {
+                        "since": now,
+                        "last_watcher_client_ref": previous_target.get("watcher_client_ref"),
+                    }
+                    since = float(absence.get("since") or now)
+                    target["watcher_state"] = "reconnecting"
+                    target["watcher_absent_since"] = since
+                    target["watcher_absent_seconds"] = max(0, int(now - since))
+                    if absence.get("last_watcher_client_ref"):
+                        target["last_watcher_client_ref"] = absence.get("last_watcher_client_ref")
+                    next_absences[channel_uuid] = dict(absence)
+                    if not previous_absence:
+                        continuity_events.append((
+                            "watcher_reconnecting",
+                            dict(target),
+                            {
+                                "last_watcher_client_ref": absence.get("last_watcher_client_ref"),
+                                "watcher_absent_seconds": target["watcher_absent_seconds"],
+                            },
+                        ))
+                else:
+                    target["watcher_state"] = "waiting"
             targets.append(target)
             watched[channel_uuid] = dict(target)
 
         with self._lock:
             self._watched = watched
+            self._watcher_absences = next_absences if continuous_mode else {}
+        for event_type, event_target, details in continuity_events:
+            self._record_event(event_type, event_target, details)
         return targets
 
     def _probe_targets(self, udi: Any, targets: Iterable[Dict[str, Any]], config: Dict[str, Any]) -> None:
@@ -441,10 +519,14 @@ class ShadowBlankMonitorService:
                 target = dict(target)
                 target["real_client_count"] = self._real_client_count(fresh_status, config)
                 target.update(self._watcher_client_details(fresh_status, config))
+                watcher_count = int(target.get("watcher_client_count") or 0)
+                target["watcher_state"] = "watching" if watcher_count > 0 else "reconnecting"
                 stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
                 target["stream_id"] = stream_id
                 target["stream_ref"] = _ref("stream", stream_id)
                 with self._lock:
+                    if watcher_count > 0:
+                        self._watcher_absences.pop(channel_uuid, None)
                     self._watched[channel_uuid] = dict(target)
         finally:
             with self._lock:
@@ -1119,6 +1201,11 @@ class ShadowBlankMonitorService:
             "watcher_client_ref",
             "watcher_connected_at",
             "watcher_uptime_seconds",
+            "watcher_state",
+            "watcher_absent_since",
+            "watcher_absent_seconds",
+            "watcher_recovered_after_seconds",
+            "last_watcher_client_ref",
             "state",
             "cooldown_seconds",
             "last_probe",

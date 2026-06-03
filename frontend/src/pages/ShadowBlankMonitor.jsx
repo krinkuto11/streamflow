@@ -57,6 +57,8 @@ const eventLabels = {
   switch_rate_limited: 'Rate Limited',
   viewer_left: 'Viewer Left',
   quality_check_active: 'Quality Check Active',
+  watcher_reconnecting: 'Watcher Reconnecting',
+  watcher_recovered: 'Watcher Recovered',
 }
 
 const parseCsv = (value, numeric = false) => {
@@ -491,7 +493,18 @@ export default function ShadowBlankMonitor() {
                         {formatDuration(channel.watcher_uptime_seconds) && (
                           <span>watching for {formatDuration(channel.watcher_uptime_seconds)}</span>
                         )}
-                        {channel.last_event && <Badge variant="secondary">{formatEvent(channel.last_event)}</Badge>}
+                        {channel.watcher_state === 'reconnecting' && (
+                          <Badge variant="outline">Watcher reconnecting</Badge>
+                        )}
+                        {channel.watcher_state === 'reconnecting' && formatDuration(channel.watcher_absent_seconds) && (
+                          <span>missing for {formatDuration(channel.watcher_absent_seconds)}</span>
+                        )}
+                        {channel.last_event?.type === 'watcher_recovered' && (
+                          <Badge variant="secondary">Watcher recovered</Badge>
+                        )}
+                        {channel.last_event && !['watcher_reconnecting', 'watcher_recovered'].includes(channel.last_event.type) && (
+                          <Badge variant="secondary">{formatEvent(channel.last_event)}</Badge>
+                        )}
                         {channel.last_probe?.freeze_detected && <Badge variant="outline">Frozen</Badge>}
                         {channel.last_probe?.blank_detected && <Badge variant="outline">Blank</Badge>}
                       </div>

@@ -539,6 +539,121 @@ def test_watched_status_includes_sanitized_watcher_identity(tmp_path):
     assert "raw-watcher-client-id" not in repr(status)
 
 
+def test_continuous_watcher_reconnects_are_visible_without_raw_client_ids(tmp_path):
+    now = {"value": 1000.0}
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-old-watcher",
+                            "connected_at": 990.0,
+                        },
+                    ],
+                )
+            },
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[{"user_agent": "VLC"}],
+                )
+            },
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-new-watcher",
+                            "connected_at": 1010.0,
+                        },
+                    ],
+                )
+            },
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    config = normalize_config({"watch_mode": "continuous"})
+
+    service.discover_active_targets(udi, config)
+    watched = service.get_status()["watched_channels"][0]
+    assert watched["watcher_state"] == "watching"
+    assert watched["watcher_client_count"] == 1
+
+    now["value"] = 1005.0
+    service.discover_active_targets(udi, config)
+    status = service.get_status()
+    watched = status["watched_channels"][0]
+    assert watched["watcher_state"] == "reconnecting"
+    assert watched["watcher_absent_seconds"] == 0
+    assert status["recent_events"][0]["type"] == "watcher_reconnecting"
+
+    now["value"] = 1012.0
+    service.discover_active_targets(udi, config)
+    status = service.get_status()
+    watched = status["watched_channels"][0]
+    assert watched["watcher_state"] == "watching"
+    assert watched["watcher_recovered_after_seconds"] == 7
+    assert status["recent_events"][0]["type"] == "watcher_recovered"
+    assert status["recent_events"][0]["details"]["downtime_seconds"] == 7
+    assert "raw-old-watcher" not in repr(status)
+    assert "raw-new-watcher" not in repr(status)
+
+
+def test_continuous_watcher_ref_change_is_recorded_as_recovery(tmp_path):
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-old-watcher",
+                            "connected_at": 990.0,
+                        },
+                    ],
+                )
+            },
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-new-watcher",
+                            "connected_at": 1001.0,
+                        },
+                    ],
+                )
+            },
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: 1005.0)
+    config = normalize_config({"watch_mode": "continuous"})
+
+    service.discover_active_targets(udi, config)
+    service.discover_active_targets(udi, config)
+    status = service.get_status()
+    watched = status["watched_channels"][0]
+
+    assert watched["watcher_state"] == "watching"
+    assert watched["watcher_recovered_after_seconds"] == 0
+    assert status["recent_events"][0]["type"] == "watcher_recovered"
+    assert status["recent_events"][0]["details"]["downtime_seconds"] == 0
+    assert "raw-old-watcher" not in repr(status)
+    assert "raw-new-watcher" not in repr(status)
+
+
 def test_continuous_mode_starts_uncovered_target_when_another_has_watcher(tmp_path):
     probe_urls = []
     udi = FakeUdi(
