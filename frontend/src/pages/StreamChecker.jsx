@@ -1074,7 +1074,7 @@ export default function StreamChecker() {
                             </SelectContent>
                           </Select>
                           <p className="text-xs text-muted-foreground">
-                            Use CUDA for NVIDIA containers when available
+                            Auto uses any FFmpeg hardware method reported below; choose VAAPI or QSV for DRI devices when needed
                           </p>
                         </div>
 
