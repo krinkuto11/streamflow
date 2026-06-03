@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { operatorHelpQuickChecks, operatorHelpSections } from './operator-help-content.js'
+import {
+  getOperatorHelpDetailTopic,
+  operatorHelpDetailGuidePrinciples,
+  operatorHelpDetailTopics,
+  operatorHelpQuickChecks,
+  operatorHelpSections,
+} from './operator-help-content.js'
 
 describe('operatorHelpSections', () => {
   it('covers the non-Teamarr V3 operator areas', () => {
@@ -7,11 +13,14 @@ describe('operatorHelpSections', () => {
       'startup-cache',
       'profiles-periods',
       'stream-checker',
+      'teamarr-preflight',
       'shadow-monitor',
       'hardware',
       'troubleshooting',
     ])
-    expect(operatorHelpQuickChecks).toHaveLength(5)
+    expect(operatorHelpQuickChecks).toHaveLength(6)
+    expect(operatorHelpDetailGuidePrinciples.join(' ')).toMatch(/platform neutral/i)
+    expect(operatorHelpDetailGuidePrinciples.join(' ')).toMatch(/settings reference/)
 
     const profilesPeriods = operatorHelpSections.find(section => section.id === 'profiles-periods')
     expect(profilesPeriods.items.join(' ')).toMatch(/Missed-run grace/)
@@ -27,6 +36,10 @@ describe('operatorHelpSections', () => {
     const streamChecker = operatorHelpSections.find(section => section.id === 'stream-checker')
     expect(streamChecker.items.join(' ')).toMatch(/Dead, Blank, and Frozen/)
     expect(streamChecker.items.join(' ')).toMatch(/cumulative stream results/)
+
+    const teamarr = operatorHelpSections.find(section => section.id === 'teamarr-preflight')
+    expect(teamarr.items.join(' ')).toMatch(/Post-start checks/)
+    expect(teamarr.links.map(link => link.to)).toContain('/help/teamarr-preflight')
 
     const shadowMonitor = operatorHelpSections.find(section => section.id === 'shadow-monitor')
     expect(shadowMonitor.items.join(' ')).toMatch(/Channel Switch Limit/)
@@ -52,5 +65,44 @@ describe('operatorHelpSections', () => {
     expect(visibleText).not.toMatch(/normal users/i)
     expect(visibleText).not.toMatch(new RegExp('un' + 'raid', 'i'))
     expect(visibleText).not.toMatch(/playlist refresh completed/i)
+  })
+
+  it('provides platform-neutral detailed guide topics with settings explanations', () => {
+    expect(operatorHelpDetailTopics.map(topic => topic.id)).toEqual([
+      'setup',
+      'automation-periods',
+      'stream-checker',
+      'teamarr-preflight',
+      'shadow-monitor',
+      'hardware-fallback',
+    ])
+
+    for (const topic of operatorHelpDetailTopics) {
+      expect(topic.visual.steps.length).toBeGreaterThanOrEqual(4)
+      expect(topic.steps.length).toBeGreaterThanOrEqual(4)
+      expect(topic.settings.length).toBeGreaterThanOrEqual(4)
+      expect(topic.smokeChecks.length).toBeGreaterThanOrEqual(3)
+      expect(topic.links.length).toBeGreaterThanOrEqual(1)
+
+      for (const setting of topic.settings) {
+        expect(setting).toEqual(expect.objectContaining({
+          name: expect.any(String),
+          defaultValue: expect.any(String),
+          effect: expect.any(String),
+          useWhen: expect.any(String),
+          risk: expect.any(String),
+        }))
+      }
+    }
+
+    expect(getOperatorHelpDetailTopic('teamarr-preflight').settings.map(setting => setting.name)).toContain('Post-Start Checks')
+    expect(getOperatorHelpDetailTopic('shadow-monitor').settings.map(setting => setting.name)).toContain('Channel Switch Limit')
+    expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
+    expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')
+    expect(getOperatorHelpDetailTopic('missing-topic')).toBeNull()
+
+    const visibleText = JSON.stringify(operatorHelpDetailTopics)
+    expect(visibleText).not.toMatch(new RegExp('un' + 'raid', 'i'))
+    expect(visibleText).not.toMatch(/platform-specific/i)
   })
 })

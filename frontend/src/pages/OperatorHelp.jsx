@@ -1,6 +1,7 @@
-import { Link } from 'react-router-dom'
+import { Link, Navigate, useParams } from 'react-router-dom'
 import {
   ArrowRight,
+  ArrowLeft,
   CheckCircle2,
   CircleHelp,
   Cpu,
@@ -9,22 +10,171 @@ import {
   ListChecks,
   RotateCw,
   ShieldCheck,
+  CalendarCheck,
 } from 'lucide-react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Button } from '@/components/ui/button.jsx'
-import { operatorHelpQuickChecks, operatorHelpSections } from '@/lib/operator-help-content.js'
+import {
+  getOperatorHelpDetailTopic,
+  operatorHelpDetailGuidePrinciples,
+  operatorHelpQuickChecks,
+  operatorHelpSections,
+} from '@/lib/operator-help-content.js'
 
 const sectionIcons = {
   'startup-cache': RotateCw,
   'profiles-periods': ListChecks,
   'stream-checker': Gauge,
+  'teamarr-preflight': CalendarCheck,
   'shadow-monitor': Eye,
   hardware: Cpu,
   troubleshooting: ShieldCheck,
+  setup: RotateCw,
+  'automation-periods': ListChecks,
+  'hardware-fallback': Cpu,
 }
 
 export default function OperatorHelp() {
+  const { topicId } = useParams()
+  const topic = topicId ? getOperatorHelpDetailTopic(topicId) : null
+
+  if (topicId && !topic) {
+    return <Navigate to="/help" replace />
+  }
+
+  if (topic) {
+    const Icon = sectionIcons[topic.id] || CircleHelp
+
+    return (
+      <div className="space-y-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-2">
+            <Button asChild variant="outline" size="sm" className="w-fit">
+              <Link to="/help">
+                <ArrowLeft className="mr-2 h-3.5 w-3.5" />
+                Help Overview
+              </Link>
+            </Button>
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 items-center justify-center rounded-md border border-border bg-card">
+                <Icon className="h-5 w-5 text-primary" />
+              </div>
+              <div>
+                <h1 className="text-3xl font-bold tracking-tight">{topic.title}</h1>
+                <p className="max-w-3xl text-muted-foreground">{topic.summary}</p>
+              </div>
+            </div>
+          </div>
+          <Badge variant="outline" className="w-fit px-3 py-1 text-sm">Detailed Guide</Badge>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>{topic.visual.title}</CardTitle>
+            <CardDescription>Visual flow for the work area</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-3 md:grid-cols-4">
+              {topic.visual.steps.map((step, index) => (
+                <div key={step} className="min-h-24 rounded-md border border-border bg-muted/30 p-3">
+                  <div className="mb-3 flex items-center justify-between">
+                    <Badge variant="secondary">{index + 1}</Badge>
+                    {index < topic.visual.steps.length - 1 ? (
+                      <ArrowRight className="h-4 w-4 text-muted-foreground" />
+                    ) : (
+                      <CheckCircle2 className="h-4 w-4 text-primary" />
+                    )}
+                  </div>
+                  <p className="text-sm font-medium">{step}</p>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+          <Card>
+            <CardHeader>
+              <CardTitle>Step By Step</CardTitle>
+              <CardDescription>Use these checks before changing wider automation behavior</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <ol className="space-y-3 text-sm text-muted-foreground">
+                {topic.steps.map((step, index) => (
+                  <li key={step} className="flex gap-3">
+                    <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-border bg-background text-xs font-semibold text-foreground">
+                      {index + 1}
+                    </span>
+                    <span>{step}</span>
+                  </li>
+                ))}
+              </ol>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Settings Reference</CardTitle>
+              <CardDescription>What each setting does, when to use it, and what to watch</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {topic.settings.map((setting) => (
+                <div key={setting.name} className="rounded-md border border-border p-3">
+                  <div className="mb-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                    <h3 className="text-sm font-semibold">{setting.name}</h3>
+                    <Badge variant="outline" className="w-fit">{setting.defaultValue}</Badge>
+                  </div>
+                  <dl className="grid gap-2 text-sm text-muted-foreground">
+                    <div>
+                      <dt className="font-medium text-foreground">Effect</dt>
+                      <dd>{setting.effect}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-foreground">Use When</dt>
+                      <dd>{setting.useWhen}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-foreground">Watch Out</dt>
+                      <dd>{setting.risk}</dd>
+                    </div>
+                  </dl>
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        </div>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Smoke Checks</CardTitle>
+            <CardDescription>Platform-neutral checks that confirm the setting is doing what you expect</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <ul className="space-y-2 text-sm text-muted-foreground">
+              {topic.smokeChecks.map((check) => (
+                <li key={check} className="flex gap-2">
+                  <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+                  <span>{check}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex flex-wrap gap-2">
+              {topic.links.map((link) => (
+                <Button key={link.to} asChild variant="outline" size="sm">
+                  <Link to={link.to}>
+                    {link.label}
+                    <ArrowRight className="ml-2 h-3.5 w-3.5" />
+                  </Link>
+                </Button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
@@ -48,6 +198,14 @@ export default function OperatorHelp() {
           >
             <CheckCircle2 className="h-4 w-4 shrink-0 text-primary" />
             <span>{check}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {operatorHelpDetailGuidePrinciples.map((principle) => (
+          <div key={principle} className="rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+            {principle}
           </div>
         ))}
       </div>

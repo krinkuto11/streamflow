@@ -189,6 +189,7 @@ function App() {
                 <Route path="/scheduling" element={<Scheduling />} />
                 <Route path="/stats" element={<StatsDashboard />} />
                 <Route path="/help" element={<OperatorHelp />} />
+                <Route path="/help/:topicId" element={<OperatorHelp />} />
                 <Route path="/changelog" element={<Changelog />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
