@@ -21,6 +21,7 @@ export const operatorHelpSections = [
       'Use checking-only profiles for targeted quality passes without playlist refresh or stream matching.',
       'Playlist Priority Rank applies only when the selected stream priority mode uses rank.',
       'Startup catch-up is opt-in per period and only covers the safe first/no-last-run case.',
+      'Missed-run grace keeps late automatic runs bounded; 0 keeps the existing schedule behavior.',
     ],
     links: [
       { label: 'Automation Settings', to: '/settings' },

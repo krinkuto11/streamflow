@@ -12,6 +12,9 @@ describe('operatorHelpSections', () => {
       'troubleshooting',
     ])
     expect(operatorHelpQuickChecks).toHaveLength(5)
+
+    const profilesPeriods = operatorHelpSections.find(section => section.id === 'profiles-periods')
+    expect(profilesPeriods.items.join(' ')).toMatch(/Missed-run grace/)
   })
 
   it('does not expose internal planning or priority wording', () => {
