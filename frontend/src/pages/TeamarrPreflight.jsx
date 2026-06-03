@@ -13,6 +13,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
+import { filterTeamarrEventsBySearch } from '@/lib/teamarr-preflight-event-search.js'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import {
   Activity,
@@ -24,6 +25,7 @@ import {
   PlayCircle,
   RefreshCw,
   Save,
+  Search,
   StopCircle,
 } from 'lucide-react'
 
@@ -66,6 +68,8 @@ const stateLabels = {
 }
 
 const DEFAULT_PROFILE_SELECT_VALUE = '__teamarr_default_profile__'
+const MANAGED_EVENT_DISPLAY_LIMIT = 50
+const RECENT_EVENT_DISPLAY_LIMIT = 50
 const DEFAULT_PREFLIGHT_STREAM_CHECKING = {
   enabled: true,
   remove_dead_streams: false,
@@ -227,6 +231,7 @@ export default function TeamarrPreflight() {
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
   const [forceEvent, setForceEvent] = useState(null)
+  const [eventSearch, setEventSearch] = useState('')
   const { toast } = useToast()
 
   useEffect(() => {
@@ -238,6 +243,16 @@ export default function TeamarrPreflight() {
   const upcomingEvents = status?.upcoming_events || []
   const recentEvents = status?.recent_events || []
   const activeChecks = status?.active_checks || []
+  const filteredUpcomingEvents = useMemo(
+    () => filterTeamarrEventsBySearch(upcomingEvents, eventSearch),
+    [upcomingEvents, eventSearch]
+  )
+  const filteredRecentEvents = useMemo(
+    () => filterTeamarrEventsBySearch(recentEvents, eventSearch),
+    [recentEvents, eventSearch]
+  )
+  const displayedUpcomingEvents = filteredUpcomingEvents.slice(0, MANAGED_EVENT_DISPLAY_LIMIT)
+  const displayedRecentEvents = filteredRecentEvents.slice(0, RECENT_EVENT_DISPLAY_LIMIT)
   const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
   const eventFilterOptions = useMemo(
     () => collectTeamarrFilterOptions([...upcomingEvents, ...recentEvents]),
@@ -758,18 +773,34 @@ export default function TeamarrPreflight() {
         </Card>
 
         <div className="space-y-6">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={eventSearch}
+              onChange={(event) => setEventSearch(event.target.value)}
+              className="pl-9"
+              placeholder="Search events"
+            />
+          </div>
+
           <Card>
             <CardHeader>
               <CardTitle>Managed Events</CardTitle>
-              <CardDescription>Upcoming Teamarr event channels</CardDescription>
+              <CardDescription>
+                {eventSearch.trim()
+                  ? `${filteredUpcomingEvents.length} of ${upcomingEvents.length} upcoming Teamarr event channels`
+                  : `${upcomingEvents.length} upcoming Teamarr event channels`}
+              </CardDescription>
             </CardHeader>
             <CardContent>
               {upcomingEvents.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No events found</p>
+              ) : filteredUpcomingEvents.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No managed events match this search</p>
               ) : (
                 <TooltipProvider delayDuration={200}>
                   <div className="space-y-3">
-                  {upcomingEvents.slice(0, 12).map(event => {
+                  {displayedUpcomingEvents.map(event => {
                     const lastPreflightEvent = event.last_preflight_event || null
                     const lastPreflightDetails = recentEventDetailParts(lastPreflightEvent)
                     const checkSummary = eventCheckSummary(event, lastPreflightEvent)
@@ -839,6 +870,11 @@ export default function TeamarrPreflight() {
                       </div>
                     )
                   })}
+                  {filteredUpcomingEvents.length > displayedUpcomingEvents.length ? (
+                    <p className="text-xs text-muted-foreground">
+                      Showing {displayedUpcomingEvents.length} of {filteredUpcomingEvents.length} matching managed events
+                    </p>
+                  ) : null}
                   </div>
                 </TooltipProvider>
               )}
@@ -848,14 +884,20 @@ export default function TeamarrPreflight() {
           <Card>
             <CardHeader>
               <CardTitle>Recent Events</CardTitle>
-              <CardDescription>Latest connector decisions</CardDescription>
+              <CardDescription>
+                {eventSearch.trim()
+                  ? `${filteredRecentEvents.length} of ${recentEvents.length} latest connector decisions`
+                  : `${recentEvents.length} latest connector decisions`}
+              </CardDescription>
             </CardHeader>
             <CardContent>
               {recentEvents.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No events recorded</p>
+              ) : filteredRecentEvents.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No recent events match this search</p>
               ) : (
                 <div className="space-y-3">
-                  {recentEvents.slice(0, 10).map((event, index) => {
+                  {displayedRecentEvents.map((event, index) => {
                     const detailParts = recentEventDetailParts(event)
                     return (
                       <div key={`${event.timestamp}-${index}`} className="grid gap-3 border-b border-border pb-3 last:border-b-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_4.75rem]">
@@ -884,6 +926,11 @@ export default function TeamarrPreflight() {
                       </div>
                     )
                   })}
+                  {filteredRecentEvents.length > displayedRecentEvents.length ? (
+                    <p className="text-xs text-muted-foreground">
+                      Showing {displayedRecentEvents.length} of {filteredRecentEvents.length} matching recent events
+                    </p>
+                  ) : null}
                 </div>
               )}
             </CardContent>
