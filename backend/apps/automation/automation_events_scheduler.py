@@ -293,6 +293,44 @@ class AutomationEventsScheduler:
                 'cached_at': current_time.isoformat(),
                 'from_cache': False
             }
+
+    def get_cached_events_snapshot(self, hours_ahead: int = 24, max_events: int = 100) -> Dict[str, Any]:
+        """Return the in-memory events cache without recalculating.
+
+        This is used while UDI initialization is still running. Calculating fresh
+        events can require channel/profile data and may block on UDI startup, so
+        startup callers get the last known snapshot or an explicit initializing
+        empty response instead.
+        """
+        with self._lock:
+            current_time = datetime.now()
+            if self._cache is None or self._cache_timestamp is None:
+                return {
+                    'events': [],
+                    'cached_at': None,
+                    'from_cache': False,
+                    'cache_only': True,
+                    'stale': False,
+                }
+
+            end_time = current_time + timedelta(hours=hours_ahead)
+            events = []
+            for event in self._cache:
+                try:
+                    event_time = datetime.fromisoformat(str(event.get('time')))
+                except (TypeError, ValueError):
+                    event_time = None
+                if event_time is None or event_time <= end_time:
+                    events.append(event)
+
+            age_seconds = (current_time - self._cache_timestamp).total_seconds()
+            return {
+                'events': events[:max_events],
+                'cached_at': self._cache_timestamp.isoformat(),
+                'from_cache': True,
+                'cache_only': True,
+                'stale': age_seconds > CACHE_VALIDITY_SECONDS,
+            }
     
     def invalidate_cache(self):
         """Invalidate the events cache."""

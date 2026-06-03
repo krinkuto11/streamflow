@@ -1,6 +1,9 @@
 from flask import Flask
 
-from apps.api.automation_handlers import handle_automation_periods_response
+from apps.api.automation_handlers import (
+    get_upcoming_automation_events_response,
+    handle_automation_periods_response,
+)
 from apps.api.stream_sessions_handlers import (
     get_playing_streams_response,
     get_proxy_status_response,
@@ -28,6 +31,31 @@ class ShadowMonitorStub:
 
     def get_status(self):
         return {"running": True, "enabled": True}
+
+
+class AutomationEventsSchedulerStub:
+    def get_cached_events_snapshot(self, hours_ahead, max_events):
+        return {
+            "events": [
+                {
+                    "time": "2026-06-03T22:00:00",
+                    "period_id": "1",
+                    "period_name": "Full Check",
+                }
+            ],
+            "cached_at": "2026-06-03T08:55:00",
+            "from_cache": True,
+            "cache_only": True,
+            "stale": True,
+        }
+
+    def get_cached_events(self, hours_ahead, max_events, force_refresh=False):
+        raise AssertionError("startup upcoming events response must not recalculate events")
+
+
+class AutomationConfigManagerStub:
+    def get_global_settings(self):
+        return {"regular_automation_enabled": True}
 
 
 def test_proxy_status_returns_empty_while_udi_initializes():
@@ -100,3 +128,23 @@ def test_automation_periods_returns_empty_page_while_udi_initializes():
         "has_prev": False,
         "initializing": True,
     }
+
+
+def test_upcoming_events_returns_cache_snapshot_while_udi_initializes():
+    app = Flask(__name__)
+
+    with app.app_context():
+        response, status_code = get_upcoming_automation_events_response(
+            args={"hours": "24", "max_events": "100", "force_refresh": "true"},
+            get_events_scheduler=lambda: AutomationEventsSchedulerStub(),
+            get_automation_config_manager=lambda: AutomationConfigManagerStub(),
+            get_udi_manager=lambda: InitializingUdi(),
+        )
+
+    assert status_code == 200
+    payload = response.get_json()
+    assert payload["initializing"] is True
+    assert payload["from_cache"] is True
+    assert payload["cache_only"] is True
+    assert payload["automation_enabled"] is True
+    assert payload["events"][0]["period_name"] == "Full Check"

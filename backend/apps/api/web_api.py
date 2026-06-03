@@ -2031,6 +2031,7 @@ def get_upcoming_automation_events():
         args=request.args,
         get_events_scheduler=get_events_scheduler,
         get_automation_config_manager=get_automation_config_manager,
+        get_udi_manager=get_udi_manager,
     )
 
 

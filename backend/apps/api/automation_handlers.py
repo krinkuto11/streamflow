@@ -1058,6 +1058,7 @@ def get_upcoming_automation_events_response(
     args: Any,
     get_events_scheduler: Callable[[], Any],
     get_automation_config_manager: Callable[[], Any],
+    get_udi_manager: Optional[Callable[[], Any]] = None,
 ):
     """Get upcoming automation events based on configured periods."""
     try:
@@ -1068,7 +1069,19 @@ def get_upcoming_automation_events_response(
         period_id_filter = args.get("period_id")
         force_refresh = args.get("force_refresh", "").lower() == "true"
 
-        result = events_scheduler.get_cached_events(hours_ahead, max_events, force_refresh)
+        initializing = False
+        if get_udi_manager is not None:
+            try:
+                udi = get_udi_manager()
+                initializing = bool(getattr(udi, "is_initialization_pending", lambda: False)())
+            except Exception as exc:
+                logger.debug(f"Could not read UDI initialization state for upcoming events: {exc}")
+
+        if initializing:
+            result = events_scheduler.get_cached_events_snapshot(hours_ahead, max_events)
+            result["initializing"] = True
+        else:
+            result = events_scheduler.get_cached_events(hours_ahead, max_events, force_refresh)
 
         config_manager = get_automation_config_manager()
         global_settings = config_manager.get_global_settings()
