@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { getProfileSlotDisplay, getProviderWaitReasonDisplay } from './provider-progress-display'
+import {
+  getCheckerConcurrencyDisplay,
+  getParallelProgressBadgeText,
+  getProfileSlotDisplay,
+  getProviderWaitReasonDisplay,
+} from './provider-progress-display'
 
 describe('getProviderWaitReasonDisplay', () => {
   it('uses concise operator wording for checker-owned capacity waits', () => {
@@ -66,6 +71,41 @@ describe('getProviderWaitReasonDisplay', () => {
       text: 'Default: open',
       title: 'Default: 0 viewer, 2 checking, unlimited capacity',
       unlimited: true,
+    })
+  })
+
+  it('does not render a zero-worker parallel badge while active checks are visible', () => {
+    expect(getParallelProgressBadgeText(
+      { parallel: { enabled: true, max_workers: 0 } },
+      { checking_streams: 4 },
+    )).toBe('Parallel (4 active)')
+  })
+
+  it('renders configured parallel capacity when available', () => {
+    expect(getParallelProgressBadgeText(
+      { parallel: { enabled: true, max_workers: 10 } },
+      { checking_streams: 4 },
+    )).toBe('Parallel (10 workers)')
+  })
+
+  it('hides the parallel badge when parallel checking is disabled', () => {
+    expect(getParallelProgressBadgeText(
+      { parallel: { enabled: false, max_workers: 0 } },
+      { checking_streams: 4 },
+    )).toBeNull()
+  })
+
+  it('describes missing dashboard worker capacity as sequential', () => {
+    expect(getCheckerConcurrencyDisplay({ parallel: { max_workers: 0 } })).toEqual({
+      text: 'Sequential',
+      active: false,
+    })
+  })
+
+  it('describes dashboard worker capacity when configured', () => {
+    expect(getCheckerConcurrencyDisplay({ parallel: { max_workers: 6 } })).toEqual({
+      text: '6 Workers',
+      active: true,
     })
   })
 })

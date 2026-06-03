@@ -11,6 +11,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
 import { getDashboardRunMetrics } from '@/lib/dashboard-run-counts.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
+import { getCheckerConcurrencyDisplay } from '@/lib/provider-progress-display.js'
 import {
   getAbortedRunDisplay,
   getDashboardActionStates,
@@ -472,6 +473,7 @@ export default function Dashboard() {
   const inProgress    = streamCheckerStatus?.queue?.in_progress || 0
   const queueState    = streamCheckerStatus?.queue?.state || 'idle'
   const streamCheckerEtaDisplay = getQueueEtaDisplay(streamCheckerStatus?.queue)
+  const checkerConcurrencyDisplay = getCheckerConcurrencyDisplay(streamCheckerStatus)
   const totalProcessed = completed
   const batchTotal    = completed + inProgress + queueSize
   const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
@@ -1189,8 +1191,8 @@ export default function Dashboard() {
               <div className="flex justify-between items-center">
                 <dt className="text-muted-foreground">Checker Concurrency:</dt>
                 <dd>
-                  <Badge variant={(streamCheckerStatus?.parallel?.max_workers || 0) > 0 ? "outline" : "secondary"}>
-                    {streamCheckerStatus?.parallel?.max_workers || 0} Workers
+                  <Badge variant={checkerConcurrencyDisplay.active ? "outline" : "secondary"}>
+                    {checkerConcurrencyDisplay.text}
                   </Badge>
                 </dd>
               </div>

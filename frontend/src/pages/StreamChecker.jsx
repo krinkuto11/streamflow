@@ -16,7 +16,7 @@ import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js
 import { formatDuration } from '@/lib/time-format.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote } from '@/lib/hardware-status-display.js'
-import { getProfileSlotDisplay, getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
+import { getParallelProgressBadgeText, getProfileSlotDisplay, getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
 import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
   Activity,
@@ -373,6 +373,7 @@ export default function StreamChecker() {
   const batchProgress = totalBatch > 0 ? ((completed + failed) / totalBatch) * 100 : 0
   const providerProgress = progress?.provider_progress || []
   const providerSummary = progress?.provider_summary || {}
+  const parallelProgressBadgeText = getParallelProgressBadgeText(status, providerSummary)
   const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
   const selectedStartChannel = startChannels.find(channel => String(channel.id) === String(queueStartChannelId))
   const firstStartChannel = startChannels[0]
@@ -599,9 +600,9 @@ export default function StreamChecker() {
 
             <div className="flex items-center gap-2 text-sm pb-2 border-b">
               <Badge variant="outline">{progress.status}</Badge>
-              {status?.parallel?.enabled && (
+              {parallelProgressBadgeText && (
                 <Badge variant="secondary">
-                  Parallel ({status.parallel.max_workers} workers)
+                  {parallelProgressBadgeText}
                 </Badge>
               )}
             </div>

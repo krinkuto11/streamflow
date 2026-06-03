@@ -57,3 +57,34 @@ export function getProfileSlotDisplay(slot = {}) {
     unlimited,
   }
 }
+
+export function getParallelProgressBadgeText(status = {}, providerSummary = {}) {
+  if (!status?.parallel?.enabled) return null
+
+  const maxWorkers = Number(status.parallel.max_workers || 0)
+  if (maxWorkers > 0) {
+    return `Parallel (${maxWorkers} workers)`
+  }
+
+  const activeWorkers = Number(providerSummary.checking_streams || 0)
+  if (activeWorkers > 0) {
+    return `Parallel (${activeWorkers} active)`
+  }
+
+  return 'Parallel'
+}
+
+export function getCheckerConcurrencyDisplay(streamCheckerStatus = {}) {
+  const workers = Number(streamCheckerStatus?.parallel?.max_workers || 0)
+  if (workers > 0) {
+    return {
+      text: `${workers} Workers`,
+      active: true,
+    }
+  }
+
+  return {
+    text: 'Sequential',
+    active: false,
+  }
+}
