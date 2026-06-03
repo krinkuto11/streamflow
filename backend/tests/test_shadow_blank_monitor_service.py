@@ -404,6 +404,17 @@ def test_viewer_left_guard_skips_switching(tmp_path):
     assert status["recent_events"][0]["type"] == "viewer_left"
 
 
+def test_switch_limit_is_per_channel_not_global(tmp_path):
+    udi = FakeUdi(statuses=[{}], channels=[])
+    service = make_service(tmp_path, udi=udi, clock=lambda: 1000.0)
+    config = normalize_config({"max_switches_per_hour": 1})
+
+    service._switch_history["uuid-1"].append(999.0)
+
+    assert service._switch_allowed("uuid-1", config) is False
+    assert service._switch_allowed("uuid-2", config) is True
+
+
 def test_viewer_left_after_probe_clears_watched_snapshot(tmp_path):
     udi = FakeUdi(
         statuses=[

@@ -13,6 +13,10 @@ import {
   formatWatcherClientCount,
 } from '@/lib/viewer-activity-display.js'
 import {
+  shadowMonitorNumberFields,
+  shadowMonitorThresholdFields,
+} from '@/lib/shadow-monitor-config-fields.js'
+import {
   Activity,
   AlertCircle,
   CheckCircle2,
@@ -24,25 +28,6 @@ import {
   Shield,
   StopCircle,
 } from 'lucide-react'
-
-const numberFields = [
-  { key: 'poll_interval_seconds', label: 'Poll Interval', suffix: 'sec', min: 5, max: 3600 },
-  { key: 'watch_gap_seconds', label: 'Watch Gap', suffix: 'sec', min: 1, max: 300 },
-  { key: 'probe_duration_seconds', label: 'Probe Duration', suffix: 'sec', min: 3, max: 120 },
-  { key: 'confirmation_count', label: 'Confirmations', suffix: 'hits', min: 1, max: 5 },
-  { key: 'channel_cooldown_seconds', label: 'Cooldown', suffix: 'sec', min: 30, max: 86400 },
-  { key: 'max_switches_per_hour', label: 'Switch Limit', suffix: 'per hour', min: 1, max: 20 },
-  { key: 'max_concurrent_watchers', label: 'Watchers', suffix: 'max', min: 1, max: 10 },
-]
-
-const thresholdFields = [
-  { key: 'blank_min_duration_seconds', label: 'Blank Duration', step: '0.5', min: 0.5, max: 30 },
-  { key: 'blank_pixel_threshold', label: 'Pixel Threshold', step: '0.01', min: 0, max: 1 },
-  { key: 'blank_ratio_threshold', label: 'Blank Ratio', step: '0.01', min: 0.1, max: 1 },
-  { key: 'freeze_min_duration_seconds', label: 'Freeze Duration', step: '0.5', min: 1, max: 120 },
-  { key: 'freeze_noise_threshold', label: 'Freeze Noise', step: '0.001', min: 0, max: 1 },
-  { key: 'freeze_ratio_threshold', label: 'Freeze Ratio', step: '0.01', min: 0.1, max: 1 },
-]
 
 const eventLabels = {
   probe_ok: 'Probe OK',
@@ -371,7 +356,7 @@ export default function ShadowBlankMonitor() {
             </div>
 
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {numberFields.map(field => (
+              {shadowMonitorNumberFields.map(field => (
                 <div key={field.key} className="space-y-2">
                   <Label htmlFor={field.key}>{field.label}</Label>
                   <div className="flex items-center gap-2">
@@ -385,6 +370,9 @@ export default function ShadowBlankMonitor() {
                     />
                     <span className="w-16 shrink-0 text-xs text-muted-foreground">{field.suffix}</span>
                   </div>
+                  {field.help ? (
+                    <p className="text-xs text-muted-foreground">{field.help}</p>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -392,7 +380,7 @@ export default function ShadowBlankMonitor() {
             <Separator />
 
             <div className="grid gap-4 md:grid-cols-3">
-              {thresholdFields.map(field => (
+              {shadowMonitorThresholdFields.map(field => (
                 <div key={field.key} className="space-y-2">
                   <Label htmlFor={field.key}>{field.label}</Label>
                   <Input
