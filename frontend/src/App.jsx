@@ -89,7 +89,12 @@ function App() {
       } catch (err) {
         console.error('Failed to check initialization status:', err)
         if (!cancelled) {
-          setUdiInitialization({ inProgress: false, status: 'unknown', percentage: 0, message: '' })
+          setUdiInitialization({
+            inProgress: true,
+            status: 'pending',
+            percentage: 0,
+            message: 'Checking startup status...',
+          })
           setUdiInitializationChecked(true)
         }
       }
