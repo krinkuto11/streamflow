@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
-import { getDashboardRunCounts } from '@/lib/dashboard-run-counts.js'
+import { getDashboardRunMetrics } from '@/lib/dashboard-run-counts.js'
 import {
   getDashboardActionStates,
   getAutomationStageCards,
@@ -610,9 +610,10 @@ export default function Dashboard() {
     displayRunStageElapsedSeconds,
     stages: AUTOMATION_STAGES,
   })
-  const displayRunCounts = getDashboardRunCounts({
+  const displayRunMetrics = getDashboardRunMetrics({
     streamCheckerStatus,
     streamQueueActive,
+    streamCheckerOnlyActive,
     batchTotal,
     completed,
     runCounts,
@@ -804,34 +805,14 @@ export default function Dashboard() {
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Channels</div>
-                <div className="text-xl font-semibold">{displayRunCounts.channels}</div>
-              </div>
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Playlists</div>
-                <div className="text-xl font-semibold">{displayRunCounts.playlists}</div>
-              </div>
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Matched</div>
-                <div className="text-xl font-semibold">{displayRunCounts.matched}</div>
-              </div>
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Checked</div>
-                <div className="text-xl font-semibold">{displayRunCounts.checked}</div>
-              </div>
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Dead</div>
-                <div className="text-xl font-semibold">{displayRunCounts.dead}</div>
-              </div>
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Blank</div>
-                <div className="text-xl font-semibold">{displayRunCounts.blank}</div>
-              </div>
-              <div className="rounded-md border p-3">
-                <div className="text-xs text-muted-foreground">Freeze</div>
-                <div className="text-xl font-semibold">{displayRunCounts.freeze}</div>
-              </div>
+              {displayRunMetrics.map((metric) => (
+                <div key={metric.key} className="rounded-md border p-3" title={metric.description}>
+                  <div className="text-xs text-muted-foreground">{metric.label}</div>
+                  <div className={`text-xl font-semibold ${metric.value === null ? 'text-muted-foreground' : ''}`}>
+                    {metric.value === null ? 'N/A' : metric.value}
+                  </div>
+                </div>
+              ))}
             </div>
 
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

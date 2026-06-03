@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getDashboardRunCounts } from './dashboard-run-counts.js'
+import { getDashboardRunCounts, getDashboardRunMetrics } from './dashboard-run-counts.js'
 
 describe('dashboard run counts', () => {
   it('includes freeze counts from completed automation run status', () => {
@@ -52,5 +52,60 @@ describe('dashboard run counts', () => {
     expect(counts.dead).toBe(1)
     expect(counts.blank).toBe(1)
     expect(counts.freeze).toBe(2)
+  })
+
+  it('does not carry playlist or matching counts into manual quality-only metrics', () => {
+    const metrics = getDashboardRunMetrics({
+      streamQueueActive: true,
+      streamCheckerOnlyActive: true,
+      batchTotal: 5,
+      completed: 2,
+      runCounts: {
+        refreshed_playlists: 9,
+        assigned_channels: 8,
+      },
+      streamCheckerStatus: {
+        progress: {
+          streams_detail: [
+            { status: 'completed' },
+            { status: 'dead' },
+            { status: 'blank' },
+            { status: 'freeze' },
+          ],
+        },
+      },
+    })
+
+    expect(metrics.map(metric => [metric.key, metric.label, metric.value])).toEqual([
+      ['channels', 'Queued Channels', 5],
+      ['playlists', 'Playlists Refreshed', null],
+      ['matched', 'Stream Matching', null],
+      ['checked', 'Channels Checked', 2],
+      ['dead', 'Dead Streams', 1],
+      ['blank', 'Blank Streams', 1],
+      ['freeze', 'Frozen Streams', 1],
+    ])
+  })
+
+  it('keeps automation matching and playlist metrics while the automation quality queue is active', () => {
+    const metrics = getDashboardRunMetrics({
+      streamQueueActive: true,
+      streamCheckerOnlyActive: false,
+      batchTotal: 3,
+      completed: 1,
+      runCounts: {
+        refreshed_playlists: 2,
+        assigned_channels: 4,
+      },
+    })
+
+    expect(metrics.find(metric => metric.key === 'playlists')).toMatchObject({
+      label: 'Playlists Refreshed',
+      value: 2,
+    })
+    expect(metrics.find(metric => metric.key === 'matched')).toMatchObject({
+      label: 'Channels Matched',
+      value: 4,
+    })
   })
 })
