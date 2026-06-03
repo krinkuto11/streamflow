@@ -15,6 +15,10 @@ describe('operatorHelpSections', () => {
 
     const profilesPeriods = operatorHelpSections.find(section => section.id === 'profiles-periods')
     expect(profilesPeriods.items.join(' ')).toMatch(/Missed-run grace/)
+
+    const startupCache = operatorHelpSections.find(section => section.id === 'startup-cache')
+    expect(startupCache.items.join(' ')).toMatch(/refresh requests are accepted by Dispatcharr/i)
+    expect(startupCache.items.join(' ')).toMatch(/Cache Sync/)
   })
 
   it('does not expose internal planning or priority wording', () => {
@@ -26,5 +30,6 @@ describe('operatorHelpSections', () => {
     expect(visibleText).not.toMatch(/Teamarr priority/i)
     expect(visibleText).not.toMatch(/not a user setting/i)
     expect(visibleText).not.toMatch(/normal users/i)
+    expect(visibleText).not.toMatch(/playlist refresh completed/i)
   })
 })

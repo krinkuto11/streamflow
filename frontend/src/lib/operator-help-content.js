@@ -6,6 +6,7 @@ export const operatorHelpSections = [
     items: [
       'The startup screen appears only before the first usable Dispatcharr cache is available.',
       'Manual UDI reloads keep the app usable when an existing cache is present.',
+      'Playlist refresh requests are accepted by Dispatcharr first; Cache Sync is where StreamFlow confirms the data it can see.',
       'Large playlists can take a few minutes; the dashboard unlocks automatically when startup is complete.',
     ],
     links: [
