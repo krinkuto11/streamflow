@@ -307,6 +307,84 @@ export default function AutomationSettings() {
               </div>
             </CardContent>
           </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Automation Run Policy</CardTitle>
+              <CardDescription>
+                Bound automatic catch-up work and reserve a daily maintenance window
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="catch-up-max-periods">Catch-up cap</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="catch-up-max-periods"
+                      type="number"
+                      min="0"
+                      max="50"
+                      className="max-w-[120px]"
+                      value={config?.catch_up_max_periods_per_cycle || 0}
+                      onChange={(e) => handleGlobalAutomationChange(
+                        'catch_up_max_periods_per_cycle',
+                        Math.max(0, parseInt(e.target.value) || 0)
+                      )}
+                    />
+                    <span className="text-sm text-muted-foreground">periods</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    0 allows every due period. Positive values defer extra automatic periods to the next scheduler pass.
+                  </p>
+                </div>
+
+                <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="maintenance-window-enabled">Maintenance window</Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Automatic runs pause inside this daily window. Manual forced runs still work.
+                    </p>
+                  </div>
+                  <Switch
+                    id="maintenance-window-enabled"
+                    checked={Boolean(config?.maintenance_window_enabled)}
+                    onCheckedChange={(checked) => handleGlobalAutomationChange('maintenance_window_enabled', checked)}
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="maintenance-window-start">Maintenance start</Label>
+                  <Input
+                    id="maintenance-window-start"
+                    type="time"
+                    value={config?.maintenance_window_start || '02:00'}
+                    onChange={(e) => handleGlobalAutomationChange('maintenance_window_start', e.target.value || '02:00')}
+                    disabled={!config?.maintenance_window_enabled}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="maintenance-window-end">Maintenance end</Label>
+                  <Input
+                    id="maintenance-window-end"
+                    type="time"
+                    value={config?.maintenance_window_end || '04:00'}
+                    onChange={(e) => handleGlobalAutomationChange('maintenance_window_end', e.target.value || '04:00')}
+                    disabled={!config?.maintenance_window_enabled}
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
+                <Button onClick={handleSave} disabled={saving}>
+                  {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Save Settings
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
         </TabsContent>
 
         <TabsContent value="monitoring" className="space-y-6">

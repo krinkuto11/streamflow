@@ -83,7 +83,23 @@ class AutomationConfigManager:
         return {
             "regular_automation_enabled": self._get_config_dict("regular_automation_enabled", False),
             "playlist_update_interval_minutes": self._get_config_dict("playlist_update_interval_minutes", {"type": "interval", "value": 5}),
-            "validate_existing_streams": self._get_config_dict("validate_existing_streams", False)
+            "validate_existing_streams": self._get_config_dict("validate_existing_streams", False),
+            "catch_up_max_periods_per_cycle": self._coerce_non_negative_int(
+                self._get_config_dict("catch_up_max_periods_per_cycle", 0),
+                default=0,
+            ),
+            "maintenance_window_enabled": self._coerce_bool(
+                self._get_config_dict("maintenance_window_enabled", False),
+                default=False,
+            ),
+            "maintenance_window_start": self._coerce_time_string(
+                self._get_config_dict("maintenance_window_start", "02:00"),
+                default="02:00",
+            ),
+            "maintenance_window_end": self._coerce_time_string(
+                self._get_config_dict("maintenance_window_end", "04:00"),
+                default="04:00",
+            ),
         }
 
     def update_global_settings(self, regular_automation_enabled: Optional[bool] = None, settings: Dict[str, Any] = None) -> bool:
@@ -97,7 +113,34 @@ class AutomationConfigManager:
             self._set_config_dict("regular_automation_enabled", bool(updates["regular_automation_enabled"]))
         
         if "validate_existing_streams" in updates:
-            self._set_config_dict("validate_existing_streams", bool(updates["validate_existing_streams"]))
+            self._set_config_dict(
+                "validate_existing_streams",
+                self._coerce_bool(updates["validate_existing_streams"], default=False),
+            )
+
+        if "catch_up_max_periods_per_cycle" in updates:
+            self._set_config_dict(
+                "catch_up_max_periods_per_cycle",
+                self._coerce_non_negative_int(updates["catch_up_max_periods_per_cycle"], default=0),
+            )
+
+        if "maintenance_window_enabled" in updates:
+            self._set_config_dict(
+                "maintenance_window_enabled",
+                self._coerce_bool(updates["maintenance_window_enabled"], default=False),
+            )
+
+        if "maintenance_window_start" in updates:
+            self._set_config_dict(
+                "maintenance_window_start",
+                self._coerce_time_string(updates["maintenance_window_start"], default="02:00"),
+            )
+
+        if "maintenance_window_end" in updates:
+            self._set_config_dict(
+                "maintenance_window_end",
+                self._coerce_time_string(updates["maintenance_window_end"], default="04:00"),
+            )
 
         if "playlist_update_interval_minutes" in updates:
             new_val = updates["playlist_update_interval_minutes"]
@@ -156,6 +199,33 @@ class AutomationConfigManager:
         except (TypeError, ValueError):
             return default
         return max(0, number)
+
+    def _coerce_bool(self, value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+        if value in (0, 1):
+            return bool(value)
+        return default
+
+    def _coerce_time_string(self, value: Any, default: str = "00:00") -> str:
+        text = str(value or "").strip()
+        parts = text.split(":")
+        if len(parts) != 2:
+            return default
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except (TypeError, ValueError):
+            return default
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+        return default
 
     def _normalize_extra_settings(self, extra_settings: Any) -> Dict[str, Any]:
         """Normalize persisted extra_settings to a dict for safe API serialization."""

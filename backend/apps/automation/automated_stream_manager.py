@@ -3548,9 +3548,10 @@ class AutomatedStreamManager:
         period_info: dict,
         *,
         reason: str,
-        due_at: datetime,
+        due_at: Optional[datetime] = None,
         now: datetime,
         grace_minutes: int,
+        message: Optional[str] = None,
     ) -> None:
         if not hasattr(self, "_period_skip_history") or not isinstance(self._period_skip_history, dict):
             self._period_skip_history = {}
@@ -3559,10 +3560,10 @@ class AutomatedStreamManager:
             "reason": reason,
             "period_id": str(period_id),
             "period_name": period_info.get("name") or str(period_id),
-            "due_at": due_at.isoformat(),
+            "due_at": due_at.isoformat() if isinstance(due_at, datetime) else None,
             "skipped_at": now.isoformat(),
             "grace_minutes": max(0, int(grace_minutes or 0)),
-            "message": "Missed-run grace expired before the scheduler observed this period",
+            "message": message or "Missed-run grace expired before the scheduler observed this period",
         }
         history = [entry] + list(self._period_skip_history.get(str(period_id), []))
         self._period_skip_history[str(period_id)] = history[:10]
@@ -3583,6 +3584,87 @@ class AutomatedStreamManager:
             str(pid): list(entries)[:normalized_limit]
             for pid, entries in self._period_skip_history.items()
         }
+
+    def _get_catch_up_max_periods_per_cycle(self, global_settings: dict) -> int:
+        try:
+            cap = int(global_settings.get("catch_up_max_periods_per_cycle") or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, cap)
+
+    def _parse_policy_time(self, value: Any) -> Optional[tuple[int, int]]:
+        parts = str(value or "").strip().split(":")
+        if len(parts) != 2:
+            return None
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except (TypeError, ValueError):
+            return None
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+        return None
+
+    def _is_maintenance_window_active(self, global_settings: dict, now: Optional[datetime] = None) -> bool:
+        if not global_settings.get("maintenance_window_enabled"):
+            return False
+        start = self._parse_policy_time(global_settings.get("maintenance_window_start"))
+        end = self._parse_policy_time(global_settings.get("maintenance_window_end"))
+        if start is None or end is None or start == end:
+            return False
+
+        current = now or datetime.now()
+        current_minutes = current.hour * 60 + current.minute
+        start_minutes = start[0] * 60 + start[1]
+        end_minutes = end[0] * 60 + end[1]
+        if start_minutes < end_minutes:
+            return start_minutes <= current_minutes < end_minutes
+        return current_minutes >= start_minutes or current_minutes < end_minutes
+
+    def _apply_global_catch_up_cap(
+        self,
+        active_periods: Dict[tuple, dict],
+        global_settings: dict,
+        *,
+        forced: bool,
+    ) -> Dict[tuple, dict]:
+        if forced:
+            return active_periods
+        cap = self._get_catch_up_max_periods_per_cycle(global_settings)
+        if cap <= 0 or len(active_periods) <= cap:
+            return active_periods
+
+        def sort_key(item):
+            (period_id, period_name), data = item
+            try:
+                numeric_period_id = int(period_id)
+            except (TypeError, ValueError):
+                numeric_period_id = 0
+            return (-int(data.get("priority") or 0), numeric_period_id, str(period_name))
+
+        ordered = sorted(active_periods.items(), key=sort_key)
+        kept = dict(ordered[:cap])
+        skipped = ordered[cap:]
+        now = datetime.now()
+        for (period_id, _period_name), data in skipped:
+            self._record_period_skip(
+                str(period_id),
+                {
+                    "id": str(period_id),
+                    "name": data.get("period_name") or str(period_id),
+                },
+                reason="global_catch_up_cap",
+                now=now,
+                grace_minutes=0,
+                message="Global catch-up cap deferred this period to the next scheduler pass",
+            )
+        self._save_state()
+        logger.info(
+            "Global catch-up cap kept %s period(s) and deferred %s period(s)",
+            len(kept),
+            len(skipped),
+        )
+        return kept
 
     def _period_due_inside_grace(
         self,
@@ -3779,6 +3861,16 @@ class AutomatedStreamManager:
             )
             return
 
+        if not forced and self._is_maintenance_window_active(global_settings):
+            logger.debug("Maintenance window is active. Skipping automation cycle.")
+            self._finish_run_status(
+                state="skipped",
+                stage="skipped",
+                stage_label="Skipped",
+                message="Maintenance window is active",
+            )
+            return
+
         # Check if stream checking mode is active - if so, skip this cycle
         try:
             stream_checker = get_stream_checker_service()
@@ -3864,11 +3956,24 @@ class AutomatedStreamManager:
                                 active_periods[key] = {
                                     'profile_id': profile_id,
                                     'profile_name': profile.get('name') if profile else "Default",
+                                    'period_name': p_name,
+                                    'priority': period_info.get('priority', 0),
                                     'channels': []
                                 }
                             active_periods[key]['channels'].append(channel)
                             if profile_id:
                                 active_profile_ids.add(profile_id)
+
+            active_periods = self._apply_global_catch_up_cap(
+                active_periods,
+                global_settings,
+                forced=bool(forced or forced_period_id),
+            )
+            active_profile_ids = {
+                str(entry.get('profile_id'))
+                for entry in active_periods.values()
+                if entry.get('profile_id') is not None
+            }
             
             if not active_periods:
                 logger.debug("No channels with active automation periods found. Skipping cycle.")

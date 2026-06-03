@@ -67,6 +67,50 @@ def test_period_outside_missed_run_grace_is_skipped_and_rebased():
     assert "skipped_at" in history[0]
 
 
+def test_maintenance_window_policy_handles_same_day_and_overnight_windows():
+    manager = AutomatedStreamManager()
+
+    same_day = {
+        "maintenance_window_enabled": True,
+        "maintenance_window_start": "02:00",
+        "maintenance_window_end": "04:00",
+    }
+    assert manager._is_maintenance_window_active(same_day, datetime(2026, 6, 3, 2, 30)) is True
+    assert manager._is_maintenance_window_active(same_day, datetime(2026, 6, 3, 4, 1)) is False
+
+    overnight = {
+        "maintenance_window_enabled": True,
+        "maintenance_window_start": "23:00",
+        "maintenance_window_end": "02:00",
+    }
+    assert manager._is_maintenance_window_active(overnight, datetime(2026, 6, 3, 23, 30)) is True
+    assert manager._is_maintenance_window_active(overnight, datetime(2026, 6, 4, 1, 30)) is True
+    assert manager._is_maintenance_window_active(overnight, datetime(2026, 6, 4, 2, 1)) is False
+
+
+def test_global_catch_up_cap_defers_lower_priority_periods():
+    manager = AutomatedStreamManager()
+    manager._period_skip_history = {}
+    manager._save_state = lambda: None
+
+    active_periods = {
+        ("1", "Highest"): {"priority": 20, "period_name": "Highest", "channels": [1]},
+        ("2", "Lowest"): {"priority": 1, "period_name": "Lowest", "channels": [2]},
+        ("3", "Middle"): {"priority": 10, "period_name": "Middle", "channels": [3]},
+    }
+
+    kept = manager._apply_global_catch_up_cap(
+        active_periods,
+        {"catch_up_max_periods_per_cycle": 2},
+        forced=False,
+    )
+
+    assert set(kept) == {("1", "Highest"), ("3", "Middle")}
+    history = manager.get_period_skip_history("2")
+    assert history[0]["reason"] == "global_catch_up_cap"
+    assert history[0]["period_name"] == "Lowest"
+
+
 def test_period_catch_up_policy_persists_with_priority():
     manager = AutomationConfigManager()
     profile_id = manager.create_profile({"name": "Catch-Up Profile"})
@@ -89,3 +133,20 @@ def test_period_catch_up_policy_persists_with_priority():
     assert period["priority"] == 7
     assert period["catch_up_missed_runs"] is False
     assert period["missed_run_grace_minutes"] == 15
+
+
+def test_global_catch_up_and_maintenance_policy_persist():
+    manager = AutomationConfigManager()
+
+    assert manager.update_global_settings(settings={
+        "catch_up_max_periods_per_cycle": "3",
+        "maintenance_window_enabled": "true",
+        "maintenance_window_start": "23:15",
+        "maintenance_window_end": "02:45",
+    }) is True
+
+    settings = manager.get_global_settings()
+    assert settings["catch_up_max_periods_per_cycle"] == 3
+    assert settings["maintenance_window_enabled"] is True
+    assert settings["maintenance_window_start"] == "23:15"
+    assert settings["maintenance_window_end"] == "02:45"
