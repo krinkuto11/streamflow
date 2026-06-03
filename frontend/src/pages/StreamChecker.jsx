@@ -14,6 +14,7 @@ import { Pagination, PaginationContent, PaginationItem, PaginationLink, Paginati
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
+import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote } from '@/lib/hardware-status-display.js'
 import { getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
 import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
@@ -396,6 +397,7 @@ export default function StreamChecker() {
     : (hardwareStatus?.config?.enabled ? 'No methods reported' : 'Not checked')
   const analysisPathDisplay = getHardwareAnalysisPathDisplay(hardwareStatus)
   const hardwareOperatorNote = getHardwareOperatorNote(hardwareStatus)
+  const queueEtaDisplay = getQueueEtaDisplay(status?.queue)
 
   return (
     <div className="space-y-6">
@@ -554,14 +556,12 @@ export default function StreamChecker() {
           <CardHeader className="pb-2">
             <div className="flex justify-between items-center">
               <CardTitle>Batch Progress</CardTitle>
-              {status?.queue?.eta_seconds > 0 ? (
-                <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md">
-                  ~{formatDuration(status.queue.eta_seconds)} remaining
+              {queueEtaDisplay.label ? (
+                <span className={`text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md ${queueEtaDisplay.pulse ? 'animate-pulse text-primary/70' : ''}`}>
+                  {queueEtaDisplay.label}
                 </span>
               ) : (
-                <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md animate-pulse">
-                  Calculating ETA...
-                </span>
+                null
               )}
             </div>
             <CardDescription>Checking {totalBatch} channels</CardDescription>

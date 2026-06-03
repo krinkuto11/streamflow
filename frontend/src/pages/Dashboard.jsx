@@ -10,6 +10,7 @@ import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
 import { getDashboardRunMetrics } from '@/lib/dashboard-run-counts.js'
+import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import {
   getAbortedRunDisplay,
   getDashboardActionStates,
@@ -469,6 +470,7 @@ export default function Dashboard() {
   const completed     = streamCheckerStatus?.queue?.completed  || 0
   const inProgress    = streamCheckerStatus?.queue?.in_progress || 0
   const queueState    = streamCheckerStatus?.queue?.state || 'idle'
+  const streamCheckerEtaDisplay = getQueueEtaDisplay(streamCheckerStatus?.queue)
   const totalProcessed = completed
   const batchTotal    = completed + inProgress + queueSize
   const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
@@ -1211,14 +1213,12 @@ export default function Dashboard() {
                 <div className="pt-2">
                   <div className="flex justify-between items-center mb-2">
                     <Label className="text-xs text-muted-foreground block">Processing Progress</Label>
-                    {streamCheckerStatus?.queue?.eta_seconds > 0 ? (
-                      <span className="text-xs text-muted-foreground">
-                        ~{formatDuration(streamCheckerStatus.queue.eta_seconds)} remaining
+                    {streamCheckerEtaDisplay.label ? (
+                      <span className={`text-xs text-muted-foreground ${streamCheckerEtaDisplay.pulse ? 'animate-pulse text-primary/70' : ''}`}>
+                        {streamCheckerEtaDisplay.label}
                       </span>
                     ) : (
-                      <span className="text-xs text-muted-foreground animate-pulse text-primary/70">
-                        Calculating ETA...
-                      </span>
+                      null
                     )}
                   </div>
                   <Progress value={queueProgress} className="h-2" />
