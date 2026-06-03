@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from unittest.mock import Mock, patch
 
 from apps.automation.automation_config_manager import AutomationConfigManager
 from apps.automation.automated_stream_manager import AutomatedStreamManager
@@ -88,6 +89,79 @@ def test_maintenance_window_policy_handles_same_day_and_overnight_windows():
     assert manager._is_maintenance_window_active(overnight, datetime(2026, 6, 4, 2, 1)) is False
 
 
+def test_teamarr_event_window_policy_uses_cached_upcoming_events():
+    manager = AutomatedStreamManager()
+    current = datetime(2026, 6, 3, 20, 50, tzinfo=timezone.utc)
+    service = Mock()
+    service.get_status.return_value = {
+        "upcoming_events": [
+            {
+                "event_name": "Team A vs Team B",
+                "channel_name": "Event Channel",
+                "dispatcharr_channel_id": 123,
+                "state": "scheduled",
+                "event_date": "2026-06-03T21:00:00+00:00",
+            }
+        ]
+    }
+
+    with patch(
+        "apps.stream.teamarr_preflight_service.get_teamarr_preflight_service",
+        return_value=service,
+    ):
+        active = manager._get_active_teamarr_event_window(
+            {
+                "teamarr_event_window_enabled": True,
+                "teamarr_event_window_before_minutes": 15,
+                "teamarr_event_window_after_minutes": 5,
+            },
+            now=current,
+        )
+
+    assert active is not None
+    assert active["event_name"] == "Team A vs Team B"
+    assert active["seconds_to_start"] == 600
+    assert active["window_before_minutes"] == 15
+    assert active["window_after_minutes"] == 5
+
+
+def test_teamarr_event_window_policy_ignores_filtered_and_outside_window_events():
+    manager = AutomatedStreamManager()
+    current = datetime(2026, 6, 3, 20, 50, tzinfo=timezone.utc)
+    service = Mock()
+    service.get_status.return_value = {
+        "upcoming_events": [
+            {
+                "event_name": "Filtered Event",
+                "dispatcharr_channel_id": 123,
+                "state": "filtered",
+                "event_date": "2026-06-03T20:55:00+00:00",
+            },
+            {
+                "event_name": "Outside Event",
+                "dispatcharr_channel_id": 456,
+                "state": "scheduled",
+                "event_date": "2026-06-03T22:00:00+00:00",
+            },
+        ]
+    }
+
+    with patch(
+        "apps.stream.teamarr_preflight_service.get_teamarr_preflight_service",
+        return_value=service,
+    ):
+        active = manager._get_active_teamarr_event_window(
+            {
+                "teamarr_event_window_enabled": True,
+                "teamarr_event_window_before_minutes": 15,
+                "teamarr_event_window_after_minutes": 5,
+            },
+            now=current,
+        )
+
+    assert active is None
+
+
 def test_global_catch_up_cap_defers_lower_priority_periods():
     manager = AutomatedStreamManager()
     manager._period_skip_history = {}
@@ -143,6 +217,9 @@ def test_global_catch_up_and_maintenance_policy_persist():
         "maintenance_window_enabled": "true",
         "maintenance_window_start": "23:15",
         "maintenance_window_end": "02:45",
+        "teamarr_event_window_enabled": "true",
+        "teamarr_event_window_before_minutes": "25",
+        "teamarr_event_window_after_minutes": "7",
     }) is True
 
     settings = manager.get_global_settings()
@@ -150,3 +227,6 @@ def test_global_catch_up_and_maintenance_policy_persist():
     assert settings["maintenance_window_enabled"] is True
     assert settings["maintenance_window_start"] == "23:15"
     assert settings["maintenance_window_end"] == "02:45"
+    assert settings["teamarr_event_window_enabled"] is True
+    assert settings["teamarr_event_window_before_minutes"] == 25
+    assert settings["teamarr_event_window_after_minutes"] == 7

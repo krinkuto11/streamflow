@@ -100,6 +100,18 @@ class AutomationConfigManager:
                 self._get_config_dict("maintenance_window_end", "04:00"),
                 default="04:00",
             ),
+            "teamarr_event_window_enabled": self._coerce_bool(
+                self._get_config_dict("teamarr_event_window_enabled", False),
+                default=False,
+            ),
+            "teamarr_event_window_before_minutes": self._coerce_non_negative_int(
+                self._get_config_dict("teamarr_event_window_before_minutes", 30),
+                default=30,
+            ),
+            "teamarr_event_window_after_minutes": self._coerce_non_negative_int(
+                self._get_config_dict("teamarr_event_window_after_minutes", 10),
+                default=10,
+            ),
         }
 
     def update_global_settings(self, regular_automation_enabled: Optional[bool] = None, settings: Dict[str, Any] = None) -> bool:
@@ -140,6 +152,24 @@ class AutomationConfigManager:
             self._set_config_dict(
                 "maintenance_window_end",
                 self._coerce_time_string(updates["maintenance_window_end"], default="04:00"),
+            )
+
+        if "teamarr_event_window_enabled" in updates:
+            self._set_config_dict(
+                "teamarr_event_window_enabled",
+                self._coerce_bool(updates["teamarr_event_window_enabled"], default=False),
+            )
+
+        if "teamarr_event_window_before_minutes" in updates:
+            self._set_config_dict(
+                "teamarr_event_window_before_minutes",
+                self._coerce_non_negative_int(updates["teamarr_event_window_before_minutes"], default=30),
+            )
+
+        if "teamarr_event_window_after_minutes" in updates:
+            self._set_config_dict(
+                "teamarr_event_window_after_minutes",
+                self._coerce_non_negative_int(updates["teamarr_event_window_after_minutes"], default=10),
             )
 
         if "playlist_update_interval_minutes" in updates:

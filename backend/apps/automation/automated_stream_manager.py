@@ -18,7 +18,7 @@ import time
 import threading
 import copy
 from functools import lru_cache
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple, Any, Union
 import concurrent.futures
@@ -3621,6 +3621,74 @@ class AutomatedStreamManager:
             return start_minutes <= current_minutes < end_minutes
         return current_minutes >= start_minutes or current_minutes < end_minutes
 
+    def _get_teamarr_event_window_minutes(self, global_settings: dict, key: str, default: int) -> int:
+        try:
+            value = int(global_settings.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        return max(0, min(value, 1440))
+
+    def _get_active_teamarr_event_window(self, global_settings: dict, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+        if not global_settings.get("teamarr_event_window_enabled"):
+            return None
+
+        before_minutes = self._get_teamarr_event_window_minutes(
+            global_settings,
+            "teamarr_event_window_before_minutes",
+            30,
+        )
+        after_minutes = self._get_teamarr_event_window_minutes(
+            global_settings,
+            "teamarr_event_window_after_minutes",
+            10,
+        )
+        if before_minutes <= 0 and after_minutes <= 0:
+            return None
+
+        try:
+            from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+            status = get_teamarr_preflight_service().get_status()
+        except Exception as exc:
+            logger.debug("Could not read Teamarr event window status: %s", exc)
+            return None
+
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+
+        for event in status.get("upcoming_events") or []:
+            if not isinstance(event, dict):
+                continue
+            if not event.get("dispatcharr_channel_id"):
+                continue
+
+            state = str(event.get("state") or "").strip().lower()
+            if state in {"filtered", "past", "no_dispatcharr_channel"}:
+                continue
+
+            event_date = event.get("event_date")
+            try:
+                event_at = datetime.fromisoformat(str(event_date).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if event_at.tzinfo is None:
+                event_at = event_at.replace(tzinfo=timezone.utc)
+
+            window_start = event_at - timedelta(minutes=before_minutes)
+            window_end = event_at + timedelta(minutes=after_minutes)
+            if window_start <= current <= window_end:
+                return {
+                    "event_name": event.get("event_name") or event.get("channel_name") or "Teamarr event",
+                    "channel_name": event.get("channel_name"),
+                    "event_date": event_at.isoformat(),
+                    "state": state or None,
+                    "seconds_to_start": int((event_at - current).total_seconds()),
+                    "window_before_minutes": before_minutes,
+                    "window_after_minutes": after_minutes,
+                }
+
+        return None
+
     def _apply_global_catch_up_cap(
         self,
         active_periods: Dict[tuple, dict],
@@ -3868,6 +3936,25 @@ class AutomatedStreamManager:
                 stage="skipped",
                 stage_label="Skipped",
                 message="Maintenance window is active",
+            )
+            return
+
+        teamarr_event_window = self._get_active_teamarr_event_window(global_settings)
+        if not forced and not forced_period_id and teamarr_event_window:
+            event_name = teamarr_event_window.get("event_name") or "Teamarr event"
+            logger.info(
+                "Teamarr event window is active for %s. Skipping automatic automation cycle.",
+                event_name,
+            )
+            self._update_run_status(
+                counts={"teamarr_event_window_active": True},
+                message=f"Teamarr event window active for {event_name}",
+            )
+            self._finish_run_status(
+                state="skipped",
+                stage="skipped",
+                stage_label="Skipped",
+                message=f"Teamarr event window active for {event_name}",
             )
             return
 

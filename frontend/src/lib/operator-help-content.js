@@ -24,6 +24,7 @@ export const operatorHelpSections = [
       'Startup catch-up is opt-in per period and only covers the safe first/no-last-run case.',
       'Missed-run grace keeps late automatic runs bounded; 0 keeps the existing schedule behavior.',
       'Catch-up cap and Maintenance window are global automatic-run policies; manual forced runs remain available.',
+      'Teamarr event window can pause automatic runs around cached event starts; manual forced runs remain available.',
     ],
     links: [
       { label: 'Automation Settings', to: '/settings' },

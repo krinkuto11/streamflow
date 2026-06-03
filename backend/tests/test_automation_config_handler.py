@@ -139,6 +139,36 @@ def test_put_automation_config_updates_enabled_m3u_accounts():
     assert cfg.update_calls == []
 
 
+def test_put_automation_config_updates_teamarr_event_window_policy():
+    app = Flask(__name__)
+    cfg = DummyConfigManager()
+    manager = DummyAutomationManager()
+
+    with app.app_context():
+        response, status_code = handle_global_automation_settings_response(
+            method="PUT",
+            updates={
+                "teamarr_event_window_enabled": True,
+                "teamarr_event_window_before_minutes": 45,
+                "teamarr_event_window_after_minutes": 6,
+            },
+            get_automation_config_manager=lambda: cfg,
+            check_wizard_complete=lambda: True,
+            get_automation_manager=lambda: manager,
+        )
+
+    assert status_code == 200
+    data = response.get_json()
+    assert data["settings"]["teamarr_event_window_enabled"] is True
+    assert data["settings"]["teamarr_event_window_before_minutes"] == 45
+    assert data["settings"]["teamarr_event_window_after_minutes"] == 6
+    assert cfg.update_calls == [{
+        "teamarr_event_window_enabled": True,
+        "teamarr_event_window_before_minutes": 45,
+        "teamarr_event_window_after_minutes": 6,
+    }]
+
+
 def test_put_automation_config_rejects_invalid_enabled_m3u_accounts_payload():
     app = Flask(__name__)
     cfg = DummyConfigManager()

@@ -17,6 +17,7 @@ describe('operatorHelpSections', () => {
     expect(profilesPeriods.items.join(' ')).toMatch(/Missed-run grace/)
     expect(profilesPeriods.items.join(' ')).toMatch(/Catch-up cap/)
     expect(profilesPeriods.items.join(' ')).toMatch(/Maintenance window/)
+    expect(profilesPeriods.items.join(' ')).toMatch(/Teamarr event window/)
 
     const startupCache = operatorHelpSections.find(section => section.id === 'startup-cache')
     expect(startupCache.items.join(' ')).toMatch(/refresh requests are accepted by Dispatcharr/i)

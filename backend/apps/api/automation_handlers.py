@@ -66,6 +66,9 @@ def handle_global_automation_settings_response(
         "maintenance_window_enabled",
         "maintenance_window_start",
         "maintenance_window_end",
+        "teamarr_event_window_enabled",
+        "teamarr_event_window_before_minutes",
+        "teamarr_event_window_after_minutes",
     }
 
     if method == "GET":

@@ -377,6 +377,63 @@ export default function AutomationSettings() {
                 </div>
               </div>
 
+              <Separator />
+
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="teamarr-event-window-enabled">Teamarr event window</Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Automatic runs pause around cached Teamarr events. Manual forced runs still work.
+                    </p>
+                  </div>
+                  <Switch
+                    id="teamarr-event-window-enabled"
+                    checked={Boolean(config?.teamarr_event_window_enabled)}
+                    onCheckedChange={(checked) => handleGlobalAutomationChange('teamarr_event_window_enabled', checked)}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="teamarr-event-window-before">Before start</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="teamarr-event-window-before"
+                        type="number"
+                        min="0"
+                        max="1440"
+                        value={config?.teamarr_event_window_before_minutes ?? 30}
+                        onChange={(e) => handleGlobalAutomationChange(
+                          'teamarr_event_window_before_minutes',
+                          Math.max(0, parseInt(e.target.value) || 0)
+                        )}
+                        disabled={!config?.teamarr_event_window_enabled}
+                      />
+                      <span className="text-sm text-muted-foreground">min</span>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="teamarr-event-window-after">After start</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="teamarr-event-window-after"
+                        type="number"
+                        min="0"
+                        max="1440"
+                        value={config?.teamarr_event_window_after_minutes ?? 10}
+                        onChange={(e) => handleGlobalAutomationChange(
+                          'teamarr_event_window_after_minutes',
+                          Math.max(0, parseInt(e.target.value) || 0)
+                        )}
+                        disabled={!config?.teamarr_event_window_enabled}
+                      />
+                      <span className="text-sm text-muted-foreground">min</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <div className="flex justify-end pt-2">
                 <Button onClick={handleSave} disabled={saving}>
                   {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
