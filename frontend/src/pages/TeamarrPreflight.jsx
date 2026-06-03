@@ -678,7 +678,7 @@ export default function TeamarrPreflight() {
                   placeholder="http://teamarr:9195"
                 />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-2 md:col-span-2">
                 <Label>Quality Profile</Label>
                 <Select
                   value={selectedProfileValue}
