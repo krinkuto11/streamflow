@@ -1,6 +1,43 @@
 import { describe, expect, it } from 'vitest'
 
-import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote } from './hardware-status-display'
+import {
+  getHardwareAnalysisPathDisplay,
+  getHardwareOperatorNote,
+  getHardwareRuntimeDeviceLabel,
+} from './hardware-status-display'
+
+describe('getHardwareRuntimeDeviceLabel', () => {
+  it('reports visible NVIDIA devices when the runtime exposes them', () => {
+    expect(getHardwareRuntimeDeviceLabel({ nvidia_gpu_count: 1 })).toBe('1 NVIDIA detected')
+    expect(getHardwareRuntimeDeviceLabel({ nvidia_gpu_count: 2 })).toBe('2 NVIDIA detected')
+  })
+
+  it('reports DRI methods for Intel or VAAPI/QSV paths without requiring NVIDIA', () => {
+    expect(getHardwareRuntimeDeviceLabel({
+      dri_available: true,
+      dri_hwaccels: ['drm', 'qsv', 'vaapi'],
+      nvidia_checked: false,
+      nvidia_gpu_count: 0,
+    })).toBe('DRI/VAAPI/QSV reported (drm, qsv, vaapi)')
+  })
+
+  it('keeps NVIDIA absence specific when NVIDIA was explicitly checked', () => {
+    expect(getHardwareRuntimeDeviceLabel({
+      nvidia_checked: true,
+      nvidia_gpu_count: 0,
+      dri_available: false,
+    })).toBe('No NVIDIA GPU reported')
+  })
+
+  it('falls back to generic ffmpeg methods when hardware is enabled but no runtime path is reported', () => {
+    expect(getHardwareRuntimeDeviceLabel({
+      config: { enabled: true },
+      nvidia_checked: false,
+      nvidia_gpu_count: 0,
+      dri_available: false,
+    })).toBe('FFmpeg methods only')
+  })
+})
 
 describe('getHardwareAnalysisPathDisplay', () => {
   it('describes CPU-only analysis when hardware acceleration is disabled', () => {

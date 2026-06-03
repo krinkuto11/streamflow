@@ -1,5 +1,32 @@
 const formatMode = (mode) => String(mode || 'auto').toUpperCase()
 
+export function getHardwareRuntimeDeviceLabel(hardwareStatus) {
+  const detectedGpuCount = Number.isFinite(Number(hardwareStatus?.nvidia_gpu_count))
+    ? Number(hardwareStatus?.nvidia_gpu_count)
+    : 0
+  const driMethodsLabel = Array.isArray(hardwareStatus?.dri_hwaccels) && hardwareStatus.dri_hwaccels.length > 0
+    ? hardwareStatus.dri_hwaccels.join(', ')
+    : ''
+
+  if (detectedGpuCount > 0) {
+    return `${detectedGpuCount} NVIDIA detected`
+  }
+
+  if (hardwareStatus?.dri_available) {
+    return `DRI/VAAPI/QSV reported${driMethodsLabel ? ` (${driMethodsLabel})` : ''}`
+  }
+
+  if (hardwareStatus?.nvidia_checked) {
+    return 'No NVIDIA GPU reported'
+  }
+
+  if (hardwareStatus?.config?.enabled) {
+    return 'FFmpeg methods only'
+  }
+
+  return 'Not checked'
+}
+
 export function getHardwareAnalysisPathDisplay(hardwareStatus) {
   const config = hardwareStatus?.config || {}
   const enabled = config.enabled === true

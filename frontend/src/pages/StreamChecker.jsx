@@ -15,7 +15,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
-import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote } from '@/lib/hardware-status-display.js'
+import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
 import { getParallelProgressBadgeText, getProfileSlotDisplay, getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
 import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
@@ -384,19 +384,7 @@ export default function StreamChecker() {
       ? (selectedStartChannel?.name || 'Select a channel')
       : (firstStartChannel?.name || 'First channel')
   const queueAllDisabled = isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || (queueStartMode === 'channel' && !queueStartChannelId)
-  const detectedGpuCount = Number.isFinite(Number(hardwareStatus?.nvidia_gpu_count)) ? Number(hardwareStatus?.nvidia_gpu_count) : 0
-  const driMethodsLabel = Array.isArray(hardwareStatus?.dri_hwaccels) && hardwareStatus.dri_hwaccels.length > 0
-    ? hardwareStatus.dri_hwaccels.join(', ')
-    : ''
-  const runtimeDeviceLabel = detectedGpuCount > 0
-    ? `${detectedGpuCount} NVIDIA detected`
-    : hardwareStatus?.dri_available
-      ? `DRI/VAAPI/QSV reported${driMethodsLabel ? ` (${driMethodsLabel})` : ''}`
-      : hardwareStatus?.nvidia_checked
-        ? 'No NVIDIA GPU reported'
-        : hardwareStatus?.config?.enabled
-          ? 'FFmpeg methods only'
-          : 'Not checked'
+  const runtimeDeviceLabel = getHardwareRuntimeDeviceLabel(hardwareStatus)
   const ffmpegModeLabel = hardwareStatus?.config?.enabled
     ? (hardwareStatus?.mode_supported ? 'Available' : 'Not reported')
     : 'Disabled'
