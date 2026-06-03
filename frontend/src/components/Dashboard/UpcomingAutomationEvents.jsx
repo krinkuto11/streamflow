@@ -85,8 +85,9 @@ export default function UpcomingAutomationEvents() {
 
   const loadPeriods = async () => {
     try {
-      const response = await automationAPI.getPeriods()
-      setAllPeriods(response.data || [])
+      const response = await automationAPI.getPeriods({ page: 1, per_page: 200 })
+      const periodItems = Array.isArray(response.data) ? response.data : response.data?.items || []
+      setAllPeriods(periodItems)
     } catch (err) {
       console.error('Failed to load periods:', err)
     }

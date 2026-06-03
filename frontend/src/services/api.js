@@ -70,7 +70,7 @@ export const automationAPI = {
   getGroupEpgAssignments: () => api.get('/automation/assign/epg-profile/group'),
 
   // Automation Periods
-  getPeriods: () => api.get('/automation/periods'),
+  getPeriods: (params = undefined) => api.get('/automation/periods', params ? { params } : undefined),
   createPeriod: (period) => api.post('/automation/periods', period),
   getPeriod: (periodId) => api.get(`/automation/periods/${periodId}`),
   updatePeriod: (periodId, period) => api.put(`/automation/periods/${periodId}`, period),

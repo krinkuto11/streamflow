@@ -219,8 +219,9 @@ export default function Dashboard() {
 
   const loadPeriods = async () => {
     try {
-      const response = await automationAPI.getPeriods()
-      setPeriods(response.data || [])
+      const response = await automationAPI.getPeriods({ page: 1, per_page: 200 })
+      const periodItems = Array.isArray(response.data) ? response.data : response.data?.items || []
+      setPeriods(periodItems)
     } catch (err) {
       console.error('Failed to load periods:', err)
     }
