@@ -1793,6 +1793,37 @@ class AutomatedStreamManager:
                         stage["message"] = message
                     break
 
+    def _sync_udi_cache_after_playlist_refresh(self, udi_manager: Any) -> bool:
+        """Refresh UDI streams/channels while surfacing coarse run progress."""
+        steps = [
+            ("streams", "Syncing stream cache", udi_manager.refresh_streams),
+            ("channels", "Syncing channel cache", udi_manager.refresh_channels),
+        ]
+        total = len(steps)
+        all_success = True
+
+        for index, (name, message, refresh_func) in enumerate(steps):
+            self._update_run_progress(
+                stage_key="cache_sync",
+                current=index,
+                total=total,
+                message=message,
+            )
+            try:
+                success = bool(refresh_func())
+            except Exception as exc:
+                logger.warning("UDI %s cache sync failed: %s", name, exc)
+                success = False
+            all_success = all_success and success
+            self._update_run_progress(
+                stage_key="cache_sync",
+                current=index + 1,
+                total=total,
+                message=f"{message} {'completed' if success else 'reported warnings'}",
+            )
+
+        return all_success
+
     def _finish_run_status(
         self,
         status: Optional[str] = None,
@@ -3824,9 +3855,14 @@ class AutomatedStreamManager:
                 )
                 try:
                     _sync_udi = get_udi_manager()
-                    _sync_udi.refresh_streams()
-                    _sync_udi.refresh_channels()
-                    logger.info("✓ UDI cache synced after provider refresh")
+                    sync_ok = self._sync_udi_cache_after_playlist_refresh(_sync_udi)
+                    if sync_ok:
+                        logger.info("UDI cache synced after provider refresh")
+                    else:
+                        logger.warning(
+                            "UDI cache sync after provider refresh reported warnings - "
+                            "proceeding with available cache"
+                        )
                 except Exception as _sync_err:
                     logger.warning(
                         f"UDI sync after provider refresh failed: {_sync_err} — "
