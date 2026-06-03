@@ -200,6 +200,9 @@ export default function AutomationProfileEditor() {
         return profile?.[stepId]?.enabled
     }
 
+    const streamPriorityMode = profile?.stream_checking?.m3u_priority_mode || 'absolute'
+    const playlistRankActive = ['absolute', 'same_resolution'].includes(streamPriorityMode)
+
     return (
         <div className="max-w-4xl mx-auto space-y-8">
             <div className="flex items-center justify-between">
@@ -543,7 +546,7 @@ export default function AutomationProfileEditor() {
                                             <div className="space-y-2">
                                                 <Label className="text-xs">Priority Mode</Label>
                                                 <Select
-                                                    value={profile.stream_checking.m3u_priority_mode || 'absolute'}
+                                                    value={streamPriorityMode}
                                                     onValueChange={(val) => updateProfile('stream_checking.m3u_priority_mode', val)}
                                                 >
                                                     <SelectTrigger><SelectValue /></SelectTrigger>
@@ -554,8 +557,13 @@ export default function AutomationProfileEditor() {
                                                         <SelectItem value="quality">Score Only</SelectItem>
                                                     </SelectContent>
                                                 </Select>
+                                                <p className="text-xs text-muted-foreground">
+                                                    {playlistRankActive
+                                                        ? 'Playlist rank is applied by this mode.'
+                                                        : 'Playlist rank is ignored by this mode.'}
+                                                </p>
                                             </div>
-                                            <div className="space-y-2">
+                                            <div className={cn('space-y-2', !playlistRankActive && 'opacity-60')}>
                                                 <Label className="text-xs">Playlist Priority Rank</Label>
                                                 <div className="border rounded-md divide-y overflow-hidden bg-background">
                                                     {(() => {
@@ -566,14 +574,18 @@ export default function AutomationProfileEditor() {
                                                         return sortedIds.map((id, idx) => {
                                                             const acct = m3uAccounts.find(a => a.id === id)
                                                             return (
-                                                                <div key={id} className="flex items-center justify-between p-2 text-sm group">
+                                                                <div
+                                                                    key={id}
+                                                                    className="flex items-center justify-between p-2 text-sm group"
+                                                                    aria-disabled={!playlistRankActive}
+                                                                >
                                                                     <span className="truncate max-w-[150px]"><span className="text-muted-foreground mr-1">#{idx + 1}</span> {acct?.name}</span>
                                                                     <div className="flex gap-0.5">
                                                                         <Button
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === 0}
+                                                                            disabled={!playlistRankActive || idx === 0}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]
@@ -588,7 +600,7 @@ export default function AutomationProfileEditor() {
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === sortedIds.length - 1}
+                                                                            disabled={!playlistRankActive || idx === sortedIds.length - 1}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]
