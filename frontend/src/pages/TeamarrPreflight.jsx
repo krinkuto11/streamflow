@@ -160,7 +160,7 @@ const forceEventTooltip = (event) => {
   if (event?.state === 'filtered') return 'Filtered'
   if (event?.state === 'past') return 'Run manual check'
   if (!forceableStates.has(String(event?.state || ''))) return 'Unavailable'
-  return 'Force event preflight'
+  return 'Run event check'
 }
 
 const normalizeFilterOption = (option) => {
@@ -377,13 +377,13 @@ export default function TeamarrPreflight() {
       toast({
         title: response.data?.launched ? 'Started' : 'Requested',
         description: response.data?.launched
-          ? 'Manual event preflight started'
-          : 'Manual event preflight request was recorded',
+          ? 'Manual event check started'
+          : 'Manual event check request was recorded',
       })
     } catch (err) {
       toast({
         title: 'Error',
-        description: err.response?.data?.error || 'Manual event preflight failed',
+        description: err.response?.data?.error || 'Manual event check failed',
         variant: 'destructive',
       })
     } finally {
@@ -730,7 +730,7 @@ export default function TeamarrPreflight() {
                                     className="h-8 w-8"
                                     disabled={!canForceEvent(event) || actionLoading !== ''}
                                     onClick={() => setForceEvent(event)}
-                                    aria-label={`Force event preflight for ${event.event_name || 'managed event'}`}
+                                    aria-label={`Run event check for ${event.event_name || 'managed event'}`}
                                   >
                                     {actionLoading === `force:${event.identity}` ? (
                                       <Loader2 className="h-4 w-4 animate-spin" />
