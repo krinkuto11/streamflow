@@ -264,13 +264,13 @@ class AutomationRunStatusTests(unittest.TestCase):
             [
                 ("planned", 0, 2),
                 ("requesting", 0, 2),
-                ("completed", 1, 2),
+                ("accepted", 1, 2),
                 ("requesting", 1, 2),
-                ("completed", 2, 2),
+                ("accepted", 2, 2),
             ],
         )
         self.assertEqual(events[1]["message"], "Refreshing playlist 1/2: One")
-        self.assertEqual(events[-1]["message"], "Playlist 2/2 refreshed: Two")
+        self.assertEqual(events[-1]["message"], "Playlist 2/2 refresh accepted: Two")
 
     def test_refresh_playlists_reports_missing_account_as_skipped(self):
         manager = self._manager()

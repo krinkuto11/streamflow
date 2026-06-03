@@ -475,7 +475,7 @@ def refresh_m3u_playlists(
     
     try:
         resp = post_request(url, {})
-        logger.info("M3U refresh initiated successfully")
+        logger.info("M3U refresh request accepted by Dispatcharr")
         return resp
     except Exception as e:
         logger.error(f"Failed to refresh M3U playlists: {e}")

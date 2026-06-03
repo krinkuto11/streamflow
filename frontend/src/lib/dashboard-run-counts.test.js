@@ -78,7 +78,7 @@ describe('dashboard run counts', () => {
 
     expect(metrics.map(metric => [metric.key, metric.label, metric.value])).toEqual([
       ['channels', 'Queued Channels', 5],
-      ['playlists', 'Playlists Refreshed', null],
+      ['playlists', 'Refresh Requests', null],
       ['matched', 'Stream Matching', null],
       ['checked', 'Channels Checked', 2],
       ['dead', 'Dead Streams', 1],
@@ -100,8 +100,9 @@ describe('dashboard run counts', () => {
     })
 
     expect(metrics.find(metric => metric.key === 'playlists')).toMatchObject({
-      label: 'Playlists Refreshed',
+      label: 'Refresh Requests',
       value: 2,
+      description: 'M3U account refresh requests accepted by Dispatcharr.',
     })
     expect(metrics.find(metric => metric.key === 'matched')).toMatchObject({
       label: 'Channels Updated',
@@ -135,7 +136,7 @@ describe('dashboard run counts', () => {
 
     expect(metrics.map(metric => [metric.key, metric.label, metric.value])).toEqual([
       ['channels', 'Active Channel', 1],
-      ['playlists', 'Playlists Refreshed', null],
+      ['playlists', 'Refresh Requests', null],
       ['matched', 'Stream Matching', null],
       ['checked', 'Channels Checked', 0],
       ['dead', 'Dead Streams', 1],

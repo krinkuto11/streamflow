@@ -122,7 +122,7 @@ class TestHTTPLogFilter(unittest.TestCase):
             level=logging.INFO,
             pathname='',
             lineno=0,
-            msg='M3U refresh initiated successfully',
+            msg='M3U refresh request accepted by Dispatcharr',
             args=(),
             exc_info=None
         )

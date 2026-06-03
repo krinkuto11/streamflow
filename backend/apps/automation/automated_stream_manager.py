@@ -2163,12 +2163,12 @@ class AutomatedStreamManager:
                                 "name": account_name,
                             })
                             emit_refresh_progress({
-                                "state": "completed",
+                                "state": "accepted",
                                 "current": index,
                                 "total": total_accounts,
                                 "account_id": acc_id,
                                 "account_name": account_name,
-                                "message": f"Playlist {index}/{total_accounts} refreshed: {account_name}",
+                                "message": f"Playlist {index}/{total_accounts} refresh accepted: {account_name}",
                             })
                         else:
                             refresh_failed = True
@@ -2216,10 +2216,10 @@ class AutomatedStreamManager:
                     })
                 else:
                     emit_refresh_progress({
-                        "state": "completed",
+                        "state": "accepted",
                         "current": 1,
                         "total": 1,
-                        "message": "Fallback playlist refresh completed",
+                        "message": "Fallback playlist refresh request accepted",
                     })
 
             if refresh_failed:
@@ -2246,7 +2246,7 @@ class AutomatedStreamManager:
                 # Continue even if EPG refresh fails
 
             self.last_playlist_update = datetime.now()
-            logger.info("M3U playlist refresh completed successfully")
+            logger.info("M3U playlist refresh requests accepted successfully")
 
             # Note: Channel marking for stream quality checking is handled in discover_and_assign_streams()
             # after streams are actually assigned to specific channels. This prevents marking all channels
@@ -3956,9 +3956,14 @@ class AutomatedStreamManager:
                         if state == "skipped":
                             current_value = _index
                             message = f"Playlist {_index}/{total_specific_playlists} skipped: {account_name}"
-                        elif state in {"completed", "failed"}:
+                        elif state in {"accepted", "completed", "failed"}:
                             current_value = _index
-                            verb = "refreshed" if state == "completed" else "failed"
+                            if state == "accepted":
+                                verb = "accepted"
+                            elif state == "completed":
+                                verb = "refreshed"
+                            else:
+                                verb = "failed"
                             message = f"Playlist {_index}/{total_specific_playlists} {verb}: {account_name}"
                         elif state == "requesting":
                             current_value = _index - 1
@@ -3998,7 +4003,7 @@ class AutomatedStreamManager:
                 },
                 durations={"m3u_refresh_seconds": time.time() - m3u_refresh_started},
                 message=(
-                    f"Playlist refresh {'completed' if refresh_success else 'failed'}"
+                    f"Playlist refresh requests {'accepted' if refresh_success else 'failed'}"
                     if playlists_refreshed
                     else "Current cache selected for stream matching"
                 ),

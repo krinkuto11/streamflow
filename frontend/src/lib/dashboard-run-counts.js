@@ -64,11 +64,11 @@ export const getDashboardRunMetrics = ({
     },
     {
       key: 'playlists',
-      label: 'Playlists Refreshed',
+      label: 'Refresh Requests',
       value: counts.playlists,
       description: qualityOnlyRun
         ? 'Not part of a quality-only Stream Checker run.'
-        : 'M3U accounts refreshed during this automation run.',
+        : 'M3U account refresh requests accepted by Dispatcharr.',
     },
     {
       key: 'matched',
