@@ -14,7 +14,7 @@ import { Pagination, PaginationContent, PaginationItem, PaginationLink, Paginati
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
-import { getHardwareAnalysisPathDisplay } from '@/lib/hardware-status-display.js'
+import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote } from '@/lib/hardware-status-display.js'
 import { getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
 import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
@@ -395,6 +395,7 @@ export default function StreamChecker() {
     ? hardwareStatus.ffmpeg_hwaccels.join(', ')
     : (hardwareStatus?.config?.enabled ? 'No methods reported' : 'Not checked')
   const analysisPathDisplay = getHardwareAnalysisPathDisplay(hardwareStatus)
+  const hardwareOperatorNote = getHardwareOperatorNote(hardwareStatus)
 
   return (
     <div className="space-y-6">
@@ -1103,6 +1104,18 @@ export default function StreamChecker() {
                           </div>
                         </div>
                       </div>
+
+                      <Alert variant={hardwareOperatorNote.variant === 'destructive' ? 'destructive' : undefined}>
+                        {hardwareOperatorNote.variant === 'destructive' ? (
+                          <ShieldAlert className="h-4 w-4" />
+                        ) : (
+                          <ShieldCheck className="h-4 w-4" />
+                        )}
+                        <AlertTitle>{hardwareOperatorNote.title}</AlertTitle>
+                        <AlertDescription>
+                          {hardwareOperatorNote.description}
+                        </AlertDescription>
+                      </Alert>
                     </div>
                   </div>
                 </TabsContent>
