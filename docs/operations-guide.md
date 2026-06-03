@@ -230,6 +230,37 @@ when ffmpeg supports the selected mode. CPU fallback only retries failures that
 look like hardware/device initialization errors; normal dead streams, HTTP
 failures, and timeouts are still handled as stream results.
 
+### Unraid Template Notes
+
+On Unraid, keep the StreamFlow container managed through the Docker template so
+future edits stay visible and reversible in the Unraid UI. Do not make GPU or
+path changes only through an ad-hoc `docker run` command and then treat that as
+the finished install.
+
+Recommended Unraid flow:
+
+1. Keep the image repository/tag in the template.
+2. Keep `/app/data` mapped to persistent appdata storage.
+3. Add GPU runtime settings, device mappings, or environment variables through
+   template fields so they remain GUI-editable.
+4. For NVIDIA passthrough, expose the NVIDIA runtime or devices supported by the
+   host and set `NVIDIA_VISIBLE_DEVICES` plus
+   `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` when required by the host
+   plugin/runtime.
+5. Start in CPU mode or Auto mode with CPU fallback enabled.
+6. Run a short targeted quality check, then review Stream Checker hardware
+   status before using hardware decode for larger checks.
+
+The Stream Checker page should show the effective analysis path. The hardware
+status API is also useful for remote checks: it reports the configured mode,
+fallback setting, detected ffmpeg methods, GPU visibility, and whether
+StreamFlow currently expects CPU-only, hardware-preferred, or hardware-only
+probing.
+
+If the Unraid template is updated by hand, take a timestamped backup first and
+keep only the latest few backups. This makes it easy to roll back while avoiding
+old template copies piling up.
+
 ### Docker Compose Examples
 
 Use the CPU-only compose shape for ordinary servers or for validating that
