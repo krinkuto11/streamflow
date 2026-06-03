@@ -1,5 +1,6 @@
 from flask import Flask
 
+from apps.api.automation_handlers import handle_automation_periods_response
 from apps.api.stream_sessions_handlers import (
     get_playing_streams_response,
     get_proxy_status_response,
@@ -69,3 +70,33 @@ def test_viewer_activity_returns_empty_summary_while_udi_initializes():
     assert payload["channels"] == []
     assert payload["shadow_monitor_running"] is True
     assert payload["shadow_monitor_enabled"] is True
+
+
+def test_automation_periods_returns_empty_page_while_udi_initializes():
+    app = Flask(__name__)
+
+    def get_automation_config_manager():
+        raise AssertionError("startup periods response must not touch automation config")
+
+    with app.app_context():
+        response, status_code = handle_automation_periods_response(
+            method="GET",
+            args={"page": "1", "per_page": "200"},
+            payload=None,
+            get_automation_config_manager=get_automation_config_manager,
+            croniter_available=True,
+            croniter_module=None,
+            get_udi_manager=lambda: InitializingUdi(),
+        )
+
+    assert status_code == 200
+    assert response.get_json() == {
+        "items": [],
+        "total": 0,
+        "page": 1,
+        "per_page": 200,
+        "total_pages": 1,
+        "has_next": False,
+        "has_prev": False,
+        "initializing": True,
+    }

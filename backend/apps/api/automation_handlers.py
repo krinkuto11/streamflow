@@ -664,11 +664,10 @@ def handle_automation_periods_response(
     get_automation_config_manager: Callable[[], Any],
     croniter_available: bool,
     croniter_module: Any,
+    get_udi_manager: Optional[Callable[[], Any]] = None,
 ):
     """Get all automation periods or create a new period."""
     try:
-        automation_config = get_automation_config_manager()
-
         if method == "GET":
             search = args.get("search", "").strip()
             page_param = args.get("page", None)
@@ -690,6 +689,28 @@ def handle_automation_periods_response(
             except (ValueError, TypeError):
                 per_page = 50
 
+            if get_udi_manager is not None:
+                try:
+                    udi = get_udi_manager()
+                    if getattr(udi, "is_initialization_pending", lambda: False)():
+                        if page is None:
+                            return jsonify([]), 200
+                        return jsonify(
+                            {
+                                "items": [],
+                                "total": 0,
+                                "page": page,
+                                "per_page": per_page,
+                                "total_pages": 1,
+                                "has_next": False,
+                                "has_prev": page > 1,
+                                "initializing": True,
+                            }
+                        ), 200
+                except Exception as exc:
+                    logger.debug(f"Could not read UDI initialization state for automation periods: {exc}")
+
+            automation_config = get_automation_config_manager()
             result = automation_config.get_all_periods(search=search, page=page, per_page=per_page)
 
             if page is None:
@@ -704,6 +725,7 @@ def handle_automation_periods_response(
             return jsonify(result), 200
 
         if method == "POST":
+            automation_config = get_automation_config_manager()
             data = AutomationPeriodCreateSchema.from_payload(payload or {}).period_data
 
             schedule = data["schedule"]

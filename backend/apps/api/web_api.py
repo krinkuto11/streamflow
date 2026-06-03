@@ -1923,6 +1923,7 @@ def handle_automation_periods():
         get_automation_config_manager=get_automation_config_manager,
         croniter_available=CRONITER_AVAILABLE,
         croniter_module=globals().get('croniter'),
+        get_udi_manager=get_udi_manager,
     )
 
 
