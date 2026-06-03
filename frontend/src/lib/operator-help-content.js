@@ -146,6 +146,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'API_HOST',
         defaultValue: '0.0.0.0',
+        location: 'Container manager -> environment variables',
         effect: 'Controls which network interface the backend listens on inside the container.',
         useWhen: 'Keep the default for normal container networking.',
         risk: 'A narrow bind can make the UI or healthcheck unreachable from outside the container.',
@@ -153,6 +154,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'API_PORT',
         defaultValue: '5000 or the configured application port',
+        location: 'Container manager -> environment variables, port mapping, and healthcheck',
         effect: 'Defines the backend port used by the UI, API, and healthcheck.',
         useWhen: 'Change only when the host mapping and healthcheck are changed together.',
         risk: 'A mismatch can make the container look unhealthy even when the process started.',
@@ -160,6 +162,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'CONFIG_DIR',
         defaultValue: '/app/data',
+        location: 'Container manager -> volume mapping and environment variables',
         effect: 'Stores persistent config, caches, profiles, and runtime state.',
         useWhen: 'Point it at the mounted persistent data directory.',
         risk: 'A temporary path can make settings disappear after an update.',
@@ -167,6 +170,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Startup cache readiness',
         defaultValue: 'Wait for completion',
+        location: 'Dashboard startup screen and /api/dispatcharr/initialization-status',
         effect: 'Prevents automation and manual checks from using partial Dispatcharr data.',
         useWhen: 'Use after container start, image update, or manual UDI reload.',
         risk: 'Starting runs too early can make stream counts, event lists, or channel mappings look incomplete.',
@@ -200,6 +204,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Quality Check',
         defaultValue: 'Profile-specific',
+        location: 'Automation Settings -> Profiles',
         effect: 'Controls whether streams are analyzed for dead, blank, freeze, loop, or quality outcomes.',
         useWhen: 'Enable for maintenance and event-preflight profiles that should score or protect streams.',
         risk: 'Disabling it skips stream analysis and leaves quality state unchanged.',
@@ -207,6 +212,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'M3U Refresh',
         defaultValue: 'Profile-specific',
+        location: 'Automation Settings -> Profiles',
         effect: 'Sends playlist refresh requests before matching or checking.',
         useWhen: 'Use for scheduled provider refresh windows, not every small quality-only pass.',
         risk: 'Unneeded refreshes can make runs slower and hide whether a quality issue is real.',
@@ -214,6 +220,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Startup catch-up',
         defaultValue: 'Off',
+        location: 'Automation Periods -> period editor',
         effect: 'Allows a period with no previous run timestamp to run once after startup.',
         useWhen: 'Use only when the first automatic pass after setup is expected.',
         risk: 'Leaving it on broadly can start work immediately after a restart.',
@@ -221,16 +228,34 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Missed-run grace',
         defaultValue: '0 minutes',
+        location: 'Automation Periods -> period editor',
         effect: 'Limits how late an automatic missed run may still be caught up.',
         useWhen: 'Use a positive window when old runs should be skipped instead of replayed.',
         risk: 'Too small can skip useful maintenance; too large can create stale catch-up work.',
       },
       {
+        name: 'Catch-up cap',
+        defaultValue: '0 periods',
+        location: 'Automation Settings -> Automation Run Policy',
+        effect: 'Limits how many due periods an automatic scheduler pass may start.',
+        useWhen: 'Use a positive cap when many missed periods could otherwise start together after downtime.',
+        risk: 'Too low can defer useful work repeatedly; 0 allows every due period.',
+      },
+      {
         name: 'Maintenance window',
         defaultValue: 'Configured globally, disabled by default',
+        location: 'Automation Settings -> Automation Run Policy',
         effect: 'Pauses automatic runs during a daily time window.',
         useWhen: 'Use around provider maintenance, backups, or known busy viewer windows.',
         risk: 'Manual forced runs bypass it, so operators still need to choose deliberately.',
+      },
+      {
+        name: 'Teamarr event window',
+        defaultValue: 'Configured globally, disabled by default',
+        location: 'Automation Settings -> Automation Run Policy',
+        effect: 'Pauses automatic automation runs around cached Teamarr event starts.',
+        useWhen: 'Use when normal automation should avoid event-channel windows while manual forced runs remain possible.',
+        risk: 'Too wide can defer regular automation for long event blocks.',
       },
     ],
     smokeChecks: [
@@ -261,6 +286,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Check on update',
         defaultValue: 'On',
+        location: 'Stream Checker -> Queue Settings',
         effect: 'Queues checks after updates when the profile calls for quality validation.',
         useWhen: 'Keep on for normal maintenance profiles.',
         risk: 'Turning it off can leave newly matched streams unverified.',
@@ -268,6 +294,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Max channels per run',
         defaultValue: '50',
+        location: 'Stream Checker -> Queue Settings',
         effect: 'Caps how much channel work a single automatic run can enqueue.',
         useWhen: 'Lower it when providers have tight limits or live viewers need more headroom.',
         risk: 'Too high can keep profiles busy for a long time.',
@@ -275,6 +302,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Parallel workers',
         defaultValue: 'Configured in Stream Checker',
+        location: 'Stream Checker -> Concurrent Checking',
         effect: 'Controls how many stream probes can run concurrently.',
         useWhen: 'Increase only when provider/profile limits and hardware can handle it.',
         risk: 'Too high can cause provider throttling, viewer contention, or noisy failures.',
@@ -282,6 +310,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'CPU Fallback',
         defaultValue: 'On for safer hardware mode',
+        location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Retries analysis on CPU if the selected hardware path is unavailable or rejected.',
         useWhen: 'Use for mixed providers and uncertain hardware support.',
         risk: 'Turning it off makes hardware setup errors fail the check instead of falling back.',
@@ -318,6 +347,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Preflight Offset',
         defaultValue: '20 minutes',
+        location: 'Teamarr Preflight -> Configuration',
         effect: 'Runs the main pre-start check before event start.',
         useWhen: 'Use a smaller value when providers name event channels close to kickoff.',
         risk: 'Too early can check placeholder or missing streams.',
@@ -325,6 +355,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Pre-Start Retries',
         defaultValue: '10 min before start; 3 min before start',
+        location: 'Teamarr Preflight -> Configuration',
         effect: 'Schedules two separate pre-start retry buckets without changing the main 20-minute preflight.',
         useWhen: 'Use when event channels appear shortly before start.',
         risk: 'Too many retries can occupy checker capacity before the stream exists.',
@@ -332,6 +363,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Post-Start Checks',
         defaultValue: '2 min after start; 4 min after start',
+        location: 'Teamarr Preflight -> Configuration',
         effect: 'Schedules two separate post-start buckets so channels that appear at kickoff or a few minutes later are not unfairly demoted.',
         useWhen: 'Use for event providers that rename or publish streams at kickoff.',
         risk: 'Too late can miss early viewer protection for short events.',
@@ -339,6 +371,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Post-Start Grace',
         defaultValue: '5 minutes',
+        location: 'Teamarr Preflight -> Configuration',
         effect: 'Limits how long after start post-start checks are still considered due.',
         useWhen: 'Keep it at least as large as the largest post-start check, for example 5 minutes for a 2-minute post-start check.',
         risk: 'Too narrow can skip the post-start bucket entirely; too wide can check stale events.',
@@ -346,6 +379,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Event Cooldown',
         defaultValue: '720 minutes',
+        location: 'Teamarr Preflight -> Configuration',
         effect: 'Prevents the same event bucket from being checked repeatedly after it already ran.',
         useWhen: 'Keep long enough to avoid repeated checks while the same event remains in the schedule feed.',
         risk: 'Too short can repeat checks and consume provider/profile capacity; too long can hide intentional retests unless you run a manual check.',
@@ -353,13 +387,15 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Concurrent Checks',
         defaultValue: '1',
+        location: 'Teamarr Preflight -> Configuration',
         effect: 'Limits how many Teamarr event checks run at the same time.',
         useWhen: 'Keep at 1 for most event-channel providers because event streams often share limited profile capacity.',
         risk: 'Higher values can make several event channels compete for the same provider slots at kickoff.',
       },
       {
-        name: 'Skip during quality check',
+        name: 'Busy Handling',
         defaultValue: 'On',
+        location: 'Teamarr Preflight -> Busy Handling',
         effect: 'Defers or queues event checks when normal checker work is already active.',
         useWhen: 'Keep on to avoid interrupting current stream work.',
         risk: 'Turning it off can overload provider/profile capacity.',
@@ -396,6 +432,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Poll Interval',
         defaultValue: '5 seconds',
+        location: 'Shadow Monitor -> Settings',
         effect: 'Controls how often periodic discovery checks active viewer sessions.',
         useWhen: 'Use default for responsive watcher discovery.',
         risk: 'Too low can add API noise; too high can notice viewer sessions late.',
@@ -403,6 +440,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Watch Gap',
         defaultValue: '1 second',
+        location: 'Shadow Monitor -> Settings',
         effect: 'Controls the short gap between continuous watcher loops.',
         useWhen: 'Keep low for long-lived viewer protection.',
         risk: 'Too high can create avoidable watcher gaps.',
@@ -410,6 +448,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Confirmations',
         defaultValue: '2 hits',
+        location: 'Shadow Monitor -> Settings',
         effect: 'Requires repeated bad detections before switching.',
         useWhen: 'Use default to reduce false positives from short video glitches.',
         risk: 'Too low can switch on transient noise; too high can leave bad playback visible longer.',
@@ -417,6 +456,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Channel Cooldown',
         defaultValue: '300 seconds',
+        location: 'Shadow Monitor -> Settings',
         effect: 'Waits before another switch attempt on the same channel.',
         useWhen: 'Use to prevent rapid repeat switches on unstable channels.',
         risk: 'Too long can delay recovery if the replacement stream is also bad.',
@@ -424,6 +464,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Channel Switch Limit',
         defaultValue: '3 per channel per rolling hour',
+        location: 'Shadow Monitor -> Settings',
         effect: 'Limits successful stream switches for one channel in a rolling hour.',
         useWhen: 'Use as a flapping guard when a channel alternates between bad streams.',
         risk: 'Too low can stop recovery attempts; too high can churn through streams.',
@@ -456,6 +497,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Hardware Acceleration',
         defaultValue: 'Off or operator-enabled',
+        location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Enables FFmpeg hardware methods for stream analysis.',
         useWhen: 'Use when the runtime exposes a supported device and CPU savings matter.',
         risk: 'Misconfigured hardware can fail probes or hide that CPU would have worked.',
@@ -463,6 +505,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Mode',
         defaultValue: 'auto',
+        location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Chooses which FFmpeg hardware method StreamFlow requests.',
         useWhen: 'Use Auto for general setups; use VAAPI or QSV for DRI devices when needed.',
         risk: 'A mode not reported by FFmpeg can fail without fallback.',
@@ -470,6 +513,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Device',
         defaultValue: 'Blank or device path',
+        location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Optional FFmpeg device path or index used by the selected mode.',
         useWhen: 'Use for DRI devices or multi-device systems that need a specific path.',
         risk: 'Wrong paths can make hardware appear configured but unusable.',
@@ -477,6 +521,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'CPU Fallback',
         defaultValue: 'On',
+        location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Retries analysis without hardware if FFmpeg rejects the hardware path.',
         useWhen: 'Use for safer production checks.',
         risk: 'Turning it off makes hardware issues fail checks immediately.',

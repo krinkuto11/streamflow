@@ -88,6 +88,7 @@ describe('operatorHelpSections', () => {
         expect(setting).toEqual(expect.objectContaining({
           name: expect.any(String),
           defaultValue: expect.any(String),
+          location: expect.any(String),
           effect: expect.any(String),
           useWhen: expect.any(String),
           risk: expect.any(String),
@@ -104,9 +105,17 @@ describe('operatorHelpSections', () => {
     expect(postStartGrace.useWhen).toMatch(/at least as large as the largest post-start check/i)
     expect(teamarr.steps.join(' ')).toMatch(/2 minutes and 4 minutes after start/i)
     expect(teamarr.settings.find(setting => setting.name === 'Post-Start Checks').defaultValue).toBe('2 min after start; 4 min after start')
+    expect(teamarr.settings.find(setting => setting.name === 'Post-Start Checks').location).toBe('Teamarr Preflight -> Configuration')
     expect(teamarr.smokeChecks.join(' ')).toMatch(/2-minute post-start check/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/4 minutes/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/dead-stream removal off/i)
+    const automation = getOperatorHelpDetailTopic('automation-periods')
+    expect(automation.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
+      'Catch-up cap',
+      'Maintenance window',
+      'Teamarr event window',
+    ]))
+    expect(automation.settings.find(setting => setting.name === 'Maintenance window').location).toBe('Automation Settings -> Automation Run Policy')
     expect(getOperatorHelpDetailTopic('shadow-monitor').settings.map(setting => setting.name)).toContain('Channel Switch Limit')
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')

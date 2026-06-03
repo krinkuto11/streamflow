@@ -115,8 +115,8 @@ export default function OperatorHelp() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Settings Reference</CardTitle>
-              <CardDescription>What each setting does, when to use it, and what to watch</CardDescription>
+              <CardTitle>Settings And Controls</CardTitle>
+              <CardDescription>Where each control lives, what it does, and what to watch</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               {topic.settings.map((setting) => (
@@ -126,6 +126,10 @@ export default function OperatorHelp() {
                     <Badge variant="outline" className="w-fit">{setting.defaultValue}</Badge>
                   </div>
                   <dl className="grid gap-2 text-sm text-muted-foreground">
+                    <div>
+                      <dt className="font-medium text-foreground">Where</dt>
+                      <dd>{setting.location}</dd>
+                    </div>
                     <div>
                       <dt className="font-medium text-foreground">Effect</dt>
                       <dd>{setting.effect}</dd>
