@@ -115,7 +115,7 @@ describe('operatorHelpSections', () => {
       'Maintenance window',
       'Teamarr event window',
     ]))
-    expect(automation.settings.find(setting => setting.name === 'Maintenance window').location).toBe('Automation Settings -> Automation Run Policy')
+    expect(automation.settings.find(setting => setting.name === 'Maintenance window').location).toBe('Settings -> Scheduling -> Automation Run Policy')
     expect(getOperatorHelpDetailTopic('shadow-monitor').settings.map(setting => setting.name)).toContain('Channel Switch Limit')
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')

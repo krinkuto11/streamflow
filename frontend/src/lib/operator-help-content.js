@@ -236,7 +236,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Catch-up cap',
         defaultValue: '0 periods',
-        location: 'Automation Settings -> Automation Run Policy',
+        location: 'Settings -> Scheduling -> Automation Run Policy',
         effect: 'Limits how many due periods an automatic scheduler pass may start.',
         useWhen: 'Use a positive cap when many missed periods could otherwise start together after downtime.',
         risk: 'Too low can defer useful work repeatedly; 0 allows every due period.',
@@ -244,7 +244,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Maintenance window',
         defaultValue: 'Configured globally, disabled by default',
-        location: 'Automation Settings -> Automation Run Policy',
+        location: 'Settings -> Scheduling -> Automation Run Policy',
         effect: 'Pauses automatic runs during a daily time window.',
         useWhen: 'Use around provider maintenance, backups, or known busy viewer windows.',
         risk: 'Manual forced runs bypass it, so operators still need to choose deliberately.',
@@ -252,7 +252,7 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Teamarr event window',
         defaultValue: 'Configured globally, disabled by default',
-        location: 'Automation Settings -> Automation Run Policy',
+        location: 'Settings -> Scheduling -> Automation Run Policy',
         effect: 'Pauses automatic automation runs around cached Teamarr event starts.',
         useWhen: 'Use when normal automation should avoid event-channel windows while manual forced runs remain possible.',
         risk: 'Too wide can defer regular automation for long event blocks.',
