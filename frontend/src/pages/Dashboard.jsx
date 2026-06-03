@@ -41,6 +41,14 @@ import {
 } from '@/components/ui/dropdown-menu.jsx'
 import UpcomingAutomationEvents from '@/components/Dashboard/UpcomingAutomationEvents.jsx'
 import StreamFlowInitializingScreen from '@/components/Dashboard/StreamFlowInitializingScreen.jsx'
+import {
+  formatRealViewerChannelCount,
+  formatStreamRef,
+  formatViewerClientCount,
+  formatWatcherClientCount,
+  formatWatcherOnlyChannelCount,
+  getPlaybackBadgeLabel,
+} from '@/lib/viewer-activity-display.js'
 
 const AUTOMATION_STAGES = [
   { id: 'settings', label: 'Preparing' },
@@ -964,10 +972,10 @@ export default function Dashboard() {
           </div>
           <div className="flex flex-wrap gap-2">
             <Badge variant={realWatchedCount > 0 ? 'default' : 'secondary'}>
-              {realWatchedCount} viewer channels
+              {formatRealViewerChannelCount(realWatchedCount)}
             </Badge>
             <Badge variant={watcherOnlyCount > 0 ? 'outline' : 'secondary'}>
-              {watcherOnlyCount} watcher-only channels
+              {formatWatcherOnlyChannelCount(watcherOnlyCount)}
             </Badge>
           </div>
         </CardHeader>
@@ -1003,18 +1011,18 @@ export default function Dashboard() {
                       <div className="truncate text-sm font-medium">{channel.channel_name || 'Unknown Channel'}</div>
                       <div className="text-xs text-muted-foreground">
                         {channel.state || 'active'}
-                        {channel.stream_id ? ` · Stream ${channel.stream_id}` : ''}
+                        {formatStreamRef(channel.stream_id)}
                       </div>
                     </div>
                     {channel.has_real_clients ? (
-                      <Badge className="shrink-0 bg-green-600 text-white">Viewer active</Badge>
+                      <Badge className="shrink-0 bg-green-600 text-white">{getPlaybackBadgeLabel(channel)}</Badge>
                     ) : (
-                      <Badge variant="outline" className="shrink-0">Watcher only</Badge>
+                      <Badge variant="outline" className="shrink-0">{getPlaybackBadgeLabel(channel)}</Badge>
                     )}
                   </div>
                   <div className="mt-3 flex flex-wrap gap-2 text-xs">
-                    <Badge variant="secondary">{channel.real_client_count || 0} viewers</Badge>
-                    <Badge variant="outline">{channel.watcher_client_count || 0} watchers</Badge>
+                    <Badge variant="secondary">{formatViewerClientCount(channel.real_client_count)}</Badge>
+                    <Badge variant="outline">{formatWatcherClientCount(channel.watcher_client_count)}</Badge>
                   </div>
                 </div>
               ))}

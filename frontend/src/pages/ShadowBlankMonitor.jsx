@@ -9,6 +9,10 @@ import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { shadowBlankMonitorAPI } from '@/services/api.js'
 import {
+  formatViewerClientCount,
+  formatWatcherClientCount,
+} from '@/lib/viewer-activity-display.js'
+import {
   Activity,
   AlertCircle,
   CheckCircle2,
@@ -475,9 +479,9 @@ export default function ShadowBlankMonitor() {
                       <div className="flex items-center justify-between gap-3">
                         <span className="font-mono text-xs">{channel.channel_ref}</span>
                         <div className="flex shrink-0 flex-wrap justify-end gap-2">
-                          <Badge variant="outline">{channel.real_client_count || 0} viewers</Badge>
+                          <Badge variant="outline">{formatViewerClientCount(channel.real_client_count)}</Badge>
                           {(channel.watcher_client_count || 0) > 0 && (
-                            <Badge variant="secondary">{channel.watcher_client_count} watcher{channel.watcher_client_count === 1 ? '' : 's'}</Badge>
+                            <Badge variant="secondary">{formatWatcherClientCount(channel.watcher_client_count)}</Badge>
                           )}
                         </div>
                       </div>
@@ -521,7 +525,7 @@ export default function ShadowBlankMonitor() {
                           {event.channel_ref} / {event.stream_ref}
                         </p>
                       </div>
-                      <span className="shrink-0 text-xs text-muted-foreground">{event.real_client_count || 0} viewers</span>
+                      <span className="shrink-0 text-xs text-muted-foreground">{formatViewerClientCount(event.real_client_count)}</span>
                     </div>
                   ))}
                 </div>
