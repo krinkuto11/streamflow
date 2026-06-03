@@ -310,30 +310,45 @@ export default function TeamarrPreflight() {
       {
         label: 'Quality check',
         value: selectedStreamChecking.enabled === false ? 'Disabled' : 'Enabled',
+        description: selectedStreamChecking.enabled === false
+          ? 'Event checks use schedule matching only.'
+          : 'Runs stream quality checks before event promotion.',
         variant: selectedStreamChecking.enabled === false ? 'secondary' : 'default',
       },
       {
         label: 'Dead removal',
-        value: selectedStreamChecking.remove_dead_streams ? 'Removes dead streams' : 'Keeps dead streams',
+        value: selectedStreamChecking.remove_dead_streams ? 'Remove' : 'Keep',
+        description: selectedStreamChecking.remove_dead_streams
+          ? 'Dead streams are removed from event channels.'
+          : 'Dead streams stay available for manual review.',
         variant: selectedStreamChecking.remove_dead_streams ? 'destructive' : 'secondary',
       },
       {
         label: 'Blank detection',
-        value: blankEnabled
-          ? (selectedStreamChecking.treat_blank_as_dead ? 'Marks dead' : 'Detects only')
-          : 'Off',
+        value: blankEnabled ? (selectedStreamChecking.treat_blank_as_dead ? 'Dead' : 'Detect') : 'Off',
+        description: blankEnabled
+          ? (selectedStreamChecking.treat_blank_as_dead
+            ? 'Blank video is treated as dead.'
+            : 'Blank video is reported only.')
+          : 'Blank-frame checks are skipped.',
         variant: blankEnabled ? 'destructive' : 'secondary',
       },
       {
         label: 'Freeze detection',
-        value: freezeEnabled
-          ? (selectedStreamChecking.treat_freeze_as_dead ? 'Marks dead' : 'Detects only')
-          : 'Off',
+        value: freezeEnabled ? (selectedStreamChecking.treat_freeze_as_dead ? 'Dead' : 'Detect') : 'Off',
+        description: freezeEnabled
+          ? (selectedStreamChecking.treat_freeze_as_dead
+            ? 'Frozen video is treated as dead.'
+            : 'Frozen video is reported only.')
+          : 'Freeze checks are skipped.',
         variant: freezeEnabled ? 'destructive' : 'secondary',
       },
       {
         label: 'Loop check',
         value: selectedStreamChecking.loop_check_enabled ? 'On' : 'Off',
+        description: selectedStreamChecking.loop_check_enabled
+          ? 'Looping content is checked during preflight.'
+          : 'Loop detection is skipped.',
         variant: selectedStreamChecking.loop_check_enabled ? 'destructive' : 'secondary',
       },
     ]
@@ -688,11 +703,14 @@ export default function TeamarrPreflight() {
                   Create or edit profiles in Automation Settings; Save stores the selection here.
                 </p>
                 {qualityRuleSummary.length > 0 && (
-                  <div className="grid gap-2 pt-2 sm:grid-cols-2">
+                  <div className="grid gap-2 pt-2 xl:grid-cols-2">
                     {qualityRuleSummary.map(rule => (
-                      <div key={rule.label} className="flex items-center justify-between gap-2 rounded-md border px-3 py-2">
-                        <span className="min-w-0 text-xs text-muted-foreground">{rule.label}</span>
-                        <Badge variant={rule.variant} className="shrink-0 text-[10px]">
+                      <div key={rule.label} className="flex min-h-[72px] items-start justify-between gap-3 rounded-md border px-3 py-2.5">
+                        <div className="min-w-0 space-y-1">
+                          <span className="block text-sm font-medium leading-snug text-foreground">{rule.label}</span>
+                          <span className="block text-xs leading-snug text-muted-foreground">{rule.description}</span>
+                        </div>
+                        <Badge variant={rule.variant} className="shrink-0 whitespace-nowrap text-[10px]">
                           {rule.value}
                         </Badge>
                       </div>
