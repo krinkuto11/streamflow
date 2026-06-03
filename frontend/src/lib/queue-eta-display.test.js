@@ -4,9 +4,17 @@ import { getQueueEtaDisplay } from './queue-eta-display'
 
 describe('getQueueEtaDisplay', () => {
   it('formats a ready queue ETA', () => {
-    expect(getQueueEtaDisplay({ eta_seconds: 125 })).toMatchObject({
+    expect(getQueueEtaDisplay({ eta_seconds: 125, completed: 12 })).toMatchObject({
       state: 'ready',
       label: '~2m 5s remaining',
+      pulse: false,
+    })
+  })
+
+  it('labels ETA as early while only a few channels have completed', () => {
+    expect(getQueueEtaDisplay({ eta_seconds: 3600, completed: 2, failed: 1 })).toMatchObject({
+      state: 'early',
+      label: 'Early ETA: ~1h remaining',
       pulse: false,
     })
   })
