@@ -78,6 +78,7 @@ FFMPEG_HWACCEL_MODES = {
     'vdpau',
     'videotoolbox',
 }
+DRI_HWACCEL_METHODS = {'drm', 'qsv', 'vaapi'}
 FFMPEG_HWACCEL_FAILURE_PATTERNS = (
     'device creation failed',
     'failed to create',
@@ -185,6 +186,12 @@ def _parse_ffmpeg_hwaccels(output: str) -> List[str]:
     return sorted(set(methods))
 
 
+def _is_dri_device_path(device: str) -> bool:
+    """Return true when the configured ffmpeg device points at a Linux DRI device."""
+    normalized = str(device or '').strip().lower()
+    return normalized == '/dev/dri' or normalized.startswith('/dev/dri/')
+
+
 def collect_hardware_acceleration_diagnostics(
     config: Optional[Dict[str, Any]],
     *,
@@ -204,6 +211,10 @@ def collect_hardware_acceleration_diagnostics(
         'nvidia_smi_ok': False,
         'nvidia_gpus': [],
         'nvidia_error': '',
+        'dri_device_configured': _is_dri_device_path(hwaccel.get('device')),
+        'dri_hwaccels': [],
+        'dri_available': False,
+        'hardware_backend': 'cpu' if not hwaccel['enabled'] else 'unknown',
     }
     def _run(command: List[str], timeout: float) -> subprocess.CompletedProcess:
         if command_runner:
@@ -222,6 +233,14 @@ def collect_hardware_acceleration_diagnostics(
         diagnostics['ffmpeg_hwaccels'] = _parse_ffmpeg_hwaccels(
             f"{ffmpeg_result.stdout or ''}\n{ffmpeg_result.stderr or ''}"
         )
+        diagnostics['dri_hwaccels'] = sorted(
+            method for method in diagnostics['ffmpeg_hwaccels']
+            if method in DRI_HWACCEL_METHODS
+        )
+        diagnostics['dri_available'] = bool(diagnostics['dri_hwaccels']) and (
+            diagnostics['dri_device_configured']
+            or hwaccel['mode'] in {'auto', 'qsv', 'vaapi'}
+        )
         if hwaccel['enabled']:
             mode = hwaccel['mode']
             diagnostics['mode_supported'] = (
@@ -237,7 +256,7 @@ def collect_hardware_acceleration_diagnostics(
         diagnostics['ffmpeg_error'] = str(exc)[:300]
 
     should_check_nvidia = (
-        (hwaccel['enabled'] and hwaccel['mode'] in {'auto', 'cuda'})
+        (hwaccel['enabled'] and hwaccel['mode'] == 'cuda')
         or diagnostics['nvidia_visible_devices_set']
     )
     if should_check_nvidia:
@@ -263,7 +282,42 @@ def collect_hardware_acceleration_diagnostics(
             diagnostics['nvidia_error'] = 'nvidia-smi timed out'
         except Exception as exc:
             diagnostics['nvidia_error'] = str(exc)[:300]
+    if hwaccel['enabled']:
+        if diagnostics['nvidia_smi_ok'] or hwaccel['mode'] == 'cuda' or diagnostics['nvidia_visible_devices_set']:
+            diagnostics['hardware_backend'] = 'nvidia'
+        elif diagnostics['dri_available']:
+            diagnostics['hardware_backend'] = 'dri'
+        elif diagnostics['mode_supported']:
+            diagnostics['hardware_backend'] = 'ffmpeg'
     return diagnostics
+
+
+def _log_nvidia_diagnostics(diagnostics: Dict[str, Any]) -> None:
+    if not diagnostics['nvidia_checked']:
+        return
+    if diagnostics['nvidia_smi_ok'] and diagnostics['nvidia_gpus']:
+        logger.info(
+            "NVIDIA runtime visible: NVIDIA_VISIBLE_DEVICES=%s; GPUs=%s",
+            'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+            ', '.join(diagnostics['nvidia_gpus']),
+        )
+    else:
+        logger.warning(
+            "NVIDIA runtime not ready: NVIDIA_VISIBLE_DEVICES=%s; nvidia-smi=%s",
+            'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+            diagnostics['nvidia_error'] or 'no GPU reported',
+        )
+
+
+def _log_dri_diagnostics(diagnostics: Dict[str, Any]) -> None:
+    if not diagnostics.get('dri_available'):
+        return
+    hwaccel = diagnostics['config']
+    logger.info(
+        "DRI/VAAPI/QSV hardware path reported by ffmpeg: device=%s methods=%s",
+        hwaccel['device'] or 'default',
+        ', '.join(diagnostics.get('dri_hwaccels') or []),
+    )
 
 
 def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -272,19 +326,7 @@ def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any
     hwaccel = diagnostics['config']
     if not hwaccel['enabled']:
         logger.info("FFmpeg hardware acceleration disabled; CPU stream analysis path is active")
-        if diagnostics['nvidia_checked']:
-            if diagnostics['nvidia_smi_ok'] and diagnostics['nvidia_gpus']:
-                logger.info(
-                    "NVIDIA runtime visible: NVIDIA_VISIBLE_DEVICES=%s; GPUs=%s",
-                    'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
-                    ', '.join(diagnostics['nvidia_gpus']),
-                )
-            else:
-                logger.warning(
-                    "NVIDIA runtime not ready: NVIDIA_VISIBLE_DEVICES=%s; nvidia-smi=%s",
-                    'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
-                    diagnostics['nvidia_error'] or 'no GPU reported',
-                )
+        _log_nvidia_diagnostics(diagnostics)
         return diagnostics
 
     logger.info(
@@ -303,19 +345,8 @@ def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any
     else:
         logger.warning("FFmpeg hardware acceleration readiness unknown: %s", diagnostics['ffmpeg_error'])
 
-    if diagnostics['nvidia_checked']:
-        if diagnostics['nvidia_smi_ok'] and diagnostics['nvidia_gpus']:
-            logger.info(
-                "NVIDIA runtime visible: NVIDIA_VISIBLE_DEVICES=%s; GPUs=%s",
-                'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
-                ', '.join(diagnostics['nvidia_gpus']),
-            )
-        else:
-            logger.warning(
-                "NVIDIA runtime not ready: NVIDIA_VISIBLE_DEVICES=%s; nvidia-smi=%s",
-                'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
-                diagnostics['nvidia_error'] or 'no GPU reported',
-            )
+    _log_nvidia_diagnostics(diagnostics)
+    _log_dri_diagnostics(diagnostics)
     return diagnostics
 
 

@@ -385,11 +385,18 @@ export default function StreamChecker() {
       : (firstStartChannel?.name || 'First channel')
   const queueAllDisabled = isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || (queueStartMode === 'channel' && !queueStartChannelId)
   const detectedGpuCount = Number.isFinite(Number(hardwareStatus?.nvidia_gpu_count)) ? Number(hardwareStatus?.nvidia_gpu_count) : 0
-  const detectedGpuLabel = detectedGpuCount > 0
-    ? `${detectedGpuCount} detected`
-    : hardwareStatus?.nvidia_checked
-      ? 'No GPU reported'
-      : 'Not checked'
+  const driMethodsLabel = Array.isArray(hardwareStatus?.dri_hwaccels) && hardwareStatus.dri_hwaccels.length > 0
+    ? hardwareStatus.dri_hwaccels.join(', ')
+    : ''
+  const runtimeDeviceLabel = detectedGpuCount > 0
+    ? `${detectedGpuCount} NVIDIA detected`
+    : hardwareStatus?.dri_available
+      ? `DRI/VAAPI/QSV reported${driMethodsLabel ? ` (${driMethodsLabel})` : ''}`
+      : hardwareStatus?.nvidia_checked
+        ? 'No NVIDIA GPU reported'
+        : hardwareStatus?.config?.enabled
+          ? 'FFmpeg methods only'
+          : 'Not checked'
   const ffmpegModeLabel = hardwareStatus?.config?.enabled
     ? (hardwareStatus?.mode_supported ? 'Available' : 'Not reported')
     : 'Disabled'
@@ -1086,7 +1093,7 @@ export default function StreamChecker() {
                             Optional ffmpeg device path or index
                           </p>
                           <p className="text-xs text-muted-foreground">
-                            Detected GPU: {detectedGpuLabel}
+                            Runtime device: {runtimeDeviceLabel}
                           </p>
                         </div>
 
@@ -1109,7 +1116,7 @@ export default function StreamChecker() {
                       <div className="grid gap-3 text-xs md:grid-cols-4">
                         <div className="rounded-md border border-border px-3 py-2">
                           <div className="text-muted-foreground">Runtime Device</div>
-                          <div className="mt-1 font-medium text-foreground">{detectedGpuLabel}</div>
+                          <div className="mt-1 font-medium text-foreground">{runtimeDeviceLabel}</div>
                         </div>
                         <div className="rounded-md border border-border px-3 py-2">
                           <div className="text-muted-foreground">Selected Mode</div>
