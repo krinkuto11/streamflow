@@ -72,11 +72,11 @@ export const getDashboardRunMetrics = ({
     },
     {
       key: 'matched',
-      label: qualityOnlyRun ? 'Stream Matching' : 'Channels Matched',
+      label: qualityOnlyRun ? 'Stream Matching' : 'Channels Updated',
       value: counts.matched,
       description: qualityOnlyRun
         ? 'Not part of a quality-only Stream Checker run.'
-        : 'Channels whose stream assignments changed or were validated during matching.',
+        : 'Channels that received new stream assignments during matching.',
     },
     {
       key: 'checked',

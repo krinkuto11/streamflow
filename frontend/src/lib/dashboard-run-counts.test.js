@@ -87,7 +87,7 @@ describe('dashboard run counts', () => {
     ])
   })
 
-  it('keeps automation matching and playlist metrics while the automation quality queue is active', () => {
+  it('labels automation assignment counts as updated channels while the automation quality queue is active', () => {
     const metrics = getDashboardRunMetrics({
       streamQueueActive: true,
       streamCheckerOnlyActive: false,
@@ -104,8 +104,9 @@ describe('dashboard run counts', () => {
       value: 2,
     })
     expect(metrics.find(metric => metric.key === 'matched')).toMatchObject({
-      label: 'Channels Matched',
+      label: 'Channels Updated',
       value: 4,
+      description: 'Channels that received new stream assignments during matching.',
     })
   })
 
