@@ -110,6 +110,9 @@ def test_udi_cache_sync_progress_tracks_streams_and_channels():
     assert cache_stage["current"] == 2
     assert cache_stage["total"] == 2
     assert cache_stage["percent"] == 100
+    assert status["counts"]["cache_sync_successful_steps"] == 2
+    assert status["counts"]["cache_sync_total_steps"] == 2
+    assert status["counts"]["cache_sync_state"] == "completed"
 
 
 def test_udi_cache_sync_progress_reports_partial_warning():
@@ -125,11 +128,18 @@ def test_udi_cache_sync_progress_reports_partial_warning():
 
     status = manager.get_run_status()
     assert status["progress"] == {
-        "current": 2,
+        "current": 1,
         "total": 2,
-        "percent": 100,
+        "percent": 50,
         "message": "Syncing channel cache reported warnings",
     }
+    cache_stage = next(stage for stage in status["stages"] if stage["key"] == "cache_sync")
+    assert cache_stage["current"] == 1
+    assert cache_stage["total"] == 2
+    assert cache_stage["percent"] == 50
+    assert status["counts"]["cache_sync_successful_steps"] == 1
+    assert status["counts"]["cache_sync_total_steps"] == 2
+    assert status["counts"]["cache_sync_state"] == "warning"
 
 
 def test_automation_duration_start_variables_are_defined_before_use():

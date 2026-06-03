@@ -1801,6 +1801,7 @@ class AutomatedStreamManager:
         ]
         total = len(steps)
         all_success = True
+        successful_steps = 0
 
         for index, (name, message, refresh_func) in enumerate(steps):
             self._update_run_progress(
@@ -1814,14 +1815,23 @@ class AutomatedStreamManager:
             except Exception as exc:
                 logger.warning("UDI %s cache sync failed: %s", name, exc)
                 success = False
+            if success:
+                successful_steps += 1
             all_success = all_success and success
             self._update_run_progress(
                 stage_key="cache_sync",
-                current=index + 1,
+                current=successful_steps,
                 total=total,
                 message=f"{message} {'completed' if success else 'reported warnings'}",
             )
 
+        self._update_run_status(
+            counts={
+                "cache_sync_successful_steps": successful_steps,
+                "cache_sync_total_steps": total,
+                "cache_sync_state": "completed" if all_success else "warning",
+            },
+        )
         return all_success
 
     def _finish_run_status(
@@ -4026,6 +4036,7 @@ class AutomatedStreamManager:
                     "Syncing UDI cache after provider refresh — "
                     "matching and safety gate will use current stream IDs..."
                 )
+                sync_ok = False
                 try:
                     _sync_udi = get_udi_manager()
                     sync_ok = self._sync_udi_cache_after_playlist_refresh(_sync_udi)
@@ -4119,10 +4130,13 @@ class AutomatedStreamManager:
                 self._update_run_status(
                     counts={
                         "post_refresh_streams": post_refresh_stream_count,
+                        "cache_sync_state": "completed" if sync_ok else "warning",
                     },
                     durations={"udi_sync_seconds": time.time() - udi_sync_started},
                     message=(
                         "Cache sync completed after playlist refresh"
+                        if refresh_success and sync_ok
+                        else "Cache sync completed with warnings after playlist refresh"
                         if refresh_success
                         else "Safety gate stopped matching after playlist refresh"
                     ),
