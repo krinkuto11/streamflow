@@ -58,7 +58,7 @@ export const operatorHelpSections = [
   {
     id: 'hardware',
     title: 'GPU And Fallback',
-    summary: 'Hardware acceleration is optional and should stay visible through the normal Unraid template path.',
+    summary: 'Hardware acceleration is optional and should stay visible through the normal container management path.',
     items: [
       'CPU only is valid; hardware preferred with CPU fallback is the safer GPU mode for mixed providers.',
       'Hardware-only mode should be used carefully because failed hardware init cannot retry on CPU.',

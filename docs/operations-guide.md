@@ -230,17 +230,17 @@ when ffmpeg supports the selected mode. CPU fallback only retries failures that
 look like hardware/device initialization errors; normal dead streams, HTTP
 failures, and timeouts are still handled as stream results.
 
-### Unraid Template Notes
+### Container Template Notes
 
-On Unraid, keep the StreamFlow container managed through the Docker template so
-future edits stay visible and reversible in the Unraid UI. Do not make GPU or
-path changes only through an ad-hoc `docker run` command and then treat that as
-the finished install.
+When using a GUI-managed container template or app template, keep the StreamFlow
+container managed through that template so future edits stay visible and
+reversible in the host UI. Do not make GPU or path changes only through an
+ad-hoc `docker run` command and then treat that as the finished install.
 
-Recommended Unraid flow:
+Recommended template-managed flow:
 
 1. Keep the image repository/tag in the template.
-2. Keep `/app/data` mapped to persistent appdata storage.
+2. Keep `/app/data` mapped to persistent application storage.
 3. Add GPU runtime settings, device mappings, or environment variables through
    template fields so they remain GUI-editable.
 4. For NVIDIA passthrough, expose the NVIDIA runtime or devices supported by the
@@ -257,7 +257,7 @@ fallback setting, detected ffmpeg methods, GPU visibility, and whether
 StreamFlow currently expects CPU-only, hardware-preferred, or hardware-only
 probing.
 
-If the Unraid template is updated by hand, take a timestamped backup first and
+If a template definition is updated by hand, take a timestamped backup first and
 keep only the latest few backups. This makes it easy to roll back while avoiding
 old template copies piling up.
 

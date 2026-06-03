@@ -30,6 +30,7 @@ describe('operatorHelpSections', () => {
     expect(visibleText).not.toMatch(/Teamarr priority/i)
     expect(visibleText).not.toMatch(/not a user setting/i)
     expect(visibleText).not.toMatch(/normal users/i)
+    expect(visibleText).not.toMatch(new RegExp('un' + 'raid', 'i'))
     expect(visibleText).not.toMatch(/playlist refresh completed/i)
   })
 })
