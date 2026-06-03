@@ -19,6 +19,10 @@ describe('operatorHelpSections', () => {
     const startupCache = operatorHelpSections.find(section => section.id === 'startup-cache')
     expect(startupCache.items.join(' ')).toMatch(/refresh requests are accepted by Dispatcharr/i)
     expect(startupCache.items.join(' ')).toMatch(/Cache Sync/)
+
+    const hardware = operatorHelpSections.find(section => section.id === 'hardware')
+    expect(hardware.items.join(' ')).toMatch(/Intel\/DRI/)
+    expect(hardware.items.join(' ')).toMatch(/VAAPI, QSV, or DRI/)
   })
 
   it('does not expose internal planning or priority wording', () => {

@@ -62,6 +62,7 @@ export const operatorHelpSections = [
     items: [
       'CPU only is valid; hardware preferred with CPU fallback is the safer GPU mode for mixed providers.',
       'Hardware-only mode should be used carefully because failed hardware init cannot retry on CPU.',
+      'Intel/DRI paths should show VAAPI, QSV, or DRI methods even when no NVIDIA runtime is present.',
       'Use the hardware status panel before changing runtime, device, or acceleration settings.',
     ],
     links: [

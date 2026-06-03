@@ -330,10 +330,46 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
 ```
 
-After starting either template, open StreamFlow, keep CPU fallback enabled, and
-run a targeted quality check before enabling GPU decode for large full checks.
-The hardware status API and startup logs should show whether CUDA is available
-or whether StreamFlow is safely using CPU fallback.
+For Intel/DRI probing, pass the host DRI devices into the container and keep CPU
+fallback enabled while testing. Set `RENDER_GID` to the group ID that owns the
+host render device, often visible with `ls -l /dev/dri/renderD128`:
+
+```yaml
+services:
+  streamflow:
+    image: ghcr.io/krinkuto11/streamflow:latest
+    container_name: streamflow
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:-109}"
+    volumes:
+      - /srv/streamflow/data:/app/data
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 5000
+      TZ: Europe/Berlin
+      CONFIG_DIR: /app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+```
+
+If you change `API_PORT`, keep the port mapping and healthcheck URL in sync. For
+example, `API_PORT: 4919` should use a `4919:4919` mapping and
+`http://localhost:4919/api/health` in the healthcheck.
+
+After starting a hardware template, open StreamFlow, keep CPU fallback enabled,
+and run a targeted quality check before enabling GPU decode for large full
+checks. The hardware status API and startup logs should show whether CUDA or
+DRI/VAAPI/QSV methods are available, or whether StreamFlow is safely using CPU
+fallback.
 
 ## Dashboard, Changelog, And Logs
 
