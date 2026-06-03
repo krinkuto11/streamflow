@@ -202,6 +202,7 @@ class UDIManager:
             'percentage': 0,
             'message': '',
             'current_step': '',
+            'started_at': None,
             'total_steps': 6,       # channels, streams, groups, logos, m3u_accounts, profiles
             # entity_counts is populated after each full refresh_all() run.
             # Each entry: { 'received': int, 'expected': int | None }
@@ -421,6 +422,9 @@ class UDIManager:
         progress['api_timing'] = self.get_api_timing_summary()
         progress['last_refresh_duration_seconds'] = round(self._last_refresh_duration_seconds, 3)
         progress['last_refresh_time'] = self._last_refresh_time.isoformat() if self._last_refresh_time else None
+        started_at = self._init_progress.get('started_at')
+        progress['elapsed_seconds'] = round((datetime.now() - started_at).total_seconds(), 3) if started_at else None
+        progress['started_at'] = started_at.isoformat() if started_at else None
         return progress
     
     def _update_init_progress(
@@ -443,6 +447,12 @@ class UDIManager:
                            existing dict so partial updates are safe.
         """
         if status:
+            if status == 'in_progress':
+                current_status = self._init_progress.get('status')
+                if current_status != 'in_progress' or not self._init_progress.get('started_at'):
+                    self._init_progress['started_at'] = datetime.now()
+            elif status in {'idle', 'completed', 'failed'}:
+                self._init_progress['started_at'] = None
             self._init_progress['status'] = status
         if percentage is not None:
             self._init_progress['percentage'] = percentage

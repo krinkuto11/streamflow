@@ -85,6 +85,9 @@ function App() {
           status: data.status || 'unknown',
           percentage: data.percentage ?? 0,
           message: data.message || '',
+          started_at: data.started_at || null,
+          elapsed_seconds: data.elapsed_seconds ?? null,
+          last_refresh_duration_seconds: data.last_refresh_duration_seconds ?? null,
         })
         setUdiInitializationChecked(true)
       } catch (err) {
@@ -95,6 +98,9 @@ function App() {
             status: 'pending',
             percentage: 0,
             message: 'Checking startup status...',
+            started_at: null,
+            elapsed_seconds: null,
+            last_refresh_duration_seconds: null,
           })
           setUdiInitializationChecked(true)
         }

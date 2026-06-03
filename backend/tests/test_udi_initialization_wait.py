@@ -52,3 +52,29 @@ def test_initialize_waits_for_concurrent_refresh(monkeypatch):
     assert second_result is True
     assert elapsed >= 0.15
     assert manager.is_network_ready() is True
+
+
+def test_initialization_progress_reports_active_elapsed_time():
+    manager = UDIManager()
+
+    manager._update_init_progress(
+        status="in_progress",
+        percentage=60,
+        message="Fetching data...",
+        current_step="fetch",
+    )
+    active_progress = manager.get_init_progress()
+
+    assert active_progress["started_at"] is not None
+    assert active_progress["elapsed_seconds"] >= 0
+
+    manager._update_init_progress(
+        status="completed",
+        percentage=100,
+        message="Initialization complete",
+        current_step="done",
+    )
+    completed_progress = manager.get_init_progress()
+
+    assert completed_progress["started_at"] is None
+    assert completed_progress["elapsed_seconds"] is None
