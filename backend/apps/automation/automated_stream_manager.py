@@ -3507,8 +3507,46 @@ class AutomatedStreamManager:
             }
     
     
+    def _get_missed_run_grace_minutes(self, period_info: dict) -> int:
+        try:
+            grace_minutes = int(period_info.get("missed_run_grace_minutes") or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, grace_minutes)
+
+    def _period_due_inside_grace(
+        self,
+        period_id: str,
+        period_info: dict,
+        due_at: datetime,
+        now: datetime,
+    ) -> bool:
+        if now < due_at:
+            return False
+
+        grace_minutes = self._get_missed_run_grace_minutes(period_info)
+        if grace_minutes <= 0:
+            return True
+
+        grace_until = due_at + timedelta(minutes=grace_minutes)
+        if now <= grace_until:
+            return True
+
+        self.period_last_run[period_id] = now
+        self._save_state()
+        logger.info(
+            "Skipping missed automation period %s because its grace window expired "
+            "(due_at=%s, grace_minutes=%s, now=%s)",
+            period_id,
+            due_at.isoformat(),
+            grace_minutes,
+            now.isoformat(),
+        )
+        return False
+
     def _is_period_due(self, period_id: str, period_info: dict) -> bool:
         """Check if a specific period is due to run based on its schedule."""
+        now = datetime.now()
         last_run = self.period_last_run.get(period_id)
         if not last_run:
             if period_info.get("catch_up_missed_runs", False):
@@ -3519,7 +3557,7 @@ class AutomatedStreamManager:
                 return True
 
             # If no previous run, initialize to now() so it waits for the first interval/cron schedule block
-            self.period_last_run[period_id] = datetime.now()
+            self.period_last_run[period_id] = now
             logger.info(f"Initialized last_run for period {period_id} to now() to wait for next schedule run")
             return False
             
@@ -3532,12 +3570,13 @@ class AutomatedStreamManager:
             except ValueError:
                 logger.warning(f"Invalid interval value for period {period_id}, using default 60")
                 interval_mins = 60
-            return datetime.now() - last_run >= timedelta(minutes=interval_mins)
+            due_at = last_run + timedelta(minutes=interval_mins)
+            return self._period_due_inside_grace(period_id, period_info, due_at, now)
         elif schedule_type == "cron" and CRONITER_AVAILABLE:
             try:
                 cron = croniter(schedule.get("value"), last_run)
                 next_run = cron.get_next(datetime)
-                return datetime.now() >= next_run
+                return self._period_due_inside_grace(period_id, period_info, next_run, now)
             except Exception as e:
                 logger.error(
                     f"Invalid cron expression for period {period_id} "

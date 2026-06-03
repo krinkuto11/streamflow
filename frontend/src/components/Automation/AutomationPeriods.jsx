@@ -55,7 +55,8 @@ export default function AutomationPeriods() {
       name: '',
       schedule: { type: 'interval', value: 60 },
       priority: 0,
-      catch_up_missed_runs: false
+      catch_up_missed_runs: false,
+      missed_run_grace_minutes: 0
     })
     setEditDialogOpen(true)
   }
@@ -229,6 +230,11 @@ export default function AutomationPeriods() {
                           Startup catch-up
                         </Badge>
                       )}
+                      {Number(period.missed_run_grace_minutes || 0) > 0 && (
+                        <Badge variant="outline" className="font-normal text-xs text-muted-foreground w-fit">
+                          Missed-run grace: {period.missed_run_grace_minutes}m
+                        </Badge>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -369,6 +375,28 @@ export default function AutomationPeriods() {
                     catch_up_missed_runs: checked
                   })}
                 />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="period-missed-run-grace">Missed-run grace</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="period-missed-run-grace"
+                    type="number"
+                    min="0"
+                    max="1440"
+                    className="max-w-[120px]"
+                    value={currentPeriod.missed_run_grace_minutes || 0}
+                    onChange={(e) => setCurrentPeriod({
+                      ...currentPeriod,
+                      missed_run_grace_minutes: Math.max(0, parseInt(e.target.value) || 0)
+                    })}
+                  />
+                  <span className="text-sm text-muted-foreground">minutes</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  0 keeps the existing schedule behavior. Positive values skip automatic missed runs that are noticed after this window.
+                </p>
               </div>
             </div>
           )}

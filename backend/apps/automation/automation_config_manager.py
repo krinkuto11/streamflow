@@ -22,7 +22,11 @@ logger = setup_logging(__name__)
 # Configuration directory
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
 AUTOMATION_CONFIG_FILE = CONFIG_DIR / 'automation_config.json'
-PERIOD_EXTRA_SETTING_KEYS = {"priority", "catch_up_missed_runs"}
+PERIOD_EXTRA_SETTING_KEYS = {
+    "priority",
+    "catch_up_missed_runs",
+    "missed_run_grace_minutes",
+}
 
 class AutomationConfigManager:
     """
@@ -140,7 +144,18 @@ class AutomationConfigManager:
         except (TypeError, ValueError):
             res["priority"] = 0
         res["catch_up_missed_runs"] = bool(res.get("catch_up_missed_runs", False))
+        res["missed_run_grace_minutes"] = self._coerce_non_negative_int(
+            res.get("missed_run_grace_minutes"),
+            default=0,
+        )
         return res
+
+    def _coerce_non_negative_int(self, value: Any, default: int = 0) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0, number)
 
     def _normalize_extra_settings(self, extra_settings: Any) -> Dict[str, Any]:
         """Normalize persisted extra_settings to a dict for safe API serialization."""
@@ -183,6 +198,11 @@ class AutomationConfigManager:
                 extra["priority"] = int(extra["priority"])
             except (TypeError, ValueError):
                 extra["priority"] = 0
+        if "missed_run_grace_minutes" in extra:
+            extra["missed_run_grace_minutes"] = self._coerce_non_negative_int(
+                extra["missed_run_grace_minutes"],
+                default=0,
+            )
 
         return extra
 
