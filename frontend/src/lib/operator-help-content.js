@@ -308,6 +308,7 @@ export const operatorHelpDetailTopics = [
     steps: [
       'Select the quality profile that represents event-channel check rules.',
       'Keep pre-start retries separate from post-start checks so early failures do not block kickoff checks.',
+      'Start with the conservative event-channel timing set: 20 min preflight, 10 min and 3 min pre-start retries, one post-start check at 2 min, and at least 5 min post-start grace.',
       'Use exclude filters for temporary suppression; leave include filters broad unless a narrow whitelist is intended.',
       'Confirm active event checks and recent events before changing scoring rules.',
     ],
@@ -321,8 +322,8 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Pre-Start Retries',
-        defaultValue: '10 and 3 minutes',
-        effect: 'Schedules additional checks before start without changing the main offset.',
+        defaultValue: '10 min, 3 min',
+        effect: 'Schedules additional checks 10 minutes and 3 minutes before start without changing the main offset.',
         useWhen: 'Use when event channels appear shortly before start.',
         risk: 'Too many retries can occupy checker capacity before the stream exists.',
       },
@@ -337,8 +338,22 @@ export const operatorHelpDetailTopics = [
         name: 'Post-Start Grace',
         defaultValue: '5 minutes',
         effect: 'Limits how long after start post-start checks are still considered due.',
-        useWhen: 'Use a short window for sports events with fast channel turnover.',
-        risk: 'Too narrow can skip late-published streams; too wide can check stale events.',
+        useWhen: 'Keep it at least as large as the largest post-start check, for example 5 minutes for a 2-minute post-start check.',
+        risk: 'Too narrow can skip the post-start bucket entirely; too wide can check stale events.',
+      },
+      {
+        name: 'Event Cooldown',
+        defaultValue: '720 minutes',
+        effect: 'Prevents the same event bucket from being checked repeatedly after it already ran.',
+        useWhen: 'Keep long enough to avoid repeated checks while the same event remains in the schedule feed.',
+        risk: 'Too short can repeat checks and consume provider/profile capacity; too long can hide intentional retests unless you run a manual check.',
+      },
+      {
+        name: 'Concurrent Checks',
+        defaultValue: '1',
+        effect: 'Limits how many Teamarr event checks run at the same time.',
+        useWhen: 'Keep at 1 for most event-channel providers because event streams often share limited profile capacity.',
+        risk: 'Higher values can make several event channels compete for the same provider slots at kickoff.',
       },
       {
         name: 'Skip during quality check',
@@ -352,6 +367,8 @@ export const operatorHelpDetailTopics = [
       'Teamarr Preflight status shows running and no last error.',
       'Upcoming events show scheduled, due, past, or filtered state with clear latest-check context.',
       'A post-start event can be classified due even if an earlier pre-start bucket already ran.',
+      'A 2-minute post-start check is skipped as past if post-start grace is only 1 minute, so keep grace larger than the post-start offset.',
+      'The default event profile keeps dead-stream removal off; enable destructive removal only after a dry event run proves the timing is reliable.',
     ],
     links: [
       { label: 'Teamarr Preflight', to: '/teamarr-preflight' },

@@ -327,6 +327,25 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["details"]["bucket"], "post+2m")
 
+    def test_post_start_grace_must_cover_post_start_offset(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2026-05-28T21:58:00+00:00")],
+            checker=checker,
+        )
+        service.update_config({
+            "post_start_offsets_minutes": [2],
+            "post_start_grace_minutes": 1,
+        })
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "past")
+
     def test_preflight_attempt_does_not_block_post_start_bucket(self):
         checker = FakeChecker()
         event = make_event(event_date="2026-05-28T21:58:00+00:00")

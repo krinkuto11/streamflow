@@ -96,6 +96,14 @@ describe('operatorHelpSections', () => {
     }
 
     expect(getOperatorHelpDetailTopic('teamarr-preflight').settings.map(setting => setting.name)).toContain('Post-Start Checks')
+    const teamarr = getOperatorHelpDetailTopic('teamarr-preflight')
+    const preStartRetries = teamarr.settings.find(setting => setting.name === 'Pre-Start Retries')
+    const postStartGrace = teamarr.settings.find(setting => setting.name === 'Post-Start Grace')
+    expect(preStartRetries.defaultValue).toBe('10 min, 3 min')
+    expect(preStartRetries.effect).toMatch(/10 minutes and 3 minutes before start/i)
+    expect(postStartGrace.useWhen).toMatch(/at least as large as the largest post-start check/i)
+    expect(teamarr.smokeChecks.join(' ')).toMatch(/2-minute post-start check/i)
+    expect(teamarr.smokeChecks.join(' ')).toMatch(/dead-stream removal off/i)
     expect(getOperatorHelpDetailTopic('shadow-monitor').settings.map(setting => setting.name)).toContain('Channel Switch Limit')
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')
