@@ -39,6 +39,15 @@ const STATUS_REASON_FALLBACKS = {
   error: 'error',
 }
 
+const STATIC_REASON_DETAILS = {
+  viewer_preempted: 'Real playback kept the profile slot; check again later',
+  active_viewers: 'Viewer protection kept the stream untouched',
+  quota_consumed_by_active_viewers: 'Active viewers are using the available capacity',
+  max_streams_reached: 'The provider stream limit is already full',
+  provider_capacity_unavailable: 'No provider or profile check slot is free',
+  provider_wait_timeout: 'No provider or profile slot became free in time',
+}
+
 const formatNumber = (value, suffix = '') => {
   if (value === null || value === undefined || value === '') return null
   const numeric = Number(value)
@@ -122,6 +131,10 @@ export function getQualityReasonDisplay(stream = {}) {
     detail = elapsed && limit ? `${elapsed} of ${limit}` : (limit ? `limit ${limit}` : null)
   } else if (code === 'error' || code === 'Error') {
     detail = context.message || context.error || null
+  }
+
+  if (!detail) {
+    detail = STATIC_REASON_DETAILS[code] || null
   }
 
   const text = detail ? `${label}: ${detail}` : label

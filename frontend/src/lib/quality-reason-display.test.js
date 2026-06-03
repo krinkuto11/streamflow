@@ -21,27 +21,30 @@ describe('getQualityReasonDisplay', () => {
   it('uses provider-capacity wording without leaking raw detail as primary text', () => {
     expect(getQualityReasonDisplay({
       reason_detail: 'provider_capacity_unavailable',
-    })).toMatchObject({
+    })).toEqual({
       code: 'provider_capacity_unavailable',
-      text: 'Provider capacity unavailable',
+      text: 'Provider capacity unavailable: No provider or profile check slot is free',
+      title: 'provider_capacity_unavailable: No provider or profile check slot is free',
     })
   })
 
   it('falls back to viewer-preempted status wording when no detail exists', () => {
     expect(getQualityReasonDisplay({
       status: 'viewer_preempted',
-    })).toMatchObject({
+    })).toEqual({
       code: 'viewer_preempted',
-      text: 'Viewer needed this profile',
+      text: 'Viewer needed this profile: Real playback kept the profile slot; check again later',
+      title: 'viewer_preempted: Real playback kept the profile slot; check again later',
     })
   })
 
   it('falls back to provider wait timeout status wording when no detail exists', () => {
     expect(getQualityReasonDisplay({
       status: 'provider_limit_wait_timeout',
-    })).toMatchObject({
+    })).toEqual({
       code: 'provider_wait_timeout',
-      text: 'Provider wait timed out',
+      text: 'Provider wait timed out: No provider or profile slot became free in time',
+      title: 'provider_wait_timeout: No provider or profile slot became free in time',
     })
   })
 
