@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  getAbortedRunDisplay,
   getDashboardActionStates,
   getAutomationStageCards,
   getRunDurationCardValue,
@@ -373,6 +374,28 @@ describe('dashboard stream checker run display', () => {
     expect(display.message).toBeNull()
     expect(display.progressDetail).toBeNull()
     expect(display.stageLabel).toBeNull()
+  })
+
+  it('uses terminal abort wording instead of stale stage progress', () => {
+    const display = getAbortedRunDisplay({
+      runState: 'aborted',
+      runStatus: {
+        last_error: 'Automation run was stopped by the user',
+        message: 'Automation run was stopped by the user',
+        progress: {
+          current: 2,
+          message: 'Syncing channel cache completed',
+          percent: 100,
+          total: 2,
+        },
+      },
+    })
+
+    expect(display).toEqual({
+      message: 'Automation run was stopped by the user',
+      progressDetail: 'Automation run was stopped by the user',
+      progressPercent: 0,
+    })
   })
 
   it('hides the automation run card for idle no-due runs', () => {

@@ -11,6 +11,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
 import { getDashboardRunMetrics } from '@/lib/dashboard-run-counts.js'
 import {
+  getAbortedRunDisplay,
   getDashboardActionStates,
   getAutomationStageCards,
   getRunDurationCardValue,
@@ -494,8 +495,14 @@ export default function Dashboard() {
     runProgressMessage: runProgress.message,
     runStatusMessage: runStatus.message,
   })
+  const abortedRunDisplay = getAbortedRunDisplay({
+    runState,
+    runStatus,
+  })
   const rawRunProgressPercent = Number(runProgress.percent)
-  const runProgressPercent = streamQueueActive
+  const runProgressPercent = abortedRunDisplay.progressPercent !== null
+    ? abortedRunDisplay.progressPercent
+    : streamQueueActive
     ? queueProgress
     : singleStreamRunActive && Number.isFinite(Number(streamProgress.percentage))
       ? Number(streamProgress.percentage)
@@ -505,11 +512,11 @@ export default function Dashboard() {
   const runProgressCurrent = streamQueueActive ? completed : (singleStreamRunActive ? null : runProgress.current)
   const runProgressTotal = streamQueueActive ? batchTotal : (singleStreamRunActive ? null : runProgress.total)
   const hasRunProgressTotal = runProgressTotal !== null && runProgressTotal !== undefined
-  const runProgressDetail = hasRunProgressTotal
+  const runProgressDetail = abortedRunDisplay.progressDetail || (hasRunProgressTotal
     ? `${runProgressCurrent ?? 0} of ${runProgressTotal}`
     : singleStreamRunActive
       ? (streamProgress.channel_name || streamProgress.step || 'Single channel check in progress')
-      : skippedRunDisplay.progressDetail || runProgress.message || runStatus.message || 'Waiting for progress'
+      : skippedRunDisplay.progressDetail || runProgress.message || runStatus.message || 'Waiting for progress')
   const showRunProgress = isProcessing || runState !== 'idle' || Object.keys(runProgress).length > 0
   const showAutomationRunCard = shouldShowAutomationRunCard({
     showRunProgress,
@@ -517,7 +524,7 @@ export default function Dashboard() {
   })
   const displayRunMessage = streamRunActive
     ? 'Running manual quality checks'
-    : skippedRunDisplay.message || runProgress.message || runStatus.message || 'Automation run status'
+    : abortedRunDisplay.message || skippedRunDisplay.message || runProgress.message || runStatus.message || 'Automation run status'
   const displayRunStageId = normalizeRunStageKey(streamRunActive ? 'quality_checking' : runStage)
   const displayRunStageLabel = streamRunActive ? 'Quality Checking' : runStageLabel
   const displayRunningRun = runningRun || streamRunActive

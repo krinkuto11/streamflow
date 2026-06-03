@@ -217,6 +217,33 @@ export const getSkippedRunDisplay = ({
   }
 }
 
+export const getAbortedRunDisplay = ({
+  runState = 'idle',
+  runStatus = {},
+} = {}) => {
+  const aborted = runState === 'aborted'
+    || runStatus?.status === 'aborted'
+    || runStatus?.stage === 'aborted'
+
+  if (!aborted) {
+    return {
+      message: null,
+      progressDetail: null,
+      progressPercent: null,
+    }
+  }
+
+  const message = runStatus?.last_error
+    || runStatus?.message
+    || 'Automation run was stopped by the user'
+
+  return {
+    message,
+    progressDetail: message,
+    progressPercent: 0,
+  }
+}
+
 export const shouldShowAutomationRunCard = ({
   showRunProgress = false,
   skippedRunDisplay = {},
