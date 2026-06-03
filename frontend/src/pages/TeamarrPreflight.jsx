@@ -747,10 +747,14 @@ export default function TeamarrPreflight() {
                   Operational Notes
                 </AccordionTrigger>
                 <AccordionContent>
-                  <div className="grid gap-3 pb-3 text-sm text-muted-foreground md:grid-cols-3">
+                  <div className="grid gap-3 pb-3 text-sm text-muted-foreground md:grid-cols-2 xl:grid-cols-4">
                     <div>
                       <p className="font-medium text-foreground">Busy Handling</p>
                       <p>Automation phases defer event checks; Stream Checker conflicts enter the server-side priority queue and continue after the current channel.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-foreground">Post-Start Checks</p>
+                      <p>Use one or two post-start offsets when event channels appear at kickoff or a few minutes after the scheduled start.</p>
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Event Status</p>

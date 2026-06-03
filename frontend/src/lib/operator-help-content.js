@@ -25,6 +25,7 @@ export const operatorHelpSections = [
       'Missed-run grace keeps late automatic runs bounded; 0 keeps the existing schedule behavior.',
       'Catch-up cap and Maintenance window are global automatic-run policies; manual forced runs remain available.',
       'Teamarr event window can pause automatic runs around cached event starts; manual forced runs remain available.',
+      'Teamarr post-start checks can intentionally run after event start when event channels appear at kickoff or a few minutes later.',
     ],
     links: [
       { label: 'Automation Settings', to: '/settings' },
@@ -39,6 +40,7 @@ export const operatorHelpSections = [
       'Queued channels wait their turn; higher waiting priority does not interrupt a channel already running.',
       'Check slots full means the checker-side capacity for that account or profile is currently occupied.',
       'Viewer-preempted probes are not counted as bad streams and can be checked again later.',
+      'During active batches, dashboard Dead, Blank, and Frozen cards count cumulative stream results from the queue.',
     ],
     links: [
       { label: 'Stream Checker', to: '/stream-checker' },

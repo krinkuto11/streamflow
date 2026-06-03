@@ -18,10 +18,15 @@ describe('operatorHelpSections', () => {
     expect(profilesPeriods.items.join(' ')).toMatch(/Catch-up cap/)
     expect(profilesPeriods.items.join(' ')).toMatch(/Maintenance window/)
     expect(profilesPeriods.items.join(' ')).toMatch(/Teamarr event window/)
+    expect(profilesPeriods.items.join(' ')).toMatch(/post-start checks/)
 
     const startupCache = operatorHelpSections.find(section => section.id === 'startup-cache')
     expect(startupCache.items.join(' ')).toMatch(/refresh requests are accepted by Dispatcharr/i)
     expect(startupCache.items.join(' ')).toMatch(/Cache Sync/)
+
+    const streamChecker = operatorHelpSections.find(section => section.id === 'stream-checker')
+    expect(streamChecker.items.join(' ')).toMatch(/Dead, Blank, and Frozen/)
+    expect(streamChecker.items.join(' ')).toMatch(/cumulative stream results/)
 
     const hardware = operatorHelpSections.find(section => section.id === 'hardware')
     expect(hardware.items.join(' ')).toMatch(/Intel\/DRI/)
