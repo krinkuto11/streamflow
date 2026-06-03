@@ -1113,7 +1113,7 @@ export default function StreamChecker() {
                     <List className="h-4 w-4" />
                     <AlertTitle>Priority Queue</AlertTitle>
                     <AlertDescription>
-                      Higher-priority waiting channels run before lower-priority work, but the channel already being checked is allowed to finish. Teamarr uses this server-side path for event checks; normal users do not edit that priority value here.
+                      Higher-priority waiting channels run before lower-priority work, while the channel already being checked is allowed to finish. Event checks use the same queue and continue after the current channel.
                     </AlertDescription>
                   </Alert>
 
