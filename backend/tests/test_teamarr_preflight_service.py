@@ -169,6 +169,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(config["post_start_offsets_minutes"], [1, 2])
         self.assertEqual(config["include_sports"], ["soccer"])
         self.assertEqual(config["exclude_leagues"], ["mlb"])
+        self.assertEqual(normalize_config({})["post_start_offsets_minutes"], [2, 4])
 
         service, _, _ = self.make_service([])
         public_config = service.get_config()
@@ -364,6 +365,25 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(len(checker.calls), 1)
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["details"]["bucket"], "post+2m")
+
+    def test_second_post_start_bucket_runs_after_first_post_start_attempt(self):
+        checker = FakeChecker()
+        event = make_event(event_date="2026-05-28T21:56:00+00:00")
+        service, _, _ = self.make_service([event], checker=checker)
+        identity = "id:100:2026-05-28T21:56:00+00:00"
+        service._attempted_buckets[f"{identity}:post+2m"] = FIXED_NOW
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(len(checker.calls), 1)
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["details"]["bucket"], "post+4m")
 
     def test_no_streams_records_no_streams_without_launching_check(self):
         checker = FakeChecker()

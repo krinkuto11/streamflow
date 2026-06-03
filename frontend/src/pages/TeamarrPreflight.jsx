@@ -772,7 +772,7 @@ export default function TeamarrPreflight() {
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Post-Start Checks</p>
-                      <p>Use one or two post-start offsets when event channels appear at kickoff or a few minutes after the scheduled start.</p>
+                      <p>Use two post-start offsets, such as 2 and 4 minutes, when event channels appear at kickoff or a few minutes after the scheduled start.</p>
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Event Status</p>

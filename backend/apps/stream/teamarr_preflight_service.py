@@ -99,7 +99,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "poll_interval_seconds": 60,
     "preflight_offset_minutes": 20,
     "retry_offsets_minutes": [10, 3],
-    "post_start_offsets_minutes": [2],
+    "post_start_offsets_minutes": [2, 4],
     "post_start_grace_minutes": 5,
     "max_concurrent_checks": 1,
     "event_cooldown_minutes": 720,
