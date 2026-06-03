@@ -16,12 +16,27 @@ const REASON_LABELS = {
   max_streams_reached: 'Provider stream limit reached',
   provider_capacity_unavailable: 'Provider capacity unavailable',
   provider_wait_timeout: 'Provider wait timed out',
+  connectivity_guard: 'Connectivity guard stopped this check',
+  connectivity_timeout: 'Connectivity probe timed out',
+  network_unreachable: 'Network endpoint unreachable',
+  dns_resolution_failed: 'DNS resolution failed',
+  dispatcharr_auth_failed: 'Dispatcharr authentication failed',
+  endpoint_unhealthy: 'Connectivity endpoint unhealthy',
+  connectivity_guard_error: 'Connectivity guard error',
+  invalid_probe_endpoint: 'Invalid connectivity probe endpoint',
+  timeout: 'Stream analysis timed out',
+  Timeout: 'Stream analysis timed out',
+  stream_timeout: 'Stream analysis timed out',
+  probe_timeout: 'Stream analysis timed out',
+  Error: 'Stream analysis failed',
+  error: 'Stream analysis failed',
 }
 
 const STATUS_REASON_FALLBACKS = {
   viewer_preempted: 'viewer_preempted',
   provider_limit_wait_timeout: 'provider_wait_timeout',
   waiting_provider_limit: 'provider_capacity_unavailable',
+  error: 'error',
 }
 
 const formatNumber = (value, suffix = '') => {
@@ -85,6 +100,28 @@ export function getQualityReasonDisplay(stream = {}) {
     const actual = formatNumber(context.actual_seconds, 's')
     const expected = formatNumber(context.expected_seconds, 's')
     detail = actual && expected ? `${actual} of ${expected}` : null
+  } else if (
+    code === 'connectivity_guard'
+    || code === 'connectivity_timeout'
+    || code === 'network_unreachable'
+    || code === 'dns_resolution_failed'
+    || code === 'dispatcharr_auth_failed'
+    || code === 'endpoint_unhealthy'
+    || code === 'connectivity_guard_error'
+    || code === 'invalid_probe_endpoint'
+  ) {
+    detail = context.message || context.url || null
+  } else if (
+    code === 'timeout'
+    || code === 'Timeout'
+    || code === 'stream_timeout'
+    || code === 'probe_timeout'
+  ) {
+    const elapsed = formatNumber(context.elapsed_seconds || context.elapsed_time, 's')
+    const limit = formatNumber(context.timeout_seconds || context.timeout, 's')
+    detail = elapsed && limit ? `${elapsed} of ${limit}` : (limit ? `limit ${limit}` : null)
+  } else if (code === 'error' || code === 'Error') {
+    detail = context.message || context.error || null
   }
 
   const text = detail ? `${label}: ${detail}` : label
