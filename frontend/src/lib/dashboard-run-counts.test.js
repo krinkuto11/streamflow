@@ -108,4 +108,38 @@ describe('dashboard run counts', () => {
       value: 4,
     })
   })
+
+  it('labels active single-channel quality checks without stale automation counts', () => {
+    const metrics = getDashboardRunMetrics({
+      streamQueueActive: false,
+      streamCheckerOnlyActive: true,
+      runCounts: {
+        channels_with_periods: 99,
+        refreshed_playlists: 9,
+        assigned_channels: 8,
+        quality_checked: 7,
+        dead_streams: 6,
+      },
+      streamCheckerStatus: {
+        progress: {
+          channel_id: 8442,
+          streams_detail: [
+            { status: 'completed' },
+            { status: 'dead' },
+            { status: 'freeze' },
+          ],
+        },
+      },
+    })
+
+    expect(metrics.map(metric => [metric.key, metric.label, metric.value])).toEqual([
+      ['channels', 'Active Channel', 1],
+      ['playlists', 'Playlists Refreshed', null],
+      ['matched', 'Stream Matching', null],
+      ['checked', 'Channels Checked', 0],
+      ['dead', 'Dead Streams', 1],
+      ['blank', 'Blank Streams', 0],
+      ['freeze', 'Frozen Streams', 1],
+    ])
+  })
 })
