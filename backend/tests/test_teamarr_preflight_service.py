@@ -467,6 +467,29 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(upcoming_after[0]["last_preflight_event"]["type"], "preflight_completed")
         self.assertEqual(upcoming_after[0]["last_preflight_event"]["details"]["bucket"], "manual")
 
+    def test_upcoming_events_attach_recent_check_by_event_fingerprint(self):
+        upcoming = [{
+            "identity": "new-identity",
+            "teamarr_id": "100",
+            "event_id": "event-100",
+            "event_name": "Home vs Away",
+            "event_date": "2026-05-28T22:10:00+00:00",
+            "dispatcharr_channel_id": 77,
+        }]
+        recent = [{
+            "identity": "old-identity",
+            "event_name": "Home vs Away",
+            "event_date": "2026-05-28T22:10:00+00:00",
+            "dispatcharr_channel_id": 77,
+            "type": "preflight_completed",
+            "details": {"bucket": "manual"},
+        }]
+
+        enriched = TeamarrPreflightService._attach_recent_events_to_upcoming(upcoming, recent)
+
+        self.assertEqual(enriched[0]["last_preflight_event"]["type"], "preflight_completed")
+        self.assertEqual(enriched[0]["last_preflight_event"]["identity"], "old-identity")
+
     def test_manual_force_launches_past_event_as_manual_check(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(

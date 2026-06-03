@@ -148,6 +148,12 @@ const canForceEvent = (event) => (
   && forceableStates.has(String(event?.state || ''))
 )
 
+const eventCheckSummary = (event, lastPreflightEvent) => {
+  if (lastPreflightEvent) return `Latest check: ${eventLabel(lastPreflightEvent.type)}`
+  if (event?.state === 'already_attempted') return 'Latest check: attempted in current cooldown'
+  return 'Latest check: not recorded'
+}
+
 const forceEventTooltip = (event) => {
   if (!event?.dispatcharr_channel_id) return 'No Dispatcharr channel'
   if (event?.state === 'waiting_for_channel_sync') return 'Channel syncing'
@@ -695,6 +701,7 @@ export default function TeamarrPreflight() {
                   {upcomingEvents.slice(0, 12).map(event => {
                     const lastPreflightEvent = event.last_preflight_event || null
                     const lastPreflightDetails = recentEventDetailParts(lastPreflightEvent)
+                    const checkSummary = eventCheckSummary(event, lastPreflightEvent)
                     return (
                       <div key={`${event.identity}-${event.trigger_bucket || 'none'}`} className="rounded-md border border-border p-3">
                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -742,16 +749,22 @@ export default function TeamarrPreflight() {
                           <span>{event.sport || 'Sport N/A'}</span>
                           <span>{event.league || 'League N/A'}</span>
                         </div>
-                        {lastPreflightEvent ? (
-                          <div className="mt-3 flex flex-wrap items-center gap-1.5">
-                            <span className="mr-1 text-xs text-muted-foreground">Last check {formatTimestamp(lastPreflightEvent.timestamp)}</span>
+                        <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                          <span className="mr-1 text-xs text-muted-foreground">
+                            {lastPreflightEvent
+                              ? `${checkSummary} at ${formatTimestamp(lastPreflightEvent.timestamp)}`
+                              : checkSummary}
+                          </span>
+                          {lastPreflightEvent ? (
+                            <>
                             {lastPreflightDetails.map(part => (
                               <Badge key={part} variant="outline" className="text-[10px] font-medium text-muted-foreground">
                                 {part}
                               </Badge>
                             ))}
-                          </div>
-                        ) : null}
+                            </>
+                          ) : null}
+                        </div>
                       </div>
                     )
                   })}
@@ -812,9 +825,9 @@ export default function TeamarrPreflight() {
       }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Force Event Preflight</AlertDialogTitle>
+            <AlertDialogTitle>Run Event Check</AlertDialogTitle>
             <AlertDialogDescription>
-              Run the Teamarr preflight profile now for {forceEvent?.event_name || 'this managed event'}. Automation,
+              Run the Teamarr event profile now for {forceEvent?.event_name || 'this managed event'}. Automation,
               Stream Checker activity, concurrency, and stream availability guards still apply.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -827,7 +840,7 @@ export default function TeamarrPreflight() {
                 forceEventCheck(selectedEvent)
               }}
             >
-              Force Check
+              Run Check
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -389,21 +389,48 @@ class TeamarrPreflightService:
         upcoming_events: Iterable[Dict[str, Any]],
         recent_events: Iterable[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        latest_by_identity: Dict[str, Dict[str, Any]] = {}
+        latest_by_key: Dict[str, Dict[str, Any]] = {}
         for recent in recent_events:
-            identity = str(recent.get("identity") or "").strip()
-            if identity and identity not in latest_by_identity:
-                latest_by_identity[identity] = recent
+            for key in TeamarrPreflightService._event_match_keys(recent):
+                if key not in latest_by_key:
+                    latest_by_key[key] = recent
 
         enriched = []
         for event in upcoming_events:
             public_event = dict(event)
-            identity = str(public_event.get("identity") or "").strip()
-            latest = latest_by_identity.get(identity)
+            latest = None
+            for key in TeamarrPreflightService._event_match_keys(public_event):
+                latest = latest_by_key.get(key)
+                if latest:
+                    break
             if latest:
                 public_event["last_preflight_event"] = deepcopy(latest)
             enriched.append(public_event)
         return enriched
+
+    @staticmethod
+    def _event_match_keys(event: Dict[str, Any]) -> List[str]:
+        keys = []
+        identity = str(event.get("identity") or "").strip()
+        if identity:
+            keys.append(f"identity:{identity}")
+
+        event_date = str(event.get("event_date") or "").strip()
+        teamarr_id = str(event.get("teamarr_id") or "").strip()
+        event_id = str(event.get("event_id") or "").strip()
+        channel_id = str(event.get("dispatcharr_channel_id") or "").strip()
+        event_name = str(event.get("event_name") or "").strip().casefold()
+
+        if teamarr_id and event_date:
+            keys.append(f"teamarr:{teamarr_id}:{event_date}")
+        if event_id and event_date:
+            keys.append(f"event:{event_id}:{event_date}")
+        if channel_id and event_date:
+            keys.append(f"channel-date:{channel_id}:{event_date}")
+        if channel_id and event_name:
+            keys.append(f"channel-name:{channel_id}:{event_name}")
+
+        return keys
 
     def run_once(self, *, force: bool = False) -> Dict[str, Any]:
         config = self.get_config(include_secret=True)
@@ -873,7 +900,10 @@ class TeamarrPreflightService:
             "attempted_key": attempted_key,
             "event": {
                 "identity": event.get("identity"),
+                "teamarr_id": event.get("teamarr_id"),
+                "event_id": event.get("event_id"),
                 "event_name": event.get("event_name"),
+                "event_date": event.get("event_date"),
                 "channel_name": event.get("channel_name"),
                 "dispatcharr_channel_id": event.get("dispatcharr_channel_id"),
                 "sport": event.get("sport"),
@@ -906,7 +936,10 @@ class TeamarrPreflightService:
         if not event:
             event = {
                 "identity": metadata.get("identity"),
+                "teamarr_id": metadata.get("teamarr_id"),
+                "event_id": metadata.get("event_id"),
                 "event_name": metadata.get("program_name"),
+                "event_date": metadata.get("event_date"),
                 "channel_name": metadata.get("channel_name"),
                 "dispatcharr_channel_id": metadata.get("dispatcharr_channel_id"),
                 "sport": metadata.get("sport"),
@@ -1071,7 +1104,10 @@ class TeamarrPreflightService:
             "timestamp": self.clock(),
             "type": event_type,
             "identity": event.get("identity"),
+            "teamarr_id": event.get("teamarr_id"),
+            "event_id": event.get("event_id"),
             "event_name": event.get("event_name"),
+            "event_date": event.get("event_date"),
             "channel_name": event.get("channel_name"),
             "dispatcharr_channel_id": event.get("dispatcharr_channel_id"),
             "sport": event.get("sport"),
