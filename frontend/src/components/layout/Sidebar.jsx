@@ -15,7 +15,8 @@ import {
   Eye,
   ChevronLeft,
   ChevronRight,
-  TrendingUp
+  TrendingUp,
+  CircleHelp
 } from 'lucide-react'
 import { Button } from '@/components/ui/button.jsx'
 import { ThemeToggle } from '@/components/ThemeToggle.jsx'
@@ -37,6 +38,7 @@ const menuItems = [
   { text: 'Scheduling', icon: Calendar, path: '/scheduling' },
   { text: 'Analytics', icon: TrendingUp, path: '/stats' },
   { text: 'Settings', icon: Settings, path: '/settings' },
+  { text: 'Help', icon: CircleHelp, path: '/help' },
   { text: 'Changelog', icon: History, path: '/changelog' },
 ]
 
