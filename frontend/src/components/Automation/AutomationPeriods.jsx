@@ -8,6 +8,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
+import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI } from '@/services/api.js'
 import { Plus, Trash2, Edit2, Clock, Calendar, Loader2 } from 'lucide-react'
@@ -53,7 +54,8 @@ export default function AutomationPeriods() {
     setCurrentPeriod({
       name: '',
       schedule: { type: 'interval', value: 60 },
-      priority: 0
+      priority: 0,
+      catch_up_missed_runs: false
     })
     setEditDialogOpen(true)
   }
@@ -222,6 +224,11 @@ export default function AutomationPeriods() {
                       <Badge variant="outline" className="font-normal text-xs text-muted-foreground w-fit">
                         Priority: {period.priority || 0}
                       </Badge>
+                      {period.catch_up_missed_runs && (
+                        <Badge variant="outline" className="font-normal text-xs text-muted-foreground w-fit">
+                          Startup catch-up
+                        </Badge>
+                      )}
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -345,6 +352,23 @@ export default function AutomationPeriods() {
                     Higher values take precedence when schedules overlap exactly.
                   </span>
                 </div>
+              </div>
+
+              <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                <div className="space-y-1">
+                  <Label htmlFor="period-catch-up">Startup catch-up</Label>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    When no saved last-run timestamp exists for this period, include it once on the next scheduler pass instead of waiting for the next interval or cron block.
+                  </p>
+                </div>
+                <Switch
+                  id="period-catch-up"
+                  checked={Boolean(currentPeriod.catch_up_missed_runs)}
+                  onCheckedChange={(checked) => setCurrentPeriod({
+                    ...currentPeriod,
+                    catch_up_missed_runs: checked
+                  })}
+                />
               </div>
             </div>
           )}

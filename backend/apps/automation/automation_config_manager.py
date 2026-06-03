@@ -22,6 +22,7 @@ logger = setup_logging(__name__)
 # Configuration directory
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
 AUTOMATION_CONFIG_FILE = CONFIG_DIR / 'automation_config.json'
+PERIOD_EXTRA_SETTING_KEYS = {"priority", "catch_up_missed_runs"}
 
 class AutomationConfigManager:
     """
@@ -120,6 +121,7 @@ class AutomationConfigManager:
         cron_val = per.cron_schedule or ""
         sched_type = "interval" if cron_val.isdigit() else "cron"
         sched_value = int(cron_val) if sched_type == "interval" and cron_val else cron_val
+        extra = self._normalize_extra_settings(per.extra_settings)
         res = {
             "id": str(per.id),
             "name": per.name,
@@ -129,11 +131,15 @@ class AutomationConfigManager:
             "exclude_regex": per.exclude_regex,
             "matching_type": per.matching_type,
             "automation_type": per.automation_type,
-            "schedule": {"type": sched_type, "value": sched_value}
+            "schedule": {"type": sched_type, "value": sched_value},
         }
-        extra = self._normalize_extra_settings(per.extra_settings)
         if extra:
             res.update(extra)
+        try:
+            res["priority"] = int(res.get("priority") or 0)
+        except (TypeError, ValueError):
+            res["priority"] = 0
+        res["catch_up_missed_runs"] = bool(res.get("catch_up_missed_runs", False))
         return res
 
     def _normalize_extra_settings(self, extra_settings: Any) -> Dict[str, Any]:
@@ -154,6 +160,31 @@ class AutomationConfigManager:
             type(extra_settings).__name__,
         )
         return {}
+
+    def _period_extra_settings_from_payload(
+        self,
+        period_data: Dict[str, Any],
+        current_extra_settings: Any = None,
+    ) -> Dict[str, Any]:
+        """Merge period UI-only fields into the existing JSON settings payload."""
+        extra = self._normalize_extra_settings(current_extra_settings)
+        payload_extra = self._normalize_extra_settings(period_data.get("extra_settings"))
+        if payload_extra:
+            extra.update(payload_extra)
+
+        for key in PERIOD_EXTRA_SETTING_KEYS:
+            if key in period_data:
+                extra[key] = period_data[key]
+
+        if "catch_up_missed_runs" in extra:
+            extra["catch_up_missed_runs"] = bool(extra["catch_up_missed_runs"])
+        if "priority" in extra:
+            try:
+                extra["priority"] = int(extra["priority"])
+            except (TypeError, ValueError):
+                extra["priority"] = 0
+
+        return extra
 
     # --- Profile Management ---
 
@@ -541,6 +572,7 @@ class AutomationConfigManager:
         try:
             sched = period_data.get("schedule", {})
             cron = sched.get("value") if isinstance(sched, dict) else period_data.get("cron_schedule", "0 * * * *")
+            extra_settings = self._period_extra_settings_from_payload(period_data)
             p = AutomationPeriod(
                 name=period_data.get("name", "New Period"),
                 profile_id=int(period_data.get("profile_id", 1)),
@@ -550,7 +582,7 @@ class AutomationConfigManager:
                 exclude_regex=period_data.get("exclude_regex"),
                 matching_type=period_data.get("matching_type"),
                 automation_type=period_data.get("automation_type"),
-                extra_settings=period_data.get("extra_settings", {})
+                extra_settings=extra_settings
             )
             session.add(p)
             session.commit()
@@ -580,7 +612,10 @@ class AutomationConfigManager:
             if "exclude_regex" in period_data: p.exclude_regex = period_data["exclude_regex"]
             if "matching_type" in period_data: p.matching_type = period_data["matching_type"]
             if "automation_type" in period_data: p.automation_type = period_data["automation_type"]
-            if "extra_settings" in period_data: p.extra_settings = period_data["extra_settings"]
+            if "extra_settings" in period_data or any(key in period_data for key in PERIOD_EXTRA_SETTING_KEYS):
+                p.extra_settings = self._period_extra_settings_from_payload(period_data, p.extra_settings)
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(p, "extra_settings")
             
             # Map schedule dictionary back to cron_schedule column
             if "schedule" in period_data:

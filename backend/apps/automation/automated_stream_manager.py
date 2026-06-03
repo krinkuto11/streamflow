@@ -3406,6 +3406,13 @@ class AutomatedStreamManager:
         """Check if a specific period is due to run based on its schedule."""
         last_run = self.period_last_run.get(period_id)
         if not last_run:
+            if period_info.get("catch_up_missed_runs", False):
+                logger.info(
+                    f"Period {period_id} has no last_run timestamp and startup catch-up is enabled; "
+                    "running once on this scheduler pass"
+                )
+                return True
+
             # If no previous run, initialize to now() so it waits for the first interval/cron schedule block
             self.period_last_run[period_id] = datetime.now()
             logger.info(f"Initialized last_run for period {period_id} to now() to wait for next schedule run")
