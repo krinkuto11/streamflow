@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from apps.udi.models import Channel, Stream, ChannelGroup, Logo, M3UAccount, UDIMetadata
 from apps.udi.storage import UDIStorage
 from apps.udi.cache import UDICache
+from apps.udi.fetcher import FetchResult
 from apps.udi.manager import UDIManager
 
 
@@ -586,6 +587,54 @@ class TestUDIManager(unittest.TestCase):
         result = self.manager.refresh_channel_by_id(1)
         
         self.assertFalse(result)
+
+    def test_refresh_all_preserves_existing_cache_on_empty_unknown_fetch(self):
+        """A transient fetch failure must not replace a good cache with empties."""
+        self.manager._initialized = True
+        self.manager._network_ready = True
+        self.manager._channels_cache = [{'id': 1, 'name': 'Existing Channel'}]
+        self.manager._streams_cache = [{'id': 10, 'name': 'Existing Stream'}]
+        self.manager._build_indexes()
+
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.refresh_config.return_value = None
+        self.manager.fetcher.fetch_entity_counts.return_value = {}
+        self.manager.fetcher.fetch_channels.return_value = FetchResult()
+        self.manager.fetcher.fetch_streams.return_value = FetchResult()
+        self.manager.fetcher.fetch_channel_groups.return_value = []
+        self.manager.fetcher.fetch_logos.return_value = FetchResult()
+        self.manager.fetcher.fetch_m3u_accounts.return_value = []
+        self.manager.fetcher.fetch_channel_profiles.return_value = []
+
+        with patch('apps.udi.manager.get_dispatcharr_config') as mock_config:
+            mock_config.return_value.is_configured.return_value = True
+            result = self.manager.refresh_all()
+
+        self.assertFalse(result)
+        self.assertEqual(self.manager._channels_cache, [{'id': 1, 'name': 'Existing Channel'}])
+        self.assertEqual(self.manager._streams_cache, [{'id': 10, 'name': 'Existing Stream'}])
+        self.assertTrue(self.manager.is_network_ready())
+
+    def test_refresh_all_allows_confirmed_empty_dispatcharr(self):
+        """A real zero-count Dispatcharr response remains valid."""
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.refresh_config.return_value = None
+        self.manager.fetcher.fetch_entity_counts.return_value = {'channels': 0, 'streams': 0}
+        self.manager.fetcher.fetch_channels.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_streams.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_channel_groups.return_value = []
+        self.manager.fetcher.fetch_logos.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_m3u_accounts.return_value = []
+        self.manager.fetcher.fetch_channel_profiles.return_value = []
+
+        with patch('apps.udi.manager.get_dispatcharr_config') as mock_config:
+            mock_config.return_value.is_configured.return_value = True
+            result = self.manager.refresh_all()
+
+        self.assertTrue(result)
+        self.assertEqual(self.manager._channels_cache, [])
+        self.assertEqual(self.manager._streams_cache, [])
+        self.assertTrue(self.manager.is_network_ready())
 
 
 if __name__ == '__main__':

@@ -104,6 +104,28 @@ def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
     return True
 
 
+def _check_nonempty_live_fetch(entity: str, result: FetchResult, existing_count: int) -> bool:
+    """Reject suspicious empty live fetches before they replace a good cache.
+
+    A confirmed ``expected_count == 0`` from Dispatcharr is valid. An empty
+    result with an unknown expected count usually means the endpoint could not be
+    reached or did not return the expected payload shape.
+    """
+    if len(result) > 0:
+        return True
+
+    if result.expected_count == 0:
+        return True
+
+    logger.warning(
+        "UDI live fetch for %s returned zero records without a confirmed zero "
+        "count; preserving existing cache with %s records",
+        entity,
+        existing_count,
+    )
+    return False
+
+
 class UDIManager:
     """
     Universal Data Index Manager - Singleton class for all Dispatcharr data access.
@@ -967,8 +989,16 @@ class UDIManager:
                 streams_result.expected_count = pre_counts['streams']
                 logger.info(f"UDI integrity: using /ids/ oracle for streams — expected {streams_result.expected_count}")
 
-            channels_ok = _check_fetch_integrity('channels', channels_result)
-            streams_ok  = _check_fetch_integrity('streams',  streams_result)
+            existing_channel_count = len(self._channels_cache)
+            existing_stream_count = len(self._streams_cache)
+            channels_ok = (
+                _check_fetch_integrity('channels', channels_result)
+                and _check_nonempty_live_fetch('channels', channels_result, existing_channel_count)
+            )
+            streams_ok = (
+                _check_fetch_integrity('streams', streams_result)
+                and _check_nonempty_live_fetch('streams', streams_result, existing_stream_count)
+            )
             _check_fetch_integrity('logos', logos_result)
 
             # Profile channels are embedded in the profiles list response — no
