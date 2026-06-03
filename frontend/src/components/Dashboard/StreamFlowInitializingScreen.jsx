@@ -29,7 +29,7 @@ export default function StreamFlowInitializingScreen({ initialization = null }) 
           <Progress value={progress} className="h-2" />
           <div className="grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
             <div>
-              <span className="font-medium text-foreground">Elapsed</span>
+              <span className="font-medium text-foreground">Elapsed:</span>
               <span className="ml-2 tabular-nums">{durationDisplay.elapsedLabel || 'Starting...'}</span>
             </div>
             <div className="sm:text-right">
