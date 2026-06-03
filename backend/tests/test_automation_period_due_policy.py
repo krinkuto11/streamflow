@@ -58,6 +58,13 @@ def test_period_outside_missed_run_grace_is_skipped_and_rebased():
     assert manager._is_period_due("period-1", _period(grace_minutes=15)) is False
     assert manager.period_last_run["period-1"] > original_last_run
     assert datetime.now() - manager.period_last_run["period-1"] < timedelta(seconds=5)
+    history = manager.get_period_skip_history("period-1")
+    assert len(history) == 1
+    assert history[0]["reason"] == "missed_run_grace_expired"
+    assert history[0]["period_name"] == "Hourly"
+    assert history[0]["grace_minutes"] == 15
+    assert "due_at" in history[0]
+    assert "skipped_at" in history[0]
 
 
 def test_period_catch_up_policy_persists_with_priority():

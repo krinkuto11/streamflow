@@ -24,6 +24,21 @@ from apps.core.logging_config import setup_logging
 logger = setup_logging(__name__)
 
 
+def _attach_period_runtime_metadata(period: Dict[str, Any], get_automation_manager: Optional[Callable[[], Any]]) -> Dict[str, Any]:
+    if not get_automation_manager or not period:
+        return period
+    try:
+        manager = get_automation_manager()
+        if not hasattr(manager, "get_period_skip_history"):
+            return period
+        history = manager.get_period_skip_history(period.get("id"), limit=5)
+        period["skip_history"] = history
+        period["last_skip"] = history[0] if history else None
+    except Exception as exc:
+        logger.debug(f"Could not attach automation period runtime metadata: {exc}")
+    return period
+
+
 def _validation_error(exc: ValidationError):
     return error_response(
         exc.message,
@@ -665,6 +680,7 @@ def handle_automation_periods_response(
     croniter_available: bool,
     croniter_module: Any,
     get_udi_manager: Optional[Callable[[], Any]] = None,
+    get_automation_manager: Optional[Callable[[], Any]] = None,
 ):
     """Get all automation periods or create a new period."""
     try:
@@ -717,11 +733,13 @@ def handle_automation_periods_response(
                 for period in result:
                     channels = automation_config.get_period_channels(period["id"])
                     period["channel_count"] = len(channels)
+                    _attach_period_runtime_metadata(period, get_automation_manager)
                 return jsonify(result), 200
 
             for period in result["items"]:
                 channels = automation_config.get_period_channels(period["id"])
                 period["channel_count"] = len(channels)
+                _attach_period_runtime_metadata(period, get_automation_manager)
             return jsonify(result), 200
 
         if method == "POST":
@@ -761,6 +779,7 @@ def handle_automation_period_response(
     get_automation_config_manager: Callable[[], Any],
     croniter_available: bool,
     croniter_module: Any,
+    get_automation_manager: Optional[Callable[[], Any]] = None,
 ):
     """Get, update, or delete a specific automation period."""
     try:
@@ -771,6 +790,7 @@ def handle_automation_period_response(
             if period:
                 channels = automation_config.get_period_channels(period_id)
                 period["channels"] = channels
+                _attach_period_runtime_metadata(period, get_automation_manager)
                 return jsonify(period), 200
             return error_response("Period not found", status_code=404, code="not_found")
 

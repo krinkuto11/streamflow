@@ -11,7 +11,7 @@ import { Badge } from '@/components/ui/badge.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI } from '@/services/api.js'
-import { Plus, Trash2, Edit2, Clock, Calendar, Loader2 } from 'lucide-react'
+import { AlertTriangle, Plus, Trash2, Edit2, Clock, Calendar, Loader2 } from 'lucide-react'
 
 export default function AutomationPeriods() {
   const [periods, setPeriods] = useState([])
@@ -158,6 +158,25 @@ export default function AutomationPeriods() {
     return 'Unknown'
   }
 
+  const formatSkipTime = (value) => {
+    if (!value) return ''
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return ''
+    return parsed.toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  }
+
+  const formatLastSkip = (skip) => {
+    if (!skip) return ''
+    const time = formatSkipTime(skip.skipped_at)
+    const reason = skip.message || 'Automatic run skipped'
+    return time ? `${reason} (${time})` : reason
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -236,6 +255,12 @@ export default function AutomationPeriods() {
                         </Badge>
                       )}
                     </div>
+                    {period.last_skip && (
+                      <div className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400 mt-2">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                        <span>{formatLastSkip(period.last_skip)}</span>
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <Button

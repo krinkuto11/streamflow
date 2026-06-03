@@ -1321,6 +1321,7 @@ class AutomatedStreamManager:
         self.running = False
         self.state_file = CONFIG_DIR / "automation_state.json"
         self.last_playlist_update = None
+        self._period_skip_history = {}
         self.period_last_run = self._load_state()  # Tracks last run time per period ID
         self.automation_start_time = None
         
@@ -1370,6 +1371,20 @@ class AutomatedStreamManager:
                     parsed_runs[pid] = datetime.fromisoformat(iso_str)
                 except (ValueError, TypeError):
                     pass
+
+            loaded_skip_history = state.get('period_skip_history', {})
+            parsed_skip_history = {}
+            if isinstance(loaded_skip_history, dict):
+                for pid, entries in loaded_skip_history.items():
+                    if not isinstance(entries, list):
+                        continue
+                    normalized_entries = []
+                    for entry in entries[:10]:
+                        if isinstance(entry, dict):
+                            normalized_entries.append(dict(entry))
+                    if normalized_entries:
+                        parsed_skip_history[str(pid)] = normalized_entries
+            self._period_skip_history = parsed_skip_history
             
             if parsed_runs:
                 logger.info(f"Loaded {len(parsed_runs)} period last-run timestamps from state file")
@@ -1392,7 +1407,10 @@ class AutomatedStreamManager:
                 for pid, dt in self.period_last_run.items() 
                 if isinstance(dt, datetime)
             }
-            state = {'period_last_run': serializable_runs}
+            state = {
+                'period_last_run': serializable_runs,
+                'period_skip_history': getattr(self, '_period_skip_history', {}),
+            }
             
             session = get_session()
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'automation_state').first()
@@ -3524,6 +3542,48 @@ class AutomatedStreamManager:
             return 0
         return max(0, grace_minutes)
 
+    def _record_period_skip(
+        self,
+        period_id: str,
+        period_info: dict,
+        *,
+        reason: str,
+        due_at: datetime,
+        now: datetime,
+        grace_minutes: int,
+    ) -> None:
+        if not hasattr(self, "_period_skip_history") or not isinstance(self._period_skip_history, dict):
+            self._period_skip_history = {}
+
+        entry = {
+            "reason": reason,
+            "period_id": str(period_id),
+            "period_name": period_info.get("name") or str(period_id),
+            "due_at": due_at.isoformat(),
+            "skipped_at": now.isoformat(),
+            "grace_minutes": max(0, int(grace_minutes or 0)),
+            "message": "Missed-run grace expired before the scheduler observed this period",
+        }
+        history = [entry] + list(self._period_skip_history.get(str(period_id), []))
+        self._period_skip_history[str(period_id)] = history[:10]
+
+    def get_period_skip_history(self, period_id: Optional[str] = None, *, limit: int = 10) -> Any:
+        if not hasattr(self, "_period_skip_history") or not isinstance(self._period_skip_history, dict):
+            self._period_skip_history = {}
+
+        try:
+            normalized_limit = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            normalized_limit = 10
+
+        if period_id is not None:
+            return list(self._period_skip_history.get(str(period_id), []))[:normalized_limit]
+
+        return {
+            str(pid): list(entries)[:normalized_limit]
+            for pid, entries in self._period_skip_history.items()
+        }
+
     def _period_due_inside_grace(
         self,
         period_id: str,
@@ -3543,6 +3603,14 @@ class AutomatedStreamManager:
             return True
 
         self.period_last_run[period_id] = now
+        self._record_period_skip(
+            period_id,
+            period_info,
+            reason="missed_run_grace_expired",
+            due_at=due_at,
+            now=now,
+            grace_minutes=grace_minutes,
+        )
         self._save_state()
         logger.info(
             "Skipping missed automation period %s because its grace window expired "

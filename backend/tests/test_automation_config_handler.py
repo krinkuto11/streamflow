@@ -1,6 +1,9 @@
 from flask import Flask
 
-from apps.api.automation_handlers import handle_global_automation_settings_response
+from apps.api.automation_handlers import (
+    handle_automation_periods_response,
+    handle_global_automation_settings_response,
+)
 
 
 class DummyConfigManager:
@@ -43,6 +46,35 @@ class DummyAutomationManager:
         self.automation_running = False
 
 
+class DummyPeriodsConfigManager:
+    def get_all_periods(self, search="", page=None, per_page=50):
+        return [
+            {
+                "id": "period-1",
+                "name": "Hourly",
+                "schedule": {"type": "interval", "value": 60},
+            }
+        ]
+
+    def get_period_channels(self, period_id):
+        return [101, 102]
+
+
+class DummyPeriodRuntimeManager:
+    def get_period_skip_history(self, period_id, *, limit=10):
+        return [
+            {
+                "reason": "missed_run_grace_expired",
+                "period_id": str(period_id),
+                "period_name": "Hourly",
+                "due_at": "2026-06-03T18:00:00",
+                "skipped_at": "2026-06-03T18:20:00",
+                "grace_minutes": 15,
+                "message": "Missed-run grace expired before the scheduler observed this period",
+            }
+        ]
+
+
 def test_get_automation_config_includes_enabled_m3u_accounts():
     app = Flask(__name__)
     cfg = DummyConfigManager()
@@ -61,6 +93,29 @@ def test_get_automation_config_includes_enabled_m3u_accounts():
     assert status_code == 200
     data = response.get_json()
     assert data["enabled_m3u_accounts"] == [1, 4]
+
+
+def test_get_automation_periods_includes_runtime_skip_history():
+    app = Flask(__name__)
+    cfg = DummyPeriodsConfigManager()
+    manager = DummyPeriodRuntimeManager()
+
+    with app.app_context():
+        response, status_code = handle_automation_periods_response(
+            method="GET",
+            args={},
+            payload=None,
+            get_automation_config_manager=lambda: cfg,
+            croniter_available=True,
+            croniter_module=None,
+            get_automation_manager=lambda: manager,
+        )
+
+    assert status_code == 200
+    data = response.get_json()
+    assert data[0]["channel_count"] == 2
+    assert data[0]["last_skip"]["reason"] == "missed_run_grace_expired"
+    assert data[0]["skip_history"][0]["grace_minutes"] == 15
 
 
 def test_put_automation_config_updates_enabled_m3u_accounts():
