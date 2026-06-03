@@ -19,7 +19,7 @@ export const formatWatcherClientCount = (value) => {
 
 export const formatRealViewerChannelCount = (value) => {
   const count = toCount(value)
-  return `${count} real-viewer ${plural(count, 'channel')}`
+  return `${count} real viewer ${plural(count, 'channel')}`
 }
 
 export const formatWatcherOnlyChannelCount = (value) => {

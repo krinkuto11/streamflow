@@ -10,8 +10,8 @@ import {
 
 describe('viewer activity display helpers', () => {
   it('labels real viewer and watcher channel counts clearly', () => {
-    expect(formatRealViewerChannelCount(1)).toBe('1 real-viewer channel')
-    expect(formatRealViewerChannelCount(2)).toBe('2 real-viewer channels')
+    expect(formatRealViewerChannelCount(1)).toBe('1 real viewer channel')
+    expect(formatRealViewerChannelCount(2)).toBe('2 real viewer channels')
     expect(formatWatcherOnlyChannelCount(0)).toBe('0 watcher-only channels')
     expect(formatWatcherOnlyChannelCount(1)).toBe('1 watcher-only channel')
   })
