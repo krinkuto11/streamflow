@@ -54,6 +54,29 @@ describe('dashboard run counts', () => {
     expect(counts.freeze).toBe(2)
   })
 
+  it('uses cumulative stream-checker queue problem counts while a batch is active', () => {
+    const counts = getDashboardRunCounts({
+      streamQueueActive: true,
+      batchTotal: 4,
+      completed: 2,
+      streamCheckerStatus: {
+        queue: {
+          dead_streams_count: 3,
+          blank_streams_count: 1,
+          freeze_streams_count: 2,
+        },
+        progress: {
+          streams_detail: [],
+        },
+      },
+    })
+
+    expect(counts.checked).toBe(2)
+    expect(counts.dead).toBe(3)
+    expect(counts.blank).toBe(1)
+    expect(counts.freeze).toBe(2)
+  })
+
   it('does not carry playlist or matching counts into manual quality-only metrics', () => {
     const metrics = getDashboardRunMetrics({
       streamQueueActive: true,

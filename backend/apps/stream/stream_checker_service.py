@@ -218,7 +218,10 @@ class StreamCheckerService:
             'total_channels': 0,
             'completed': 0,
             'failed': 0,
-            'in_progress': 0
+            'in_progress': 0,
+            'dead_streams_count': 0,
+            'blank_streams_count': 0,
+            'freeze_streams_count': 0,
         }
         
         # Event for immediate triggering of updated channels check
@@ -4067,6 +4070,9 @@ class StreamCheckerService:
             # Map tracking stream properties back over queue_status for calculations
             queue_status['queued_streams_count'] = sync_state.get('queued_streams_count', 0)
             queue_status['in_progress_streams_count'] = sync_state.get('in_progress_streams_count', 0)
+            queue_status['dead_streams_count'] = sync_state.get('dead_streams_count', 0)
+            queue_status['blank_streams_count'] = sync_state.get('blank_streams_count', 0)
+            queue_status['freeze_streams_count'] = sync_state.get('freeze_streams_count', 0)
             
             # Use real queue average if available, otherwise 0
             queue_status['avg_stream_process_time_sec'] = self.check_queue.get_status().get('avg_stream_process_time_sec', 0)
@@ -4188,6 +4194,13 @@ class StreamCheckerService:
             self.check_queue.remove_from_completed(channel_id)
 
         return self.check_queue.add_channels(channel_ids, priority)
+
+    @staticmethod
+    def _result_count(result: Dict, key: str) -> int:
+        try:
+            return max(0, int(result.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0
     
     def check_channels_synchronously(
         self,
@@ -4259,6 +4272,9 @@ class StreamCheckerService:
                 'in_progress': 0,
                 'queued_streams_count': total_streams,
                 'in_progress_streams_count': 0,
+                'dead_streams_count': 0,
+                'blank_streams_count': 0,
+                'freeze_streams_count': 0,
                 'started_at': datetime.now().isoformat(),
                 'generation': sync_generation,
             }
@@ -4304,6 +4320,10 @@ class StreamCheckerService:
                                 self.sync_batch_state['failed'] += 1
                             else:
                                 self.sync_batch_state['completed'] += 1
+                            if isinstance(channel_result, dict):
+                                self.sync_batch_state['dead_streams_count'] += self._result_count(channel_result, 'dead_streams_count')
+                                self.sync_batch_state['blank_streams_count'] += self._result_count(channel_result, 'blank_streams_count')
+                                self.sync_batch_state['freeze_streams_count'] += self._result_count(channel_result, 'freeze_streams_count')
 
                     if isinstance(channel_result, dict) and channel_result.get('aborted'):
                         logger.info("Synchronous channel batch aborted; stopping remaining checks")
@@ -5114,6 +5134,9 @@ class StreamCheckerService:
                     'in_progress': 0,
                     'queued_streams_count': 0,
                     'in_progress_streams_count': 0,
+                    'dead_streams_count': 0,
+                    'blank_streams_count': 0,
+                    'freeze_streams_count': 0,
                     'generation': self._sync_batch_generation,
                 }
                 self.checking = False

@@ -2,6 +2,11 @@ const countProgressStatus = (streams = [], status) => (
   streams.filter(stream => stream?.status === status).length
 )
 
+const numericOrNull = (value) => {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
 export const getDashboardRunCounts = ({
   streamCheckerStatus,
   streamQueueActive = false,
@@ -11,6 +16,10 @@ export const getDashboardRunCounts = ({
   runCounts = {},
 } = {}) => {
   const progressStreams = streamCheckerStatus?.progress?.streams_detail || []
+  const queueCounts = streamCheckerStatus?.queue || {}
+  const queueDead = numericOrNull(queueCounts.dead_streams_count)
+  const queueBlank = numericOrNull(queueCounts.blank_streams_count)
+  const queueFreeze = numericOrNull(queueCounts.freeze_streams_count)
   const qualityOnlyRun = streamCheckerOnlyActive
   const singleQualityOnlyRun = qualityOnlyRun && !streamQueueActive
   const activeStreamCheckerRun = streamQueueActive || qualityOnlyRun
@@ -24,9 +33,15 @@ export const getDashboardRunCounts = ({
     playlists: qualityOnlyRun ? null : (runCounts.refreshed_playlists ?? 0),
     matched: qualityOnlyRun ? null : (runCounts.assigned_channels ?? 0),
     checked: streamQueueActive ? completed : (singleQualityOnlyRun ? 0 : (runCounts.quality_checked ?? 0)),
-    dead: activeStreamCheckerRun ? countProgressStatus(progressStreams, 'dead') : (runCounts.dead_streams ?? 0),
-    blank: activeStreamCheckerRun ? countProgressStatus(progressStreams, 'blank') : (runCounts.blank_streams ?? 0),
-    freeze: activeStreamCheckerRun ? countProgressStatus(progressStreams, 'freeze') : (runCounts.freeze_streams ?? 0),
+    dead: streamQueueActive
+      ? (queueDead ?? countProgressStatus(progressStreams, 'dead'))
+      : (singleQualityOnlyRun ? countProgressStatus(progressStreams, 'dead') : (runCounts.dead_streams ?? 0)),
+    blank: streamQueueActive
+      ? (queueBlank ?? countProgressStatus(progressStreams, 'blank'))
+      : (singleQualityOnlyRun ? countProgressStatus(progressStreams, 'blank') : (runCounts.blank_streams ?? 0)),
+    freeze: streamQueueActive
+      ? (queueFreeze ?? countProgressStatus(progressStreams, 'freeze'))
+      : (singleQualityOnlyRun ? countProgressStatus(progressStreams, 'freeze') : (runCounts.freeze_streams ?? 0)),
   }
 }
 

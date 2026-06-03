@@ -280,6 +280,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             'in_progress': 1,
             'queued_streams_count': 10,
             'in_progress_streams_count': 2,
+            'dead_streams_count': 3,
+            'blank_streams_count': 1,
+            'freeze_streams_count': 2,
             'generation': 4,
         }
         service.checking = True
@@ -294,6 +297,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(service.sync_batch_state['total_channels'], 0)
         self.assertEqual(service.sync_batch_state['in_progress'], 0)
         self.assertEqual(service.sync_batch_state['queued_streams_count'], 0)
+        self.assertEqual(service.sync_batch_state['dead_streams_count'], 0)
+        self.assertEqual(service.sync_batch_state['blank_streams_count'], 0)
+        self.assertEqual(service.sync_batch_state['freeze_streams_count'], 0)
         self.assertEqual(service._sync_batch_generation, 5)
         self.assertFalse(service.checking)
 
@@ -310,6 +316,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             'in_progress': 1,
             'queued_streams_count': 6,
             'in_progress_streams_count': 2,
+            'dead_streams_count': 3,
+            'blank_streams_count': 1,
+            'freeze_streams_count': 2,
             'started_at': '2026-05-29T18:03:41',
             'generation': 1,
         }
@@ -328,6 +337,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['queue']['state'], 'checking')
         self.assertEqual(status['queue']['queued'], 2)
         self.assertEqual(status['queue']['in_progress'], 1)
+        self.assertEqual(status['queue']['dead_streams_count'], 3)
+        self.assertEqual(status['queue']['blank_streams_count'], 1)
+        self.assertEqual(status['queue']['freeze_streams_count'], 2)
         self.assertEqual(status['queue']['started_at'], '2026-05-29T18:03:41')
         self.assertTrue(status['stream_checking_mode'])
 
@@ -369,24 +381,42 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.config.get.side_effect = lambda key, default=None: True if key == 'concurrent_streams.enabled' else default
         service._require_quality_check_connectivity = Mock(return_value=None)
         service._check_channel_concurrent = Mock(side_effect=[
-            {'success': True, 'channel_name': 'One'},
-            {'success': True, 'channel_name': 'Two'},
+            {
+                'success': True,
+                'channel_name': 'One',
+                'dead_streams_count': 2,
+                'blank_streams_count': 1,
+                'freeze_streams_count': 0,
+            },
+            {
+                'success': True,
+                'channel_name': 'Two',
+                'dead_streams_count': 1,
+                'blank_streams_count': 0,
+                'freeze_streams_count': 2,
+            },
         ])
 
         udi = Mock()
         udi.get_channel_by_id.side_effect = lambda channel_id: {'streams': [{'id': f'{channel_id}-a'}]}
         progress_events = []
+        sync_counts = []
 
         with patch('apps.udi.get_udi_manager', return_value=udi):
             result = service.check_channels_synchronously(
                 [101, 102],
                 progress_callback=lambda completed, total, payload: progress_events.append(
                     (completed, total, payload.get('channel_name'))
-                ),
+                ) or sync_counts.append((
+                    service.sync_batch_state.get('dead_streams_count'),
+                    service.sync_batch_state.get('blank_streams_count'),
+                    service.sync_batch_state.get('freeze_streams_count'),
+                )),
             )
 
         self.assertEqual(list(result.keys()), [101, 102])
         self.assertEqual(progress_events, [(1, 2, 'One'), (2, 2, 'Two')])
+        self.assertEqual(sync_counts, [(2, 1, 0), (3, 1, 2)])
         self.assertFalse(service.sync_batch_state['active'])
 
 
