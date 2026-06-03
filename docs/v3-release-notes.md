@@ -23,6 +23,8 @@ template update path.
 - Automation periods now include startup catch-up, missed-run grace,
   missed-run skip history, a global catch-up cap, and a maintenance window for
   automatic runs.
+- Scheduling auto-create rule previews now test every selected channel and every
+  channel in selected groups instead of sampling one channel from the selection.
 - Hardware acceleration stays optional and visible, with CPU-only,
   hardware-preferred fallback, and hardware-only states separated. Intel/DRI
   paths can report VAAPI, QSV, or DRI methods without requiring NVIDIA runtime
@@ -43,6 +45,8 @@ template update path.
   forced runs still work.
 - Hardware status now distinguishes runtime device, FFmpeg methods, DRI methods,
   NVIDIA checks, and CPU fallback state.
+- Auto-create rule test results for channel groups now show matches from all
+  resolved channels and call out partial TVG-ID coverage.
 
 ## Validation Snapshot
 

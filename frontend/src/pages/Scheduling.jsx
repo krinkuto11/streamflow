@@ -297,46 +297,47 @@ export default function Scheduling() {
 
     try {
       setTestingRegex(true)
-      // Test regex against first selected channel or first channel from first selected group
-      let testChannelId = null
-      if (ruleSelectedChannels.length > 0) {
-        testChannelId = ruleSelectedChannels[0].id
-      } else if (ruleSelectedChannelGroups.length > 0) {
-        // Find first channel in the first selected group
-        const firstGroup = ruleSelectedChannelGroups[0]
-        const groupChannels = channels.filter(c => c.channel_group_id === firstGroup.id)
-        if (groupChannels.length > 0) {
-          testChannelId = groupChannels[0].id
-        }
-      }
+      const selectedChannelIds = ruleSelectedChannels.map(c => c.id)
+      const selectedGroupIds = ruleSelectedChannelGroups.map(g => g.id)
 
-      if (!testChannelId) {
+      if (selectedChannelIds.length === 0 && selectedGroupIds.length === 0) {
         toast({
           title: "No Channels",
-          description: "No channels found in selected groups",
+          description: "Select at least one channel or channel group",
           variant: "destructive"
         })
         return
       }
 
       const response = await schedulingAPI.testAutoCreateRule({
-        channel_id: testChannelId,
+        channel_ids: selectedChannelIds,
+        channel_group_ids: selectedGroupIds,
         regex_pattern: ruleRegexPattern
       })
 
       setRegexMatches(response.data.programs || [])
+      const channelsTested = response.data.channels_tested || selectedChannelIds.length
+      const channelsWithoutTvg = response.data.channels_without_tvg || []
 
-      // SCH-002: backend signals the channel has no TVG-ID configured
+      // SCH-002: backend signals the selected channels have no TVG-ID configured
       if (response.data.no_tvg_id) {
         toast({
           title: "No TVG-ID Configured",
-          description: "This channel has no TVG-ID set. EPG matching requires a TVG-ID — open the channel in Dispatcharr and click \"Use EPG TVG-ID\" to populate it.",
+          description: channelsTested > 1
+            ? "None of the selected channels have a TVG-ID set. EPG matching requires TVG-IDs on the source channels."
+            : "This channel has no TVG-ID set. EPG matching requires a TVG-ID.",
           variant: "destructive"
         })
       } else if (response.data.matches === 0) {
         toast({
           title: "No Matches",
-          description: "The regex pattern didn't match any programs in the EPG (tested on first available channel)",
+          description: `The regex pattern didn't match any EPG programs across ${channelsTested} selected channel${channelsTested === 1 ? '' : 's'}.`,
+          variant: "default"
+        })
+      } else if (channelsWithoutTvg.length > 0) {
+        toast({
+          title: "Partial TVG-ID Coverage",
+          description: `${channelsWithoutTvg.length} selected channel${channelsWithoutTvg.length === 1 ? '' : 's'} had no TVG-ID and could not be tested.`,
           variant: "default"
         })
       }
@@ -1579,14 +1580,14 @@ export default function Scheduling() {
                             }}
                           />
                           <p className="text-sm text-muted-foreground">
-                            Use regex syntax to match program titles. Click "Test Pattern" to see live results{ruleSelectedChannels.length > 1 ? ' (tested on first selected channel)' : ''}.
+                            Use regex syntax to match program titles. Click "Test Pattern" to see live results across selected channels and groups.
                           </p>
                         </div>
 
                         {/* Live Regex Results */}
                         {regexMatches.length > 0 && (
                           <div className="space-y-2">
-                            <Label>Matching Programs ({regexMatches.length}){ruleSelectedChannels.length > 1 && ` on ${ruleSelectedChannels[0].name}`}</Label>
+                            <Label>Matching Programs ({regexMatches.length})</Label>
                             <div className="border rounded-lg max-h-48 overflow-y-auto">
                               {regexMatches.map((program, idx) => (
                                 <div
@@ -1594,6 +1595,11 @@ export default function Scheduling() {
                                   className="p-2 border-b last:border-b-0 text-sm"
                                 >
                                   <div className="font-medium">{program.title}</div>
+                                  {program.channel_name && (
+                                    <div className="text-muted-foreground text-xs mt-1">
+                                      {program.channel_name}
+                                    </div>
+                                  )}
                                   <div className="text-muted-foreground text-xs mt-1">
                                     {formatTime(program.start_time)} - {formatTime(program.end_time)}
                                   </div>

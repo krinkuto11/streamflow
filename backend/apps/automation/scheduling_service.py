@@ -930,6 +930,110 @@ class SchedulingService:
         logger.debug(f"Regex '{effective_pattern}' matched {len(matching_programs)} programs for channel {channel_id}")
         return matching_programs
 
+    def test_regex_against_epg_for_rule(
+        self,
+        *,
+        channel_ids: Optional[List[Any]] = None,
+        channel_group_ids: Optional[List[Any]] = None,
+        regex_pattern: str,
+    ) -> Dict[str, Any]:
+        """Test an auto-create regex against every selected channel and group channel."""
+        if not regex_pattern or not regex_pattern.strip():
+            raise ValueError("Regex pattern must not be empty.")
+
+        udi = get_udi_manager()
+        resolved_channel_ids: List[int] = []
+        seen_channel_ids = set()
+
+        def add_channel_id(raw_channel_id: Any) -> None:
+            if raw_channel_id in (None, ""):
+                return
+            try:
+                channel_id = int(raw_channel_id)
+            except (TypeError, ValueError):
+                raise ValueError("channel_ids must contain integer IDs") from None
+            if channel_id not in seen_channel_ids:
+                seen_channel_ids.add(channel_id)
+                resolved_channel_ids.append(channel_id)
+
+        for raw_channel_id in channel_ids or []:
+            add_channel_id(raw_channel_id)
+
+        channel_groups_info: List[Dict[str, Any]] = []
+        for raw_group_id in channel_group_ids or []:
+            if raw_group_id in (None, ""):
+                continue
+            try:
+                group_id = int(raw_group_id)
+            except (TypeError, ValueError):
+                raise ValueError("channel_group_ids must contain integer IDs") from None
+
+            group = udi.get_channel_group_by_id(group_id)
+            if not group:
+                continue
+
+            group_channels = udi.get_channels_by_group(group_id) or []
+            channel_groups_info.append({
+                'id': group_id,
+                'name': group.get('name', ''),
+                'channel_count': len(group_channels),
+            })
+            for channel in group_channels:
+                add_channel_id(channel.get('id'))
+
+        channels_info: List[Dict[str, Any]] = []
+        for channel_id in resolved_channel_ids:
+            channel = udi.get_channel_by_id(channel_id)
+            if not channel:
+                continue
+            channels_info.append({
+                'id': channel_id,
+                'name': channel.get('name', f'Channel {channel_id}'),
+                'tvg_id': channel.get('tvg_id'),
+            })
+
+        if not channels_info:
+            raise ValueError("No valid channels found for this rule")
+
+        matching_programs: List[Dict[str, Any]] = []
+        channels_without_tvg: List[Dict[str, Any]] = []
+        channels_with_matches = set()
+
+        for channel_info in channels_info:
+            channel_id = channel_info['id']
+            try:
+                channel_matches = self.test_regex_against_epg(channel_id, regex_pattern)
+            except NoTvgIdError:
+                channels_without_tvg.append(channel_info)
+                continue
+
+            if channel_matches:
+                channels_with_matches.add(channel_id)
+
+            for program in channel_matches:
+                enriched_program = dict(program)
+                enriched_program['channel_id'] = channel_id
+                enriched_program['channel_name'] = channel_info.get('name', f'Channel {channel_id}')
+                enriched_program['tvg_id'] = channel_info.get('tvg_id')
+                matching_programs.append(enriched_program)
+
+        logger.debug(
+            "Auto-create regex preview matched %s programs across %s/%s channels",
+            len(matching_programs),
+            len(channels_with_matches),
+            len(channels_info),
+        )
+
+        return {
+            'matches': len(matching_programs),
+            'programs': matching_programs,
+            'channels_tested': len(channels_info),
+            'channels_with_matches': len(channels_with_matches),
+            'channels_without_tvg': channels_without_tvg,
+            'channel_groups_info': channel_groups_info,
+            'no_tvg_id': len(channels_without_tvg) == len(channels_info),
+        }
+
     def match_programs_to_rules(self, force_refresh: bool = False) -> Dict[str, Any]:
         """Match EPG programs to auto-create rules and create/update scheduled events.
 

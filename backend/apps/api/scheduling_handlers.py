@@ -242,12 +242,20 @@ def update_auto_create_rule_response(
 
 
 def test_auto_create_rule_response(*, payload: Any, get_scheduling_service: Callable[[], Any]):
-    """Handle regex testing against EPG data for a channel."""
+    """Handle regex testing against EPG data for selected channels and groups."""
     from apps.automation.scheduling_service import NoTvgIdError
     try:
         schema = AutoCreateRuleTestSchema.from_payload(payload)
 
         service = get_scheduling_service()
+        if schema.channel_group_ids or len(schema.channel_ids) != 1 or schema.channel_ids[0] != schema.channel_id:
+            result = service.test_regex_against_epg_for_rule(
+                channel_ids=schema.channel_ids,
+                channel_group_ids=schema.channel_group_ids,
+                regex_pattern=schema.regex_pattern,
+            )
+            return jsonify(result)
+
         matching_programs = service.test_regex_against_epg(schema.channel_id, schema.regex_pattern)
 
         return jsonify({"matches": len(matching_programs), "programs": matching_programs})

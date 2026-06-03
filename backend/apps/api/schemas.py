@@ -606,8 +606,8 @@ class AutoCreateRuleCreateSchema:
         if missing:
             raise ValidationError("Missing required fields", details={"missing_fields": missing})
 
-        if "channel_id" not in data and "channel_ids" not in data:
-            raise ValidationError("Missing required field: channel_id or channel_ids")
+        if "channel_id" not in data and "channel_ids" not in data and "channel_group_ids" not in data:
+            raise ValidationError("Missing required field: channel_id, channel_ids, or channel_group_ids")
 
         return cls(rule_data=data)
 
@@ -627,16 +627,46 @@ class AutoCreateRuleUpdateSchema:
 @dataclass(frozen=True)
 class AutoCreateRuleTestSchema:
     channel_id: Any
+    channel_ids: List[Any]
+    channel_group_ids: List[Any]
     regex_pattern: str
 
     @classmethod
     def from_payload(cls, payload: Any) -> "AutoCreateRuleTestSchema":
         data = _ensure_dict(payload, message="No test data provided")
-        required_fields = ["channel_id", "regex_pattern"]
+        required_fields = ["regex_pattern"]
         missing = [field for field in required_fields if field not in data]
         if missing:
             raise ValidationError("Missing required fields", details={"missing_fields": missing})
-        return cls(channel_id=data["channel_id"], regex_pattern=str(data["regex_pattern"]))
+
+        channel_ids: List[Any] = []
+        channel_group_ids: List[Any] = []
+
+        channel_id = data.get("channel_id")
+        if "channel_id" in data:
+            channel_ids.append(channel_id)
+
+        if "channel_ids" in data:
+            raw_channel_ids = data.get("channel_ids")
+            if not isinstance(raw_channel_ids, list):
+                raise ValidationError("channel_ids must be a list")
+            channel_ids.extend(raw_channel_ids)
+
+        if "channel_group_ids" in data:
+            raw_group_ids = data.get("channel_group_ids")
+            if not isinstance(raw_group_ids, list):
+                raise ValidationError("channel_group_ids must be a list")
+            channel_group_ids.extend(raw_group_ids)
+
+        if not channel_ids and not channel_group_ids:
+            raise ValidationError("Missing required field: channel_id, channel_ids, or channel_group_ids")
+
+        return cls(
+            channel_id=channel_id,
+            channel_ids=channel_ids,
+            channel_group_ids=channel_group_ids,
+            regex_pattern=str(data["regex_pattern"]),
+        )
 
 
 @dataclass(frozen=True)
