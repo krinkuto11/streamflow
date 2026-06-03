@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import threading
 import unittest
+from unittest.mock import Mock, patch
 
 from apps.automation.automated_stream_manager import AutomatedStreamManager
 from apps.udi.fetcher import UDIFetcher
@@ -223,6 +224,86 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(summary["aborted_count"], 1)
         self.assertEqual(summary["incomplete_count"], 3)
         self.assertEqual(summary["abort_message"], "dispatcharr_api connectivity probe timed out")
+
+    def test_refresh_playlists_emits_account_progress(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {
+                "auto_playlist_update": True,
+                "changelog_tracking": False,
+            },
+            "enabled_m3u_accounts": [],
+        }
+        events = []
+        response = Mock(status_code=200)
+        scheduling_service = Mock()
+
+        with patch(
+            "apps.automation.automated_stream_manager.get_m3u_accounts",
+            return_value=[
+                {"id": 1, "name": "One", "is_active": True},
+                {"id": 2, "name": "Two", "is_active": True},
+                {"id": 3, "name": "custom", "is_active": True},
+            ],
+        ), patch(
+            "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+            return_value=response,
+        ), patch(
+            "apps.automation.scheduling_service.get_scheduling_service",
+            return_value=scheduling_service,
+        ):
+            success, accounts = manager.refresh_playlists(
+                skip_changelog=True,
+                progress_callback=events.append,
+            )
+
+        self.assertTrue(success)
+        self.assertEqual([account["id"] for account in accounts], [1, 2])
+        self.assertEqual(
+            [(event["state"], event["current"], event["total"]) for event in events],
+            [
+                ("planned", 0, 2),
+                ("requesting", 0, 2),
+                ("completed", 1, 2),
+                ("requesting", 1, 2),
+                ("completed", 2, 2),
+            ],
+        )
+        self.assertEqual(events[1]["message"], "Refreshing playlist 1/2: One")
+        self.assertEqual(events[-1]["message"], "Playlist 2/2 refreshed: Two")
+
+    def test_refresh_playlists_reports_missing_account_as_skipped(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {
+                "auto_playlist_update": True,
+                "changelog_tracking": False,
+            },
+            "enabled_m3u_accounts": [],
+        }
+        events = []
+        scheduling_service = Mock()
+
+        with patch(
+            "apps.automation.automated_stream_manager.get_m3u_accounts",
+            return_value=[{"id": 2, "name": "Two", "is_active": True}],
+        ), patch(
+            "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+        ) as refresh_mock, patch(
+            "apps.automation.scheduling_service.get_scheduling_service",
+            return_value=scheduling_service,
+        ):
+            success, accounts = manager.refresh_playlists(
+                account_id=99,
+                skip_changelog=True,
+                progress_callback=events.append,
+            )
+
+        self.assertTrue(success)
+        self.assertEqual(accounts, [])
+        refresh_mock.assert_not_called()
+        self.assertEqual(events[-1]["state"], "skipped")
+        self.assertEqual(events[-1]["message"], "No active playlists matched the refresh request")
 
 
 class FetcherTimingSummaryTests(unittest.TestCase):

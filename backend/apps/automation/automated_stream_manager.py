@@ -20,7 +20,7 @@ import copy
 from functools import lru_cache
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Callable, Dict, List, Optional, Tuple, Any, Union
 import concurrent.futures
 from collections import defaultdict
 
@@ -2055,7 +2055,13 @@ class AutomatedStreamManager:
         # letting the specific logic (assignment/validation) handle per-channel profiles.
         return all_channels
     
-    def refresh_playlists(self, force: bool = False, account_id: Optional[int] = None, skip_changelog: bool = False) -> Tuple[bool, List[Dict]]:
+    def refresh_playlists(
+        self,
+        force: bool = False,
+        account_id: Optional[int] = None,
+        skip_changelog: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Tuple[bool, List[Dict]]:
         """Refresh M3U playlists and track changes.
         
         Args:
@@ -2068,6 +2074,15 @@ class AutomatedStreamManager:
         """
         refreshed_accounts = []
         refresh_failed = False
+
+        def emit_refresh_progress(payload: Dict[str, Any]) -> None:
+            if not progress_callback:
+                return
+            try:
+                progress_callback(payload)
+            except Exception as callback_error:
+                logger.debug(f"M3U refresh progress callback failed: {callback_error}")
+
         try:
             if not force and not self.config.get("enabled_features", {}).get("auto_playlist_update", True):
                 if not force:  # Allow force to override feature flag
@@ -2109,34 +2124,93 @@ class AutomatedStreamManager:
                          accounts_to_process = non_custom_accounts
 
                 # Execute refresh
-                for account in accounts_to_process:
+                total_accounts = len(accounts_to_process)
+                if total_accounts:
+                    emit_refresh_progress({
+                        "state": "planned",
+                        "current": 0,
+                        "total": total_accounts,
+                        "message": f"Preparing {total_accounts} playlist refresh request(s)",
+                    })
+
+                for index, account in enumerate(accounts_to_process, start=1):
                     acc_id = account.get('id')
                     if acc_id is not None:
-                        logger.info(f"Refreshing M3U account {acc_id}: {account.get('name')}")
+                        account_name = account.get('name', f"Account {acc_id}")
+                        logger.info(f"Refreshing M3U account {acc_id}: {account_name}")
+                        emit_refresh_progress({
+                            "state": "requesting",
+                            "current": index - 1,
+                            "total": total_accounts,
+                            "account_id": acc_id,
+                            "account_name": account_name,
+                            "message": f"Refreshing playlist {index}/{total_accounts}: {account_name}",
+                        })
                         response = refresh_m3u_playlists(account_id=acc_id)
                         if self._is_m3u_refresh_response_success(response):
                             refreshed_accounts.append({
                                 "id": acc_id,
-                                "name": account.get('name', f"Account {acc_id}")
+                                "name": account_name,
+                            })
+                            emit_refresh_progress({
+                                "state": "completed",
+                                "current": index,
+                                "total": total_accounts,
+                                "account_id": acc_id,
+                                "account_name": account_name,
+                                "message": f"Playlist {index}/{total_accounts} refreshed: {account_name}",
                             })
                         else:
                             refresh_failed = True
                             status = getattr(response, 'status_code', None)
                             logger.error(
-                                f"M3U refresh failed for account {acc_id} ({account.get('name')}), "
+                                f"M3U refresh failed for account {acc_id} ({account_name}), "
                                 f"status={status}"
                             )
+                            emit_refresh_progress({
+                                "state": "failed",
+                                "current": index,
+                                "total": total_accounts,
+                                "account_id": acc_id,
+                                "account_name": account_name,
+                                "message": f"Playlist {index}/{total_accounts} failed: {account_name}",
+                            })
                 
                 if not accounts_to_process:
                     logger.info("No accounts matched criteria for refresh.")
+                    emit_refresh_progress({
+                        "state": "skipped",
+                        "current": 0,
+                        "total": 0,
+                        "message": "No active playlists matched the refresh request",
+                    })
             else:
                 # Fallback: if we can't get accounts, refresh all (legacy behavior)
                 logger.warning("Could not fetch M3U accounts, refreshing all as fallback")
+                emit_refresh_progress({
+                    "state": "requesting",
+                    "current": 0,
+                    "total": 1,
+                    "message": "Refreshing all playlists through Dispatcharr",
+                })
                 response = refresh_m3u_playlists()
                 if not self._is_m3u_refresh_response_success(response):
                     refresh_failed = True
                     status = getattr(response, 'status_code', None)
                     logger.error(f"Fallback M3U refresh failed, status={status}")
+                    emit_refresh_progress({
+                        "state": "failed",
+                        "current": 1,
+                        "total": 1,
+                        "message": "Fallback playlist refresh failed",
+                    })
+                else:
+                    emit_refresh_progress({
+                        "state": "completed",
+                        "current": 1,
+                        "total": 1,
+                        "message": "Fallback playlist refresh completed",
+                    })
 
             if refresh_failed:
                 logger.error("Playlist refresh encountered one or more failed account refreshes")
@@ -3788,14 +3862,74 @@ class AutomatedStreamManager:
             else:
                 before_stream_ids = {}
 
+            def update_m3u_refresh_progress(
+                payload: Dict[str, Any],
+                *,
+                current_override: Optional[int] = None,
+                total_override: Optional[int] = None,
+                message_override: Optional[str] = None,
+            ) -> None:
+                total = total_override if total_override is not None else payload.get("total")
+                current = current_override if current_override is not None else payload.get("current", 0)
+                message = message_override or payload.get("message") or "Refreshing configured playlists"
+                self._update_run_status(
+                    stage="m3u_refresh",
+                    stage_label="Refreshing M3U",
+                    message=message,
+                    counts={
+                        "m3u_refresh_current": current,
+                        "m3u_refresh_total": total,
+                        "m3u_refresh_state": payload.get("state", "running"),
+                    },
+                    progress={
+                        "current": current,
+                        "total": total,
+                        "message": message,
+                    },
+                )
+
             if update_all_playlists:
                 logger.info("Updating ALL playlists (requested by one or more profiles)")
-                refresh_success, refreshed_accounts = self.refresh_playlists(account_id=None, skip_changelog=True)
+                refresh_success, refreshed_accounts = self.refresh_playlists(
+                    account_id=None,
+                    skip_changelog=True,
+                    progress_callback=update_m3u_refresh_progress,
+                )
             elif playlists_to_update:
                 logger.info(f"Updating {len(playlists_to_update)} specific playlists: {playlists_to_update}")
                 refresh_success = True
-                for acc_id in playlists_to_update:
-                    success, accs = self.refresh_playlists(account_id=int(acc_id), skip_changelog=True)
+                ordered_playlist_ids = list(playlists_to_update)
+                total_specific_playlists = len(ordered_playlist_ids)
+                for refresh_index, acc_id in enumerate(ordered_playlist_ids, start=1):
+                    def specific_refresh_progress(payload: Dict[str, Any], *, _index: int = refresh_index, _acc_id: Any = acc_id) -> None:
+                        state = payload.get("state", "running")
+                        account_name = payload.get("account_name") or f"Account {_acc_id}"
+                        if state == "skipped":
+                            current_value = _index
+                            message = f"Playlist {_index}/{total_specific_playlists} skipped: {account_name}"
+                        elif state in {"completed", "failed"}:
+                            current_value = _index
+                            verb = "refreshed" if state == "completed" else "failed"
+                            message = f"Playlist {_index}/{total_specific_playlists} {verb}: {account_name}"
+                        elif state == "requesting":
+                            current_value = _index - 1
+                            message = f"Refreshing playlist {_index}/{total_specific_playlists}: {account_name}"
+                        else:
+                            current_value = _index - 1
+                            message = f"Preparing playlist {_index}/{total_specific_playlists}: {account_name}"
+
+                        update_m3u_refresh_progress(
+                            payload,
+                            current_override=current_value,
+                            total_override=total_specific_playlists,
+                            message_override=message,
+                        )
+
+                    success, accs = self.refresh_playlists(
+                        account_id=int(acc_id),
+                        skip_changelog=True,
+                        progress_callback=specific_refresh_progress,
+                    )
                     if not success:
                         refresh_success = False
                     if accs:
