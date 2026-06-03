@@ -700,6 +700,8 @@ def get_proxy_status_response(*, get_udi_manager: Callable[[], Any]):
     """Get current proxy status."""
     try:
         udi = get_udi_manager()
+        if getattr(udi, "is_initialization_pending", lambda: False)():
+            return jsonify({}), 200
         proxy_status = udi.get_proxy_status()
         return jsonify(proxy_status), 200
     except Exception as exc:
@@ -711,6 +713,8 @@ def get_playing_streams_response(*, get_udi_manager: Callable[[], Any]):
     """Get list of stream IDs that are currently being played."""
     try:
         udi = get_udi_manager()
+        if getattr(udi, "is_initialization_pending", lambda: False)():
+            return jsonify({"playing_stream_ids": [], "count": 0, "initializing": True}), 200
         playing_stream_ids = udi.get_playing_stream_ids()
 
         return jsonify({"playing_stream_ids": list(playing_stream_ids), "count": len(playing_stream_ids)}), 200

@@ -479,6 +479,14 @@ class UDIManager:
         """
         return self._network_ready
 
+    def is_initialization_pending(self) -> bool:
+        """Return True while the startup/live UDI refresh is actively building caches."""
+        with self._lock:
+            return bool(
+                self._init_in_progress
+                or self._init_progress.get("status") == "in_progress"
+            )
+
     def get_last_refresh_duration(self) -> float:
         """Return seconds taken by the last successful refresh_all().
 
