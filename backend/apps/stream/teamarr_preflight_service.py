@@ -99,6 +99,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "poll_interval_seconds": 60,
     "preflight_offset_minutes": 20,
     "retry_offsets_minutes": [10, 3],
+    "post_start_offsets_minutes": [2],
     "post_start_grace_minutes": 5,
     "max_concurrent_checks": 1,
     "event_cooldown_minutes": 720,
@@ -145,16 +146,16 @@ def _normalize_terms(value: Any) -> List[str]:
     return terms
 
 
-def _normalize_retry_offsets(value: Any) -> List[int]:
+def _normalize_minute_offsets(value: Any, *, min_value: int = 1, max_value: int = 360, reverse: bool = True) -> List[int]:
     offsets: List[int] = []
     for item in _coerce_list(value):
         try:
             parsed = int(item)
         except (TypeError, ValueError):
             continue
-        if 1 <= parsed <= 360:
+        if min_value <= parsed <= max_value:
             offsets.append(parsed)
-    return sorted(set(offsets), reverse=True)
+    return sorted(set(offsets), reverse=reverse)
 
 
 def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -175,7 +176,12 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     if not config["api_key_header"]:
         config["api_key_header"] = DEFAULT_CONFIG["api_key_header"]
     config["forced_profile_id"] = str(config.get("forced_profile_id") or "").strip()
-    config["retry_offsets_minutes"] = _normalize_retry_offsets(config.get("retry_offsets_minutes"))
+    config["retry_offsets_minutes"] = _normalize_minute_offsets(config.get("retry_offsets_minutes"))
+    config["post_start_offsets_minutes"] = _normalize_minute_offsets(
+        config.get("post_start_offsets_minutes"),
+        max_value=120,
+        reverse=False,
+    )
     for key in ("include_sports", "exclude_sports", "include_leagues", "exclude_leagues"):
         config[key] = _normalize_terms(config.get(key))
     return config
@@ -793,20 +799,56 @@ class TeamarrPreflightService:
             return "waiting_for_channel_sync", None
 
         seconds = int(event.get("seconds_to_start") or 0)
-        if seconds < -int(config["post_start_grace_minutes"]) * 60:
+        post_start_grace_seconds = int(config["post_start_grace_minutes"]) * 60
+        if seconds < -post_start_grace_seconds:
             return "past", None
 
-        offsets = [int(config["preflight_offset_minutes"])] + list(config.get("retry_offsets_minutes") or [])
-        offsets = sorted(set(offsets), reverse=True)
-        for offset in offsets:
-            if seconds <= offset * 60:
-                bucket = f"{offset}m"
-                attempted_key = f"{event['identity']}:{bucket}"
-                with self._lock:
-                    if attempted_key in self._attempted_buckets:
-                        return "already_attempted", bucket
-                return "due", bucket
+        if seconds >= 0:
+            preflight_offset = int(config["preflight_offset_minutes"])
+            retry_offsets = [
+                int(offset)
+                for offset in list(config.get("retry_offsets_minutes") or [])
+                if int(offset) <= preflight_offset
+            ]
+            offsets = [preflight_offset] + retry_offsets
+            return self._classify_bucket_offsets(event, seconds, offsets, direction="pre")
 
+        elapsed_seconds = abs(seconds)
+        post_offsets = list(config.get("post_start_offsets_minutes") or [])
+        return self._classify_bucket_offsets(event, elapsed_seconds, post_offsets, direction="post")
+
+    def _classify_bucket_offsets(
+        self,
+        event: Dict[str, Any],
+        seconds: int,
+        offsets: Iterable[int],
+        *,
+        direction: str,
+    ) -> tuple[str, Optional[str]]:
+        normalized = sorted(
+            {int(offset) for offset in offsets if int(offset) > 0},
+            reverse=(direction == "pre"),
+        )
+        attempted_bucket: Optional[str] = None
+        for offset in normalized:
+            threshold_seconds = offset * 60
+            if direction == "pre":
+                is_due = seconds <= threshold_seconds
+            else:
+                is_due = seconds >= threshold_seconds
+            if not is_due:
+                continue
+
+            bucket = f"{offset}m" if direction == "pre" else f"post+{offset}m"
+            attempted_key = f"{event['identity']}:{bucket}"
+            with self._lock:
+                if attempted_key in self._attempted_buckets:
+                    attempted_bucket = bucket
+                    continue
+            return "due", bucket
+
+        if attempted_bucket:
+            return "already_attempted", attempted_bucket
         return "scheduled", None
 
     def _passes_filters(self, event: Dict[str, Any], config: Dict[str, Any]) -> bool:

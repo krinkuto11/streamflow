@@ -160,11 +160,13 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         config = normalize_config({
             "api_key": "secret",
             "retry_offsets_minutes": ["3", "10", "bad", "10"],
+            "post_start_offsets_minutes": ["2", "1", "bad", "2"],
             "include_sports": [" Soccer ", ""],
             "exclude_leagues": "mlb",
         })
 
         self.assertEqual(config["retry_offsets_minutes"], [10, 3])
+        self.assertEqual(config["post_start_offsets_minutes"], [1, 2])
         self.assertEqual(config["include_sports"], ["soccer"])
         self.assertEqual(config["exclude_leagues"], ["mlb"])
 
@@ -285,6 +287,64 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(len(checker.calls), 2)
         self.assertEqual(recent[0]["type"], "preflight_completed")
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 1)
+
+    def test_retry_offsets_do_not_fire_before_preflight_offset(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2026-05-28T22:05:00+00:00")],
+            checker=checker,
+        )
+        service.update_config({
+            "preflight_offset_minutes": 1,
+            "retry_offsets_minutes": [10, 3],
+        })
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "scheduled")
+
+    def test_post_start_offset_launches_after_game_start(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2026-05-28T21:58:00+00:00")],
+            checker=checker,
+        )
+        service.update_config({"post_start_offsets_minutes": [2]})
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(len(checker.calls), 1)
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["details"]["bucket"], "post+2m")
+
+    def test_preflight_attempt_does_not_block_post_start_bucket(self):
+        checker = FakeChecker()
+        event = make_event(event_date="2026-05-28T21:58:00+00:00")
+        service, _, _ = self.make_service([event], checker=checker)
+        identity = "id:100:2026-05-28T21:58:00+00:00"
+        service._attempted_buckets[f"{identity}:20m"] = FIXED_NOW
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(len(checker.calls), 1)
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["details"]["bucket"], "post+2m")
 
     def test_no_streams_records_no_streams_without_launching_check(self):
         checker = FakeChecker()

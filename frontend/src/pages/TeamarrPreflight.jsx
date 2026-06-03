@@ -209,6 +209,7 @@ export default function TeamarrPreflight() {
   const [editedConfig, setEditedConfig] = useState(null)
   const [status, setStatus] = useState(null)
   const [retryOffsets, setRetryOffsets] = useState('')
+  const [postStartOffsets, setPostStartOffsets] = useState('')
   const [includeSports, setIncludeSports] = useState('')
   const [excludeSports, setExcludeSports] = useState('')
   const [includeLeagues, setIncludeLeagues] = useState('')
@@ -267,6 +268,7 @@ export default function TeamarrPreflight() {
 
   const hydrateInputs = (nextConfig) => {
     setRetryOffsets((nextConfig.retry_offsets_minutes || []).join(', '))
+    setPostStartOffsets((nextConfig.post_start_offsets_minutes || []).join(', '))
     setIncludeSports((nextConfig.include_sports || []).join(', '))
     setExcludeSports((nextConfig.exclude_sports || []).join(', '))
     setIncludeLeagues((nextConfig.include_leagues || []).join(', '))
@@ -327,6 +329,7 @@ export default function TeamarrPreflight() {
       const payload = {
         ...(editedConfig || {}),
         retry_offsets_minutes: parseCsv(retryOffsets).map(item => Number(item)).filter(Number.isFinite),
+        post_start_offsets_minutes: parseCsv(postStartOffsets).map(item => Number(item)).filter(Number.isFinite),
         include_sports: parseFilterCsv(includeSports),
         exclude_sports: parseFilterCsv(excludeSports),
         include_leagues: parseFilterCsv(includeLeagues),
@@ -633,8 +636,12 @@ export default function TeamarrPreflight() {
                 </div>
               ))}
               <div className="space-y-2">
-                <Label>Retry Offsets</Label>
+                <Label>Pre-Start Retries</Label>
                 <Input value={retryOffsets} onChange={(event) => setRetryOffsets(event.target.value)} />
+              </div>
+              <div className="space-y-2">
+                <Label>Post-Start Checks</Label>
+                <Input value={postStartOffsets} onChange={(event) => setPostStartOffsets(event.target.value)} />
               </div>
             </div>
 
