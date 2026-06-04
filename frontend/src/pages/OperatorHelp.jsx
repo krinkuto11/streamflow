@@ -130,7 +130,17 @@ export default function OperatorHelp() {
                   <dl className="grid gap-2 text-sm text-muted-foreground">
                     <div>
                       <dt className="font-medium text-foreground">Where</dt>
-                      <dd>{setting.location}</dd>
+                      <dd className="space-y-2">
+                        <span>{setting.location}</span>
+                        {(setting.locationTo || topic.settingsLocationTo) && (
+                          <Button asChild variant="outline" size="sm" className="block w-fit">
+                            <Link to={setting.locationTo || topic.settingsLocationTo}>
+                              Open Location
+                              <ArrowRight className="ml-2 h-3.5 w-3.5" />
+                            </Link>
+                          </Button>
+                        )}
+                      </dd>
                     </div>
                     <div>
                       <dt className="font-medium text-foreground">Default</dt>

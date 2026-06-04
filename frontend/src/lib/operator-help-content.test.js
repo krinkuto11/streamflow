@@ -96,6 +96,9 @@ describe('operatorHelpSections', () => {
           risk: expect.any(String),
         }))
         expect(['Visible UI setting', 'Container setting', 'Status/API']).toContain(setting.controlType)
+        if (setting.controlType === 'Visible UI setting') {
+          expect(setting.locationTo || topic.settingsLocationTo).toMatch(/^\//)
+        }
       }
     }
 

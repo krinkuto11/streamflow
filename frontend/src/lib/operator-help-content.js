@@ -194,6 +194,7 @@ export const operatorHelpDetailTopics = [
     id: 'automation-periods',
     title: 'Automation Profiles And Periods',
     summary: 'Profiles decide what a run does; periods decide when and which channels run.',
+    settingsLocationTo: '/settings',
     visual: {
       title: 'Automation control flow',
       steps: ['Profile rules', 'Period schedule', 'Run policy', 'Stage progress'],
@@ -283,6 +284,7 @@ export const operatorHelpDetailTopics = [
     id: 'stream-checker',
     title: 'Stream Checker',
     summary: 'Use Stream Checker for controlled quality analysis without stealing capacity from real viewers.',
+    settingsLocationTo: '/stream-checker',
     visual: {
       title: 'Quality-check flow',
       steps: ['Queue channel', 'Reserve profile slot', 'Analyze stream', 'Record reason'],
@@ -345,6 +347,7 @@ export const operatorHelpDetailTopics = [
     id: 'teamarr-preflight',
     title: 'Teamarr Preflight',
     summary: 'Preflight protects event channels that may appear exactly at start time or shortly after.',
+    settingsLocationTo: '/teamarr-preflight',
     visual: {
       title: 'Event-check timing',
       steps: ['Read event', 'Preflight -20 min', 'Retry -10 min / -3 min', 'Post-start +2 min / +4 min', 'Queue or complete'],
@@ -440,6 +443,7 @@ export const operatorHelpDetailTopics = [
     id: 'shadow-monitor',
     title: 'Shadow Monitor',
     summary: 'Shadow Monitor follows real viewer sessions and switches only when confirmed bad playback is observed.',
+    settingsLocationTo: '/shadow-monitor',
     visual: {
       title: 'Viewer protection loop',
       steps: ['Real viewer active', 'Shadow watcher joins', 'Confirm blank/freeze', 'Switch with guardrails'],
@@ -510,6 +514,7 @@ export const operatorHelpDetailTopics = [
     id: 'hardware-fallback',
     title: 'Hardware And Fallback',
     summary: 'Hardware acceleration is optional; the UI should show whether CPU, hardware, or fallback is active.',
+    settingsLocationTo: '/stream-checker',
     visual: {
       title: 'Analysis path decision',
       steps: ['Configured mode', 'Runtime device', 'FFmpeg methods', 'Fallback result'],
