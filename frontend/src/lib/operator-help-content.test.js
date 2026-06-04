@@ -12,6 +12,30 @@ import {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
+const getJpegDimensions = (assetPath) => {
+  const buffer = fs.readFileSync(assetPath)
+  let offset = 2
+
+  while (offset < buffer.length) {
+    if (buffer[offset] !== 0xff) {
+      offset += 1
+      continue
+    }
+
+    const marker = buffer[offset + 1]
+    const segmentLength = buffer.readUInt16BE(offset + 2)
+    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+      return {
+        height: buffer.readUInt16BE(offset + 5),
+        width: buffer.readUInt16BE(offset + 7),
+      }
+    }
+    offset += 2 + segmentLength
+  }
+
+  throw new Error(`Could not read JPEG dimensions for ${assetPath}`)
+}
+
 describe('operatorHelpSections', () => {
   it('covers the non-Teamarr V3 operator areas', () => {
     expect(operatorHelpSections.map(section => section.id)).toEqual([
@@ -182,6 +206,12 @@ describe('operatorHelpSections', () => {
       const stat = fs.statSync(assetPath)
       expect(stat.size).toBeGreaterThan(1000)
       expect(stat.size).toBeLessThan(80_000)
+
+      const dimensions = getJpegDimensions(assetPath)
+      expect(dimensions.width).toBeGreaterThanOrEqual(200)
+      expect(dimensions.height).toBeGreaterThanOrEqual(120)
+      expect(dimensions.width).toBeLessThanOrEqual(1200)
+      expect(dimensions.height).toBeLessThanOrEqual(720)
     }
   })
 })

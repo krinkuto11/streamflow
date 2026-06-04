@@ -407,7 +407,7 @@ export const operatorHelpDetailTopics = [
         defaultValue: '5 minutes',
         location: 'Teamarr Preflight -> Configuration',
         effect: 'Limits how long after start post-start checks are still considered due.',
-        useWhen: 'Keep it at least as large as the largest post-start check, for example 5 minutes for a 2-minute post-start check.',
+        useWhen: 'Keep it at least as large as the largest post-start check, and preferably slightly larger; 5 minutes covers the 2-minute and 4-minute defaults.',
         risk: 'Too narrow can skip the post-start bucket entirely; too wide can check stale events.',
       },
       {
