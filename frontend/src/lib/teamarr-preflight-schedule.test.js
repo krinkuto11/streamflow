@@ -5,9 +5,8 @@ import { getTeamarrAutomaticCheck, getTeamarrNextAutomaticCheck } from './teamar
 describe('Teamarr preflight schedule helpers', () => {
   const config = {
     preflight_offset_minutes: 20,
-    pre_start_retry_count: 2,
-    post_start_retry_count: 2,
-    post_start_grace_minutes: 5,
+    retry_offsets_minutes: [10, 3],
+    post_start_offsets_minutes: [2, 4],
   }
 
   it('shows the first pre-start bucket when an event is scheduled far in the future', () => {
@@ -28,8 +27,8 @@ describe('Teamarr preflight schedule helpers', () => {
       seconds_to_start: 900,
       state: 'already_attempted',
     }, config)).toMatchObject({
-      bucket: '-14m',
-      timestamp: '2026-06-04T23:46:00.000Z',
+      bucket: '-10m',
+      timestamp: '2026-06-04T23:50:00.000Z',
     })
   })
 

@@ -48,15 +48,11 @@ template update path.
 
 ## Operator Changes
 
-- `Teamarr API Poll Interval` in Teamarr Preflight controls how often
-  StreamFlow reads Teamarr managed-event state; the default remains 60 seconds.
-- `Post-Start Retries` in Teamarr Preflight lets event checks run after game
-  start when event channels appear late. The retry count is distributed inside
-  `Post Start Grace`.
+- `Post-Start Checks` in Teamarr Preflight lets event checks run after game
+  start when event channels appear late.
 - Teamarr scheduled event cards now show `Next auto check` and expose the
   manual one-time action as `Force Check`.
-- `Pre-Start Retries` is now a count of additional checks before start, not a
-  comma-separated minute-offset list.
+- `Pre-Start Retries` no longer makes a shorter preflight offset trigger early.
 - `Missed-run grace` skips stale automatic runs after the configured window and
   records the latest skip reason in Automation Periods.
 - `Run all due periods` is off by default; automatic scheduler passes process

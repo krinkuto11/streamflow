@@ -199,23 +199,15 @@ it on the Teamarr Preflight page and save. The selected profile controls whether
 the preflight only scores/reorders streams or also runs stricter checks such as
 dead, blank, or freeze handling.
 
-`Teamarr API Poll Interval` controls how often StreamFlow reads Teamarr managed
-event state. Use 30-60 seconds for normal event automation; longer intervals can
-miss narrow windows such as a 1-minute preflight offset or a short post-start
-grace.
+Use retry offsets for events that receive streams shortly before start. For
+example, run a safe preflight 20 minutes before start and retry 10 minutes and
+3 minutes before start if the channel was not ready.
 
-`Preflight Offset` is the main automatic check before event start. `Pre-Start
-Retries` is a count of additional checks; StreamFlow distributes those retry
-checks between the main preflight offset and kickoff. For example, a 20-minute
-preflight offset with 2 pre-start retries yields a main `-20m` check plus two
-additional checks closer to start.
-
-`Post-Start Retries` is a count of checks after event start. StreamFlow
-distributes those checks inside `Post Start Grace`; with the 5-minute grace and
-2 post-start retries, the effective default buckets are roughly `+2m` and
-`+4m`. Keep post-start grace wide enough for the retry count and the poll
-interval. If the Stream Checker is already busy, the event check is queued ahead
-of lower-priority waiting work and runs after the active channel finishes.
+Use post-start offsets for providers that publish or rename event channels at
+kickoff. The default post-start checks are 2 minutes and 4 minutes after start;
+keep post-start grace at least as large as the largest post-start offset. If the
+Stream Checker is already busy, the event check is queued ahead of lower-priority
+waiting work and runs after the active channel finishes.
 
 ## Hardware Acceleration
 
