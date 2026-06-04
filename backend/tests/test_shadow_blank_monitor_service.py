@@ -66,6 +66,19 @@ def active_status(stream_id=10, clients=None):
 
 
 def test_watch_mode_controls_scan_delay():
+    defaults = normalize_config({})
+    assert defaults["enabled"] is False
+    assert defaults["dry_run"] is False
+    assert defaults["watch_mode"] == "continuous"
+    assert defaults["poll_interval_seconds"] == 5
+    assert defaults["watch_gap_seconds"] == 1
+    assert defaults["probe_duration_seconds"] == 60
+    assert defaults["freeze_detection_enabled"] is True
+    assert defaults["confirmation_count"] == 2
+    assert defaults["channel_cooldown_seconds"] == 300
+    assert defaults["max_switches_per_hour"] == 3
+    assert defaults["max_concurrent_watchers"] == 2
+
     continuous = normalize_config({
         "watch_mode": "continuous",
         "watch_gap_seconds": 2,
@@ -81,7 +94,7 @@ def test_watch_mode_controls_scan_delay():
     assert ShadowBlankMonitorService._next_scan_delay(periodic) == 90
 
     invalid = normalize_config({"watch_mode": "always-on", "watch_gap_seconds": 0})
-    assert invalid["watch_mode"] == "periodic"
+    assert invalid["watch_mode"] == "continuous"
     assert invalid["watch_gap_seconds"] == 1
 
 

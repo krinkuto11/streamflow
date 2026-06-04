@@ -168,7 +168,18 @@ describe('operatorHelpSections', () => {
     const streamChecker = getOperatorHelpDetailTopic('stream-checker')
     expect(streamChecker.settings.find(setting => setting.name === 'Check on update').controlType).toBe('Status/API')
     expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Concurrent Checking tab -> Global Concurrent Limit')
-    expect(getOperatorHelpDetailTopic('shadow-monitor').settings.map(setting => setting.name)).toContain('Channel Switch Limit')
+    const shadowSettings = getOperatorHelpDetailTopic('shadow-monitor').settings
+    expect(shadowSettings.map(setting => setting.name)).toEqual(expect.arrayContaining([
+      'Watch Mode',
+      'Dry Run',
+      'Freeze Detection',
+      'Probe Duration',
+      'Channel Switch Limit',
+    ]))
+    expect(shadowSettings.find(setting => setting.name === 'Watch Mode').defaultValue).toBe('Continuous')
+    expect(shadowSettings.find(setting => setting.name === 'Dry Run').defaultValue).toBe('Off')
+    expect(shadowSettings.find(setting => setting.name === 'Freeze Detection').defaultValue).toBe('On')
+    expect(shadowSettings.find(setting => setting.name === 'Probe Duration').defaultValue).toBe('60 seconds')
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')
     const troubleshooting = getOperatorHelpDetailTopic('troubleshooting')

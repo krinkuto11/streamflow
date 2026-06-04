@@ -190,7 +190,7 @@ export default function ShadowBlankMonitor() {
   const running = Boolean(status?.running)
   const enabled = Boolean(editedConfig?.enabled)
   const dryRun = Boolean(editedConfig?.dry_run)
-  const watchMode = editedConfig?.watch_mode || 'periodic'
+  const watchMode = editedConfig?.watch_mode || 'continuous'
   const hasKey = Boolean(config?.has_watcher_api_key)
   const continuousWatcherActive = running && watchMode === 'continuous'
 
