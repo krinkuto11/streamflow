@@ -119,6 +119,41 @@ class TestCompletedChannelRequeue(unittest.TestCase):
             status = queue.get_status()
             self.assertEqual(status['queued'], 1, "Channel should be in queue again")
             self.assertEqual(status['completed'], 0, "Channel should no longer be in completed set")
+
+    def test_update_tracker_does_not_initialize_udi_while_draining_queue(self):
+        """Draining updated channels should not start UDI or require profile storage."""
+        class UninitializedUdi:
+            def is_initialized(self):
+                return False
+
+            def get_channels(self):
+                raise AssertionError("get_channels should not be called before UDI is initialized")
+
+        class UnavailableAutomationConfig:
+            def get_effective_configuration(self, channel_id, group_id=None):
+                raise RuntimeError("profile storage is not ready")
+
+            def get_all_profiles(self, *args, **kwargs):
+                raise RuntimeError("profile storage is not ready")
+
+        tracker = ChannelUpdateTracker(self.tracker_file)
+        tracker.updates = {
+            'channels': {
+                '42': {
+                    'last_update': '2026-06-03T00:00:00',
+                    'needs_check': True,
+                    'stream_count': 3,
+                    'checked_stream_ids': [],
+                },
+            },
+            'last_global_check': None,
+        }
+
+        with patch('apps.stream.stream_checker_components.get_udi_manager', return_value=UninitializedUdi()), \
+             patch('apps.automation.automation_config_manager.get_automation_config_manager', return_value=UnavailableAutomationConfig()):
+            channels_to_queue = tracker.get_and_clear_channels_needing_check(max_channels=50)
+
+        self.assertEqual(channels_to_queue, [42])
     
     def test_integration_without_fix_channels_cannot_be_requeued(self):
         """Integration test showing the problem WITHOUT the fix (remove_from_completed not called)."""

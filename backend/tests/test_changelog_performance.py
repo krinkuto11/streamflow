@@ -6,6 +6,7 @@ import unittest
 import json
 import tempfile
 import os
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 from datetime import datetime
@@ -24,12 +25,54 @@ class TestChangelogPerformance(unittest.TestCase):
         import shutil
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
+
+    def _discovery_context(self, *, channels, streams, assign_mock):
+        stack = ExitStack()
+        stack.enter_context(
+            patch('apps.automation.automated_stream_manager.CONFIG_DIR', Path(self.temp_dir))
+        )
+        stack.enter_context(
+            patch('apps.automation.automated_stream_manager.get_channels', return_value=channels)
+        )
+        stack.enter_context(
+            patch('apps.automation.automated_stream_manager.get_streams', return_value=streams)
+        )
+        stack.enter_context(
+            patch('apps.automation.automated_stream_manager.get_m3u_accounts', return_value=[])
+        )
+        stack.enter_context(
+            patch('apps.automation.automated_stream_manager.assign_streams_to_channel', assign_mock)
+        )
+
+        fake_udi = MagicMock()
+        fake_udi.get_channel_streams.return_value = []
+        fake_udi.get_channel_by_id.side_effect = lambda channel_id: next(
+            (channel for channel in channels if channel.get('id') == channel_id),
+            None,
+        )
+        stack.enter_context(
+            patch('apps.automation.automated_stream_manager.get_udi_manager', return_value=fake_udi)
+        )
+
+        fake_automation_config = MagicMock()
+        fake_automation_config.get_effective_configuration.return_value = None
+        stack.enter_context(
+            patch(
+                'apps.automation.automated_stream_manager.get_automation_config_manager',
+                return_value=fake_automation_config,
+            )
+        )
+
+        fake_session_manager = MagicMock()
+        fake_session_manager.get_channels_in_active_sessions.return_value = []
+        fake_session_manager.get_active_sessions.return_value = []
+        stack.enter_context(
+            patch('apps.stream.stream_session_manager.get_session_manager', return_value=fake_session_manager)
+        )
+
+        return stack
     
-    @patch('automated_stream_manager.CONFIG_DIR', Path(tempfile.mkdtemp()))
-    @patch('automated_stream_manager.get_channels')
-    @patch('automated_stream_manager.get_streams')
-    @patch('automated_stream_manager.assign_streams_to_channel')
-    def test_changelog_limits_channels_to_50(self, mock_assign, mock_get_streams, mock_get_channels):
+    def test_changelog_limits_channels_to_50(self):
         """Test that changelog entries are limited to top 50 channels."""
         from apps.automation.automated_stream_manager import AutomatedStreamManager
         
@@ -41,8 +84,6 @@ class TestChangelogPerformance(unittest.TestCase):
                 'name': f'Channel {i}',
                 'streams': []
             })
-        mock_get_channels.return_value = channels
-        
         # Create 500 streams
         streams = []
         for i in range(500):
@@ -51,12 +92,10 @@ class TestChangelogPerformance(unittest.TestCase):
                 'name': f'Stream {i}',
                 'group_title': 'Sports' if i % 2 == 0 else 'Movies'
             })
-        mock_get_streams.return_value = streams
-        
         # Mock successful stream assignment
-        mock_assign.return_value = 5  # Each channel gets 5 streams
+        mock_assign = MagicMock(return_value=5)  # Each channel gets 5 streams
         
-        with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
+        with self._discovery_context(channels=channels, streams=streams, assign_mock=mock_assign):
             manager = AutomatedStreamManager()
             manager.config['enabled_features']['changelog_tracking'] = True
             
@@ -91,11 +130,7 @@ class TestChangelogPerformance(unittest.TestCase):
             # Total channel count should reflect all 100 channels
             self.assertEqual(entry['details']['channel_count'], 100)
     
-    @patch('automated_stream_manager.CONFIG_DIR', Path(tempfile.mkdtemp()))
-    @patch('automated_stream_manager.get_channels')
-    @patch('automated_stream_manager.get_streams')
-    @patch('automated_stream_manager.assign_streams_to_channel')
-    def test_changelog_sorts_by_stream_count(self, mock_assign, mock_get_streams, mock_get_channels):
+    def test_changelog_sorts_by_stream_count(self):
         """Test that channels are sorted by stream count (descending)."""
         from apps.automation.automated_stream_manager import AutomatedStreamManager
         
@@ -107,8 +142,6 @@ class TestChangelogPerformance(unittest.TestCase):
                 'name': f'Channel {i}',
                 'streams': []
             })
-        mock_get_channels.return_value = channels
-        
         # Create streams
         streams = []
         for i in range(100):
@@ -117,15 +150,13 @@ class TestChangelogPerformance(unittest.TestCase):
                 'name': f'Stream {i}',
                 'group_title': 'Sports'
             })
-        mock_get_streams.return_value = streams
-        
         # Mock varying assignment counts
         assignment_counts = [1, 5, 2, 10, 3, 8, 4, 6, 9, 7]
         def mock_assign_side_effect(channel_id, stream_ids):
             return assignment_counts[channel_id]
-        mock_assign.side_effect = mock_assign_side_effect
+        mock_assign = MagicMock(side_effect=mock_assign_side_effect)
         
-        with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
+        with self._discovery_context(channels=channels, streams=streams, assign_mock=mock_assign):
             manager = AutomatedStreamManager()
             manager.config['enabled_features']['changelog_tracking'] = True
             
@@ -157,11 +188,7 @@ class TestChangelogPerformance(unittest.TestCase):
             # First channel should have the most streams (10)
             self.assertEqual(assignments[0]['stream_count'], 10)
     
-    @patch('automated_stream_manager.CONFIG_DIR', Path(tempfile.mkdtemp()))
-    @patch('automated_stream_manager.get_channels')
-    @patch('automated_stream_manager.get_streams')
-    @patch('automated_stream_manager.assign_streams_to_channel')
-    def test_changelog_no_truncation_for_small_sets(self, mock_assign, mock_get_streams, mock_get_channels):
+    def test_changelog_no_truncation_for_small_sets(self):
         """Test that small channel sets are not truncated."""
         from apps.automation.automated_stream_manager import AutomatedStreamManager
         
@@ -173,8 +200,6 @@ class TestChangelogPerformance(unittest.TestCase):
                 'name': f'Channel {i}',
                 'streams': []
             })
-        mock_get_channels.return_value = channels
-        
         streams = []
         for i in range(20):
             streams.append({
@@ -182,11 +207,9 @@ class TestChangelogPerformance(unittest.TestCase):
                 'name': f'Stream {i}',
                 'group_title': 'Sports'
             })
-        mock_get_streams.return_value = streams
+        mock_assign = MagicMock(return_value=4)  # Each channel gets 4 streams
         
-        mock_assign.return_value = 4  # Each channel gets 4 streams
-        
-        with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
+        with self._discovery_context(channels=channels, streams=streams, assign_mock=mock_assign):
             manager = AutomatedStreamManager()
             manager.config['enabled_features']['changelog_tracking'] = True
             
@@ -240,7 +263,7 @@ class TestChangelogPerformance(unittest.TestCase):
             'timestamp': datetime.now().isoformat()
         }
         
-        with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
+        with patch('apps.automation.automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
             manager = ChangelogManager(self.changelog_file)
             manager.add_entry(
                 changelog_data['action'],

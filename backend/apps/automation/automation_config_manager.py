@@ -892,24 +892,33 @@ class AutomationConfigManager:
                 groups_with_period[gid] = str(profile_id)
 
         valid_channel_ids: Optional[set] = None
+        udi = None
         try:
             from apps.udi import get_udi_manager
             udi = get_udi_manager()
-            udi_channels = udi.get_channels() or []
-            # When UDI has no loaded channel inventory (for example in isolated
-            # tests or before initialization), do not filter explicit assignments.
-            if udi_channels:
-                valid_channel_ids = {
-                    int(ch.get('id'))
-                    for ch in udi_channels
-                    if isinstance(ch, dict) and ch.get('id') is not None
-                }
+            is_initialized = getattr(udi, "is_initialized", None)
+            if callable(is_initialized) and not is_initialized():
+                # Event previews and automation policy checks must not trigger a
+                # UDI network init. Explicit channel assignments remain valid
+                # when no cached channel inventory is available yet.
+                udi = None
             else:
-                valid_channel_ids = None
+                udi_channels = udi.get_channels() or []
+                # When UDI has no loaded channel inventory (for example in isolated
+                # tests or before initialization), do not filter explicit assignments.
+                if udi_channels:
+                    valid_channel_ids = {
+                        int(ch.get('id'))
+                        for ch in udi_channels
+                        if isinstance(ch, dict) and ch.get('id') is not None
+                    }
+                else:
+                    valid_channel_ids = None
         except Exception:
+            udi = None
             valid_channel_ids = None
 
-        if groups_with_period:
+        if groups_with_period and udi is not None:
             try:
                 for gid, profile_id in groups_with_period.items():
                     channels = udi.get_channels_by_group(gid) or []

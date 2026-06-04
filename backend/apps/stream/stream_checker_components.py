@@ -398,36 +398,65 @@ class ChannelUpdateTracker:
                     if max_channels and len(channels) >= max_channels:
                         break
             
+            if not channels:
+                return []
+
             # Filter channels by checking_mode setting (channel-level overrides group-level)
-            # Filter channels by checking_mode setting (channel-level overrides group-level)
-            # Need to get full channel data to access channel_group_id
-            udi = get_udi_manager()
-            from apps.automation.automation_config_manager import get_automation_config_manager
-            automation_config = get_automation_config_manager()
+            # using only already-available cache/config state. This path can run during
+            # startup while UDI or automation storage is not ready yet.
+            channel_by_id: Dict[int, Dict[str, Any]] = {}
+            try:
+                udi = get_udi_manager()
+                if hasattr(udi, 'is_initialized') and not udi.is_initialized():
+                    udi = None
+            except Exception as exc:
+                logger.debug(f"Skipping channel metadata lookup while queueing updates: {exc}")
+                udi = None
+
+            if udi is not None:
+                try:
+                    channel_by_id = {
+                        ch.get('id'): ch
+                        for ch in udi.get_channels()
+                        if isinstance(ch, dict) and ch.get('id') is not None
+                    }
+                except Exception as exc:
+                    logger.debug(f"Unable to read channel metadata while queueing updates: {exc}")
+                    channel_by_id = {}
+
+            try:
+                from apps.automation.automation_config_manager import get_automation_config_manager
+                automation_config = get_automation_config_manager()
+            except Exception as exc:
+                logger.debug(f"Skipping checking-mode filtering while queueing updates: {exc}")
+                automation_config = None
             
             filtered_channels = []
             for cid in channels:
-                # Get channel data to access group_id
-                channel_data = None
-                for ch in udi.get_channels():
-                    if ch.get('id') == cid:
-                        channel_data = ch
-                        break
-                
+                channel_data = channel_by_id.get(cid)
                 group_id = channel_data.get('channel_group_id') if channel_data else None
-                
-                # Get effective profile
-                # Get effective profile via configuration
-                config = automation_config.get_effective_configuration(cid, group_id)
+
+                if automation_config is None:
+                    filtered_channels.append(cid)
+                    continue
+
+                try:
+                    config = automation_config.get_effective_configuration(cid, group_id)
+                except Exception as exc:
+                    logger.debug(f"Unable to resolve checking profile for channel {cid}: {exc}")
+                    filtered_channels.append(cid)
+                    continue
+
                 profile = config.get('profile') if config else None
                 
                 if profile and profile.get('stream_checking', {}).get('enabled', False):
                     filtered_channels.append(cid)
                 elif profile is None:
                     try:
-                        existing_profiles = automation_config.get_all_profiles(include_inactive=True)
-                    except TypeError:
-                        existing_profiles = automation_config.get_all_profiles()
+                        try:
+                            existing_profiles = automation_config.get_all_profiles(include_inactive=True)
+                        except TypeError:
+                            existing_profiles = automation_config.get_all_profiles()
                     except Exception:
                         existing_profiles = []
                     if not existing_profiles:
@@ -631,11 +660,34 @@ class StreamCheckQueue:
     def add_channels(self, channel_ids: List[int], priority: int = 0):
         """Add multiple channels to the queue."""
         added = 0
-        from apps.udi import get_udi_manager
-        udi = get_udi_manager()
+        udi = None
+        try:
+            from apps.udi import get_udi_manager
+            udi = get_udi_manager()
+        except Exception as exc:
+            logger.debug(
+                "Could not access UDI manager while estimating queued stream counts: %s",
+                exc,
+            )
         
         for channel_id in channel_ids:
-            channel = udi.get_channel_by_id(channel_id)
+            channel = None
+            if udi is not None:
+                try:
+                    is_initialized = getattr(udi, "is_initialized", None)
+                    if callable(is_initialized) and not is_initialized():
+                        channel = None
+                    else:
+                        try:
+                            channel = udi.get_channel_by_id(channel_id, fetch_if_missing=False)
+                        except TypeError:
+                            channel = udi.get_channel_by_id(channel_id)
+                except Exception as exc:
+                    logger.debug(
+                        "Could not read cached channel %s for queued stream count: %s",
+                        channel_id,
+                        exc,
+                    )
             stream_count = len(channel.get('streams', [])) if channel else 1
             if self.add_channel(channel_id, priority, stream_count=stream_count):
                 added += 1

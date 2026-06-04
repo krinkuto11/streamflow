@@ -8,6 +8,7 @@ import os
 import tempfile
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -127,6 +128,43 @@ def test_automation_periods_channel_assignment():
             
             print("✅ Test 2 passed\n")
             
+        finally:
+            automation_config_manager.CONFIG_DIR = original_config_dir
+            automation_config_manager.AUTOMATION_CONFIG_FILE = original_config_file
+
+
+def test_period_channel_profiles_do_not_initialize_udi_for_explicit_assignments():
+    """Explicit period channel assignments should not trigger UDI auto-init."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import apps.automation.automation_config_manager
+        original_config_dir = automation_config_manager.CONFIG_DIR
+        original_config_file = automation_config_manager.AUTOMATION_CONFIG_FILE
+        automation_config_manager.CONFIG_DIR = Path(tmpdir)
+        automation_config_manager.AUTOMATION_CONFIG_FILE = Path(tmpdir) / 'test_automation_config.json'
+
+        class UninitializedUdi:
+            def is_initialized(self):
+                return False
+
+            def get_channels(self):
+                raise AssertionError("period profile lookup must not initialize UDI")
+
+            def get_channels_by_group(self, group_id):
+                raise AssertionError("group lookup requires initialized UDI cache")
+
+        try:
+            manager = AutomationConfigManager()
+            profile_id = manager.create_profile({"name": "Test Profile"})
+            period_id = manager.create_period({
+                "name": "Test Period",
+                "schedule": {"type": "interval", "value": 30}
+            })
+            assert manager.assign_period_to_channels(period_id, [1, 2], profile_id) is True
+
+            with patch('apps.udi.get_udi_manager', return_value=UninitializedUdi()):
+                effective = manager.get_effective_period_channel_profiles(period_id)
+
+            assert effective == {1: profile_id, 2: profile_id}
         finally:
             automation_config_manager.CONFIG_DIR = original_config_dir
             automation_config_manager.AUTOMATION_CONFIG_FILE = original_config_file
