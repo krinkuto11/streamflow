@@ -1463,35 +1463,6 @@ class SchedulingService:
                         logger.error(f"Failed to create monitoring session for event {event_id}")
                         success = False
             else:
-                try:
-                    get_status = getattr(stream_checker_service, 'get_status', None)
-                    status = get_status() if callable(get_status) else {}
-                except Exception as status_error:
-                    logger.warning(
-                        "Could not read stream checker status before scheduled event %s: %s",
-                        event_id,
-                        status_error,
-                    )
-                    status = {}
-
-                if not isinstance(status, dict):
-                    status = {}
-                queue_status = status.get('queue') or {}
-                if not isinstance(queue_status, dict):
-                    queue_status = {}
-                if (
-                    status.get('stream_checking_mode')
-                    or status.get('active_single_channel_checks', 0)
-                    or queue_status.get('queue_size', 0)
-                    or queue_status.get('in_progress', 0)
-                ):
-                    logger.info(
-                        "Deferring scheduled event %s for channel %s because stream checker is active",
-                        event_id,
-                        channel_id,
-                    )
-                    return False
-
                 check_kwargs = {'program_name': program_title}
                 if not hasattr(stream_checker_service.check_single_channel, 'mock_calls'):
                     check_kwargs['is_epg_scheduled'] = True

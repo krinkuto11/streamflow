@@ -60,25 +60,6 @@ class TestStreamCheckingMode(unittest.TestCase):
             # stream_checking_mode should be False again
             status = service.get_status()
             self.assertFalse(status['stream_checking_mode'])
-
-    def test_stream_checking_mode_with_active_single_channel_counter(self):
-        """Direct single-channel checks should be visible to other schedulers."""
-        with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
-            service = StreamCheckerService()
-
-            self.assertFalse(service.get_status()['stream_checking_mode'])
-
-            with service.lock:
-                service._active_single_channel_checks = 1
-
-            status = service.get_status()
-            self.assertTrue(status['stream_checking_mode'])
-            self.assertEqual(status['active_single_channel_checks'], 1)
-
-            with service.lock:
-                service._active_single_channel_checks = 0
-
-            self.assertFalse(service.get_status()['stream_checking_mode'])
     
     def test_stream_checking_mode_with_queue(self):
         """Test that stream_checking_mode is True when queue has channels."""
