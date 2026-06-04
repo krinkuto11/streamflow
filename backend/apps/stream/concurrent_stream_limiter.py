@@ -855,7 +855,13 @@ class SmartStreamScheduler:
                                     'bitrate_kbps': 0,
                                     'fps': 0,
                                     'video_codec': 'N/A',
-                                    'audio_codec': 'N/A'
+                                    'audio_codec': 'N/A',
+                                    'quality_reason': 'offline',
+                                    'quality_reason_detail': 'error',
+                                    'quality_reason_context': {
+                                        'stage': 'stream analysis',
+                                        'message': 'Stream analysis worker returned no result',
+                                    },
                                 })
                             if result is not None or not (abort_event and abort_event.is_set()):
                                 nonlocal completed_count

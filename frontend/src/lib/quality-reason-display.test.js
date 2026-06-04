@@ -61,6 +61,26 @@ describe('getQualityReasonDisplay', () => {
     })
   })
 
+  it('formats connectivity probe context without exposing raw URLs', () => {
+    expect(getQualityReasonDisplay({
+      quality_reason_detail: 'endpoint_unhealthy',
+      quality_reason_context: {
+        dispatcharr_api: {
+          label: 'dispatcharr_api',
+          host: 'dispatcharr.local',
+          status_code: 503,
+          attempts: 3,
+          max_attempts: 3,
+          timeout_seconds: 1,
+        },
+      },
+    })).toEqual({
+      code: 'endpoint_unhealthy',
+      text: 'Connectivity endpoint unhealthy: Dispatcharr API dispatcharr.local, HTTP 503, attempt 3/3, timeout 1s',
+      title: 'endpoint_unhealthy: Dispatcharr API dispatcharr.local, HTTP 503, attempt 3/3, timeout 1s',
+    })
+  })
+
   it('formats stream timeout context without exposing a raw code first', () => {
     expect(getQualityReasonDisplay({
       reason_detail: 'stream_timeout',
@@ -71,6 +91,24 @@ describe('getQualityReasonDisplay', () => {
     })).toMatchObject({
       code: 'stream_timeout',
       text: 'Stream analysis timed out: 65s of 65s',
+    })
+  })
+
+  it('formats stream timeout breakdown and retry context', () => {
+    expect(getQualityReasonDisplay({
+      reason_detail: 'stream_timeout',
+      quality_reason_context: {
+        elapsed_seconds: 65,
+        timeout_seconds: 65,
+        operation_timeout_seconds: 30,
+        ffmpeg_duration_seconds: 30,
+        startup_buffer_seconds: 5,
+        attempt: 2,
+        max_attempts: 2,
+      },
+    })).toMatchObject({
+      code: 'stream_timeout',
+      text: 'Stream analysis timed out: 65s of 65s, base 30s + window 30s + startup 5s, attempt 2/2',
     })
   })
 

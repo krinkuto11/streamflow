@@ -445,6 +445,35 @@ def calculate_channel_averages(streams: list, dead_stream_ids: set = None) -> Di
     }
 
 
+def _compact_context(values: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in values.items() if value not in (None, '', [], {})}
+
+
+def _analysis_failure_context(stream_data: Dict[str, Any]) -> Dict[str, Any]:
+    return _compact_context({
+        'elapsed_seconds': stream_data.get('elapsed_seconds', stream_data.get('elapsed_time')),
+        'timeout_seconds': stream_data.get(
+            'timeout_seconds',
+            stream_data.get('analysis_timeout_seconds', stream_data.get('timeout')),
+        ),
+        'operation_timeout_seconds': stream_data.get('operation_timeout_seconds'),
+        'ffmpeg_duration_seconds': stream_data.get(
+            'ffmpeg_duration_seconds',
+            stream_data.get('ffmpeg_duration'),
+        ),
+        'startup_buffer_seconds': stream_data.get(
+            'startup_buffer_seconds',
+            stream_data.get('stream_startup_buffer'),
+        ),
+        'attempt': stream_data.get('attempt'),
+        'attempts': stream_data.get('attempts'),
+        'max_attempts': stream_data.get('max_attempts'),
+        'stage': stream_data.get('stage'),
+        'message': stream_data.get('error_message') or stream_data.get('message'),
+        'error': stream_data.get('error'),
+    })
+
+
 def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -> DeadStreamResult:
     """Check if a stream should be considered dead based on its statistics.
     
@@ -485,6 +514,22 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     # elapsed_time and ffmpeg_duration are set by analyze_stream() and flow
     # through the analyzed dict.  If they are absent (e.g. cached streams or
     # legacy callers) the check is skipped safely.
+    status = str(stream_data.get('status') or '').strip().lower()
+    if status in {'timeout', 'stream_timeout', 'probe_timeout'}:
+        return DeadStreamResult(
+            True,
+            'offline',
+            'stream_timeout',
+            _analysis_failure_context(stream_data),
+        )
+    if status in {'error', 'failed'}:
+        return DeadStreamResult(
+            True,
+            'offline',
+            'error',
+            _analysis_failure_context(stream_data),
+        )
+
     EARLY_EXIT_THRESHOLD = 0.8
     elapsed  = stream_data.get('elapsed_time')
     expected = stream_data.get('ffmpeg_duration')

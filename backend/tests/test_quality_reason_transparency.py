@@ -17,6 +17,37 @@ def test_low_quality_result_carries_machine_readable_threshold_detail():
     assert result.details == {"actual": 742.4, "threshold": 1500}
 
 
+def test_timeout_result_carries_machine_readable_analysis_context():
+    result = is_stream_dead(
+        {
+            "status": "Timeout",
+            "resolution": "0x0",
+            "elapsed_time": 65,
+            "timeout_seconds": 65,
+            "operation_timeout_seconds": 30,
+            "ffmpeg_duration_seconds": 30,
+            "startup_buffer_seconds": 5,
+            "attempt": 2,
+            "max_attempts": 2,
+            "stage": "stream analysis",
+        },
+        {"min_bitrate_kbps": 1500},
+    )
+
+    assert result == (True, "offline")
+    assert result.reason_detail == "stream_timeout"
+    assert result.details == {
+        "elapsed_seconds": 65,
+        "timeout_seconds": 65,
+        "operation_timeout_seconds": 30,
+        "ffmpeg_duration_seconds": 30,
+        "startup_buffer_seconds": 5,
+        "attempt": 2,
+        "max_attempts": 2,
+        "stage": "stream analysis",
+    }
+
+
 def test_quality_reason_fields_are_prepared_for_stream_stats_payload():
     service = object.__new__(StreamCheckerService)
     stream_data = {

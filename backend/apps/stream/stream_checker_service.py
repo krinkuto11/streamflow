@@ -1964,6 +1964,13 @@ class StreamCheckerService:
                     elif result.get('status') == 'ERROR':
                         stream_statuses[stream_id]['status'] = 'error'
                         stream_statuses[stream_id]['score'] = 0.0
+                        stream_statuses[stream_id]['reason_detail'] = result.get('quality_reason_detail') or 'error'
+                        stream_statuses[stream_id]['quality_reason'] = result.get('quality_reason') or 'offline'
+                        stream_statuses[stream_id]['quality_reason_detail'] = result.get('quality_reason_detail') or 'error'
+                        stream_statuses[stream_id]['quality_reason_context'] = result.get('quality_reason_context') or {
+                            'stage': 'stream analysis',
+                            'message': result.get('error_message') or 'Stream analysis worker returned no result',
+                        }
                     else:
                         # Calculate temp score for UI display
                         temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights)
@@ -3085,6 +3092,13 @@ class StreamCheckerService:
                     if analyzed.get('status') == 'ERROR':
                         stream_statuses[stream['id']]['status'] = 'error'
                         stream_statuses[stream['id']]['score'] = 0.0
+                        stream_statuses[stream['id']]['reason_detail'] = analyzed.get('quality_reason_detail') or 'error'
+                        stream_statuses[stream['id']]['quality_reason'] = analyzed.get('quality_reason') or 'offline'
+                        stream_statuses[stream['id']]['quality_reason_detail'] = analyzed.get('quality_reason_detail') or 'error'
+                        stream_statuses[stream['id']]['quality_reason_context'] = analyzed.get('quality_reason_context') or {
+                            'stage': 'stream analysis',
+                            'message': analyzed.get('error_message') or 'Stream analysis worker returned no result',
+                        }
                     elif is_dead:
                         stream_statuses[stream['id']]['status'] = dead_reason if dead_reason in ('low_quality', 'blank', 'freeze') else 'dead'
                         stream_statuses[stream['id']]['score'] = 0.0

@@ -1097,12 +1097,19 @@ def get_stream_info_and_bitrate(
                 '-f', 'null', os.devnull,
             ]
 
+    # Total subprocess timeout: analysis window + startup headroom.
+    actual_timeout = timeout + duration + stream_startup_buffer
+
     result_data = {
         'video_codec': 'N/A', 'audio_codec': 'N/A', 'resolution': '0x0',
         'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,
         'pixel_format': None, 'audio_sample_rate': None,
         'audio_channels': None, 'channel_layout': None,
         'audio_bitrate': None, 'status': 'OK', 'elapsed_time': 0,
+        'timeout_seconds': actual_timeout,
+        'operation_timeout_seconds': timeout,
+        'ffmpeg_duration_seconds': duration,
+        'startup_buffer_seconds': stream_startup_buffer,
         'blank_probe_ran': False, 'blank_detected': False,
         'blank_duration_secs': None, 'blank_ratio': None,
         'blank_segments': [],
@@ -1111,9 +1118,6 @@ def get_stream_info_and_bitrate(
         'freeze_segments': [],
         'preempted': False, 'preempt_reason': None,
     }
-
-    # Total subprocess timeout: analysis window + startup headroom
-    actual_timeout = timeout + duration + stream_startup_buffer
 
     try:
         start = time.time()
@@ -1739,6 +1743,36 @@ def _probe_stream_for_loops(
     return loop_detected, loop_duration, n
 
 
+def _analysis_failure_context(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value for key, value in {
+            'elapsed_seconds': result.get('elapsed_time'),
+            'timeout_seconds': result.get('timeout_seconds'),
+            'operation_timeout_seconds': result.get('operation_timeout_seconds'),
+            'ffmpeg_duration_seconds': result.get('ffmpeg_duration_seconds', result.get('ffmpeg_duration')),
+            'startup_buffer_seconds': result.get('startup_buffer_seconds', result.get('stream_startup_buffer')),
+            'attempt': result.get('attempt'),
+            'attempts': result.get('attempts'),
+            'max_attempts': result.get('max_attempts'),
+            'stage': result.get('stage') or 'stream analysis',
+            'message': result.get('error_message'),
+        }.items()
+        if value not in (None, '', [], {})
+    }
+
+
+def _stamp_analysis_failure_reason(result: Dict[str, Any]) -> None:
+    status = str(result.get('status') or '').strip().lower()
+    if status in {'timeout', 'stream_timeout', 'probe_timeout'}:
+        result['quality_reason'] = 'offline'
+        result['quality_reason_detail'] = 'stream_timeout'
+        result['quality_reason_context'] = _analysis_failure_context(result)
+    elif status in {'error', 'failed'}:
+        result['quality_reason'] = 'offline'
+        result['quality_reason_detail'] = 'error'
+        result['quality_reason_context'] = _analysis_failure_context(result)
+
+
 def analyze_stream(
     stream_url: str,
     stream_id: int,
@@ -1822,6 +1856,15 @@ def analyze_stream(
         'status': 'Error',
         'elapsed_time': 0,
         'ffmpeg_duration': ffmpeg_duration,
+        'ffmpeg_duration_seconds': ffmpeg_duration,
+        'timeout_seconds': timeout + ffmpeg_duration + stream_startup_buffer,
+        'operation_timeout_seconds': timeout,
+        'stream_startup_buffer': stream_startup_buffer,
+        'startup_buffer_seconds': stream_startup_buffer,
+        'attempt': 0,
+        'attempts': 0,
+        'max_attempts': retries + 1,
+        'stage': 'stream analysis',
         'blank_probe_ran': False,
         'blank_detected': False,
         'blank_duration_secs': None,
@@ -1834,6 +1877,9 @@ def analyze_stream(
         'freeze_segments': [],
         'preempted': False,
         'preempt_reason': None,
+        'quality_reason': 'offline',
+        'quality_reason_detail': 'error',
+        'quality_reason_context': {},
     }
 
     try:
@@ -1890,6 +1936,18 @@ def analyze_stream(
                     'status': result_data['status'],
                     'elapsed_time': result_data.get('elapsed_time', 0),
                     'ffmpeg_duration': ffmpeg_duration,
+                    'ffmpeg_duration_seconds': result_data.get('ffmpeg_duration_seconds', ffmpeg_duration),
+                    'timeout_seconds': result_data.get(
+                        'timeout_seconds',
+                        timeout + ffmpeg_duration + stream_startup_buffer,
+                    ),
+                    'operation_timeout_seconds': result_data.get('operation_timeout_seconds', timeout),
+                    'stream_startup_buffer': stream_startup_buffer,
+                    'startup_buffer_seconds': result_data.get('startup_buffer_seconds', stream_startup_buffer),
+                    'attempt': attempt + 1,
+                    'attempts': attempt + 1,
+                    'max_attempts': total_attempts,
+                    'stage': 'stream analysis',
                     'blank_probe_ran': result_data.get('blank_probe_ran', False),
                     'blank_detected': result_data.get('blank_detected', False),
                     'blank_duration_secs': result_data.get('blank_duration_secs'),
@@ -1903,6 +1961,12 @@ def analyze_stream(
                     'preempted': bool(result_data.get('preempted')),
                     'preempt_reason': result_data.get('preempt_reason'),
                 }
+                if result['status'] == 'OK':
+                    result['quality_reason'] = 'none'
+                    result['quality_reason_detail'] = 'none'
+                    result['quality_reason_context'] = {}
+                else:
+                    _stamp_analysis_failure_reason(result)
 
                 if result.get('blank_probe_ran'):
                     blank_duration = float(result.get('blank_duration_secs') or 0.0)
@@ -2000,6 +2064,22 @@ def analyze_stream(
                             )
 
             except Exception as inner_e:
+                result.update({
+                    'status': 'Error',
+                    'elapsed_time': 0,
+                    'ffmpeg_duration': ffmpeg_duration,
+                    'ffmpeg_duration_seconds': ffmpeg_duration,
+                    'timeout_seconds': timeout + ffmpeg_duration + stream_startup_buffer,
+                    'operation_timeout_seconds': timeout,
+                    'stream_startup_buffer': stream_startup_buffer,
+                    'startup_buffer_seconds': stream_startup_buffer,
+                    'attempt': attempt + 1,
+                    'attempts': attempt + 1,
+                    'max_attempts': total_attempts,
+                    'stage': 'stream analysis',
+                    'error_message': scrub_urls(str(inner_e))[:300],
+                })
+                _stamp_analysis_failure_reason(result)
                 logger.error(
                     f"  Exception during stream analysis "
                     f"(attempt {attempt + 1} of {total_attempts}) for {stream_audit_ref}: "
@@ -2009,6 +2089,12 @@ def analyze_stream(
                     logger.warning(f"  Retrying in {retry_delay} seconds...")
 
     except Exception as outer_e:
+        result.update({
+            'status': 'Error',
+            'error_message': scrub_urls(str(outer_e))[:300],
+            'stage': 'stream analysis',
+        })
+        _stamp_analysis_failure_reason(result)
         logger.error(f"Unexpected error in analyze_stream for {stream_audit_ref}: {scrub_urls(outer_e)}")
 
     return result
