@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **V3 reliability fixes** - Preserves active batch dead/blank/freeze counters, avoids misleading DRI hardware warnings, improves Teamarr post-start checks, validates auto-create group previews across channels, and keeps real-viewer wording distinct from watcher probes.
 - **V3 final polish** - Adds safe profile-slot ID/limit tooltips, active Teamarr check runtime text, and explicit checker-capacity/global-worker quality reason wording.
 - **Stream Checker profile matrix** - Adds an expandable provider/profile matrix with safe profile ID, limit, active viewer, checking, free-slot, and status details.
+- **Teamarr event preflight override** - Adds a warned provider/profile capacity override for event checks while keeping active-viewer protection enforced.
+- **Shadow Monitor recovery defaults** - Uses the live-validated continuous watcher defaults, enables freeze detection, disables dry-run by default when the monitor is enabled, and keeps switching rate limits in place.
+- **Viewer-proxy blank recovery** - Shadow Monitor now verifies the real viewer proxy path after stream switches and does not hide a failed replacement behind the normal channel cooldown.
 
 
 ## [2.5.6] - 2026-05-07

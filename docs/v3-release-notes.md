@@ -20,7 +20,8 @@ template update path.
   keep skipped M3U refresh/cache sync stages visibly neutral.
 - Teamarr-managed event checks support queued event preflights, manual checks for
   past events, event/channel/date matching, post-start checks after game start,
-  active-check runtime visibility, and focused operator controls.
+  provider-limit override for event windows, active-check runtime visibility,
+  and focused operator controls.
 - Automation periods now include startup catch-up, missed-run grace,
   missed-run skip history, a global catch-up cap, and a maintenance window for
   automatic runs.
@@ -48,6 +49,9 @@ template update path.
   NVIDIA checks, and CPU fallback state.
 - Auto-create rule test results for channel groups now show matches from all
   resolved channels and call out partial TVG-ID coverage.
+- Shadow Monitor defaults now match the validated live recovery path: continuous
+  watch mode, live switching when enabled, freeze detection on, 60-second probe
+  duration, two confirmations, and per-channel switch-rate protection.
 
 ## Validation Snapshot
 
@@ -68,6 +72,11 @@ template update path.
   12 samples, at least one real viewer client, at least one watcher client, one
   watched channel, `watching` state, max watcher uptime 135 seconds,
   `bad_count=0`, and no Shadow last error.
+- Live `Das Erste HD` proxy validation reproduced black viewer output on the
+  channel proxy path while a forced single-channel check re-analyzed 18 streams
+  with blank/freeze probes and reported no raw-stream blank/freeze detections;
+  Shadow recovery therefore protects the viewer-proxy path that normal stream
+  checks cannot reliably represent.
 - Post-deploy log scans found no app tracebacks, critical errors, internal server
   errors, or unhandled exceptions.
 
