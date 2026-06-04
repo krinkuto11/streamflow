@@ -14,6 +14,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
 import { filterTeamarrEventsBySearch } from '@/lib/teamarr-preflight-event-search.js'
+import { getTeamarrEventHealthAlert } from '@/lib/teamarr-preflight-event-health.js'
 import { getTeamarrAutomaticCheck, getTeamarrSchedulePreview } from '@/lib/teamarr-preflight-schedule.js'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import {
@@ -153,11 +154,12 @@ const recentEventDetailParts = (event) => {
   const details = event?.details || {}
   const stats = details.stats || {}
   const parts = []
+  const unit = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
 
   if (details.bucket) parts.push(`Bucket ${details.bucket}`)
   if (details.reason) parts.push(reasonLabel(details.reason))
   if (details.error) parts.push(details.error)
-  if (stats.total_streams !== undefined) parts.push(`${stats.total_streams} streams`)
+  if (stats.total_streams !== undefined) parts.push(unit(Number(stats.total_streams), 'stream'))
   if (stats.dead_streams !== undefined) parts.push(`${stats.dead_streams} dead`)
   if (stats.duration || stats.duration_seconds !== undefined) parts.push(stats.duration || `${stats.duration_seconds}s`)
   if (stats.avg_resolution) parts.push(stats.avg_resolution)
@@ -1023,6 +1025,7 @@ export default function TeamarrPreflight() {
                     const checkSummary = eventCheckSummary(event, lastPreflightEvent)
                     const automaticCheckSummary = eventAutomaticCheckSummary(event, status?.config || config || editedConfig || {})
                     const eventDiagnostics = eventScheduleDiagnosticParts(event, automaticCheckSummary, status?.config || config || editedConfig || {})
+                    const healthAlert = getTeamarrEventHealthAlert(event, lastPreflightEvent, automaticCheckSummary)
                     return (
                       <div key={`${event.identity}-${event.trigger_bucket || 'none'}`} className="rounded-md border border-border p-3">
                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1093,6 +1096,21 @@ export default function TeamarrPreflight() {
                             </>
                           ) : null}
                         </div>
+                        {healthAlert ? (
+                          <div
+                            className={`mt-3 flex items-start gap-2 rounded-md border px-3 py-2 text-sm ${
+                              healthAlert.severity === 'critical'
+                                ? 'border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300'
+                                : 'border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                            }`}
+                          >
+                            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                            <div className="min-w-0">
+                              <p className="font-medium">{healthAlert.label}</p>
+                              <p className="text-xs leading-snug opacity-90">{healthAlert.detail}</p>
+                            </div>
+                          </div>
+                        ) : null}
                         {eventDiagnostics.length > 0 ? (
                           <div className="mt-3 border-t border-border pt-2">
                             <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 xl:grid-cols-3">
