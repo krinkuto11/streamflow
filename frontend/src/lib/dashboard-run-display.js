@@ -236,6 +236,31 @@ export const getCacheSyncCardDetail = ({
   return null
 }
 
+export const getRunHistoryBaseline = ({
+  summary = {},
+} = {}) => {
+  const sampleCount = finiteNumber(summary?.sample_count) ?? 0
+  if (sampleCount <= 0) {
+    return {
+      available: false,
+      sampleCount: 0,
+      latest: null,
+      typicalDurationSeconds: null,
+      averageDurationSeconds: null,
+      typicalSecondsPerChannel: null,
+    }
+  }
+
+  return {
+    available: true,
+    sampleCount,
+    latest: summary.latest || null,
+    typicalDurationSeconds: finiteNumber(summary.typical_duration_seconds),
+    averageDurationSeconds: finiteNumber(summary.average_duration_seconds),
+    typicalSecondsPerChannel: finiteNumber(summary.typical_seconds_per_channel),
+  }
+}
+
 export const getStreamCheckerRunDisplay = ({
   streamCheckerStatus,
   runState = 'idle',

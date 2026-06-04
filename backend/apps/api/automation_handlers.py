@@ -1,5 +1,6 @@
 """Automation API handler functions extracted from web_api."""
 
+from statistics import median
 from typing import Any, Callable, Dict, Optional
 
 from flask import jsonify
@@ -46,6 +47,93 @@ def _validation_error(exc: ValidationError):
         code=exc.error_code,
         details=exc.details,
     )
+
+
+def _finite_number(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def get_recent_run_history_summary(limit: int = 5) -> Dict[str, Any]:
+    """Return a small dashboard-safe baseline from stored automation telemetry."""
+    safe_limit = max(1, min(int(limit or 5), 10))
+    empty = {
+        "sample_count": 0,
+        "runs": [],
+        "latest": None,
+        "typical_duration_seconds": None,
+        "average_duration_seconds": None,
+        "typical_seconds_per_channel": None,
+    }
+
+    try:
+        from apps.telemetry.telemetry_db import Run, get_session
+
+        session = get_session()
+    except Exception as exc:
+        logger.debug(f"Could not open telemetry session for run history: {exc}")
+        return empty
+
+    try:
+        rows = (
+            session.query(Run)
+            .filter(Run.run_type == "automation_run")
+            .order_by(Run.timestamp.desc())
+            .limit(safe_limit)
+            .all()
+        )
+
+        runs = []
+        durations = []
+        seconds_per_channel = []
+        for row in rows:
+            duration = _finite_number(getattr(row, "duration_seconds", None))
+            total_channels = int(getattr(row, "total_channels", 0) or 0)
+            if duration is None:
+                continue
+
+            durations.append(duration)
+            per_channel = None
+            if total_channels > 0:
+                per_channel = duration / total_channels
+                seconds_per_channel.append(per_channel)
+
+            runs.append(
+                {
+                    "id": getattr(row, "id", None),
+                    "timestamp": row.timestamp.isoformat() if getattr(row, "timestamp", None) else None,
+                    "duration_seconds": round(duration, 3),
+                    "total_channels": total_channels,
+                    "total_streams": int(getattr(row, "total_streams", 0) or 0),
+                    "dead_streams": int(getattr(row, "global_dead_count", 0) or 0),
+                    "revived_streams": int(getattr(row, "global_revived_count", 0) or 0),
+                    "seconds_per_channel": round(per_channel, 3) if per_channel is not None else None,
+                }
+            )
+
+        if not runs:
+            return empty
+
+        return {
+            "sample_count": len(runs),
+            "runs": runs,
+            "latest": runs[0],
+            "typical_duration_seconds": round(median(durations), 3),
+            "average_duration_seconds": round(sum(durations) / len(durations), 3),
+            "typical_seconds_per_channel": (
+                round(median(seconds_per_channel), 3)
+                if seconds_per_channel
+                else None
+            ),
+        }
+    except Exception as exc:
+        logger.debug(f"Could not build automation run history summary: {exc}")
+        return empty
+    finally:
+        session.close()
 
 
 def handle_global_automation_settings_response(
@@ -172,6 +260,7 @@ def get_automation_status_response(
         )
         run_status = manager.get_run_status() if hasattr(manager, "get_run_status") else None
         run_progress = run_status
+        run_history_summary = get_recent_run_history_summary()
         udi_status = None
         try:
             from apps.udi import get_udi_manager
@@ -194,6 +283,7 @@ def get_automation_status_response(
                     "stream_checking_enabled": stream_checking_enabled,
                     "run_status": run_status,
                     "run_progress": run_progress,
+                    "run_history_summary": run_history_summary,
                     "udi_status": udi_status,
                 }
             ),

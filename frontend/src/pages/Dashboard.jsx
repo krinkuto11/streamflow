@@ -17,6 +17,7 @@ import {
   getDashboardActionStates,
   getAutomationStageCards,
   getCacheSyncCardDetail,
+  getRunHistoryBaseline,
   getM3uRefreshCardDetail,
   getRunDurationCardValue,
   getRunDurationValue,
@@ -31,7 +32,7 @@ import { formatDuration as formatDurationValue, formatLatency as formatLatencyVa
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
   Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
-  Clock3, AlertCircle, ListChecks, Timer, Eye, Users, StopCircle
+  Clock3, AlertCircle, ListChecks, Timer, Eye, Users, StopCircle, History
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -74,6 +75,12 @@ const formatDuration = (seconds) => {
 const formatLatency = (seconds) => {
   const formatted = formatLatencyValue(seconds)
   return formatted || 'N/A'
+}
+
+const formatSecondsPerChannel = (seconds) => {
+  const value = Number(seconds)
+  if (!Number.isFinite(value)) return 'N/A'
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} sec`
 }
 
 const formatTime = (value) => {
@@ -676,6 +683,9 @@ export default function Dashboard() {
       value: getRunDurationCardValue({ seconds: qualityCheckDuration }),
     },
   ]
+  const runHistoryBaseline = getRunHistoryBaseline({
+    summary: status?.run_history_summary,
+  })
   const displayRunMetrics = getDashboardRunMetrics({
     streamCheckerStatus,
     streamQueueActive,
@@ -1194,7 +1204,7 @@ export default function Dashboard() {
       </Card>
 
       {/* System Information */}
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Card>
           <CardHeader><CardTitle>Automation Configuration</CardTitle></CardHeader>
           <CardContent>
@@ -1255,6 +1265,42 @@ export default function Dashboard() {
                 </div>
               )}
             </dl>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <History className="h-4 w-4 text-muted-foreground" />
+              Recent Run Baseline
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {runHistoryBaseline.available ? (
+              <dl className="space-y-3 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Typical Duration:</dt>
+                  <dd><Badge variant="outline">{formatDuration(runHistoryBaseline.typicalDurationSeconds)}</Badge></dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Seconds / Channel:</dt>
+                  <dd><Badge variant="secondary">{formatSecondsPerChannel(runHistoryBaseline.typicalSecondsPerChannel)}</Badge></dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Samples:</dt>
+                  <dd><Badge variant="secondary">{runHistoryBaseline.sampleCount}</Badge></dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Last Run:</dt>
+                  <dd className="text-right">
+                    <div className="font-medium">{formatDuration(runHistoryBaseline.latest?.duration_seconds)}</div>
+                    <div className="text-xs text-muted-foreground">{formatTime(runHistoryBaseline.latest?.timestamp)}</div>
+                  </dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="text-sm text-muted-foreground">No completed automation runs yet</p>
+            )}
           </CardContent>
         </Card>
       </div>

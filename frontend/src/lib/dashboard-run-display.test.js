@@ -4,6 +4,7 @@ import {
   getDashboardActionStates,
   getAutomationStageCards,
   getCacheSyncCardDetail,
+  getRunHistoryBaseline,
   getM3uRefreshCardDetail,
   getRunDurationCardValue,
   getRunDurationValue,
@@ -400,6 +401,42 @@ describe('dashboard stream checker run display', () => {
 
     expect(getCacheSyncCardDetail({ skipped: true })).toBe('No cache sync requested')
     expect(getCacheSyncCardDetail({ streamRunActive: true })).toBeNull()
+  })
+
+  it('normalizes recent automation run history for dashboard display', () => {
+    expect(getRunHistoryBaseline({
+      summary: {
+        sample_count: 3,
+        latest: {
+          duration_seconds: 120,
+          total_channels: 12,
+        },
+        typical_duration_seconds: 90,
+        average_duration_seconds: 100,
+        typical_seconds_per_channel: 7.5,
+      },
+    })).toEqual({
+      available: true,
+      sampleCount: 3,
+      latest: {
+        duration_seconds: 120,
+        total_channels: 12,
+      },
+      typicalDurationSeconds: 90,
+      averageDurationSeconds: 100,
+      typicalSecondsPerChannel: 7.5,
+    })
+  })
+
+  it('keeps empty automation run history quiet', () => {
+    expect(getRunHistoryBaseline({ summary: { sample_count: 0 } })).toEqual({
+      available: false,
+      sampleCount: 0,
+      latest: null,
+      typicalDurationSeconds: null,
+      averageDurationSeconds: null,
+      typicalSecondsPerChannel: null,
+    })
   })
 
   it('uses explicit idle wording for skipped no-due automation runs', () => {
