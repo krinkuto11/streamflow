@@ -79,7 +79,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Labels non-editable status, API, or backend-only values instead of presenting them as user-editable settings.
 - Adds a `Quality reason details` Status/API card with elapsed/limit, probe window, startup buffer, attempts, host, HTTP status, timeout seconds, and wrapped API-field paths.
 - Uses explicit operator wording for checker-capacity and global-worker quality reasons instead of raw fallback codes.
-- Tracks screenshot guidance for future Help assets: crop tightly, optimize size, keep assets collapsible/lazy where useful, and avoid shipping raw full-screen proof captures.
+- Ships Help screenshots as explicit collapsible/lazy UI references with fixed dimensions, tight crops, optimized size, and no raw full-screen proof captures.
 - Adds setup guidance for post-start event-channel checks, Shadow Monitor switch guard behavior, and post-setup smoke checks.
 
 ### Automation Policies
@@ -123,5 +123,5 @@ This PR must remain draft until:
 - Any remaining V3 polish requested by the operator is finished.
 - The latest image has completed multi-arch build and live smoke validation.
 - Help pages include the required platform-neutral setting explanations and verified locations.
-- Any shipped Help screenshots are cropped, optimized, and useful enough to justify image size.
+- Shipped Help screenshots are cropped, optimized, collapsible/lazy, and useful enough to justify image size.
 - Final release notes are reviewed and explicitly approved by the operator.

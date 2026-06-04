@@ -7,6 +7,7 @@ import {
   Cpu,
   Eye,
   Gauge,
+  Image as ImageIcon,
   ListChecks,
   RotateCw,
   ShieldCheck,
@@ -15,6 +16,7 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Button } from '@/components/ui/button.jsx'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
 import {
   getOperatorHelpDetailTopic,
   operatorHelpDetailGuidePrinciples,
@@ -160,22 +162,32 @@ export default function OperatorHelp() {
                     </div>
                   </dl>
                   {setting.reference ? (
-                    <details className="mt-3 border-t border-border pt-3">
-                      <summary className="cursor-pointer text-sm font-medium text-foreground">
-                        Visual Reference
-                      </summary>
-                      <figure className="mt-3 space-y-2">
-                        <img
-                          src={setting.reference.imageSrc}
-                          alt={setting.reference.alt}
-                          loading="lazy"
-                          className="max-h-72 w-full rounded-md border border-border object-contain"
-                        />
-                        <figcaption className="text-xs text-muted-foreground">
-                          {setting.reference.caption}
-                        </figcaption>
-                      </figure>
-                    </details>
+                    <Accordion type="single" collapsible className="mt-3 border-t border-border pt-1">
+                      <AccordionItem value={`${setting.name}-screenshot`} className="border-b-0">
+                        <AccordionTrigger className="py-2 text-sm hover:no-underline">
+                          <span className="flex items-center gap-2">
+                            <ImageIcon className="h-4 w-4 text-primary" />
+                            {setting.reference.triggerLabel || 'UI Screenshot'}
+                          </span>
+                        </AccordionTrigger>
+                        <AccordionContent>
+                          <figure className="space-y-2 pb-1">
+                            <img
+                              src={setting.reference.imageSrc}
+                              alt={setting.reference.alt}
+                              loading="lazy"
+                              decoding="async"
+                              width={setting.reference.width}
+                              height={setting.reference.height}
+                              className="max-h-72 w-full rounded-md border border-border bg-background object-contain"
+                            />
+                            <figcaption className="text-xs text-muted-foreground">
+                              {setting.reference.caption}
+                            </figcaption>
+                          </figure>
+                        </AccordionContent>
+                      </AccordionItem>
+                    </Accordion>
                   ) : null}
                 </div>
               ))}

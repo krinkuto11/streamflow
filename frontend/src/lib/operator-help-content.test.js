@@ -209,6 +209,7 @@ describe('operatorHelpSections', () => {
 
     for (const reference of references) {
       expect(reference.imageSrc).toMatch(/^\/help\/.+-dark\.jpg$/)
+      expect(reference.triggerLabel).toBe('UI Screenshot')
       expect(reference.alt).toMatch(/Dark mode crop/i)
       expect(reference.caption.length).toBeGreaterThan(40)
 
@@ -218,6 +219,8 @@ describe('operatorHelpSections', () => {
       expect(stat.size).toBeLessThan(80_000)
 
       const dimensions = getJpegDimensions(assetPath)
+      expect(reference.width).toBe(dimensions.width)
+      expect(reference.height).toBe(dimensions.height)
       expect(dimensions.width).toBeGreaterThanOrEqual(200)
       expect(dimensions.height).toBeGreaterThanOrEqual(120)
       expect(dimensions.width).toBeLessThanOrEqual(1200)

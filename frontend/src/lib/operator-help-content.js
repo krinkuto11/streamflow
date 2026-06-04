@@ -254,8 +254,11 @@ export const operatorHelpDetailTopics = [
         risk: 'Too low can defer useful work repeatedly; 0 allows every due period.',
         reference: {
           imageSrc: '/help/automation-run-policy-dark.jpg',
+          triggerLabel: 'UI Screenshot',
           alt: 'Dark mode crop of Automation Run Policy settings with catch-up, maintenance, and Teamarr event window controls.',
           caption: 'This same Settings section contains Catch-up cap, Maintenance window, and Teamarr event window.',
+          width: 1056,
+          height: 554,
         },
       },
       {
@@ -400,8 +403,11 @@ export const operatorHelpDetailTopics = [
         risk: 'Too late can miss early viewer protection for short events.',
         reference: {
           imageSrc: '/help/teamarr-preflight-timing-dark.jpg',
+          triggerLabel: 'UI Screenshot',
           alt: 'Dark mode crop of Teamarr Preflight timing fields including preflight offset, retries, grace, cooldown, and post-start checks.',
           caption: 'Timing values are entered as minutes or comma-separated minute offsets in Teamarr Preflight configuration.',
+          width: 492,
+          height: 249,
         },
       },
       {
@@ -441,8 +447,11 @@ export const operatorHelpDetailTopics = [
         risk: 'Turning it off can overload provider/profile capacity or make kickoff checks race with regular maintenance.',
         reference: {
           imageSrc: '/help/teamarr-preflight-busy-dark.jpg',
+          triggerLabel: 'UI Screenshot',
           alt: 'Dark mode crop of the Teamarr Preflight Busy Handling toggle.',
           caption: 'Busy Handling lives in the Teamarr Preflight configuration card near the service enable switch.',
+          width: 239,
+          height: 158,
         },
       },
     ],
