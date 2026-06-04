@@ -129,6 +129,7 @@ describe('operatorHelpSections', () => {
         expect(['Visible UI setting', 'Container setting', 'Status/API']).toContain(setting.controlType)
         if (setting.controlType === 'Visible UI setting') {
           expect(setting.locationTo || topic.settingsLocationTo).toMatch(/^\//)
+          expect(setting.location.split('->').map(part => part.trim()).filter(Boolean).length).toBeGreaterThanOrEqual(3)
         }
       }
     }
