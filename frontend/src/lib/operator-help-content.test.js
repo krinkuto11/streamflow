@@ -146,7 +146,7 @@ describe('operatorHelpSections', () => {
     expect(postStartGrace.useWhen).toMatch(/at least as large as the largest post-start check/i)
     expect(teamarr.steps.join(' ')).toMatch(/2 minutes and 4 minutes after start/i)
     expect(teamarr.settings.find(setting => setting.name === 'Post-Start Checks').defaultValue).toBe('2 min after start; 4 min after start')
-    expect(teamarr.settings.find(setting => setting.name === 'Post-Start Checks').location).toBe('Teamarr Preflight -> Configuration')
+    expect(teamarr.settings.find(setting => setting.name === 'Post-Start Checks').location).toBe('Teamarr Preflight -> Configuration card -> Post-Start Checks')
     expect(teamarr.smokeChecks.join(' ')).toMatch(/2-minute post-start check/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/4 minutes/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/dead-stream removal off/i)
@@ -159,7 +159,10 @@ describe('operatorHelpSections', () => {
       'Maintenance window',
       'Teamarr event window',
     ]))
-    expect(automation.settings.find(setting => setting.name === 'Maintenance window').location).toBe('Settings -> Scheduling -> Automation Run Policy')
+    expect(automation.settings.find(setting => setting.name === 'Maintenance window').location).toBe('Settings -> Scheduling tab -> Automation Run Policy -> Maintenance window/start/end')
+    const streamChecker = getOperatorHelpDetailTopic('stream-checker')
+    expect(streamChecker.settings.find(setting => setting.name === 'Check on update').controlType).toBe('Status/API')
+    expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Concurrent Checking tab -> Global Concurrent Limit')
     expect(getOperatorHelpDetailTopic('shadow-monitor').settings.map(setting => setting.name)).toContain('Channel Switch Limit')
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')
