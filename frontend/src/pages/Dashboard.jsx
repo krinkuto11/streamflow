@@ -16,6 +16,7 @@ import {
   getAbortedRunDisplay,
   getDashboardActionStates,
   getAutomationStageCards,
+  getCacheSyncCardDetail,
   getM3uRefreshCardDetail,
   getRunDurationCardValue,
   getRunDurationValue,
@@ -644,6 +645,11 @@ export default function Dashboard() {
     streamRunActive,
   })
   const cacheSyncSkipped = m3uRefreshSkipped && cacheSyncDuration == null
+  const cacheSyncDetail = getCacheSyncCardDetail({
+    runCounts,
+    skipped: cacheSyncSkipped,
+    streamRunActive,
+  })
   const durationCards = [
     {
       label: 'M3U Refresh',
@@ -659,6 +665,7 @@ export default function Dashboard() {
         seconds: cacheSyncDuration,
         skipped: cacheSyncSkipped,
       }),
+      detail: cacheSyncDetail,
     },
     {
       label: 'Stream Matching',

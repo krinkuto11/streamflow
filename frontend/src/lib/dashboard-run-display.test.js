@@ -3,6 +3,7 @@ import {
   getAbortedRunDisplay,
   getDashboardActionStates,
   getAutomationStageCards,
+  getCacheSyncCardDetail,
   getM3uRefreshCardDetail,
   getRunDurationCardValue,
   getRunDurationValue,
@@ -378,6 +379,27 @@ describe('dashboard stream checker run display', () => {
   it('keeps skipped and manual-check M3U refresh card details explicit', () => {
     expect(getM3uRefreshCardDetail({ skipped: true })).toBe('No playlist refresh requested')
     expect(getM3uRefreshCardDetail({ streamRunActive: true })).toBeNull()
+  })
+
+  it('summarizes cache sync step progress for the duration card', () => {
+    expect(getCacheSyncCardDetail({
+      runCounts: {
+        cache_sync_state: 'completed',
+        cache_sync_successful_steps: 2,
+        cache_sync_total_steps: 2,
+      },
+    })).toBe('2/2 cache sync steps completed')
+
+    expect(getCacheSyncCardDetail({
+      runCounts: {
+        cache_sync_state: 'warning',
+        cache_sync_successful_steps: 1,
+        cache_sync_total_steps: 2,
+      },
+    })).toBe('1/2 cache sync steps completed with warnings')
+
+    expect(getCacheSyncCardDetail({ skipped: true })).toBe('No cache sync requested')
+    expect(getCacheSyncCardDetail({ streamRunActive: true })).toBeNull()
   })
 
   it('uses explicit idle wording for skipped no-due automation runs', () => {

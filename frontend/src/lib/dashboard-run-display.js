@@ -203,6 +203,39 @@ export const getM3uRefreshCardDetail = ({
   return null
 }
 
+export const getCacheSyncCardDetail = ({
+  runCounts = {},
+  skipped = false,
+  streamRunActive = false,
+} = {}) => {
+  if (streamRunActive) {
+    return null
+  }
+
+  if (skipped) {
+    return 'No cache sync requested'
+  }
+
+  const state = runCounts.cache_sync_state
+  const current = finiteNumber(runCounts.cache_sync_successful_steps)
+  const total = finiteNumber(runCounts.cache_sync_total_steps)
+
+  if (current !== null && total !== null && total > 0) {
+    const suffix = state === 'warning' ? 'completed with warnings' : 'completed'
+    return `${current}/${total} cache sync steps ${suffix}`
+  }
+
+  if (state === 'warning') {
+    return 'Cache sync reported warnings'
+  }
+
+  if (state === 'completed') {
+    return 'Cache sync completed'
+  }
+
+  return null
+}
+
 export const getStreamCheckerRunDisplay = ({
   streamCheckerStatus,
   runState = 'idle',
