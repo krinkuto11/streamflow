@@ -11,16 +11,17 @@ export const getAutoCreateRuleTestToast = ({
   responseData = {},
   selectedChannelCount = 0,
 } = {}) => {
-  const matches = finiteNumber(responseData.matches)
-  const channelsTested = finiteNumber(responseData.channels_tested, selectedChannelCount)
-  const channelsWithoutTvg = responseData.channels_without_tvg || []
-  const channelsWithoutPrograms = responseData.channels_without_programs || []
-  const channelsWithoutMatches = responseData.channels_without_matches || []
-  const channelsWithMatches = responseData.channels_with_matches == null
+  const data = responseData || {}
+  const matches = finiteNumber(data.matches)
+  const channelsTested = finiteNumber(data.channels_tested, selectedChannelCount)
+  const channelsWithoutTvg = data.channels_without_tvg || []
+  const channelsWithoutPrograms = data.channels_without_programs || []
+  const channelsWithoutMatches = data.channels_without_matches || []
+  const channelsWithMatches = data.channels_with_matches == null
     ? (matches > 0 ? Math.min(channelsTested, 1) : 0)
-    : finiteNumber(responseData.channels_with_matches)
+    : finiteNumber(data.channels_with_matches)
 
-  if (responseData.no_tvg_id) {
+  if (data.no_tvg_id) {
     return {
       title: 'No TVG-ID Configured',
       description: channelsTested > 1
@@ -67,9 +68,10 @@ export const getAutoCreateRuleTestToast = ({
 }
 
 export const getAutoCreateRuleTestDiagnostics = (responseData = {}) => {
-  const channelsWithoutTvg = responseData.channels_without_tvg || []
-  const channelsWithoutPrograms = responseData.channels_without_programs || []
-  const channelsWithoutMatches = responseData.channels_without_matches || []
+  const data = responseData || {}
+  const channelsWithoutTvg = data.channels_without_tvg || []
+  const channelsWithoutPrograms = data.channels_without_programs || []
+  const channelsWithoutMatches = data.channels_without_matches || []
   const diagnostics = []
 
   if (channelsWithoutTvg.length > 0) {

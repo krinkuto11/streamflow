@@ -65,6 +65,18 @@ describe('getAutoCreateRuleTestToast', () => {
     })).toBeNull()
   })
 
+  it('treats null test data as an empty diagnostic snapshot', () => {
+    expect(getAutoCreateRuleTestToast({
+      responseData: null,
+      selectedChannelCount: 3,
+    })).toEqual({
+      title: 'No Matches',
+      description: 'The regex pattern did not match any EPG programs across 3 selected channels.',
+      variant: 'default',
+    })
+    expect(getAutoCreateRuleTestDiagnostics(null)).toEqual([])
+  })
+
   it('builds diagnostics for missing tvg, missing epg data, and regex mismatch', () => {
     expect(getAutoCreateRuleTestDiagnostics({
       channels_without_tvg: [{ id: 1, name: 'No TVG' }],
