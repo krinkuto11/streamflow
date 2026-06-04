@@ -41,3 +41,14 @@ export const isStartupGateActive = ({
   if (!initializationChecked) return true
   return Boolean(initialization?.inProgress)
 }
+
+export const shouldRedirectForStartupGate = ({
+  setupComplete,
+  initializationChecked,
+  initialization,
+  pathname,
+}) => {
+  if (!setupComplete || !initializationChecked) return false
+  if (!initialization?.inProgress) return false
+  return pathname !== '/' && pathname !== '/dashboard'
+}

@@ -11,6 +11,7 @@ import {
   getInitializationStateFromStatus,
   getInitializationStateFromStatusError,
   isStartupGateActive,
+  shouldRedirectForStartupGate,
 } from '@/lib/startup-gate-state.js'
 
 // Page imports
@@ -107,14 +108,15 @@ function App() {
   }, [setupComplete])
 
   useEffect(() => {
-    if (
-      startupGateActive &&
-      location.pathname !== '/' &&
-      location.pathname !== '/dashboard'
-    ) {
+    if (shouldRedirectForStartupGate({
+      setupComplete,
+      initializationChecked: udiInitializationChecked,
+      initialization: udiInitialization,
+      pathname: location.pathname,
+    })) {
       navigate('/', { replace: true })
     }
-  }, [location.pathname, navigate, startupGateActive])
+  }, [location.pathname, navigate, setupComplete, udiInitialization, udiInitializationChecked])
 
   if (loading) {
     return (

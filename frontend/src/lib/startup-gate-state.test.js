@@ -4,6 +4,7 @@ import {
   getInitializationStateFromStatus,
   getInitializationStateFromStatusError,
   isStartupGateActive,
+  shouldRedirectForStartupGate,
 } from './startup-gate-state.js'
 
 describe('startup gate state', () => {
@@ -41,6 +42,36 @@ describe('startup gate state', () => {
       setupComplete: true,
       initializationChecked: true,
       initialization: { inProgress: false },
+    })).toBe(false)
+  })
+
+  it('does not redirect deep links until startup status is confirmed active', () => {
+    expect(shouldRedirectForStartupGate({
+      setupComplete: true,
+      initializationChecked: false,
+      initialization: null,
+      pathname: '/settings',
+    })).toBe(false)
+
+    expect(shouldRedirectForStartupGate({
+      setupComplete: true,
+      initializationChecked: true,
+      initialization: { inProgress: false },
+      pathname: '/settings',
+    })).toBe(false)
+
+    expect(shouldRedirectForStartupGate({
+      setupComplete: true,
+      initializationChecked: true,
+      initialization: { inProgress: true },
+      pathname: '/settings',
+    })).toBe(true)
+
+    expect(shouldRedirectForStartupGate({
+      setupComplete: true,
+      initializationChecked: true,
+      initialization: { inProgress: true },
+      pathname: '/dashboard',
     })).toBe(false)
   })
 })
