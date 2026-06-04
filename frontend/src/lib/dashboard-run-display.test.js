@@ -3,6 +3,7 @@ import {
   getAbortedRunDisplay,
   getDashboardActionStates,
   getAutomationStageCards,
+  getM3uRefreshCardDetail,
   getRunDurationCardValue,
   getRunDurationValue,
   getSkippedRunDisplay,
@@ -346,6 +347,37 @@ describe('dashboard stream checker run display', () => {
     expect(getRunDurationCardValue({ skipped: true, seconds: 0 })).toBe('Skipped')
     expect(getRunDurationCardValue({ seconds: 61 })).toBe('1m 1s')
     expect(getRunDurationCardValue({ seconds: null })).toBe('N/A')
+  })
+
+  it('summarizes running M3U refresh request progress for the duration card', () => {
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'requesting',
+        m3u_refresh_current: 1,
+        m3u_refresh_total: 3,
+      },
+    })).toBe('Refreshing playlist 2/3')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'accepted',
+        m3u_refresh_current: 2,
+        m3u_refresh_total: 3,
+      },
+    })).toBe('2/3 refresh requests accepted')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'failed',
+        m3u_refresh_current: 2,
+        m3u_refresh_total: 3,
+      },
+    })).toBe('2/3 refresh requests failed')
+  })
+
+  it('keeps skipped and manual-check M3U refresh card details explicit', () => {
+    expect(getM3uRefreshCardDetail({ skipped: true })).toBe('No playlist refresh requested')
+    expect(getM3uRefreshCardDetail({ streamRunActive: true })).toBeNull()
   })
 
   it('uses explicit idle wording for skipped no-due automation runs', () => {

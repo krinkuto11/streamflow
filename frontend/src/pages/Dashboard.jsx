@@ -16,6 +16,7 @@ import {
   getAbortedRunDisplay,
   getDashboardActionStates,
   getAutomationStageCards,
+  getM3uRefreshCardDetail,
   getRunDurationCardValue,
   getRunDurationValue,
   getSkippedRunDisplay,
@@ -637,6 +638,11 @@ export default function Dashboard() {
     runCounts,
     streamRunActive,
   })
+  const m3uRefreshDetail = getM3uRefreshCardDetail({
+    runCounts,
+    skipped: m3uRefreshSkipped,
+    streamRunActive,
+  })
   const cacheSyncSkipped = m3uRefreshSkipped && cacheSyncDuration == null
   const durationCards = [
     {
@@ -645,6 +651,7 @@ export default function Dashboard() {
         seconds: m3uRefreshDuration,
         skipped: m3uRefreshSkipped,
       }),
+      detail: m3uRefreshDetail,
     },
     {
       label: 'Cache Sync',
@@ -873,6 +880,9 @@ export default function Dashboard() {
                 <div key={card.label} className="rounded-md border p-3">
                   <div className="text-xs text-muted-foreground">{card.label}</div>
                   <div className="text-base font-semibold">{card.value}</div>
+                  {card.detail && (
+                    <div className="mt-1 text-xs text-muted-foreground">{card.detail}</div>
+                  )}
                 </div>
               ))}
             </div>

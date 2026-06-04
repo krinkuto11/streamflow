@@ -147,6 +147,62 @@ export const getRunDurationCardValue = ({
   return formatDuration(seconds) || 'N/A'
 }
 
+const finiteNumber = (value) => {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+export const getM3uRefreshCardDetail = ({
+  runCounts = {},
+  skipped = false,
+  streamRunActive = false,
+} = {}) => {
+  if (streamRunActive) {
+    return null
+  }
+
+  if (skipped) {
+    return 'No playlist refresh requested'
+  }
+
+  const state = runCounts.m3u_refresh_state
+  const current = finiteNumber(runCounts.m3u_refresh_current)
+  const total = finiteNumber(runCounts.m3u_refresh_total)
+  const refreshed = finiteNumber(runCounts.refreshed_playlists)
+  const playlistsToRefresh = runCounts.playlists_to_refresh
+
+  if (state === 'skipped') {
+    return 'No active playlists matched'
+  }
+
+  if (state === 'planned' && total !== null && total > 0) {
+    return `Preparing ${total} playlist refresh request${total === 1 ? '' : 's'}`
+  }
+
+  if (state === 'requesting' && total !== null && total > 0) {
+    const active = current !== null ? Math.min(current + 1, total) : 1
+    return `Refreshing playlist ${active}/${total}`
+  }
+
+  if (['accepted', 'completed'].includes(state) && current !== null && total !== null && total > 0) {
+    return `${current}/${total} refresh request${total === 1 ? '' : 's'} accepted`
+  }
+
+  if (state === 'failed' && current !== null && total !== null && total > 0) {
+    return `${current}/${total} refresh request${total === 1 ? '' : 's'} failed`
+  }
+
+  if (refreshed !== null && refreshed > 0) {
+    return `${refreshed} refresh request${refreshed === 1 ? '' : 's'} accepted`
+  }
+
+  if (playlistsToRefresh === 'all') {
+    return 'All playlists selected'
+  }
+
+  return null
+}
+
 export const getStreamCheckerRunDisplay = ({
   streamCheckerStatus,
   runState = 'idle',
