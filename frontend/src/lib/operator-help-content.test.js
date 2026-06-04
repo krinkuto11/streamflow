@@ -81,6 +81,7 @@ describe('operatorHelpSections', () => {
 
     const troubleshooting = operatorHelpSections.find(section => section.id === 'troubleshooting')
     expect(troubleshooting.items.join(' ')).toMatch(/After setup or image updates/)
+    expect(troubleshooting.items.join(' ')).toMatch(/elapsed\/limit/)
     expect(troubleshooting.items.join(' ')).toMatch(/post-start checks/)
     expect(troubleshooting.links.map(link => link.to)).toContain('/help/troubleshooting')
   })
@@ -174,12 +175,16 @@ describe('operatorHelpSections', () => {
     expect(troubleshooting.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Startup readiness',
       'Stream Checker status',
+      'Quality reason details',
       'Hardware status',
       'Teamarr Preflight status',
       'Shadow Monitor status',
       'Changelog and logs',
     ]))
+    expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').effect).toMatch(/timeout, connectivity, endpoint/i)
+    expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').useWhen).toMatch(/timeout values/)
     expect(troubleshooting.steps.join(' ')).toMatch(/smallest manual check/i)
+    expect(troubleshooting.steps.join(' ')).toMatch(/reason-detail fields/i)
     expect(troubleshooting.smokeChecks.join(' ')).toMatch(/post-start buckets/i)
     expect(getOperatorHelpDetailTopic('missing-topic')).toBeNull()
 

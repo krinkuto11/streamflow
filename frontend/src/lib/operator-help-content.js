@@ -104,6 +104,7 @@ export const operatorHelpSections = [
       'If the dashboard is idle, upcoming events and automation status should refresh without manual clicks.',
       'If a run is stopped, the dashboard should show an aborted state instead of completed or failed.',
       'For stream failures, check the displayed reason text before changing provider or profile settings.',
+      'Timeout and connectivity reason details can show host, HTTP status, attempts, elapsed/limit, probe window, startup buffer, and retry context.',
       'For event channels that appear at kickoff, use post-start checks instead of letting early failed checks demote streams.',
     ],
     links: [
@@ -606,7 +607,7 @@ export const operatorHelpDetailTopics = [
       'Check Health, Stream Checker, Teamarr Preflight, and Shadow Monitor status before changing provider or profile rules.',
       'Run the smallest manual check that reproduces the issue, then read the stage and reason text before changing settings.',
       'For event channels that appear late, prefer post-start checks over widening destructive quality rules.',
-      'For dead, blank, freeze, or timeout results, compare the displayed reason with the stream row and active batch counters.',
+      'For dead, blank, freeze, timeout, or connectivity results, compare the displayed reason with the stream row, active batch counters, and reason-detail fields.',
       'If a page looks idle but work is expected, use the status endpoint or page status card before forcing another run.',
     ],
     settings: [
@@ -629,6 +630,16 @@ export const operatorHelpDetailTopics = [
         effect: 'Shows active queue state, capacity pressure, current stage, and recent reason context.',
         useWhen: 'Use before starting another manual check or changing provider/profile capacity.',
         risk: 'Starting overlapping work can hide the original reason behind capacity or busy states.',
+      },
+      {
+        name: 'Quality reason details',
+        controlType: 'Status/API',
+        defaultValue: 'Shown when a stream check reports a problem',
+        location: 'Stream Checker stream row reason text and /api/stream-checker/status streams_detail',
+        locationTo: '/stream-checker',
+        effect: 'Explains timeout, connectivity, endpoint, dead, blank, freeze, low-quality, provider-capacity, and viewer-protection outcomes with structured context when available.',
+        useWhen: 'Use before changing provider credentials, hardware mode, timeout values, retry counts, or destructive removal rules.',
+        risk: 'Ignoring the reason context can turn a network, endpoint, or capacity issue into an unnecessary stream-order or deletion change.',
       },
       {
         name: 'Hardware status',
