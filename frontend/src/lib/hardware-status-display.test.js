@@ -12,13 +12,13 @@ describe('getHardwareRuntimeDeviceLabel', () => {
     expect(getHardwareRuntimeDeviceLabel({ nvidia_gpu_count: 2 })).toBe('2 NVIDIA detected')
   })
 
-  it('reports DRI methods for Intel or VAAPI/QSV paths without requiring NVIDIA', () => {
+  it('reports DRI methods without claiming every method initializes', () => {
     expect(getHardwareRuntimeDeviceLabel({
       dri_available: true,
       dri_hwaccels: ['drm', 'qsv', 'vaapi'],
       nvidia_checked: false,
       nvidia_gpu_count: 0,
-    })).toBe('DRI/VAAPI/QSV reported (drm, qsv, vaapi)')
+    })).toBe('DRI methods reported (drm, qsv, vaapi)')
   })
 
   it('keeps NVIDIA absence specific when NVIDIA was explicitly checked', () => {
@@ -65,7 +65,54 @@ describe('getHardwareAnalysisPathDisplay', () => {
     })).toMatchObject({
       label: 'Hardware preferred',
       variant: 'default',
-      description: expect.stringContaining('CUDA is available'),
+      description: expect.stringContaining('CUDA is reported by FFmpeg'),
+    })
+  })
+
+  it('warns when explicit QSV is selected on a DRI path without fallback', () => {
+    const display = getHardwareAnalysisPathDisplay({
+      config: { enabled: true, mode: 'qsv', allow_fallback: false },
+      mode_supported: true,
+      dri_available: true,
+    })
+    const note = getHardwareOperatorNote({
+      config: { enabled: true, mode: 'qsv', allow_fallback: false },
+      mode_supported: true,
+      dri_available: true,
+    })
+
+    expect(display).toMatchObject({
+      label: 'Hardware risk',
+      variant: 'destructive',
+      description: expect.stringContaining('Auto or VAAPI is safer'),
+    })
+    expect(note).toMatchObject({
+      title: 'QSV Init Risk',
+      variant: 'destructive',
+      description: expect.stringContaining('does not guarantee'),
+    })
+  })
+
+  it('asks operators to validate explicit QSV on DRI even with fallback', () => {
+    const display = getHardwareAnalysisPathDisplay({
+      config: { enabled: true, mode: 'qsv', allow_fallback: true },
+      mode_supported: true,
+      dri_available: true,
+    })
+    const note = getHardwareOperatorNote({
+      config: { enabled: true, mode: 'qsv', allow_fallback: true },
+      mode_supported: true,
+      dri_available: true,
+    })
+
+    expect(display).toMatchObject({
+      label: 'QSV reported',
+      variant: 'secondary',
+      description: expect.stringContaining('only proven by a probe'),
+    })
+    expect(note).toMatchObject({
+      title: 'QSV Reported, Validate With Probe',
+      variant: 'default',
     })
   })
 

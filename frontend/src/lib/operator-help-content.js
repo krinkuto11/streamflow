@@ -625,8 +625,9 @@ export const operatorHelpDetailTopics = [
       steps: ['Configured mode', 'Runtime device', 'FFmpeg methods', 'Fallback result'],
     },
     steps: [
-      'Check Runtime Device and FFmpeg Methods before changing acceleration mode.',
-      'Use Auto first unless the hardware path needs an explicit VAAPI, QSV, or CUDA mode.',
+      'Check Runtime Device and FFmpeg Reported Methods before changing acceleration mode.',
+      'Use Auto first for DRI devices; StreamFlow resolves that path to VAAPI for observable probes.',
+      'Use QSV only after a small blank or freeze probe proves FFmpeg can initialize it on this host.',
       'Keep CPU Fallback on unless a hardware-only failure should stop the run.',
       'After container runtime or device changes, smoke the hardware-status API before running a large queue.',
     ],
@@ -646,8 +647,8 @@ export const operatorHelpDetailTopics = [
         defaultValue: 'auto',
         location: 'Stream Checker -> Stream Analysis tab -> Hardware Acceleration -> Mode',
         effect: 'Chooses which FFmpeg hardware method StreamFlow requests.',
-        useWhen: 'Use Auto for general setups; use VAAPI or QSV for DRI devices when needed.',
-        risk: 'A mode not reported by FFmpeg can fail without fallback.',
+        useWhen: 'Use Auto or VAAPI for DRI devices first; use CUDA for NVIDIA; use QSV only after a targeted probe succeeds.',
+        risk: 'FFmpeg can report a mode such as QSV even when the device init fails; without CPU fallback that fails the probe immediately.',
       },
       {
         name: 'Device',
@@ -670,7 +671,7 @@ export const operatorHelpDetailTopics = [
     ],
     smokeChecks: [
       'Hardware status reports FFmpeg available and lists hardware methods when present.',
-      'Runtime Device reports NVIDIA, DRI/VAAPI/QSV, or a generic FFmpeg-method state instead of misleading GPU-only wording.',
+      'Runtime Device reports NVIDIA, DRI reported methods, or a generic FFmpeg-method state instead of misleading GPU-only wording.',
       'Analysis Path shows CPU only, hardware preferred, hardware only, fallback ready, or hardware risk.',
     ],
     links: [

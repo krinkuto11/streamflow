@@ -341,7 +341,8 @@ def _log_dri_diagnostics(diagnostics: Dict[str, Any]) -> None:
         return
     hwaccel = diagnostics['config']
     logger.info(
-        "DRI/VAAPI/QSV hardware path reported by ffmpeg: device=%s methods=%s",
+        "DRI/VAAPI/QSV hardware methods reported by ffmpeg: device=%s methods=%s; "
+        "reported methods still require a successful ffmpeg device init during probes",
         hwaccel['device'] or 'default',
         ', '.join(diagnostics.get('dri_hwaccels') or []),
     )
@@ -366,7 +367,10 @@ def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any
         methods = ', '.join(diagnostics['ffmpeg_hwaccels']) or 'none reported'
         logger.info("FFmpeg hardware acceleration methods available: %s", methods)
         if diagnostics['mode_supported']:
-            logger.info("FFmpeg hardware acceleration mode %s appears available", hwaccel['mode'])
+            logger.info(
+                "FFmpeg hardware acceleration mode %s is reported by ffmpeg; device init is verified during probes",
+                hwaccel['mode'],
+            )
         else:
             logger.warning("FFmpeg hardware acceleration mode %s is not reported by ffmpeg", hwaccel['mode'])
     else:

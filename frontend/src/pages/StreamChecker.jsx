@@ -387,7 +387,7 @@ export default function StreamChecker() {
   const queueAllDisabled = isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || (queueStartMode === 'channel' && !queueStartChannelId)
   const runtimeDeviceLabel = getHardwareRuntimeDeviceLabel(hardwareStatus)
   const ffmpegModeLabel = hardwareStatus?.config?.enabled
-    ? (hardwareStatus?.mode_supported ? 'Available' : 'Not reported')
+    ? (hardwareStatus?.mode_supported ? 'Reported' : 'Not reported')
     : 'Disabled'
   const ffmpegMethodsLabel = Array.isArray(hardwareStatus?.ffmpeg_hwaccels) && hardwareStatus.ffmpeg_hwaccels.length > 0
     ? hardwareStatus.ffmpeg_hwaccels.join(', ')
@@ -1147,7 +1147,7 @@ export default function StreamChecker() {
                             </SelectContent>
                           </Select>
                           <p className="text-xs text-muted-foreground">
-                            Auto uses any FFmpeg hardware method reported below; choose VAAPI or QSV for DRI devices when needed
+                            Auto resolves DRI devices to VAAPI; use QSV only after a probe proves it initializes on this host
                           </p>
                         </div>
 
@@ -1203,7 +1203,7 @@ export default function StreamChecker() {
                           </div>
                         </div>
                         <div className="rounded-md border border-border px-3 py-2">
-                          <div className="text-muted-foreground">FFmpeg Methods</div>
+                          <div className="text-muted-foreground">FFmpeg Reported Methods</div>
                           <div className="mt-1 font-medium text-foreground">{ffmpegMethodsLabel}</div>
                         </div>
                         <div className="rounded-md border border-border px-3 py-2">
