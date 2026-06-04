@@ -14,6 +14,8 @@ export const getAutoCreateRuleTestToast = ({
   const matches = finiteNumber(responseData.matches)
   const channelsTested = finiteNumber(responseData.channels_tested, selectedChannelCount)
   const channelsWithoutTvg = responseData.channels_without_tvg || []
+  const channelsWithoutPrograms = responseData.channels_without_programs || []
+  const channelsWithoutMatches = responseData.channels_without_matches || []
   const channelsWithMatches = responseData.channels_with_matches == null
     ? (matches > 0 ? Math.min(channelsTested, 1) : 0)
     : finiteNumber(responseData.channels_with_matches)
@@ -45,12 +47,69 @@ export const getAutoCreateRuleTestToast = ({
   }
 
   if (channelsTested > 1 && channelsWithMatches < channelsTested) {
+    const reasonParts = []
+    if (channelsWithoutPrograms.length > 0) {
+      reasonParts.push(`${channelsWithoutPrograms.length} without EPG programs`)
+    }
+    if (channelsWithoutMatches.length > 0) {
+      reasonParts.push(`${channelsWithoutMatches.length} with EPG titles that did not match`)
+    }
+    const reasonSuffix = reasonParts.length > 0 ? ` (${reasonParts.join(', ')})` : ''
+
     return {
       title: 'Partial Matches',
-      description: `${matches} matching ${plural(matches, 'program')} found on ${channelsWithMatches}/${channelsTested} tested ${plural(channelsTested, 'channel')}. Channels without matching EPG programs will not create events until a future EPG refresh matches them.`,
+      description: `${matches} matching ${plural(matches, 'program')} found on ${channelsWithMatches}/${channelsTested} tested ${plural(channelsTested, 'channel')}${reasonSuffix}.`,
       variant: 'default',
     }
   }
 
   return null
+}
+
+export const getAutoCreateRuleTestDiagnostics = (responseData = {}) => {
+  const channelsWithoutTvg = responseData.channels_without_tvg || []
+  const channelsWithoutPrograms = responseData.channels_without_programs || []
+  const channelsWithoutMatches = responseData.channels_without_matches || []
+  const diagnostics = []
+
+  if (channelsWithoutTvg.length > 0) {
+    diagnostics.push({
+      key: 'no_tvg_id',
+      label: 'No TVG-ID',
+      count: channelsWithoutTvg.length,
+      detail: 'EPG matching needs a TVG-ID on the source channel.',
+      channels: channelsWithoutTvg,
+    })
+  }
+
+  if (channelsWithoutPrograms.length > 0) {
+    diagnostics.push({
+      key: 'no_epg_programs',
+      label: 'No EPG programs',
+      count: channelsWithoutPrograms.length,
+      detail: 'StreamFlow could not see any EPG programs for these TVG-IDs.',
+      channels: channelsWithoutPrograms,
+    })
+  }
+
+  if (channelsWithoutMatches.length > 0) {
+    const sampleTitles = []
+    channelsWithoutMatches.forEach((channel) => {
+      ;(channel.sample_titles || []).forEach((title) => {
+        if (title && sampleTitles.length < 4 && !sampleTitles.includes(title)) {
+          sampleTitles.push(title)
+        }
+      })
+    })
+    diagnostics.push({
+      key: 'regex_mismatch',
+      label: 'Regex did not match',
+      count: channelsWithoutMatches.length,
+      detail: 'EPG programs exist, but their titles do not match this pattern.',
+      sampleTitles,
+      channels: channelsWithoutMatches,
+    })
+  }
+
+  return diagnostics
 }

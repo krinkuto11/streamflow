@@ -3,7 +3,7 @@
 Unit tests for EPG past events handling.
 
 Tests cover:
-1. Programs that have already started should not create events
+1. Programs that are currently airing should still create immediate events
 2. Programs in the past should not create events
 3. Events should not be re-created after being checked
 4. Program name changes should not affect duplicate detection (same start time)
@@ -77,8 +77,8 @@ class TestEPGPastEvents(unittest.TestCase):
         # Reset the global singleton
         scheduling_service._scheduling_service = None
     
-    def test_skip_programs_already_started(self):
-        """Test that programs that have already started are not scheduled."""
+    def test_schedule_programs_currently_airing(self):
+        """Test that programs already started but not ended are still scheduled."""
         now = datetime.now(timezone.utc)
         
         # Create a rule
@@ -92,7 +92,7 @@ class TestEPGPastEvents(unittest.TestCase):
         with patch.object(self.service, 'match_programs_to_rules'):
             rule = self.service.create_auto_create_rule(rule_data)
         
-        # Create EPG programs - one started 5 minutes ago, one in the future
+        # Create EPG programs - one currently airing, one in the future
         programs = [
             {
                 'title': 'Test Program Past',
@@ -115,11 +115,14 @@ class TestEPGPastEvents(unittest.TestCase):
         # Run matching
         result = self.service.match_programs_to_rules()
         
-        # Verify only the future program created an event
+        # Verify both current and future programs created events
         events = self.service.get_scheduled_events()
-        self.assertEqual(len(events), 1, "Should only create event for future program")
-        self.assertEqual(events[0]['program_title'], 'Test Program Future')
-        self.assertEqual(result['created'], 1)
+        self.assertEqual(len(events), 2, "Should create events for current and future programs")
+        self.assertEqual({event['program_title'] for event in events}, {
+            'Test Program Past',
+            'Test Program Future',
+        })
+        self.assertEqual(result['created'], 2)
     
     def test_skip_programs_in_past(self):
         """Test that programs completely in the past are not scheduled."""

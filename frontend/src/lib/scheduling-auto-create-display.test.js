@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { getAutoCreateRuleTestToast } from './scheduling-auto-create-display.js'
+import {
+  getAutoCreateRuleTestDiagnostics,
+  getAutoCreateRuleTestToast,
+} from './scheduling-auto-create-display.js'
 
 describe('getAutoCreateRuleTestToast', () => {
   it('explains when selected channels have no TVG-ID', () => {
@@ -36,6 +39,8 @@ describe('getAutoCreateRuleTestToast', () => {
         matches: 2,
         channels_tested: 4,
         channels_with_matches: 1,
+        channels_without_programs: [{ id: 2, name: 'No EPG' }],
+        channels_without_matches: [{ id: 3, name: 'Wrong Title' }],
         programs: [
           { title: 'Friendly', channel_name: 'Match Channel' },
           { title: 'Friendly Extra', channel_name: 'Match Channel' },
@@ -44,7 +49,7 @@ describe('getAutoCreateRuleTestToast', () => {
       selectedChannelCount: 0,
     })).toEqual({
       title: 'Partial Matches',
-      description: '2 matching programs found on 1/4 tested channels. Channels without matching EPG programs will not create events until a future EPG refresh matches them.',
+      description: '2 matching programs found on 1/4 tested channels (1 without EPG programs, 1 with EPG titles that did not match).',
       variant: 'default',
     })
   })
@@ -58,5 +63,44 @@ describe('getAutoCreateRuleTestToast', () => {
       },
       selectedChannelCount: 2,
     })).toBeNull()
+  })
+
+  it('builds diagnostics for missing tvg, missing epg data, and regex mismatch', () => {
+    expect(getAutoCreateRuleTestDiagnostics({
+      channels_without_tvg: [{ id: 1, name: 'No TVG' }],
+      channels_without_programs: [{ id: 2, name: 'No EPG' }],
+      channels_without_matches: [{
+        id: 3,
+        name: 'Wrong Title',
+        sample_titles: ['Pregame Baseball', 'Postgame Baseball'],
+      }],
+    })).toEqual([
+      {
+        key: 'no_tvg_id',
+        label: 'No TVG-ID',
+        count: 1,
+        detail: 'EPG matching needs a TVG-ID on the source channel.',
+        channels: [{ id: 1, name: 'No TVG' }],
+      },
+      {
+        key: 'no_epg_programs',
+        label: 'No EPG programs',
+        count: 1,
+        detail: 'StreamFlow could not see any EPG programs for these TVG-IDs.',
+        channels: [{ id: 2, name: 'No EPG' }],
+      },
+      {
+        key: 'regex_mismatch',
+        label: 'Regex did not match',
+        count: 1,
+        detail: 'EPG programs exist, but their titles do not match this pattern.',
+        sampleTitles: ['Pregame Baseball', 'Postgame Baseball'],
+        channels: [{
+          id: 3,
+          name: 'Wrong Title',
+          sample_titles: ['Pregame Baseball', 'Postgame Baseball'],
+        }],
+      },
+    ])
   })
 })

@@ -572,8 +572,8 @@ class TestExistingBehaviourPreserved(_SchedulingBase):
     """Quick regression smoke-tests to confirm existing passing behaviour
     is not broken by the new guards."""
 
-    def test_auto_create_rule_flow_still_skips_past_programs(self):
-        """match_programs_to_rules must still skip programs that have started."""
+    def test_auto_create_rule_flow_schedules_current_programs_but_skips_ended_programs(self):
+        """match_programs_to_rules keeps currently airing programs schedulable."""
         now = datetime.now(timezone.utc)
 
         rule_data = {
@@ -585,18 +585,18 @@ class TestExistingBehaviourPreserved(_SchedulingBase):
         with patch.object(self.service, 'match_programs_to_rules'):
             self.service.create_auto_create_rule(rule_data)
 
-        # Both programs started in the past
+        # One program is currently airing; one is fully over.
         self.service._epg_cache = [
             {
-                'title': 'Test Show Past',
+                'title': 'Test Show Current',
                 'start_time': (now - timedelta(hours=1)).isoformat(),
                 'end_time': (now + timedelta(hours=1)).isoformat(),
                 'tvg_id': 'test-channel-1',
             },
             {
-                'title': 'Test Show Future',
-                'start_time': (now + timedelta(hours=2)).isoformat(),
-                'end_time': (now + timedelta(hours=4)).isoformat(),
+                'title': 'Test Show Ended',
+                'start_time': (now - timedelta(hours=4)).isoformat(),
+                'end_time': (now - timedelta(hours=2)).isoformat(),
                 'tvg_id': 'test-channel-1',
             },
         ]
@@ -609,7 +609,7 @@ class TestExistingBehaviourPreserved(_SchedulingBase):
         self.assertEqual(result['created'], 1)
         events = self.service.get_scheduled_events()
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]['program_title'], 'Test Show Future')
+        self.assertEqual(events[0]['program_title'], 'Test Show Current')
 
     def test_delete_scheduled_event_still_works(self):
         """delete_scheduled_event must still remove an event by ID."""
