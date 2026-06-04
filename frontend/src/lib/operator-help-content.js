@@ -207,6 +207,7 @@ export const operatorHelpDetailTopics = [
     settings: [
       {
         name: 'Quality Check',
+        controlType: 'Visible UI setting',
         defaultValue: 'Profile-specific',
         location: 'Automation Settings -> Profiles',
         effect: 'Controls whether streams are analyzed for dead, blank, freeze, loop, or quality outcomes.',
@@ -215,6 +216,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'M3U Refresh',
+        controlType: 'Visible UI setting',
         defaultValue: 'Profile-specific',
         location: 'Automation Settings -> Profiles',
         effect: 'Sends playlist refresh requests before matching or checking.',
@@ -223,6 +225,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Startup catch-up',
+        controlType: 'Visible UI setting',
         defaultValue: 'Off',
         location: 'Automation Periods -> period editor',
         effect: 'Allows a period with no previous run timestamp to run once after startup.',
@@ -231,6 +234,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Missed-run grace',
+        controlType: 'Visible UI setting',
         defaultValue: '0 minutes',
         location: 'Automation Periods -> period editor',
         effect: 'Limits how late an automatic missed run may still be caught up.',
@@ -239,6 +243,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Catch-up cap',
+        controlType: 'Visible UI setting',
         defaultValue: '0 periods',
         location: 'Settings -> Scheduling -> Automation Run Policy',
         effect: 'Limits how many due periods an automatic scheduler pass may start.',
@@ -247,6 +252,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Maintenance window',
+        controlType: 'Visible UI setting',
         defaultValue: 'Configured globally, disabled by default',
         location: 'Settings -> Scheduling -> Automation Run Policy',
         effect: 'Pauses automatic runs during a daily time window.',
@@ -255,6 +261,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Teamarr event window',
+        controlType: 'Visible UI setting',
         defaultValue: 'Configured globally, disabled by default',
         location: 'Settings -> Scheduling -> Automation Run Policy',
         effect: 'Pauses automatic automation runs around cached Teamarr event starts.',
@@ -289,6 +296,7 @@ export const operatorHelpDetailTopics = [
     settings: [
       {
         name: 'Check on update',
+        controlType: 'Visible UI setting',
         defaultValue: 'On',
         location: 'Stream Checker -> Queue Settings',
         effect: 'Queues checks after updates when the profile calls for quality validation.',
@@ -297,6 +305,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Max channels per run',
+        controlType: 'Visible UI setting',
         defaultValue: '50',
         location: 'Stream Checker -> Queue Settings',
         effect: 'Caps how much channel work a single automatic run can enqueue.',
@@ -305,6 +314,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Parallel workers',
+        controlType: 'Visible UI setting',
         defaultValue: 'Configured in Stream Checker',
         location: 'Stream Checker -> Concurrent Checking',
         effect: 'Controls how many stream probes can run concurrently.',
@@ -313,6 +323,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'CPU Fallback',
+        controlType: 'Visible UI setting',
         defaultValue: 'On for safer hardware mode',
         location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Retries analysis on CPU if the selected hardware path is unavailable or rejected.',
@@ -350,6 +361,7 @@ export const operatorHelpDetailTopics = [
     settings: [
       {
         name: 'Preflight Offset',
+        controlType: 'Visible UI setting',
         defaultValue: '20 minutes',
         location: 'Teamarr Preflight -> Configuration',
         effect: 'Runs the main pre-start check before event start.',
@@ -358,6 +370,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Pre-Start Retries',
+        controlType: 'Visible UI setting',
         defaultValue: '10 min before start; 3 min before start',
         location: 'Teamarr Preflight -> Configuration',
         effect: 'Schedules two separate pre-start retry buckets without changing the main 20-minute preflight.',
@@ -366,6 +379,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Post-Start Checks',
+        controlType: 'Visible UI setting',
         defaultValue: '2 min after start; 4 min after start',
         location: 'Teamarr Preflight -> Configuration',
         effect: 'Schedules two separate post-start buckets so channels that appear at kickoff or a few minutes later are not unfairly demoted.',
@@ -374,6 +388,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Post-Start Grace',
+        controlType: 'Visible UI setting',
         defaultValue: '5 minutes',
         location: 'Teamarr Preflight -> Configuration',
         effect: 'Limits how long after start post-start checks are still considered due.',
@@ -382,6 +397,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Event Cooldown',
+        controlType: 'Visible UI setting',
         defaultValue: '720 minutes',
         location: 'Teamarr Preflight -> Configuration',
         effect: 'Prevents the same event bucket from being checked repeatedly after it already ran.',
@@ -390,6 +406,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Concurrent Checks',
+        controlType: 'Visible UI setting',
         defaultValue: '1',
         location: 'Teamarr Preflight -> Configuration',
         effect: 'Limits how many Teamarr event checks run at the same time.',
@@ -398,6 +415,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Busy Handling',
+        controlType: 'Visible UI setting',
         defaultValue: 'On',
         location: 'Teamarr Preflight -> Busy Handling',
         effect: 'Defers or queues event checks when normal checker work is already active.',
@@ -435,6 +453,7 @@ export const operatorHelpDetailTopics = [
     settings: [
       {
         name: 'Poll Interval',
+        controlType: 'Visible UI setting',
         defaultValue: '5 seconds',
         location: 'Shadow Monitor -> Settings',
         effect: 'Controls how often periodic discovery checks active viewer sessions.',
@@ -443,6 +462,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Watch Gap',
+        controlType: 'Visible UI setting',
         defaultValue: '1 second',
         location: 'Shadow Monitor -> Settings',
         effect: 'Controls the short gap between continuous watcher loops.',
@@ -451,6 +471,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Confirmations',
+        controlType: 'Visible UI setting',
         defaultValue: '2 hits',
         location: 'Shadow Monitor -> Settings',
         effect: 'Requires repeated bad detections before switching.',
@@ -459,6 +480,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Channel Cooldown',
+        controlType: 'Visible UI setting',
         defaultValue: '300 seconds',
         location: 'Shadow Monitor -> Settings',
         effect: 'Waits before another switch attempt on the same channel.',
@@ -467,6 +489,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Channel Switch Limit',
+        controlType: 'Visible UI setting',
         defaultValue: '3 per channel per rolling hour',
         location: 'Shadow Monitor -> Settings',
         effect: 'Limits successful stream switches for one channel in a rolling hour.',
@@ -500,6 +523,7 @@ export const operatorHelpDetailTopics = [
     settings: [
       {
         name: 'Hardware Acceleration',
+        controlType: 'Visible UI setting',
         defaultValue: 'Off or operator-enabled',
         location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Enables FFmpeg hardware methods for stream analysis.',
@@ -508,6 +532,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Mode',
+        controlType: 'Visible UI setting',
         defaultValue: 'auto',
         location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Chooses which FFmpeg hardware method StreamFlow requests.',
@@ -516,6 +541,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Device',
+        controlType: 'Visible UI setting',
         defaultValue: 'Blank or device path',
         location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Optional FFmpeg device path or index used by the selected mode.',
@@ -524,6 +550,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'CPU Fallback',
+        controlType: 'Visible UI setting',
         defaultValue: 'On',
         location: 'Stream Checker -> Hardware Acceleration',
         effect: 'Retries analysis without hardware if FFmpeg rejects the hardware path.',

@@ -88,12 +88,14 @@ describe('operatorHelpSections', () => {
       for (const setting of topic.settings) {
         expect(setting).toEqual(expect.objectContaining({
           name: expect.any(String),
+          controlType: expect.any(String),
           defaultValue: expect.any(String),
           location: expect.any(String),
           effect: expect.any(String),
           useWhen: expect.any(String),
           risk: expect.any(String),
         }))
+        expect(['Visible UI setting', 'Container setting', 'Status/API']).toContain(setting.controlType)
       }
     }
 
