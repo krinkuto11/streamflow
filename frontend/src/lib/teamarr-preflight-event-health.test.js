@@ -38,6 +38,7 @@ describe('Teamarr event health alert helpers', () => {
       totalStreams: 1,
       deadStreams: 1,
     })
+    expect(alert.detail).toMatch(/quality\/dead-stream check/i)
     expect(alert.detail).toMatch(/No automatic check remains/i)
   })
 

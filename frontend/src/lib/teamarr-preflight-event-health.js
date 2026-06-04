@@ -28,7 +28,7 @@ export const getTeamarrEventHealthAlert = (event = {}, lastPreflightEvent = null
   return {
     severity: afterStart ? 'critical' : 'warning',
     label: 'No functional streams',
-    detail: `All ${totalStreams} checked ${plural(totalStreams, 'stream')} ${plural(totalStreams, 'is', 'are')} dead ${timingText}. ${scheduleText}`,
+    detail: `All ${totalStreams} checked ${plural(totalStreams, 'stream')} failed the preflight quality/dead-stream check ${timingText}. ${scheduleText}`,
     totalStreams,
     deadStreams,
     afterStart,
