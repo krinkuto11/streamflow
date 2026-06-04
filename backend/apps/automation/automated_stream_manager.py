@@ -3148,25 +3148,29 @@ class AutomatedStreamManager:
                         elif added_count > 0:
                             logger.debug(f"Skipped verification for channel {channel_id} (disabled in config)")
                         
-                        # Prepare detailed assignment info
-                        channel_assignment = {
-                            "channel_id": channel_id,
-                            "channel_name": channel_names.get(channel_id, f'Channel {channel_id}'),
-                            "logo_url": channel_logo_urls.get(channel_id),
-                            "stream_count": added_count,
-                            "streams": assignment_details[channel_id][:20],  # Limit to first 20 for changelog
-                            "added_to_session": False
-                        }
-                        detailed_assignments.append(channel_assignment)
+                        if added_count > 0:
+                            channel_assignment = {
+                                "channel_id": channel_id,
+                                "channel_name": channel_names.get(channel_id, f'Channel {channel_id}'),
+                                "logo_url": channel_logo_urls.get(channel_id),
+                                "stream_count": added_count,
+                                "streams": assignment_details[channel_id][:20],  # Limit to first 20 for changelog
+                                "added_to_session": False
+                            }
+                            detailed_assignments.append(channel_assignment)
                         
                         
                     except Exception as e:
                         logger.error(f"Failed to assign streams to channel {channel_id}: {e}")
             
+            accepted_assignment_count = {
+                channel_id: count
+                for channel_id, count in assignment_count.items()
+                if count > 0
+            }
+            total_assigned = sum(accepted_assignment_count.values())
+            accepted_channel_count = len(accepted_assignment_count)
             # Add comprehensive changelog entry
-            total_assigned = sum(assignment_count.values())
-            # Add comprehensive changelog entry
-            total_assigned = sum(assignment_count.values())
             if self.config.get("enabled_features", {}).get("changelog_tracking", True) and not skip_changelog:
                 # Limit detailed assignments to prevent oversized changelog entries
                 # Sort by stream count (descending) to show the most significant updates
@@ -3175,30 +3179,29 @@ class AutomatedStreamManager:
                 
                 self.changelog.add_entry("streams_assigned", {
                     "total_assigned": total_assigned,
-                    "channel_count": len(assignment_count),
+                    "channel_count": accepted_channel_count,
                     "assignments": sorted_assignments[:max_channels_in_changelog],
                     "has_more_channels": len(sorted_assignments) > max_channels_in_changelog,
                     "timestamp": datetime.now().isoformat()
                 })
             
-            logger.info(f"Stream discovery completed. Assigned {total_assigned} new streams across {len(assignment_count)} channels")
+            logger.info(f"Stream discovery completed. Assigned {total_assigned} new streams across {accepted_channel_count} channels")
             
             # Mark channels that received new streams for stream quality checking
-            if total_assigned > 0 and assignment_count:
+            if total_assigned > 0 and accepted_assignment_count:
                 try:
                     # Get updated stream counts for channels that received new streams
                     channel_ids_to_mark = []
                     stream_counts = {}
                     
-                    for channel_id in assignment_count.keys():
-                        if assignment_count[channel_id] > 0:
-                            channel_ids_to_mark.append(int(channel_id))
-                            # Avoid a post-write UDI/network fetch here. The checker
-                            # only needs a best-effort current count for its update
-                            # tracker, and we already know the pre-assignment set plus
-                            # how many streams Dispatcharr accepted.
-                            existing_streams = channel_streams.get(str(channel_id), set())
-                            stream_counts[int(channel_id)] = len(existing_streams) + int(assignment_count[channel_id])
+                    for channel_id, added_count in accepted_assignment_count.items():
+                        channel_ids_to_mark.append(int(channel_id))
+                        # Avoid a post-write UDI/network fetch here. The checker
+                        # only needs a best-effort current count for its update
+                        # tracker, and we already know the pre-assignment set plus
+                        # how many streams Dispatcharr accepted.
+                        existing_streams = channel_streams.get(str(channel_id), set())
+                        stream_counts[int(channel_id)] = len(existing_streams) + int(added_count)
                     
                     # Try to get stream checker service and mark channels
                     if channel_ids_to_mark:
@@ -3228,10 +3231,16 @@ class AutomatedStreamManager:
             if checking_only_channel_ids:
                 self._mark_checking_only_channels(checking_only_channel_ids, udi, skip_check_trigger)
             
+            accepted_assigned_stream_ids = {
+                str(channel_id): stream_ids
+                for channel_id, stream_ids in assignments.items()
+                if accepted_assignment_count.get(str(channel_id), 0) > 0
+            }
+
             return {
-                "assignment_count": assignment_count,
+                "assignment_count": accepted_assignment_count,
                 "assignment_details": detailed_assignments,
-                "assigned_stream_ids": dict(assignments)
+                "assigned_stream_ids": dict(accepted_assigned_stream_ids)
             }
             
         except Exception as e:

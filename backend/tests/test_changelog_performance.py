@@ -240,6 +240,53 @@ class TestChangelogPerformance(unittest.TestCase):
             
             # Channel count should be 5
             self.assertEqual(entry['details']['channel_count'], 5)
+
+    def test_changelog_ignores_zero_assignment_channels(self):
+        """Channels where Dispatcharr accepted no streams are not counted as updates."""
+        from apps.automation.automated_stream_manager import AutomatedStreamManager
+
+        channels = [
+            {'id': 0, 'name': 'Already Current', 'streams': []},
+            {'id': 1, 'name': 'New Streams', 'streams': []},
+        ]
+        streams = [
+            {'id': 100, 'name': 'Stream 100', 'group_title': 'Sports'},
+            {'id': 101, 'name': 'Stream 101', 'group_title': 'Sports'},
+        ]
+
+        def mock_assign(channel_id, stream_ids, **_kwargs):
+            return 0 if channel_id == 0 else 2
+
+        with self._discovery_context(
+            channels=channels,
+            streams=streams,
+            assign_mock=MagicMock(side_effect=mock_assign),
+        ):
+            manager = AutomatedStreamManager()
+            manager.config['enabled_features']['changelog_tracking'] = True
+            manager.regex_matcher.regex_config = {
+                'channels': [
+                    {
+                        'channel_id': str(channel['id']),
+                        'channel_name': channel['name'],
+                        'patterns': [r'.*'],
+                    }
+                    for channel in channels
+                ]
+            }
+
+            result = manager.discover_and_assign_streams()
+
+            recent_entries = manager.changelog.get_recent_entries(1)
+            entry = recent_entries[0]
+            self.assertEqual(entry['details']['total_assigned'], 2)
+            self.assertEqual(entry['details']['channel_count'], 1)
+            self.assertEqual(
+                [assignment['channel_id'] for assignment in entry['details']['assignments']],
+                ['1'],
+            )
+            self.assertEqual(result['assignment_count'], {'1': 2})
+            self.assertEqual(result['assigned_stream_ids'], {'1': [100, 101]})
     
     def test_changelog_entry_per_channel_stream_limit(self):
         """Test that each channel in changelog is limited to 20 streams."""

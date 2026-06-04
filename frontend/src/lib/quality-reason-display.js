@@ -42,6 +42,8 @@ const STATUS_REASON_FALLBACKS = {
   error: 'error',
 }
 
+const ACTIVE_STREAM_STATUSES = new Set(['checking', 'probing'])
+
 const STATIC_REASON_DETAILS = {
   viewer_preempted: 'Real playback kept the profile slot; check again later',
   active_viewers: 'Viewer protection kept the stream untouched',
@@ -156,6 +158,8 @@ const formatAnalysisFailureDetail = (context = {}) => {
 }
 
 export function getQualityReasonDisplay(stream = {}) {
+  if (ACTIVE_STREAM_STATUSES.has(stream.status)) return null
+
   const code = stream.quality_reason_detail
     || stream.reason_detail
     || STATUS_REASON_FALLBACKS[stream.status]

@@ -603,6 +603,7 @@ class StreamCheckQueue:
         # ETA Tracking variables
         import collections
         self.stream_processing_times = collections.deque(maxlen=100)
+        self.channel_processing_times = collections.deque(maxlen=100)
         self.channel_start_times = {}
         self.batch_started_at = None
         self.last_cleared_at = None
@@ -632,6 +633,8 @@ class StreamCheckQueue:
                 self.queued.clear()
                 self.queued_metadata.clear()
                 self.failed.clear()
+                self.stream_processing_times.clear()
+                self.channel_processing_times.clear()
                 self.batch_started_at = datetime.now()
                 self.last_cleared_at = None
                 self.last_clear_reason = None
@@ -761,6 +764,7 @@ class StreamCheckQueue:
             if channel_id in self.channel_start_times:
                 duration_sec = (datetime.now() - self.channel_start_times[channel_id]).total_seconds()
                 stream_count = self.in_progress.get(channel_id, 1)
+                self.channel_processing_times.append(duration_sec)
                 if stream_count > 0:
                     time_per_stream = duration_sec / stream_count
                     self.stream_processing_times.append(time_per_stream)
@@ -789,6 +793,8 @@ class StreamCheckQueue:
                 return False
 
             if channel_id in self.channel_start_times:
+                duration_sec = (datetime.now() - self.channel_start_times[channel_id]).total_seconds()
+                self.channel_processing_times.append(duration_sec)
                 del self.channel_start_times[channel_id]
                 
             if channel_id in self.in_progress:
@@ -818,6 +824,7 @@ class StreamCheckQueue:
                 'queued_streams_count': sum(self.queued.values()),
                 'in_progress_streams_count': sum(self.in_progress.values()),
                 'avg_stream_process_time_sec': sum(self.stream_processing_times) / len(self.stream_processing_times) if self.stream_processing_times else 0,
+                'avg_channel_process_time_sec': sum(self.channel_processing_times) / len(self.channel_processing_times) if self.channel_processing_times else 0,
                 
                 'current_channel': self.stats['current_channel'],
                 'total_queued': self.stats['total_queued'],
@@ -863,6 +870,8 @@ class StreamCheckQueue:
             self.completed.clear()
             self.failed.clear()
             self.channel_start_times.clear()
+            self.stream_processing_times.clear()
+            self.channel_processing_times.clear()
             self.batch_started_at = None
             self.stats = {
                 'total_queued': 0,

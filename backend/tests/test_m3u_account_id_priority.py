@@ -83,6 +83,58 @@ class TestM3uAccountIdPriority(unittest.TestCase):
 
         self.assertEqual([stream["stream_id"] for stream in sorted_streams], [2, 1])
 
+    def test_stream_sort_key_uses_playlist_then_score_mode(self):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        udi = Mock()
+        udi.get_stream_by_id.side_effect = lambda stream_id: {
+            1: {"id": 1, "m3u_account_id": 20},
+            2: {"id": 2, "m3u_account_id": 10},
+        }.get(stream_id)
+
+        low_score_priority_stream = {"stream_id": 1, "resolution": "1280x720", "score": 0.10}
+        high_score_secondary_stream = {"stream_id": 2, "resolution": "3840x2160", "score": 1.00}
+
+        with patch("apps.stream.stream_checker_service.get_udi_manager", return_value=udi):
+            sorted_streams = sorted(
+                [high_score_secondary_stream, low_score_priority_stream],
+                key=lambda stream: service._generate_stream_sort_key(
+                    stream,
+                    priority_m3u_ids=[20, 10],
+                    priority_mode="playlist_score",
+                ),
+            )
+
+        self.assertEqual([stream["stream_id"] for stream in sorted_streams], [1, 2])
+
+    def test_stream_sort_key_uses_score_then_playlist_tiebreaker_mode(self):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        udi = Mock()
+        udi.get_stream_by_id.side_effect = lambda stream_id: {
+            1: {"id": 1, "m3u_account_id": 20},
+            2: {"id": 2, "m3u_account_id": 10},
+            3: {"id": 3, "m3u_account_id": 10},
+        }.get(stream_id)
+
+        priority_tie_stream = {"stream_id": 1, "resolution": "1280x720", "score": 0.80}
+        secondary_tie_stream = {"stream_id": 2, "resolution": "3840x2160", "score": 0.80}
+        high_score_secondary_stream = {"stream_id": 3, "resolution": "1280x720", "score": 0.90}
+
+        with patch("apps.stream.stream_checker_service.get_udi_manager", return_value=udi):
+            sorted_streams = sorted(
+                [secondary_tie_stream, high_score_secondary_stream, priority_tie_stream],
+                key=lambda stream: service._generate_stream_sort_key(
+                    stream,
+                    priority_m3u_ids=[20, 10],
+                    priority_mode="score_playlist",
+                ),
+            )
+
+        self.assertEqual([stream["stream_id"] for stream in sorted_streams], [3, 1, 2])
+
     def test_udi_profile_lookup_accepts_m3u_account_id(self):
         from apps.udi.manager import UDIManager
 

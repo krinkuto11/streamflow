@@ -38,6 +38,17 @@ describe('getQualityReasonDisplay', () => {
     })
   })
 
+  it('hides stale wait reasons while a stream is actively checking', () => {
+    expect(getQualityReasonDisplay({
+      status: 'checking',
+      reason_detail: 'checking_capacity',
+    })).toBeNull()
+    expect(getQualityReasonDisplay({
+      status: 'probing',
+      quality_reason_detail: 'global_worker_limit',
+    })).toBeNull()
+  })
+
   it('uses explicit global-worker wording for queue capacity waits', () => {
     expect(getQualityReasonDisplay({
       reason_detail: 'global_worker_limit',

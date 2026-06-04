@@ -201,7 +201,7 @@ export default function AutomationProfileEditor() {
     }
 
     const streamPriorityMode = profile?.stream_checking?.m3u_priority_mode || 'absolute'
-    const playlistRankActive = ['absolute', 'same_resolution'].includes(streamPriorityMode)
+    const playlistRankActive = ['absolute', 'same_resolution', 'playlist_score', 'score_playlist'].includes(streamPriorityMode)
 
     return (
         <div className="max-w-4xl mx-auto space-y-8">
@@ -552,8 +552,10 @@ export default function AutomationProfileEditor() {
                                                     <SelectTrigger><SelectValue /></SelectTrigger>
                                                     <SelectContent>
                                                         <SelectItem value="absolute">Playlist Priority → Resolution → Score</SelectItem>
+                                                        <SelectItem value="playlist_score">Playlist Priority → Score</SelectItem>
                                                         <SelectItem value="same_resolution">Resolution → Playlist Priority → Score</SelectItem>
                                                         <SelectItem value="equal">Resolution → Score</SelectItem>
+                                                        <SelectItem value="score_playlist">Score → Playlist Priority</SelectItem>
                                                         <SelectItem value="quality">Score Only</SelectItem>
                                                     </SelectContent>
                                                 </Select>

@@ -5,6 +5,7 @@ import os
 import sys
 import threading
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
 from flask import Flask
@@ -157,6 +158,118 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
 
         check_queue.clear(reason='test_clear')
         self.assertIsNone(check_queue.get_status()['started_at'])
+
+    def test_queue_status_tracks_channel_duration_average(self):
+        check_queue = StreamCheckQueue(max_size=10)
+
+        self.assertTrue(check_queue.add_channel(106, priority=10, stream_count=4))
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 106)
+        with check_queue.lock:
+            check_queue.channel_start_times[106] = datetime.now() - timedelta(seconds=20)
+
+        self.assertTrue(check_queue.mark_completed(106))
+
+        status = check_queue.get_status()
+        self.assertGreaterEqual(status['avg_channel_process_time_sec'], 19)
+        self.assertGreaterEqual(status['avg_stream_process_time_sec'], 4)
+
+    def test_queue_eta_uses_channel_rate_as_conservative_floor(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: (
+            True if key == 'concurrent_streams.enabled'
+            else 10 if key == 'concurrent_streams.global_limit'
+            else {'global_limit': 10} if key == 'concurrent_streams'
+            else default
+        )
+        queue_status = {
+            'completed': 28,
+            'failed': 0,
+            'queued': 184,
+            'in_progress': 1,
+            'total_queued': 212,
+            'queued_streams_count': 3028,
+            'in_progress_streams_count': 19,
+            'avg_stream_process_time_sec': 6.31,
+            'avg_channel_process_time_sec': 113.3,
+        }
+
+        eta_seconds = service._calculate_queue_eta_seconds(queue_status)
+
+        self.assertGreaterEqual(eta_seconds, int(113.3 * 185))
+        self.assertEqual(queue_status['eta_basis'], 'channel')
+        self.assertGreater(queue_status['eta_channel_seconds'], queue_status['eta_stream_seconds'])
+
+    def test_queue_eta_uses_global_limit_for_stream_throughput(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: (
+            True if key == 'concurrent_streams.enabled'
+            else 4 if key == 'concurrent_streams.global_limit'
+            else {'global_limit': 4} if key == 'concurrent_streams'
+            else default
+        )
+        queue_status = {
+            'completed': 20,
+            'failed': 0,
+            'queued': 5,
+            'in_progress': 0,
+            'total_queued': 25,
+            'queued_streams_count': 100,
+            'in_progress_streams_count': 0,
+            'avg_stream_process_time_sec': 10,
+            'avg_channel_process_time_sec': 1,
+        }
+
+        eta_seconds = service._calculate_queue_eta_seconds(queue_status)
+
+        self.assertEqual(queue_status['eta_stream_seconds'], 250)
+        self.assertEqual(queue_status['eta_basis'], 'stream')
+        self.assertEqual(eta_seconds, 250)
+
+    def test_queue_eta_uses_elapsed_channel_rate_when_channel_average_missing(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: (
+            True if key == 'concurrent_streams.enabled'
+            else 20 if key == 'concurrent_streams.global_limit'
+            else {'global_limit': 20} if key == 'concurrent_streams'
+            else default
+        )
+        queue_status = {
+            'completed': 20,
+            'failed': 0,
+            'queued': 80,
+            'in_progress': 0,
+            'total_queued': 100,
+            'queued_streams_count': 800,
+            'in_progress_streams_count': 0,
+            'avg_stream_process_time_sec': 1,
+            'started_at': (datetime.now() - timedelta(hours=1)).isoformat(),
+        }
+
+        eta_seconds = service._calculate_queue_eta_seconds(queue_status)
+
+        self.assertGreaterEqual(eta_seconds, 80 * 180)
+        self.assertEqual(queue_status['eta_basis'], 'channel')
+        self.assertGreater(queue_status['eta_channel_seconds'], queue_status['eta_stream_seconds'])
+
+    def test_active_stream_reason_cleanup_removes_stale_wait_details(self):
+        stream_status = {
+            'id': 1,
+            'status': 'waiting_provider_limit',
+            'reason_detail': 'checking_capacity',
+            'quality_reason': 'provider_capacity',
+            'quality_reason_detail': 'checking_capacity',
+            'quality_reason_context': {'profile_id': 10},
+        }
+
+        StreamCheckerService._clear_active_stream_reason(stream_status)
+
+        self.assertNotIn('reason_detail', stream_status)
+        self.assertNotIn('quality_reason', stream_status)
+        self.assertNotIn('quality_reason_detail', stream_status)
+        self.assertNotIn('quality_reason_context', stream_status)
 
     def test_service_clear_queue_does_not_leave_abort_stuck_when_idle(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
@@ -493,6 +606,47 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(progress_events, [(1, 2, 'One'), (2, 2, 'Two')])
         self.assertEqual(sync_counts, [(2, 1, 0), (3, 1, 2)])
         self.assertFalse(service.sync_batch_state['active'])
+
+    def test_sync_batch_counts_blank_and_freeze_from_checked_streams_fallback(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.update_tracker = Mock()
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: True if key == 'concurrent_streams.enabled' else default
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel_concurrent = Mock(return_value={
+            'success': True,
+            'channel_name': 'Fallback',
+            'dead_streams_count': 2,
+            'checked_streams': [
+                {'id': 1, 'status': 'blank'},
+                {'id': 2, 'status': 'completed', 'freeze_detected': True},
+                {'id': 3, 'status': 'completed'},
+            ],
+        })
+
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {
+            'streams': [{'id': '101-a'}, {'id': '101-b'}, {'id': '101-c'}],
+        }
+        sync_counts = []
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            service.check_channels_synchronously(
+                [101],
+                progress_callback=lambda _completed, _total, _payload: sync_counts.append((
+                    service.sync_batch_state.get('dead_streams_count'),
+                    service.sync_batch_state.get('blank_streams_count'),
+                    service.sync_batch_state.get('freeze_streams_count'),
+                )),
+            )
+
+        self.assertEqual(sync_counts, [(2, 1, 1)])
 
 
 class TestStreamCheckerQueueHandlers(unittest.TestCase):
