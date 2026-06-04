@@ -2945,41 +2945,64 @@ export default function ChannelConfiguration() {
           <TabsContent value="groups" className="space-y-6">
             <Card>
               <CardHeader>
-                <div className="flex items-center justify-between">
+                <div className="flex items-start justify-between gap-4">
                   <div>
                     <CardTitle>Group Configuration</CardTitle>
                     <CardDescription>
                       Assign automation profiles and periods to channel groups. New channels added to a group will inherit these settings.
                     </CardDescription>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Select
-                      value={bulkGroupProfileId}
-                      onValueChange={setBulkGroupProfileId}
-                      disabled={selectedGroups.size === 0 || savingBulkGroupProfile}
-                    >
-                      <SelectTrigger className="h-8 w-[210px] text-xs">
-                        <SelectValue placeholder="Bulk profile..." />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="none">Remove profile assignment</SelectItem>
-                        {profiles.map((profile) => (
-                          <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={handleBulkAssignGroupProfile}
-                      disabled={selectedGroups.size === 0 || savingBulkGroupProfile || !bulkGroupProfileId}
-                      className="h-8"
-                    >
-                      {savingBulkGroupProfile ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserRound className="h-4 w-4" />}
-                    </Button>
+                  <div className="flex items-center gap-2 flex-shrink-0">
                     <Button variant="outline" size="sm" onClick={loadGroupsConfig} disabled={loadingGroupsConfig} className="h-8">
                       {loadingGroupsConfig ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
                     </Button>
+                  </div>
+                </div>
+                <div className="rounded-md border bg-muted/20 p-3">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <UserRound className="h-4 w-4" />
+                        Bulk Automation Profile
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Select one or more groups below, choose a profile, then apply it to all selected groups.
+                      </p>
+                    </div>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <Badge variant="secondary" className="h-8 justify-center px-3 text-xs">
+                        {selectedGroups.size} selected
+                      </Badge>
+                      <Select
+                        value={bulkGroupProfileId}
+                        onValueChange={setBulkGroupProfileId}
+                        disabled={savingBulkGroupProfile}
+                      >
+                        <SelectTrigger className="h-8 w-full sm:w-[240px] text-xs">
+                          <SelectValue placeholder="Choose profile" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">Remove profile assignment</SelectItem>
+                          {profiles.map((profile) => (
+                            <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleBulkAssignGroupProfile}
+                        disabled={selectedGroups.size === 0 || savingBulkGroupProfile || !bulkGroupProfileId}
+                        className="h-8 min-w-[170px]"
+                      >
+                        {savingBulkGroupProfile ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <UserRound className="mr-2 h-4 w-4" />
+                        )}
+                        Apply to selected groups
+                      </Button>
+                    </div>
                   </div>
                 </div>
               </CardHeader>
