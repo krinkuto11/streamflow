@@ -14,6 +14,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
 import { filterTeamarrEventsBySearch } from '@/lib/teamarr-preflight-event-search.js'
+import { getTeamarrNextAutomaticCheck } from '@/lib/teamarr-preflight-schedule.js'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import {
   Activity,
@@ -172,6 +173,14 @@ const eventCheckSummary = (event, lastPreflightEvent) => {
   if (lastPreflightEvent) return `Latest check: ${eventLabel(lastPreflightEvent.type)}`
   if (event?.state === 'already_attempted') return 'Latest check: attempted in current cooldown'
   return 'Latest check: not recorded'
+}
+
+const eventAutomaticCheckSummary = (event, config) => {
+  const nextCheck = getTeamarrNextAutomaticCheck(event, config)
+  if (!nextCheck) return ''
+  const bucket = nextCheck.bucket ? ` (${nextCheck.bucket})` : ''
+  if (!nextCheck.timestamp) return `${nextCheck.label}${bucket}`
+  return `${nextCheck.label}: ${formatDateTime(nextCheck.timestamp)}${bucket}`
 }
 
 const forceEventTooltip = (event) => {
@@ -860,6 +869,7 @@ export default function TeamarrPreflight() {
                     const lastPreflightEvent = event.last_preflight_event || null
                     const lastPreflightDetails = recentEventDetailParts(lastPreflightEvent)
                     const checkSummary = eventCheckSummary(event, lastPreflightEvent)
+                    const automaticCheckSummary = eventAutomaticCheckSummary(event, status?.config || config || editedConfig || {})
                     return (
                       <div key={`${event.identity}-${event.trigger_bucket || 'none'}`} className="rounded-md border border-border p-3">
                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -913,6 +923,11 @@ export default function TeamarrPreflight() {
                               ? `${checkSummary} at ${formatTimestamp(lastPreflightEvent.timestamp)}`
                               : checkSummary}
                           </span>
+                          {!lastPreflightEvent && automaticCheckSummary ? (
+                            <span className="basis-full text-xs text-muted-foreground">
+                              {automaticCheckSummary}
+                            </span>
+                          ) : null}
                           {lastPreflightEvent ? (
                             <>
                             {lastPreflightDetails.map(part => (
