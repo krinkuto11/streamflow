@@ -131,7 +131,7 @@ export default function OperatorHelp() {
                     <div>
                       <dt className="font-medium text-foreground">Where</dt>
                       <dd className="space-y-2">
-                        <span>{setting.location}</span>
+                        <span className="break-words">{setting.location}</span>
                         {(setting.locationTo || topic.settingsLocationTo) && (
                           <Button asChild variant="outline" size="sm" className="block w-fit">
                             <Link to={setting.locationTo || topic.settingsLocationTo}>

@@ -182,6 +182,7 @@ describe('operatorHelpSections', () => {
       'Changelog and logs',
     ]))
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').effect).toMatch(/timeout, connectivity, endpoint/i)
+    expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').effect).toMatch(/elapsed\/limit/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').useWhen).toMatch(/timeout values/)
     expect(troubleshooting.steps.join(' ')).toMatch(/smallest manual check/i)
     expect(troubleshooting.steps.join(' ')).toMatch(/reason-detail fields/i)
