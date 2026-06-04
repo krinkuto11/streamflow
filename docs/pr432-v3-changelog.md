@@ -75,6 +75,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Adds detailed `Where` locations for Settings and Controls cards.
 - Verifies Help setting locations against real visible UI paths.
 - Labels non-editable status, API, or backend-only values instead of presenting them as user-editable settings.
+- Adds a `Quality reason details` Status/API card with elapsed/limit, probe window, startup buffer, attempts, host, HTTP status, timeout seconds, and wrapped API-field paths.
 - Tracks screenshot guidance for future Help assets: crop tightly, optimize size, keep assets collapsible/lazy where useful, and avoid shipping raw full-screen proof captures.
 - Adds setup guidance for post-start event-channel checks, Shadow Monitor switch guard behavior, and post-setup smoke checks.
 
@@ -93,11 +94,11 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Focused backend and frontend tests have been run for each V3 slice before push.
 - Frontend production builds have passed after UI/help changes.
 - `git diff --check` has been kept clean apart from normal CRLF notices in the Windows workspace.
-- Current code head `38b6e09` passed `npm.cmd run test:ci -- startup-duration-display` and `npm.cmd run build` before push.
+- Current code head `b862b91` passed `npm.cmd run test:ci`, `npm.cmd run build`, and a local dark-mode `/help/troubleshooting` Playwright render before push.
 
 ### GitHub
 
-- PR checks for current code head `38b6e09` passed:
+- PR checks for current code head `b862b91` passed:
   - Backend smoke tests
   - Frontend build and tests
   - CodeQL Python analysis
@@ -106,9 +107,11 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 ### Image And Live
 
 - Test image tag: `ghcr.io/bttfw/streamflow:dashboard-manual-quality-stage-state`
-- Image workflow for current code head `38b6e09`: https://github.com/bttfw/streamflow/actions/runs/26920959495
-- Earlier V3 slices have been repeatedly deployed through the existing template/update path and smoke-tested live against API health, hardware status, Stream Checker status, Teamarr Preflight status/config, Shadow Monitor status, browser DOM checks, and post-deploy log scans.
-- The latest code-head live smoke for `38b6e09` should be recorded in this document and the PR body after the current image is deployed and checked.
+- Image workflow for current code head `b862b91`: https://github.com/bttfw/streamflow/actions/runs/26934807443
+- Manifest digest for current test image: `sha256:1e5bc7ee64f04f085c1986d08f5ff5bb0771ef125b102095a5d097b638000b02`
+- Current code head `b862b91` is live-loaded and smoke-tested against API health, initialization, hardware status, Stream Checker status, Teamarr Preflight status, Shadow Monitor status, Auto-Create-Rules, browser DOM checks, and post-deploy log scans.
+- Startup completed with 217526 streams, 212 channels, and 6 accounts in 104.407 seconds.
+- A 10-minute idle observation passed with 20 API samples, `bad_count=0`, no Stream Checker/Teamarr/Shadow last errors, an empty 12-minute log scan, and the service still healthy.
 
 ## Release Gate
 
@@ -118,4 +121,5 @@ This PR must remain draft until:
 - The latest image has completed multi-arch build and live smoke validation.
 - Help pages include the required platform-neutral setting explanations and verified locations.
 - Any shipped Help screenshots are cropped, optimized, and useful enough to justify image size.
+- Active-viewer Shadow Monitor observation still needs a real viewer or an explicitly approved synthetic viewer session.
 - Final release notes are reviewed and explicitly approved by the operator.
