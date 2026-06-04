@@ -433,10 +433,10 @@ export const operatorHelpDetailTopics = [
         reference: {
           imageSrc: '/help/teamarr-preflight-timing-dark.jpg',
           triggerLabel: 'UI Screenshot',
-          alt: 'Dark mode crop of Teamarr Preflight timing fields including preflight offset, retries, grace, cooldown, and post-start checks.',
-          caption: 'Preflight Offset is the main pre-start bucket; Pre-Start Retries and Post-Start Checks are comma-separated minute offsets.',
-          width: 492,
-          height: 249,
+          alt: 'Dark mode crop of Teamarr Preflight timing fields including Teamarr API poll interval, preflight offset, retries, grace, cooldown, and post-start checks.',
+          caption: 'Preflight Offset is the main pre-start bucket; Pre-Start Retries and Post-Start Checks are comma-separated minute offsets, with inline help under each timing field.',
+          width: 570,
+          height: 650,
         },
       },
       {
