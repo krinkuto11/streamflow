@@ -360,6 +360,7 @@ export const operatorHelpDetailTopics = [
       'Use post-start retry points at 2 minutes and 4 minutes after start for channels that only appear at kickoff or shortly after.',
       'Keep post-start grace at least as large as the largest post-start point; 5 minutes covers the 2-minute and 4-minute defaults.',
       'Use exclude filters for temporary suppression; leave include filters broad unless a narrow whitelist is intended.',
+      'Treat busy handling as two paths: regular automation can defer write/pipeline phases around event windows, while Stream Checker conflicts enter the event priority queue and still run later.',
       'Confirm active event checks and recent events before changing scoring rules.',
     ],
     settings: [
@@ -422,9 +423,9 @@ export const operatorHelpDetailTopics = [
         controlType: 'Visible UI setting',
         defaultValue: 'On',
         location: 'Teamarr Preflight -> Busy Handling',
-        effect: 'Defers or queues event checks when normal checker work is already active.',
-        useWhen: 'Keep on to avoid interrupting current stream work.',
-        risk: 'Turning it off can overload provider/profile capacity.',
+        effect: 'Separates automatic-run deferral from checker queueing: automation write/pipeline phases wait, while event checks blocked by Stream Checker capacity enter the priority queue.',
+        useWhen: 'Keep on so event checks are not silently dropped when normal stream work is already active.',
+        risk: 'Turning it off can overload provider/profile capacity or make kickoff checks race with regular maintenance.',
       },
     ],
     smokeChecks: [
@@ -433,6 +434,7 @@ export const operatorHelpDetailTopics = [
       'A post-start event can be classified due even if an earlier pre-start bucket already ran.',
       'A second post-start bucket can run at 4 minutes when the 2-minute bucket already ran.',
       'A 2-minute post-start check is skipped as past if post-start grace is only 1 minute, so keep grace larger than the post-start offsets.',
+      'A busy Stream Checker state shows queued or deferred event-check context instead of losing the event check.',
       'The default event profile keeps dead-stream removal off; enable destructive removal only after a dry event run proves the timing is reliable.',
     ],
     links: [

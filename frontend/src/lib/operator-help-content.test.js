@@ -121,6 +121,9 @@ describe('operatorHelpSections', () => {
     expect(teamarr.smokeChecks.join(' ')).toMatch(/2-minute post-start check/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/4 minutes/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/dead-stream removal off/i)
+    expect(teamarr.steps.join(' ')).toMatch(/automation can defer/i)
+    expect(teamarr.settings.find(setting => setting.name === 'Busy Handling').effect).toMatch(/priority queue/i)
+    expect(teamarr.smokeChecks.join(' ')).toMatch(/queued or deferred event-check context/i)
     const automation = getOperatorHelpDetailTopic('automation-periods')
     expect(automation.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Catch-up cap',
