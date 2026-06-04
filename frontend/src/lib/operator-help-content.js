@@ -58,6 +58,7 @@ export const operatorHelpSections = [
       'The selected quality profile defines the actual check rules for event channels.',
       'Post-start checks intentionally run after kickoff when event streams appear late.',
       'Busy stream-checker work is queued instead of silently dropping the event check.',
+      'Event priority only sorts waiting checks; it does not interrupt the channel currently being checked.',
       'Include and exclude filters should stay broad unless an operator needs a temporary override.',
     ],
     links: [
@@ -473,6 +474,15 @@ export const operatorHelpDetailTopics = [
         },
       },
       {
+        name: 'Event Priority Queue',
+        controlType: 'Status/API',
+        defaultValue: 'Teamarr event checks use high waiting priority',
+        location: 'Teamarr Preflight -> Active Event Checks and Stream Checker -> Settings -> Queue',
+        effect: 'Places due event checks ahead of normal waiting queue work while letting the currently active channel finish.',
+        useWhen: 'Use it to understand why a kickoff check waits briefly during an active quality run but still runs before lower-priority queued channels.',
+        risk: 'It is not a preemption switch. If an event must be checked after kickoff, use Post-Start Checks rather than expecting priority to stop an active probe.',
+      },
+      {
         name: 'Provider Limit Override',
         controlType: 'Visible UI setting',
         defaultValue: 'Off',
@@ -489,6 +499,7 @@ export const operatorHelpDetailTopics = [
       'A second post-start bucket can run at 4 minutes when the 2-minute bucket already ran.',
       'A 2-minute post-start check is skipped as past if post-start grace is only 1 minute, so keep grace larger than the post-start offsets.',
       'A busy Stream Checker state shows queued or deferred event-check context instead of losing the event check.',
+      'Queued event checks appear in Active Event Checks or Stream Checker queue context and run after the active channel, before lower-priority waiting work.',
       'Provider Limit Override still defers active-viewer events while allowing provider-slot deferrals to be intentionally bypassed.',
       'The default event profile keeps dead-stream removal off; enable destructive removal only after a dry event run proves the timing is reliable.',
     ],

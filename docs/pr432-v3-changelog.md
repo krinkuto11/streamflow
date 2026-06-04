@@ -45,6 +45,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Keeps active checks searchable in the Teamarr event list.
 - Surfaces post-start event-channel behavior in Help and Operational Notes.
 - Queues due Teamarr event checks when direct preflight capacity is already occupied, instead of hiding them until the next poll.
+- Documents that event priority sorts waiting checks only; it does not interrupt the channel currently being checked.
 
 ### Dashboard, Startup, And Automation Progress
 

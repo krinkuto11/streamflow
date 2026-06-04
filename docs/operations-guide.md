@@ -186,6 +186,8 @@ Key rules:
 - Include/exclude sport and league filters can restrict which managed events are
   preflighted.
 - The safest default is scoring/reorder only.
+- Teamarr event checks use high waiting priority, but priority only sorts work
+  that is still waiting. It does not stop the channel currently being checked.
 
 StreamFlow creates a `Teamarr Event Preflight` automation profile if it is
 missing. That default profile is intentionally conservative: no playlist
@@ -200,6 +202,12 @@ dead, blank, or freeze handling.
 Use retry offsets for events that receive streams shortly before start. For
 example, run a safe preflight 20 minutes before start and retry 10 minutes and
 3 minutes before start if the channel was not ready.
+
+Use post-start offsets for providers that publish or rename event channels at
+kickoff. The default post-start checks are 2 minutes and 4 minutes after start;
+keep post-start grace at least as large as the largest post-start offset. If the
+Stream Checker is already busy, the event check is queued ahead of lower-priority
+waiting work and runs after the active channel finishes.
 
 ## Hardware Acceleration
 
