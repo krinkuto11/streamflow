@@ -53,6 +53,7 @@ describe('operatorHelpSections', () => {
     const troubleshooting = operatorHelpSections.find(section => section.id === 'troubleshooting')
     expect(troubleshooting.items.join(' ')).toMatch(/After setup or image updates/)
     expect(troubleshooting.items.join(' ')).toMatch(/post-start checks/)
+    expect(troubleshooting.links.map(link => link.to)).toContain('/help/troubleshooting')
   })
 
   it('does not expose internal planning or priority wording', () => {
@@ -76,6 +77,7 @@ describe('operatorHelpSections', () => {
       'teamarr-preflight',
       'shadow-monitor',
       'hardware-fallback',
+      'troubleshooting',
     ])
 
     for (const topic of operatorHelpDetailTopics) {
@@ -129,6 +131,20 @@ describe('operatorHelpSections', () => {
     expect(getOperatorHelpDetailTopic('shadow-monitor').settings.map(setting => setting.name)).toContain('Channel Switch Limit')
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')
+    const troubleshooting = getOperatorHelpDetailTopic('troubleshooting')
+    expect(troubleshooting.settings.map(setting => setting.controlType)).toEqual(
+      troubleshooting.settings.map(() => 'Status/API'),
+    )
+    expect(troubleshooting.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
+      'Startup readiness',
+      'Stream Checker status',
+      'Hardware status',
+      'Teamarr Preflight status',
+      'Shadow Monitor status',
+      'Changelog and logs',
+    ]))
+    expect(troubleshooting.steps.join(' ')).toMatch(/smallest manual check/i)
+    expect(troubleshooting.smokeChecks.join(' ')).toMatch(/post-start buckets/i)
     expect(getOperatorHelpDetailTopic('missing-topic')).toBeNull()
 
     const visibleText = JSON.stringify(operatorHelpDetailTopics)
