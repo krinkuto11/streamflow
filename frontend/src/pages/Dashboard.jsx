@@ -83,6 +83,16 @@ const formatSecondsPerChannel = (seconds) => {
   return `${value >= 10 ? Math.round(value) : value.toFixed(1)} sec`
 }
 
+const getSecondsPerChannelBaselineLabel = (baseline) => {
+  if (baseline?.perChannelBaselineStable) {
+    return formatSecondsPerChannel(baseline.typicalSecondsPerChannel)
+  }
+  if ((baseline?.perChannelSampleCount || 0) > 0) {
+    return 'Mixed'
+  }
+  return 'N/A'
+}
+
 const formatTime = (value) => {
   if (!value) return 'N/A'
   const date = new Date(value)
@@ -1284,7 +1294,7 @@ export default function Dashboard() {
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <dt className="text-muted-foreground">Seconds / Channel:</dt>
-                  <dd><Badge variant="secondary">{formatSecondsPerChannel(runHistoryBaseline.typicalSecondsPerChannel)}</Badge></dd>
+                  <dd><Badge variant="secondary">{getSecondsPerChannelBaselineLabel(runHistoryBaseline)}</Badge></dd>
                 </div>
                 <div className="flex items-center justify-between gap-3">
                   <dt className="text-muted-foreground">Samples:</dt>

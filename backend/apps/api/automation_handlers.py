@@ -67,6 +67,8 @@ def get_recent_run_history_summary(limit: int = 5) -> Dict[str, Any]:
         "typical_duration_seconds": None,
         "average_duration_seconds": None,
         "typical_seconds_per_channel": None,
+        "per_channel_sample_count": 0,
+        "per_channel_baseline_stable": False,
     }
 
     try:
@@ -99,7 +101,8 @@ def get_recent_run_history_summary(limit: int = 5) -> Dict[str, Any]:
             per_channel = None
             if total_channels > 0:
                 per_channel = duration / total_channels
-                seconds_per_channel.append(per_channel)
+                if total_channels >= 10:
+                    seconds_per_channel.append(per_channel)
 
             runs.append(
                 {
@@ -117,17 +120,24 @@ def get_recent_run_history_summary(limit: int = 5) -> Dict[str, Any]:
         if not runs:
             return empty
 
+        per_channel_stable = False
+        typical_seconds_per_channel = None
+        if len(seconds_per_channel) >= 3:
+            fastest = min(seconds_per_channel)
+            slowest = max(seconds_per_channel)
+            per_channel_stable = fastest > 0 and (slowest / fastest) <= 5
+            if per_channel_stable:
+                typical_seconds_per_channel = round(median(seconds_per_channel), 3)
+
         return {
             "sample_count": len(runs),
             "runs": runs,
             "latest": runs[0],
             "typical_duration_seconds": round(median(durations), 3),
             "average_duration_seconds": round(sum(durations) / len(durations), 3),
-            "typical_seconds_per_channel": (
-                round(median(seconds_per_channel), 3)
-                if seconds_per_channel
-                else None
-            ),
+            "typical_seconds_per_channel": typical_seconds_per_channel,
+            "per_channel_sample_count": len(seconds_per_channel),
+            "per_channel_baseline_stable": per_channel_stable,
         }
     except Exception as exc:
         logger.debug(f"Could not build automation run history summary: {exc}")

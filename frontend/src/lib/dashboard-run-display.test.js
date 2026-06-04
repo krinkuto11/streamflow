@@ -414,6 +414,8 @@ describe('dashboard stream checker run display', () => {
         typical_duration_seconds: 90,
         average_duration_seconds: 100,
         typical_seconds_per_channel: 7.5,
+        per_channel_sample_count: 3,
+        per_channel_baseline_stable: true,
       },
     })).toEqual({
       available: true,
@@ -425,6 +427,8 @@ describe('dashboard stream checker run display', () => {
       typicalDurationSeconds: 90,
       averageDurationSeconds: 100,
       typicalSecondsPerChannel: 7.5,
+      perChannelSampleCount: 3,
+      perChannelBaselineStable: true,
     })
   })
 
@@ -436,6 +440,8 @@ describe('dashboard stream checker run display', () => {
       typicalDurationSeconds: null,
       averageDurationSeconds: null,
       typicalSecondsPerChannel: null,
+      perChannelSampleCount: 0,
+      perChannelBaselineStable: false,
     })
   })
 

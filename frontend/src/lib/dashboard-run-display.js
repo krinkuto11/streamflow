@@ -248,6 +248,8 @@ export const getRunHistoryBaseline = ({
       typicalDurationSeconds: null,
       averageDurationSeconds: null,
       typicalSecondsPerChannel: null,
+      perChannelSampleCount: 0,
+      perChannelBaselineStable: false,
     }
   }
 
@@ -258,6 +260,8 @@ export const getRunHistoryBaseline = ({
     typicalDurationSeconds: finiteNumber(summary.typical_duration_seconds),
     averageDurationSeconds: finiteNumber(summary.average_duration_seconds),
     typicalSecondsPerChannel: finiteNumber(summary.typical_seconds_per_channel),
+    perChannelSampleCount: finiteNumber(summary.per_channel_sample_count) ?? 0,
+    perChannelBaselineStable: Boolean(summary.per_channel_baseline_stable),
   }
 }
 
