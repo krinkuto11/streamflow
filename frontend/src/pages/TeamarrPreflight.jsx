@@ -31,11 +31,11 @@ import {
 } from 'lucide-react'
 
 const numberFields = [
-  { key: 'poll_interval_seconds', label: 'Poll Interval', suffix: 'sec', min: 15, max: 3600 },
-  { key: 'preflight_offset_minutes', label: 'Preflight Offset', suffix: 'min', min: 1, max: 360 },
-  { key: 'post_start_grace_minutes', label: 'Post Start Grace', suffix: 'min', min: 0, max: 120 },
-  { key: 'max_concurrent_checks', label: 'Concurrent Checks', suffix: 'max', min: 1, max: 10 },
-  { key: 'event_cooldown_minutes', label: 'Event Cooldown', suffix: 'min', min: 1, max: 10080 },
+  { key: 'poll_interval_seconds', label: 'Teamarr API Poll Interval', suffix: 'sec', min: 15, max: 3600, description: 'How often StreamFlow reads Teamarr events. 30-60 sec keeps narrow event windows reliable.' },
+  { key: 'preflight_offset_minutes', label: 'Preflight Offset', suffix: 'min', min: 1, max: 360, description: 'Main automatic check before start. 20 means the first check becomes due around -20 min.' },
+  { key: 'post_start_grace_minutes', label: 'Post Start Grace', suffix: 'min', min: 0, max: 120, description: 'How long after start post-start offsets can still run.' },
+  { key: 'max_concurrent_checks', label: 'Concurrent Checks', suffix: 'max', min: 1, max: 10, description: 'Maximum Teamarr event checks running at the same time.' },
+  { key: 'event_cooldown_minutes', label: 'Event Cooldown', suffix: 'min', min: 1, max: 10080, description: 'Prevents the same event bucket from repeating after it already ran.' },
 ]
 
 const eventLabels = {
@@ -768,15 +768,22 @@ export default function TeamarrPreflight() {
                     />
                     <span className="w-14 text-sm text-muted-foreground">{field.suffix}</span>
                   </div>
+                  <p className="text-xs leading-snug text-muted-foreground">{field.description}</p>
                 </div>
               ))}
               <div className="space-y-2">
                 <Label>Pre-Start Retries</Label>
                 <Input value={retryOffsets} onChange={(event) => setRetryOffsets(event.target.value)} />
+                <p className="text-xs leading-snug text-muted-foreground">
+                  Comma-separated minutes before start, for example 10, 3. Each value is one extra check bucket and should be less than or equal to Preflight Offset.
+                </p>
               </div>
               <div className="space-y-2">
                 <Label>Post-Start Checks</Label>
                 <Input value={postStartOffsets} onChange={(event) => setPostStartOffsets(event.target.value)} />
+                <p className="text-xs leading-snug text-muted-foreground">
+                  Comma-separated minutes after start, for example 2, 4. These only run while the event is still inside Post Start Grace.
+                </p>
               </div>
             </div>
 
@@ -803,8 +810,12 @@ export default function TeamarrPreflight() {
                       <p>Automation phases defer event checks; Stream Checker conflicts enter the server-side priority queue and continue after the current channel.</p>
                     </div>
                     <div>
+                      <p className="font-medium text-foreground">Timing Fields</p>
+                      <p>Offset fields are check times, not continuous monitoring. Poll interval controls how often Teamarr is read.</p>
+                    </div>
+                    <div>
                       <p className="font-medium text-foreground">Post-Start Checks</p>
-                      <p>Use two post-start offsets, such as 2 and 4 minutes, when event channels appear at kickoff or a few minutes after the scheduled start.</p>
+                      <p>Use post-start offsets such as 2 and 4 minutes when event channels appear at kickoff or shortly after.</p>
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Event Status</p>

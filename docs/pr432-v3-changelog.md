@@ -35,6 +35,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Adds managed-event preflight filters and operator UX refinements.
 - Shows selected quality profile behavior directly in Teamarr Preflight, including Quality Check, Dead Removal, Blank Detection, Freeze Detection, and Loop Check.
 - Splits timing guidance into explicit buckets: main preflight at `-20 min`, pre-start retries at `-10 min` and `-3 min`, and post-start checks at `+2 min` and `+4 min`.
+- Clarifies that `Poll Interval` is the Teamarr API polling interval, while `Pre-Start Retries` and `Post-Start Checks` are comma-separated minute offsets rather than continuous monitoring.
 - Adds `post_start_offsets_minutes=[2,4]` for new default configs without silently changing already-saved configs.
 - Adds shared search, filtered counts, empty search states, and larger managed/recent event windows.
 - Keeps up to 1000 managed Teamarr event candidates in backend status and shows the first 100 in the UI with a `Show all` option for large schedules.

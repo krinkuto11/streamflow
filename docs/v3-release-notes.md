@@ -50,6 +50,8 @@ template update path.
 
 - `Post-Start Checks` in Teamarr Preflight lets event checks run after game
   start when event channels appear late.
+- Teamarr Preflight timing fields now explain that the poll interval reads the
+  Teamarr API, while pre-start and post-start retry fields are minute offsets.
 - Teamarr scheduled event cards now show `Next auto check` and expose the
   manual one-time action as `Force Check`.
 - `Pre-Start Retries` no longer makes a shorter preflight offset trigger early.
