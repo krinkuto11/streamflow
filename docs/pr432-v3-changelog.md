@@ -114,11 +114,12 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - `git diff --check` has been kept clean apart from normal CRLF notices in the Windows workspace.
 - The functional Help follow-up head passed `npm.cmd run test:ci`, `npm.cmd run build`, and a local dark-mode `/help/troubleshooting` Playwright render before push.
 - The latest DRI/Teamarr/catch-up/session head passed focused backend tests, full frontend Vitest, frontend production build, and the full backend suite with 1094 passed, 2 skipped.
-- Current head `4b151df` passed `python -m pytest tests/test_teamarr_preflight_service.py -q`, `npm.cmd test -- teamarr-preflight-schedule.test.js --run`, `npm.cmd run build`, `python scripts/run_ci_checks.py`, and full `npm.cmd run test:ci` with 117 frontend tests.
+- Feature-change head `4b151df` passed `python -m pytest tests/test_teamarr_preflight_service.py -q`, `npm.cmd test -- teamarr-preflight-schedule.test.js --run`, `npm.cmd run build`, `python scripts/run_ci_checks.py`, and full `npm.cmd run test:ci` with 117 frontend tests.
 
 ### GitHub
 
-- PR checks passed on current head `4b151df`:
+- PR checks passed on the feature-change head and were rerun after documentation
+  refreshes:
   - Backend smoke tests
   - Frontend build and tests
   - CodeQL Python analysis
@@ -127,8 +128,6 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 ### Image And Live
 
 - Test image tag: `ghcr.io/bttfw/streamflow:dashboard-manual-quality-stage-state`
-- Current image build: https://github.com/bttfw/streamflow/actions/runs/26963161477
-- Current manifest digest: `sha256:6f1630e43d1327d36b21a4ffdb6189a2eaaa2b6e5ddb0d5fe3e101e5633603a3`
 - The PR body tracks the mutable current image build URL, manifest digest, and deployed commit for external testing.
 - Current V3 test images have been live-loaded and smoke-tested against API health, initialization, hardware status, Stream Checker status, Teamarr Preflight status, Shadow Monitor status, Auto-Create-Rules, browser DOM checks, and post-deploy log scans.
 - Recent live smoke completed with 217513 streams, 220 channels, and 6 accounts loaded.

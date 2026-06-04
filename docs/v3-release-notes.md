@@ -73,8 +73,9 @@ template update path.
 ## Validation Snapshot
 
 - Backend focused tests, frontend Vitest, production build, and the repository CI
-  helper passed on current head `4b151df`.
-- GitHub Tests and CodeQL passed on current head `4b151df`.
+  helper passed on feature-change head `4b151df`.
+- GitHub Tests and CodeQL passed on the feature-change head and were rerun after
+  documentation refreshes.
 - The branch image was rebuilt for AMD64 and ARM64, then live-loaded through the
   existing template update path.
 - Live API smoke passed for health, version, initialization status, automation,
