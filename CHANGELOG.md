@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+### Added
+- **StreamFlow V3 reliability stack** - Draft-gated work for provider/profile-aware Stream Checker capacity, Teamarr managed-event preflight, Shadow Monitor continuity, startup progress, hardware diagnostics, and in-app operator Help.
+- **Detailed V3 changelog** - Added `docs/pr432-v3-changelog.md` so PR #432 has a readable branch-level changelog and validation record instead of relying on an oversized PR body.
+
+### Changed
+- **Operator-facing progress and setup wording** - Clarified Stream Checker ETA labels, dashboard run counters, startup duration estimates, Teamarr timing buckets, Shadow Monitor switch limits, and Help `Where` locations.
+- **Help and setup guidance** - Keeps V3 Help platform neutral, points settings to visible UI or explicit status/API locations, and requires future screenshot assets to be cropped, optimized, and collapsible where useful.
+
+### Fixed
+- **V3 reliability fixes** - Preserves active batch dead/blank/freeze counters, avoids misleading DRI hardware warnings, improves Teamarr post-start checks, validates auto-create group previews across channels, and keeps real-viewer wording distinct from watcher probes.
+
 
 ## [2.5.6] - 2026-05-07
 
