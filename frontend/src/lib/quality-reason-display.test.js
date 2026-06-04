@@ -28,6 +28,26 @@ describe('getQualityReasonDisplay', () => {
     })
   })
 
+  it('uses explicit checker-capacity wording for account/profile slot waits', () => {
+    expect(getQualityReasonDisplay({
+      reason_detail: 'checking_capacity',
+    })).toEqual({
+      code: 'checking_capacity',
+      text: 'Check slots full: The checker has no free slot for this account or profile yet',
+      title: 'checking_capacity: The checker has no free slot for this account or profile yet',
+    })
+  })
+
+  it('uses explicit global-worker wording for queue capacity waits', () => {
+    expect(getQualityReasonDisplay({
+      reason_detail: 'global_worker_limit',
+    })).toEqual({
+      code: 'global_worker_limit',
+      text: 'Global workers full: The global Stream Checker worker limit is full',
+      title: 'global_worker_limit: The global Stream Checker worker limit is full',
+    })
+  })
+
   it('falls back to viewer-preempted status wording when no detail exists', () => {
     expect(getQualityReasonDisplay({
       status: 'viewer_preempted',

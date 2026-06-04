@@ -20,6 +20,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 
 - Adds provider/profile-aware slot reservation for stream checks.
 - Shows per-account profile slot usage and reserved profile names during Stream Checker progress.
+- Adds safe profile-slot ID and limit details to Stream Checker tooltips without exposing credentials.
 - Lets real viewers preempt quality probes when the viewer needs the slot.
 - Cleans up manual quality queue progress and stage semantics.
 - Honors both `m3u_account_id` and legacy `m3u_account` stream payloads for UDI indexes, slot reservation, and stream sorting.
@@ -36,6 +37,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Adds `post_start_offsets_minutes=[2,4]` for new default configs without silently changing already-saved configs.
 - Adds shared search, filtered counts, empty search states, and larger managed/recent event windows.
 - Shows active event checks with event, channel, bucket, and start-time context.
+- Shows active event-check runtime so long-running Teamarr checks are easier to spot.
 - Keeps active checks searchable in the Teamarr event list.
 - Surfaces post-start event-channel behavior in Help and Operational Notes.
 
@@ -76,6 +78,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Verifies Help setting locations against real visible UI paths.
 - Labels non-editable status, API, or backend-only values instead of presenting them as user-editable settings.
 - Adds a `Quality reason details` Status/API card with elapsed/limit, probe window, startup buffer, attempts, host, HTTP status, timeout seconds, and wrapped API-field paths.
+- Uses explicit operator wording for checker-capacity and global-worker quality reasons instead of raw fallback codes.
 - Tracks screenshot guidance for future Help assets: crop tightly, optimize size, keep assets collapsible/lazy where useful, and avoid shipping raw full-screen proof captures.
 - Adds setup guidance for post-start event-channel checks, Shadow Monitor switch guard behavior, and post-setup smoke checks.
 

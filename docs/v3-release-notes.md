@@ -11,7 +11,8 @@ template update path.
 ## Highlights
 
 - Stream Checker now reserves provider/profile capacity more explicitly and keeps
-  real viewer activity protected from quality probes.
+  real viewer activity protected from quality probes. Profile-slot tooltips now
+  include safe ID and limit details for debugging without exposing credentials.
 - Dashboard and Stream Checker progress wording now separates learning ETA,
   early ETA, no-due idle state, refresh requests, cache sync, stream matching,
   queueing, and quality-check stages.
@@ -19,7 +20,7 @@ template update path.
   keep skipped M3U refresh/cache sync stages visibly neutral.
 - Teamarr-managed event checks support queued event preflights, manual checks for
   past events, event/channel/date matching, post-start checks after game start,
-  and focused operator controls.
+  active-check runtime visibility, and focused operator controls.
 - Automation periods now include startup catch-up, missed-run grace,
   missed-run skip history, a global catch-up cap, and a maintenance window for
   automatic runs.

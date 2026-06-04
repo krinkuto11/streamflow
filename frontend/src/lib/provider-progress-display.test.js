@@ -56,7 +56,7 @@ describe('getProviderWaitReasonDisplay', () => {
     })).toMatchObject({
       id: 50,
       text: 'Sibling: 2/2',
-      title: 'Sibling: 1 viewer, 1 checking, 0 free',
+      title: 'Sibling, ID 50, 1 viewer, 1 checking, 0 free',
       full: true,
     })
   })
@@ -69,7 +69,7 @@ describe('getProviderWaitReasonDisplay', () => {
       active_viewers: 0,
     })).toMatchObject({
       text: 'Default: open',
-      title: 'Default: 0 viewer, 2 checking, unlimited capacity',
+      title: 'Default, 0 viewer, 2 checking, unlimited capacity',
       unlimited: true,
     })
   })

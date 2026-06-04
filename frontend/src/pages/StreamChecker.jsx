@@ -759,6 +759,11 @@ export default function StreamChecker() {
                           }
                           const qualityReason = getQualityReasonDisplay(stream)
                           const showMeasuredSpecs = ['completed', 'loop_detected', 'low_quality', 'dead', 'blank', 'freeze'].includes(stream.status)
+                          const reservedProfileTitle = [
+                            stream.reserved_profile_name ? `Profile: ${stream.reserved_profile_name}` : null,
+                            stream.reserved_profile_id != null ? `ID: ${stream.reserved_profile_id}` : null,
+                            stream.reserved_profile_limit != null ? `Limit: ${stream.reserved_profile_limit || 'unlimited'}` : null,
+                          ].filter(Boolean).join(' | ')
 
                           return (
                             <tr key={stream.id} className="hover:bg-muted/50 transition-colors bg-card">
@@ -779,7 +784,7 @@ export default function StreamChecker() {
                                 {stream.reserved_profile_name && (
                                   <div
                                     className="text-[10px] text-muted-foreground/80 max-w-[150px] truncate"
-                                    title={`Profile: ${stream.reserved_profile_name}`}
+                                    title={reservedProfileTitle}
                                   >
                                     {stream.reserved_profile_name}
                                   </div>

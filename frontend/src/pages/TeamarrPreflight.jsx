@@ -119,6 +119,12 @@ const formatOffset = (seconds) => {
   return `${sign}${secs}s`
 }
 
+const formatElapsedSince = (timestamp) => {
+  if (!timestamp) return 'N/A'
+  const elapsed = Math.max(0, Math.floor(Date.now() / 1000 - Number(timestamp)))
+  return formatOffset(elapsed)
+}
+
 const eventLabel = (type) => eventLabels[type] || type || 'Unknown'
 const stateLabel = (state) => stateLabels[state] || state || 'Unknown'
 const forceableStates = new Set(['due', 'scheduled', 'already_attempted', 'past'])
@@ -935,7 +941,7 @@ export default function TeamarrPreflight() {
                         <Badge variant="secondary">{check.bucket || 'manual'}</Badge>
                       </div>
                       <p className="mt-2 text-xs text-muted-foreground">
-                        Started {formatTimestamp(check.started_at)}
+                        Started {formatTimestamp(check.started_at)} - running {formatElapsedSince(check.started_at)}
                       </p>
                     </div>
                   ))}

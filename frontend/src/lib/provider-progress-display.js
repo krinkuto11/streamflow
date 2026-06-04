@@ -33,6 +33,7 @@ export function getProviderWaitReasonDisplay(provider = {}) {
 
 export function getProfileSlotDisplay(slot = {}) {
   const name = slot.name || (slot.id != null ? `Profile ${slot.id}` : 'Profile')
+  const idText = slot.id != null ? `ID ${slot.id}` : null
   const activeViewers = Number(slot.active_viewers || 0)
   const checking = Number(slot.checking || 0)
   const used = Number(slot.used ?? (activeViewers + checking))
@@ -49,7 +50,9 @@ export function getProfileSlotDisplay(slot = {}) {
     id: slot.id,
     name,
     text: `${name}: ${capacityText}`,
-    title: `${name}: ${activeViewers} viewer, ${checking} checking, ${freeText}`,
+    title: [name, idText, `${activeViewers} viewer`, `${checking} checking`, freeText]
+      .filter(Boolean)
+      .join(', '),
     full: Boolean(slot.full),
     checking,
     activeViewers,
