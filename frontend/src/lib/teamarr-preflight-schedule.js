@@ -1,7 +1,13 @@
 const DEFAULT_PREFLIGHT_OFFSET_MINUTES = 20
 
+const minuteValues = (values = []) => {
+  if (Array.isArray(values)) return values
+  if (values === null || values === undefined || values === '') return []
+  return [values]
+}
+
 const positiveMinutes = (values = []) => (
-  values
+  minuteValues(values)
     .map(value => Number(value))
     .filter(value => Number.isFinite(value) && value > 0)
 )

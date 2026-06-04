@@ -170,6 +170,8 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(config["include_sports"], ["soccer"])
         self.assertEqual(config["exclude_leagues"], ["mlb"])
         self.assertEqual(normalize_config({})["post_start_offsets_minutes"], [2, 4])
+        self.assertEqual(normalize_config({"retry_offsets_minutes": "3"})["retry_offsets_minutes"], [3])
+        self.assertEqual(normalize_config({"post_start_offsets_minutes": 2})["post_start_offsets_minutes"], [2])
         self.assertFalse(normalize_config({})["provider_limit_override"])
         self.assertTrue(normalize_config({"provider_limit_override": True})["provider_limit_override"])
 

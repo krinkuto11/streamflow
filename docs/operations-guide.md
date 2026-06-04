@@ -205,15 +205,19 @@ miss narrow windows such as a 1-minute preflight offset or a short post-start
 grace.
 
 `Preflight Offset` is the main automatic check before event start. `Pre-Start
-Retries` are comma-separated minute offsets before start, not a retry count. For
-example, run a safe preflight 20 minutes before start and retry 10 minutes and
-3 minutes before start if the channel was not ready.
+Retries` are one or more minute offsets before start, not a retry count. A
+single value such as `3` is valid; multiple values such as `10,3` create
+multiple extra buckets. For example, run a safe preflight 20 minutes before
+start and retry 10 minutes and 3 minutes before start if the channel was not
+ready.
 
-`Post-Start Checks` are comma-separated minute offsets after start for providers
-that publish or rename event channels at kickoff. The default post-start checks
-are 2 minutes and 4 minutes after start; keep post-start grace at least as large
-as the largest post-start offset and wide enough for the poll interval. If the
-Stream Checker is already busy, the event check is queued ahead of lower-priority
+`Post-Start Checks` are one or more minute offsets after start for providers
+that publish or rename event channels at kickoff. A single value such as `2` is
+valid; multiple values such as `2,4` create multiple post-start buckets. The
+default post-start checks are 2 minutes and 4 minutes after start; keep
+post-start grace at least as large as the largest post-start offset and wide
+enough for the poll interval. If the Stream Checker is already busy, the event
+check is queued ahead of lower-priority
 waiting work and runs after the active channel finishes.
 
 ## Hardware Acceleration

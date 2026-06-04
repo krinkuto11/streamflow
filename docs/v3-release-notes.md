@@ -52,8 +52,10 @@ template update path.
   start when event channels appear late.
 - Teamarr Preflight timing fields now explain that the poll interval reads the
   Teamarr API, while pre-start and post-start retry fields are minute offsets.
-- `Pre-Start Retries` remains an offset list, not a retry count; V3 clarifies
-  the UI/Help wording instead of changing the saved timing semantics.
+- `Pre-Start Retries` remains an offset list, not a retry count; a single value
+  such as `3` is valid, and multiple values can be entered as `10,3`.
+- `Post-Start Checks` also accepts a single value such as `2` or multiple values
+  such as `2,4`.
 - Teamarr scheduled event cards now show `Next auto check` and expose the
   manual one-time action as `Force Check`.
 - `Pre-Start Retries` no longer makes a shorter preflight offset trigger early.

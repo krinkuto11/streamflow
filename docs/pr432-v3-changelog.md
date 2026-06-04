@@ -38,7 +38,7 @@ and deployed commit for external testing.
 - Adds managed-event preflight filters and operator UX refinements.
 - Shows selected quality profile behavior directly in Teamarr Preflight, including Quality Check, Dead Removal, Blank Detection, Freeze Detection, and Loop Check.
 - Splits timing guidance into explicit buckets: main preflight at `-20 min`, pre-start retries at `-10 min` and `-3 min`, and post-start checks at `+2 min` and `+4 min`.
-- Clarifies that `Teamarr API Poll Interval` controls how often StreamFlow reads Teamarr, while `Pre-Start Retries` and `Post-Start Checks` remain comma-separated minute offsets rather than counts or continuous monitoring.
+- Clarifies that `Teamarr API Poll Interval` controls how often StreamFlow reads Teamarr, while `Pre-Start Retries` and `Post-Start Checks` accept one or more minute offsets rather than counts or continuous monitoring.
 - Adds `post_start_offsets_minutes=[2,4]` for new default configs without silently changing already-saved configs.
 - Adds shared search, filtered counts, empty search states, and larger managed/recent event windows.
 - Keeps up to 1000 managed Teamarr event candidates in backend status and shows the first 100 in the UI with a `Show all` option for large schedules.

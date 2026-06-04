@@ -775,14 +775,14 @@ export default function TeamarrPreflight() {
                 <Label>Pre-Start Retries</Label>
                 <Input value={retryOffsets} onChange={(event) => setRetryOffsets(event.target.value)} />
                 <p className="text-xs leading-snug text-muted-foreground">
-                  Comma-separated minutes before start, for example 10, 3. Each value is one extra check bucket and should be less than or equal to Preflight Offset.
+                  One or more minutes before start, for example 3 or 10, 3. Each value is one extra check bucket and should be less than or equal to Preflight Offset.
                 </p>
               </div>
               <div className="space-y-2">
                 <Label>Post-Start Checks</Label>
                 <Input value={postStartOffsets} onChange={(event) => setPostStartOffsets(event.target.value)} />
                 <p className="text-xs leading-snug text-muted-foreground">
-                  Comma-separated minutes after start, for example 2, 4. These only run while the event is still inside Post Start Grace.
+                  One or more minutes after start, for example 2 or 2, 4. These only run while the event is still inside Post Start Grace.
                 </p>
               </div>
             </div>
@@ -815,7 +815,7 @@ export default function TeamarrPreflight() {
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Post-Start Checks</p>
-                      <p>Use post-start offsets such as 2 and 4 minutes when event channels appear at kickoff or shortly after.</p>
+                      <p>Use one post-start offset such as 2 minutes, or multiple offsets such as 2 and 4 minutes, when event channels appear at kickoff or shortly after.</p>
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Event Status</p>

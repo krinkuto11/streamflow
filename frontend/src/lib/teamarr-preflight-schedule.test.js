@@ -43,6 +43,36 @@ describe('Teamarr preflight schedule helpers', () => {
     })
   })
 
+  it('accepts a single pre-start retry offset value', () => {
+    expect(getTeamarrNextAutomaticCheck({
+      event_date: '2026-06-05T00:00:00Z',
+      seconds_to_start: 181,
+      state: 'already_attempted',
+    }, {
+      preflight_offset_minutes: 20,
+      retry_offsets_minutes: '3',
+      post_start_offsets_minutes: [],
+    })).toMatchObject({
+      bucket: '-3m',
+      timestamp: '2026-06-04T23:57:00.000Z',
+    })
+  })
+
+  it('accepts a single post-start check offset value', () => {
+    expect(getTeamarrNextAutomaticCheck({
+      event_date: '2026-06-05T00:00:00Z',
+      seconds_to_start: -60,
+      state: 'scheduled',
+    }, {
+      preflight_offset_minutes: 20,
+      retry_offsets_minutes: [],
+      post_start_offsets_minutes: '2',
+    })).toMatchObject({
+      bucket: '+2m',
+      timestamp: '2026-06-05T00:02:00.000Z',
+    })
+  })
+
   it('marks due events as due now', () => {
     expect(getTeamarrNextAutomaticCheck({
       event_date: '2026-06-05T00:00:00Z',
