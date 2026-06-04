@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { getTeamarrAutomaticCheck, getTeamarrNextAutomaticCheck } from './teamarr-preflight-schedule'
+import {
+  getTeamarrAutomaticCheck,
+  getTeamarrNextAutomaticCheck,
+  getTeamarrSchedulePreview,
+  getTeamarrTimingWarnings,
+} from './teamarr-preflight-schedule'
 
 describe('Teamarr preflight schedule helpers', () => {
   const config = {
@@ -99,5 +104,39 @@ describe('Teamarr preflight schedule helpers', () => {
       seconds_to_start: 35092,
       state: 'scheduled',
     }, config)).toBe(backendCheck)
+  })
+
+  it('builds a timing preview from all configured buckets', () => {
+    const preview = getTeamarrSchedulePreview({
+      event_date: '2026-06-05T00:00:00Z',
+    }, {
+      ...config,
+      post_start_grace_minutes: 4,
+    })
+
+    expect(preview.items.map(item => [item.bucket, item.label])).toEqual([
+      ['-20m', 'Preflight Offset'],
+      ['-10m', 'Pre-start check'],
+      ['-3m', 'Pre-start check'],
+      ['+2m', 'Post-start check'],
+      ['+4m', 'Post-start check'],
+    ])
+    expect(preview.items[0].timestamp).toBe('2026-06-04T23:40:00.000Z')
+  })
+
+  it('warns about ignored buckets and wide polling intervals', () => {
+    const warnings = getTeamarrTimingWarnings({
+      preflight_offset_minutes: 5,
+      retry_offsets_minutes: [10, 3],
+      post_start_offsets_minutes: [2, 6],
+      post_start_grace_minutes: 4,
+      poll_interval_seconds: 240,
+    })
+
+    expect(warnings.map(warning => warning.code)).toEqual([
+      'retry_after_preflight_offset',
+      'post_start_outside_grace',
+      'poll_interval_wider_than_bucket_gap',
+    ])
   })
 })

@@ -385,7 +385,7 @@ export const operatorHelpDetailTopics = [
     },
     steps: [
       'Select the quality profile that represents event-channel check rules.',
-      'Keep Teamarr API Poll Interval short enough for your timing windows; 30-60 seconds is the normal range.',
+      'Keep Teamarr Poll Interval short enough for your timing windows; 30-60 seconds is the normal range.',
       'Use the main preflight at 20 minutes before start for early, already-published event channels.',
       'Use Pre-Start Retries as one or more minute offsets before start, such as 3 or 10 and 3 minutes, for late renames before kickoff.',
       'Use Post-Start Checks as one or more minute offsets after start, such as 2 or 2 and 4 minutes, for channels that only appear at kickoff or shortly after.',
@@ -396,11 +396,11 @@ export const operatorHelpDetailTopics = [
     ],
     settings: [
       {
-        name: 'Teamarr API Poll Interval',
+        name: 'Teamarr Poll Interval',
         controlType: 'Visible UI setting',
         defaultValue: '60 seconds',
-        location: 'Teamarr Preflight -> Configuration card -> Teamarr API Poll Interval',
-        effect: 'Controls how often StreamFlow reads Teamarr managed-event state and notices due timing buckets.',
+        location: 'Teamarr Preflight -> Configuration card -> Teamarr Poll Interval',
+        effect: 'Controls how often StreamFlow reads Teamarr internal managed-event endpoints and notices due timing buckets.',
         useWhen: 'Use 30-60 seconds for normal event automation; use longer intervals only with wide timing windows.',
         risk: 'A long poll interval can miss very narrow windows, such as a 1-minute preflight offset with only a few minutes of post-start grace.',
       },
@@ -433,7 +433,7 @@ export const operatorHelpDetailTopics = [
         reference: {
           imageSrc: '/help/teamarr-preflight-timing-dark.jpg',
           triggerLabel: 'UI Screenshot',
-          alt: 'Dark mode crop of Teamarr Preflight timing fields including Teamarr API poll interval, preflight offset, retries, grace, cooldown, and post-start checks.',
+          alt: 'Dark mode crop of Teamarr Preflight timing fields including Teamarr poll interval, preflight offset, retries, grace, cooldown, and post-start checks.',
           caption: 'Preflight Offset is the main pre-start bucket; Pre-Start Retries and Post-Start Checks accept one or more minute offsets, with inline help under each timing field.',
           width: 500,
           height: 650,

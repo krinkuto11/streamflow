@@ -144,7 +144,7 @@ describe('operatorHelpSections', () => {
     const teamarr = getOperatorHelpDetailTopic('teamarr-preflight')
     const preStartRetries = teamarr.settings.find(setting => setting.name === 'Pre-Start Retries')
     const postStartGrace = teamarr.settings.find(setting => setting.name === 'Post-Start Grace')
-    expect(teamarr.settings.find(setting => setting.name === 'Teamarr API Poll Interval').effect).toMatch(/reads Teamarr managed-event state/i)
+    expect(teamarr.settings.find(setting => setting.name === 'Teamarr Poll Interval').effect).toMatch(/reads Teamarr internal managed-event endpoints/i)
     expect(preStartRetries.defaultValue).toBe('10 min before start; 3 min before start')
     expect(preStartRetries.effect).toMatch(/single value like 3/i)
     expect(preStartRetries.effect).toMatch(/10, 3/i)

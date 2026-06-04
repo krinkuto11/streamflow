@@ -442,8 +442,49 @@ class TeamarrPreflightService:
                 "managed_events_limit": MAX_UPCOMING_EVENTS,
                 "recent_events": recent_events,
                 "filter_options": dict(self._filter_options),
+                "teamarr_connector": self._teamarr_connector_status(),
                 "config": public_config(self._config, self._default_profile_metadata()),
             }
+
+    def _teamarr_connector_status(self) -> Dict[str, Any]:
+        base_url = str(self._config.get("teamarr_base_url") or "").strip()
+        if not base_url:
+            state = "not_configured"
+            label = "Not configured"
+            detail = "Set the Teamarr base URL to read managed event channels."
+        elif self._last_error:
+            state = "error"
+            label = "Scan error"
+            detail = "Teamarr managed event endpoint did not complete the last scan."
+        elif not self._last_scan_at:
+            state = "pending"
+            label = "Waiting for scan"
+            detail = "StreamFlow has not scanned Teamarr managed event channels yet."
+        elif self._last_events_seen <= 0:
+            state = "empty"
+            label = "No managed channels"
+            detail = "Teamarr was reached but returned no managed event channels."
+        elif self._last_candidates_count <= 0:
+            state = "filtered"
+            label = "No matching events"
+            detail = "Teamarr returned managed channels, but filters or event data left no check candidates."
+        else:
+            state = "connected"
+            label = "Connected"
+            detail = "Teamarr managed event channels are available."
+
+        return {
+            "state": state,
+            "label": label,
+            "detail": detail,
+            "base_url_configured": bool(base_url),
+            "endpoint": "/api/v1/channels/managed",
+            "official_api_key_required": False,
+            "last_scan_at": self._last_scan_at,
+            "last_error": self._last_error,
+            "managed_events_seen": self._last_events_seen,
+            "managed_candidates": self._last_candidates_count,
+        }
 
     @staticmethod
     def _attach_recent_events_to_upcoming(

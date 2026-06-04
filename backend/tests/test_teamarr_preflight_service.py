@@ -269,6 +269,31 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(status["managed_events_returned"], 75)
         self.assertFalse(status["managed_events_truncated"])
         self.assertEqual(len(status["upcoming_events"]), 75)
+        self.assertEqual(status["teamarr_connector"]["state"], "connected")
+        self.assertFalse(status["teamarr_connector"]["official_api_key_required"])
+
+    def test_status_exposes_empty_teamarr_connector_state(self):
+        service, _, _ = self.make_service([])
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        connector = service.get_status()["teamarr_connector"]
+        self.assertEqual(connector["state"], "empty")
+        self.assertEqual(connector["endpoint"], "/api/v1/channels/managed")
+
+    def test_status_exposes_teamarr_connector_scan_error(self):
+        def failing_http_get(*_args, **_kwargs):
+            raise RuntimeError("network unavailable")
+
+        service, _, _ = self.make_service([], http_get=failing_http_get)
+
+        result = service.run_once(force=True)
+
+        self.assertFalse(result["success"])
+        connector = service.get_status()["teamarr_connector"]
+        self.assertEqual(connector["state"], "error")
+        self.assertEqual(connector["last_error"], "Teamarr preflight scan failed")
 
     def test_managed_event_accepts_alternate_start_time_and_channel_id_fields(self):
         event = make_event(

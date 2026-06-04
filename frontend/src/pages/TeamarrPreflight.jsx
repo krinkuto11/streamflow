@@ -14,24 +14,27 @@ import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
 import { filterTeamarrEventsBySearch } from '@/lib/teamarr-preflight-event-search.js'
-import { getTeamarrAutomaticCheck } from '@/lib/teamarr-preflight-schedule.js'
+import { getTeamarrAutomaticCheck, getTeamarrSchedulePreview } from '@/lib/teamarr-preflight-schedule.js'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import {
   Activity,
+  AlertCircle,
   CalendarCheck,
   ChevronDown,
   CheckCircle2,
   Clock,
+  Info,
   Loader2,
   PlayCircle,
   RefreshCw,
   Save,
   Search,
   StopCircle,
+  Wifi,
 } from 'lucide-react'
 
 const numberFields = [
-  { key: 'poll_interval_seconds', label: 'Teamarr API Poll Interval', suffix: 'sec', min: 15, max: 3600, description: 'How often StreamFlow reads Teamarr events. 30-60 sec keeps narrow event windows reliable.' },
+  { key: 'poll_interval_seconds', label: 'Teamarr Poll Interval', suffix: 'sec', min: 15, max: 3600, description: 'How often StreamFlow reads Teamarr managed events. 30-60 sec keeps narrow event windows reliable.' },
   { key: 'preflight_offset_minutes', label: 'Preflight Offset', suffix: 'min', min: 1, max: 360, description: 'Main automatic check before start. 20 means the first check becomes due around -20 min.' },
   { key: 'post_start_grace_minutes', label: 'Post Start Grace', suffix: 'min', min: 0, max: 120, description: 'How long after start post-start offsets can still run.' },
   { key: 'max_concurrent_checks', label: 'Concurrent Checks', suffix: 'max', min: 1, max: 10, description: 'Maximum Teamarr event checks running at the same time.' },
@@ -183,6 +186,63 @@ const eventAutomaticCheckSummary = (event, config) => {
   return `${nextCheck.label}: ${formatDateTime(nextCheck.timestamp)}${bucket}`
 }
 
+const connectorStatusDisplay = (connector = {}) => {
+  const state = String(connector?.state || '').trim()
+  if (state === 'connected') {
+    return {
+      label: connector.label || 'Connected',
+      detail: connector.detail || 'Teamarr managed event channels are available.',
+      variant: 'default',
+      className: 'bg-green-500',
+      icon: CheckCircle2,
+    }
+  }
+  if (state === 'empty' || state === 'filtered' || state === 'pending') {
+    return {
+      label: connector.label || (state === 'pending' ? 'Waiting for scan' : 'No events'),
+      detail: connector.detail || 'Teamarr is reachable, but no matching managed events are available.',
+      variant: 'secondary',
+      className: '',
+      icon: Info,
+    }
+  }
+  if (state === 'error') {
+    return {
+      label: connector.label || 'Scan error',
+      detail: connector.detail || 'Teamarr managed event endpoint did not complete the last scan.',
+      variant: 'destructive',
+      className: '',
+      icon: AlertCircle,
+    }
+  }
+  return {
+    label: connector.label || 'Not configured',
+    detail: connector.detail || 'Set the Teamarr base URL to read managed event channels.',
+    variant: 'secondary',
+    className: '',
+    icon: Wifi,
+  }
+}
+
+const eventScheduleDiagnosticParts = (event, automaticCheckSummary, config) => {
+  const parts = []
+  const seconds = Number(event?.seconds_to_start)
+  parts.push({ label: 'State', value: stateLabel(event?.state) })
+  if (event?.trigger_bucket) parts.push({ label: 'Bucket', value: event.trigger_bucket })
+  if (automaticCheckSummary) parts.push({ label: 'Schedule', value: automaticCheckSummary })
+  if (!automaticCheckSummary && event?.state === 'past') parts.push({ label: 'Schedule', value: 'Outside automatic window' })
+  if (!automaticCheckSummary && event?.state === 'filtered') parts.push({ label: 'Schedule', value: 'Hidden by filters' })
+  if (Number.isFinite(seconds)) {
+    parts.push({
+      label: seconds < 0 ? 'Since start' : 'Until start',
+      value: formatOffset(seconds),
+    })
+  }
+  if (event?.dispatcharr_channel_id) parts.push({ label: 'Channel ID', value: event.dispatcharr_channel_id })
+  if (config?.poll_interval_seconds) parts.push({ label: 'Poll', value: `${config.poll_interval_seconds}s` })
+  return parts.filter(part => part.value !== undefined && part.value !== null && part.value !== '')
+}
+
 const forceEventTooltip = (event) => {
   if (!event?.dispatcharr_channel_id) return 'No Dispatcharr channel'
   if (event?.state === 'waiting_for_channel_sync') return 'Channel syncing'
@@ -282,6 +342,23 @@ export default function TeamarrPreflight() {
   const managedEventsReturned = Number(status?.managed_events_returned ?? upcomingEvents.length)
   const managedEventsTruncated = Boolean(status?.managed_events_truncated)
   const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
+  const connectorDisplay = connectorStatusDisplay(status?.teamarr_connector || {})
+  const ConnectorIcon = connectorDisplay.icon
+  const previewConfig = useMemo(() => ({
+    ...(editedConfig || {}),
+    retry_offsets_minutes: parseCsv(retryOffsets).map(item => Number(item)).filter(Number.isFinite),
+    post_start_offsets_minutes: parseCsv(postStartOffsets).map(item => Number(item)).filter(Number.isFinite),
+  }), [editedConfig, retryOffsets, postStartOffsets])
+  const previewEvent = useMemo(() => (
+    nextEvent || {
+      event_name: 'Example event',
+      event_date: new Date(Date.now() + Number(previewConfig.preflight_offset_minutes || 20) * 60 * 1000).toISOString(),
+    }
+  ), [nextEvent, previewConfig.preflight_offset_minutes])
+  const timingPreview = useMemo(
+    () => getTeamarrSchedulePreview(previewEvent, previewConfig),
+    [previewEvent, previewConfig]
+  )
   const eventFilterOptions = useMemo(
     () => collectTeamarrFilterOptions([...upcomingEvents, ...recentEvents]),
     [upcomingEvents, recentEvents]
@@ -613,7 +690,7 @@ export default function TeamarrPreflight() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Service</CardTitle>
@@ -625,6 +702,19 @@ export default function TeamarrPreflight() {
               {running ? 'Running' : 'Stopped'}
             </Badge>
             <p className="mt-2 text-xs text-muted-foreground">{enabled ? 'Enabled' : 'Disabled'}</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Teamarr</CardTitle>
+            <ConnectorIcon className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <Badge variant={connectorDisplay.variant} className={connectorDisplay.className}>
+              {connectorDisplay.label}
+            </Badge>
+            <p className="mt-2 line-clamp-2 text-xs text-muted-foreground">{connectorDisplay.detail}</p>
           </CardContent>
         </Card>
 
@@ -709,6 +799,9 @@ export default function TeamarrPreflight() {
                   onChange={(event) => updateConfigValue('teamarr_base_url', event.target.value)}
                   placeholder="http://teamarr:9195"
                 />
+                <p className="text-xs text-muted-foreground">
+                  StreamFlow reads Teamarr internal managed-event endpoints. No separate official Teamarr API key is required.
+                </p>
               </div>
               <div className="space-y-2 md:col-span-2">
                 <Label>Quality Profile</Label>
@@ -785,6 +878,54 @@ export default function TeamarrPreflight() {
                   One or more minutes after start, for example 2 or 2, 4. These only run while the event is still inside Post Start Grace.
                 </p>
               </div>
+            </div>
+
+            <div className="rounded-md border border-border p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-medium">Timing Preview</p>
+                  <p className="text-xs text-muted-foreground">
+                    {nextEvent
+                      ? `${nextEvent.event_name || 'Next event'} at ${formatDateTime(nextEvent.event_date)}`
+                      : 'Example event using the current timing fields'}
+                  </p>
+                </div>
+                <Badge variant="outline" className="text-[10px]">
+                  {timingPreview.items.filter(item => !item.disabled).length} automatic buckets
+                </Badge>
+              </div>
+              {timingPreview.items.length > 0 ? (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  {timingPreview.items.map(item => (
+                    <div
+                      key={`${item.bucket}-${item.timestamp}`}
+                      className={`rounded-md border px-2.5 py-2 text-xs ${
+                        item.disabled ? 'border-dashed text-muted-foreground opacity-70' : 'text-foreground'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">{item.bucket}</span>
+                        <Badge variant={item.disabled ? 'secondary' : 'outline'} className="text-[10px]">
+                          {item.label}
+                        </Badge>
+                      </div>
+                      <p className="mt-1 text-muted-foreground">{formatDateTime(item.timestamp)}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-3 text-xs text-muted-foreground">No preview is available until a valid event date exists.</p>
+              )}
+              {timingPreview.warnings.length > 0 ? (
+                <div className="mt-3 space-y-1">
+                  {timingPreview.warnings.map(warning => (
+                    <div key={warning.code} className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-300">
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                      <span>{warning.text}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
 
             <Separator />
@@ -881,6 +1022,7 @@ export default function TeamarrPreflight() {
                     const lastPreflightDetails = recentEventDetailParts(lastPreflightEvent)
                     const checkSummary = eventCheckSummary(event, lastPreflightEvent)
                     const automaticCheckSummary = eventAutomaticCheckSummary(event, status?.config || config || editedConfig || {})
+                    const eventDiagnostics = eventScheduleDiagnosticParts(event, automaticCheckSummary, status?.config || config || editedConfig || {})
                     return (
                       <div key={`${event.identity}-${event.trigger_bucket || 'none'}`} className="rounded-md border border-border p-3">
                         <div className="flex flex-wrap items-start justify-between gap-2">
@@ -951,6 +1093,18 @@ export default function TeamarrPreflight() {
                             </>
                           ) : null}
                         </div>
+                        {eventDiagnostics.length > 0 ? (
+                          <div className="mt-3 border-t border-border pt-2">
+                            <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-2 xl:grid-cols-3">
+                              {eventDiagnostics.map(part => (
+                                <div key={`${part.label}-${part.value}`} className="min-w-0">
+                                  <span className="text-muted-foreground/80">{part.label}: </span>
+                                  <span className="text-foreground/90">{part.value}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                     )
                   })}
