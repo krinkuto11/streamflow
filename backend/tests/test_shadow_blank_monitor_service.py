@@ -245,6 +245,53 @@ def test_discovers_real_clients_and_hides_raw_channel_identifiers(tmp_path):
     assert "uuid-2" not in repr(status)
 
 
+def test_discovery_tracks_all_real_viewer_channels_with_excludes_only(tmp_path):
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}]),
+            "uuid-2": {
+                "state": "active",
+                "channel_id": "uuid-2",
+                "stream_id": 20,
+                "clients": [{"user_agent": "VLC"}],
+            },
+            "uuid-3": {
+                "state": "active",
+                "channel_id": "uuid-3",
+                "stream_id": 30,
+                "clients": [{"user_agent": "VLC"}],
+            },
+            "uuid-4": {
+                "state": "active",
+                "channel_id": "uuid-4",
+                "stream_id": 40,
+                "clients": [{"user_agent": "VLC"}],
+            },
+        }],
+        channels=[
+            {"id": 1, "uuid": "uuid-1", "streams": [10, 11]},
+            {"id": 2, "uuid": "uuid-2", "streams": [20, 21]},
+            {"id": 4, "uuid": "uuid-4", "streams": [40, 41]},
+        ],
+    )
+    service = make_service(tmp_path, udi=udi)
+    config = normalize_config({
+        "excluded_channel_ids": [2],
+        "excluded_channel_uuids": ["uuid-4"],
+        "max_concurrent_watchers": 1,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+
+    assert {(target["channel_id"], target["channel_uuid"]) for target in targets} == {
+        (1, "uuid-1"),
+        (None, "uuid-3"),
+    }
+    assert all(target["real_client_count"] == 1 for target in targets)
+    assert "included_channel_ids" not in normalize_config({})
+    assert service.get_status()["watched_count"] == 2
+
+
 def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):
     probe_urls = []
     switch_calls = []
