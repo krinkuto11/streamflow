@@ -31,8 +31,10 @@ import {
 } from 'lucide-react'
 
 const numberFields = [
-  { key: 'poll_interval_seconds', label: 'Poll Interval', suffix: 'sec', min: 15, max: 3600 },
+  { key: 'poll_interval_seconds', label: 'Teamarr API Poll Interval', suffix: 'sec', min: 15, max: 3600 },
   { key: 'preflight_offset_minutes', label: 'Preflight Offset', suffix: 'min', min: 1, max: 360 },
+  { key: 'pre_start_retry_count', label: 'Pre-Start Retries', suffix: 'checks', min: 0, max: 10 },
+  { key: 'post_start_retry_count', label: 'Post-Start Retries', suffix: 'checks', min: 0, max: 10 },
   { key: 'post_start_grace_minutes', label: 'Post Start Grace', suffix: 'min', min: 0, max: 120 },
   { key: 'max_concurrent_checks', label: 'Concurrent Checks', suffix: 'max', min: 1, max: 10 },
   { key: 'event_cooldown_minutes', label: 'Event Cooldown', suffix: 'min', min: 1, max: 10080 },
@@ -81,13 +83,6 @@ const DEFAULT_PREFLIGHT_STREAM_CHECKING = {
   treat_freeze_as_dead: false,
   loop_check_enabled: false,
 }
-
-const parseCsv = (value) => (
-  String(value || '')
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean)
-)
 
 const normalizeProfiles = (payload) => {
   const items = Array.isArray(payload)
@@ -237,8 +232,6 @@ export default function TeamarrPreflight() {
   const [config, setConfig] = useState(null)
   const [editedConfig, setEditedConfig] = useState(null)
   const [status, setStatus] = useState(null)
-  const [retryOffsets, setRetryOffsets] = useState('')
-  const [postStartOffsets, setPostStartOffsets] = useState('')
   const [includeSports, setIncludeSports] = useState('')
   const [excludeSports, setExcludeSports] = useState('')
   const [includeLeagues, setIncludeLeagues] = useState('')
@@ -377,8 +370,6 @@ export default function TeamarrPreflight() {
   }, [selectedStreamChecking])
 
   const hydrateInputs = (nextConfig) => {
-    setRetryOffsets((nextConfig.retry_offsets_minutes || []).join(', '))
-    setPostStartOffsets((nextConfig.post_start_offsets_minutes || []).join(', '))
     setIncludeSports((nextConfig.include_sports || []).join(', '))
     setExcludeSports((nextConfig.exclude_sports || []).join(', '))
     setIncludeLeagues((nextConfig.include_leagues || []).join(', '))
@@ -438,8 +429,6 @@ export default function TeamarrPreflight() {
       setActionLoading('save')
       const payload = {
         ...(editedConfig || {}),
-        retry_offsets_minutes: parseCsv(retryOffsets).map(item => Number(item)).filter(Number.isFinite),
-        post_start_offsets_minutes: parseCsv(postStartOffsets).map(item => Number(item)).filter(Number.isFinite),
         include_sports: parseFilterCsv(includeSports),
         exclude_sports: parseFilterCsv(excludeSports),
         include_leagues: parseFilterCsv(includeLeagues),
@@ -770,14 +759,6 @@ export default function TeamarrPreflight() {
                   </div>
                 </div>
               ))}
-              <div className="space-y-2">
-                <Label>Pre-Start Retries</Label>
-                <Input value={retryOffsets} onChange={(event) => setRetryOffsets(event.target.value)} />
-              </div>
-              <div className="space-y-2">
-                <Label>Post-Start Checks</Label>
-                <Input value={postStartOffsets} onChange={(event) => setPostStartOffsets(event.target.value)} />
-              </div>
             </div>
 
             <Separator />
@@ -803,8 +784,12 @@ export default function TeamarrPreflight() {
                       <p>Automation phases defer event checks; Stream Checker conflicts enter the server-side priority queue and continue after the current channel.</p>
                     </div>
                     <div>
-                      <p className="font-medium text-foreground">Post-Start Checks</p>
-                      <p>Use two post-start offsets, such as 2 and 4 minutes, when event channels appear at kickoff or a few minutes after the scheduled start.</p>
+                      <p className="font-medium text-foreground">Teamarr API Poll</p>
+                      <p>Poll interval controls how often StreamFlow reads Teamarr event state. 30-60 seconds keeps narrow event windows reliable.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-foreground">Post-Start Retries</p>
+                      <p>Post-start retry count is distributed across the grace window for channels that appear at kickoff or a few minutes later.</p>
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Event Status</p>

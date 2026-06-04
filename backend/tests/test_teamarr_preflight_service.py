@@ -152,7 +152,8 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             "api_key": "secret",
             "api_key_header": "X-Teamarr-Key",
             "preflight_offset_minutes": 20,
-            "retry_offsets_minutes": [10, 3],
+            "pre_start_retry_count": 2,
+            "post_start_retry_count": 2,
         })
         return service, checker, http_get
 
@@ -165,11 +166,14 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             "exclude_leagues": "mlb",
         })
 
-        self.assertEqual(config["retry_offsets_minutes"], [10, 3])
-        self.assertEqual(config["post_start_offsets_minutes"], [1, 2])
+        self.assertEqual(config["pre_start_retry_count"], 2)
+        self.assertEqual(config["post_start_retry_count"], 2)
+        self.assertNotIn("retry_offsets_minutes", config)
+        self.assertNotIn("post_start_offsets_minutes", config)
         self.assertEqual(config["include_sports"], ["soccer"])
         self.assertEqual(config["exclude_leagues"], ["mlb"])
-        self.assertEqual(normalize_config({})["post_start_offsets_minutes"], [2, 4])
+        self.assertEqual(normalize_config({})["pre_start_retry_count"], 2)
+        self.assertEqual(normalize_config({})["post_start_retry_count"], 2)
         self.assertFalse(normalize_config({})["provider_limit_override"])
         self.assertTrue(normalize_config({"provider_limit_override": True})["provider_limit_override"])
 
@@ -177,6 +181,8 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         public_config = service.get_config()
         self.assertTrue(public_config["has_api_key"])
         self.assertEqual(public_config["api_key"], "")
+        self.assertEqual(public_config["retry_offsets_minutes"], [14, 7])
+        self.assertEqual(public_config["post_start_offsets_minutes"], [2, 4])
 
     def test_default_profile_is_created_and_selected_for_preflight(self):
         automation_config = FakeAutomationConfig()
@@ -330,7 +336,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["type"], "preflight_completed")
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 1)
 
-    def test_retry_offsets_do_not_fire_before_preflight_offset(self):
+    def test_retry_count_does_not_fire_before_preflight_offset(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(
             [make_event(event_date="2026-05-28T22:05:00+00:00")],
@@ -338,7 +344,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         )
         service.update_config({
             "preflight_offset_minutes": 1,
-            "retry_offsets_minutes": [10, 3],
+            "pre_start_retry_count": 2,
         })
 
         result = service.run_once(force=True)
@@ -368,13 +374,31 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             "timestamp": "2026-05-28T22:25:00+00:00",
         })
 
-    def test_post_start_offset_launches_after_game_start(self):
+    def test_retry_count_exposes_next_distributed_pre_start_check(self):
+        checker = FakeChecker()
+        event = make_event(event_date="2026-05-28T22:15:00+00:00")
+        service, _, _ = self.make_service([event], checker=checker)
+        identity = "id:100:2026-05-28T22:15:00+00:00"
+        service._attempted_buckets[f"{identity}:20m"] = FIXED_NOW
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "already_attempted")
+        self.assertEqual(upcoming[0]["next_automatic_check"], {
+            "label": "Next auto check",
+            "bucket": "-14m",
+            "timestamp": "2026-05-28T22:01:00+00:00",
+        })
+
+    def test_post_start_retry_launches_after_game_start(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(
             [make_event(event_date="2026-05-28T21:58:00+00:00")],
             checker=checker,
         )
-        service.update_config({"post_start_offsets_minutes": [2]})
 
         result = service.run_once(force=True)
         self.assertTrue(result["success"])
@@ -388,14 +412,14 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["details"]["bucket"], "post+2m")
 
-    def test_post_start_grace_must_cover_post_start_offset(self):
+    def test_post_start_grace_must_cover_post_start_retries(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(
             [make_event(event_date="2026-05-28T21:58:00+00:00")],
             checker=checker,
         )
         service.update_config({
-            "post_start_offsets_minutes": [2],
+            "post_start_retry_count": 1,
             "post_start_grace_minutes": 1,
         })
 

@@ -1,4 +1,5 @@
 const DEFAULT_PREFLIGHT_OFFSET_MINUTES = 20
+const DEFAULT_POST_START_GRACE_MINUTES = 5
 
 const positiveMinutes = (values = []) => (
   values
@@ -8,19 +9,55 @@ const positiveMinutes = (values = []) => (
 
 const uniquePositiveMinutes = (values = []) => [...new Set(positiveMinutes(values))]
 
+const boundedCount = (value) => {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) return null
+  return Math.max(0, Math.min(10, Math.floor(parsed)))
+}
+
+const distributedPreStartOffsets = (preflightOffset, retryCount) => {
+  const offsets = [preflightOffset]
+  if (retryCount <= 0) return offsets
+  const denominator = retryCount + 1
+  for (let index = 1; index <= retryCount; index += 1) {
+    const offset = Math.max(1, Math.ceil((preflightOffset * (retryCount - index + 1)) / denominator))
+    if (offset < preflightOffset) offsets.push(offset)
+  }
+  return [...new Set(offsets)].sort((a, b) => b - a)
+}
+
+const distributedPostStartOffsets = (graceMinutes, retryCount) => {
+  if (graceMinutes <= 0 || retryCount <= 0) return []
+  const denominator = retryCount + 1
+  const offsets = []
+  for (let index = 1; index <= retryCount; index += 1) {
+    const offset = Math.max(1, Math.ceil((graceMinutes * index) / denominator))
+    offsets.push(Math.min(graceMinutes, offset))
+  }
+  return [...new Set(offsets)].sort((a, b) => a - b)
+}
+
 const preStartOffsets = (config = {}) => {
   const rawPreflightOffset = Number(config.preflight_offset_minutes)
   const preflightOffset = Number.isFinite(rawPreflightOffset) && rawPreflightOffset > 0
     ? rawPreflightOffset
     : DEFAULT_PREFLIGHT_OFFSET_MINUTES
+  const retryCount = boundedCount(config.pre_start_retry_count)
+  if (retryCount !== null) return distributedPreStartOffsets(preflightOffset, retryCount)
   const retryOffsets = positiveMinutes(config.retry_offsets_minutes || [])
     .filter(offset => offset <= preflightOffset)
   return uniquePositiveMinutes([preflightOffset, ...retryOffsets]).sort((a, b) => b - a)
 }
 
-const postStartOffsets = (config = {}) => (
-  uniquePositiveMinutes(config.post_start_offsets_minutes || []).sort((a, b) => a - b)
-)
+const postStartOffsets = (config = {}) => {
+  const retryCount = boundedCount(config.post_start_retry_count)
+  if (retryCount !== null) {
+    const rawGrace = Number(config.post_start_grace_minutes)
+    const grace = Number.isFinite(rawGrace) && rawGrace > 0 ? rawGrace : DEFAULT_POST_START_GRACE_MINUTES
+    return distributedPostStartOffsets(grace, retryCount)
+  }
+  return uniquePositiveMinutes(config.post_start_offsets_minutes || []).sort((a, b) => a - b)
+}
 
 const eventSecondsToStart = (event, eventAt) => {
   const seconds = Number(event?.seconds_to_start)

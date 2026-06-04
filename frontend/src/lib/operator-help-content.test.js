@@ -140,17 +140,20 @@ describe('operatorHelpSections', () => {
     expect(setup.settings.find(setting => setting.name === 'API_HOST').controlType).toBe('Container setting')
     expect(setup.settings.find(setting => setting.name === 'Startup cache readiness').controlType).toBe('Status/API')
 
-    expect(getOperatorHelpDetailTopic('teamarr-preflight').settings.map(setting => setting.name)).toContain('Post-Start Checks')
+    expect(getOperatorHelpDetailTopic('teamarr-preflight').settings.map(setting => setting.name)).toContain('Post-Start Retries')
     const teamarr = getOperatorHelpDetailTopic('teamarr-preflight')
     const preStartRetries = teamarr.settings.find(setting => setting.name === 'Pre-Start Retries')
+    const postStartRetries = teamarr.settings.find(setting => setting.name === 'Post-Start Retries')
     const postStartGrace = teamarr.settings.find(setting => setting.name === 'Post-Start Grace')
-    expect(preStartRetries.defaultValue).toBe('10 min before start; 3 min before start')
-    expect(preStartRetries.effect).toMatch(/two separate pre-start retry buckets/i)
-    expect(postStartGrace.useWhen).toMatch(/at least as large as the largest post-start check/i)
-    expect(teamarr.steps.join(' ')).toMatch(/2 minutes and 4 minutes after start/i)
-    expect(teamarr.settings.find(setting => setting.name === 'Post-Start Checks').defaultValue).toBe('2 min after start; 4 min after start')
-    expect(teamarr.settings.find(setting => setting.name === 'Post-Start Checks').location).toBe('Teamarr Preflight -> Configuration card -> Post-Start Checks')
-    expect(teamarr.smokeChecks.join(' ')).toMatch(/2-minute post-start check/i)
+    expect(teamarr.settings.find(setting => setting.name === 'Teamarr API Poll Interval').effect).toMatch(/reads Teamarr managed-event state/i)
+    expect(preStartRetries.defaultValue).toBe('2 checks')
+    expect(preStartRetries.effect).toMatch(/automatically distributed/i)
+    expect(postStartRetries.defaultValue).toBe('2 checks')
+    expect(postStartRetries.effect).toMatch(/inside Post Start Grace/i)
+    expect(postStartGrace.useWhen).toMatch(/poll interval/i)
+    expect(teamarr.steps.join(' ')).toMatch(/Post-Start Retries/i)
+    expect(postStartRetries.location).toBe('Teamarr Preflight -> Configuration card -> Post-Start Retries')
+    expect(teamarr.smokeChecks.join(' ')).toMatch(/post-start bucket/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/4 minutes/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/dead-stream removal off/i)
     expect(teamarr.steps.join(' ')).toMatch(/automation can defer/i)
@@ -220,7 +223,7 @@ describe('operatorHelpSections', () => {
     expect(references.map(reference => `${reference.topicId}:${reference.settingName}`)).toEqual([
       'automation-periods:Run all due periods',
       'automation-periods:Catch-up cap',
-      'teamarr-preflight:Post-Start Checks',
+      'teamarr-preflight:Post-Start Retries',
       'teamarr-preflight:Busy Handling',
     ])
 

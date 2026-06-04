@@ -115,8 +115,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "api_key_header": "X-API-Key",
     "poll_interval_seconds": 60,
     "preflight_offset_minutes": 20,
-    "retry_offsets_minutes": [10, 3],
-    "post_start_offsets_minutes": [2, 4],
+    "pre_start_retry_count": 2,
+    "post_start_retry_count": 2,
     "post_start_grace_minutes": 5,
     "max_concurrent_checks": 1,
     "event_cooldown_minutes": 720,
@@ -128,11 +128,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "include_leagues": [],
     "exclude_leagues": [],
 }
-CONFIG_KEYS = set(DEFAULT_CONFIG)
+LEGACY_CONFIG_KEYS = {"retry_offsets_minutes", "post_start_offsets_minutes"}
+CONFIG_KEYS = set(DEFAULT_CONFIG) | LEGACY_CONFIG_KEYS
 
 INT_BOUNDS = {
     "poll_interval_seconds": (15, 3600),
     "preflight_offset_minutes": (1, 360),
+    "pre_start_retry_count": (0, 10),
+    "post_start_retry_count": (0, 10),
     "post_start_grace_minutes": (0, 120),
     "max_concurrent_checks": (1, 10),
     "event_cooldown_minutes": (1, 10080),
@@ -176,12 +179,63 @@ def _normalize_minute_offsets(value: Any, *, min_value: int = 1, max_value: int 
     return sorted(set(offsets), reverse=reverse)
 
 
+def _derive_count_from_legacy_offsets(value: Any, *, max_value: int = 360) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    return len(_normalize_minute_offsets(value, max_value=max_value))
+
+
+def _pre_start_offsets(config: Dict[str, Any]) -> List[int]:
+    preflight_offset = int(config.get("preflight_offset_minutes") or DEFAULT_CONFIG["preflight_offset_minutes"])
+    retry_count = int(config.get("pre_start_retry_count") or 0)
+    offsets = [preflight_offset]
+    if retry_count <= 0:
+        return offsets
+
+    denominator = retry_count + 1
+    for index in range(1, retry_count + 1):
+        numerator = preflight_offset * (retry_count - index + 1)
+        offset = max(1, (numerator + denominator - 1) // denominator)
+        if offset < preflight_offset:
+            offsets.append(offset)
+    return sorted(set(offsets), reverse=True)
+
+
+def _post_start_offsets(config: Dict[str, Any]) -> List[int]:
+    grace_minutes = int(config.get("post_start_grace_minutes") or 0)
+    retry_count = int(config.get("post_start_retry_count") or 0)
+    if grace_minutes <= 0 or retry_count <= 0:
+        return []
+
+    offsets = []
+    denominator = retry_count + 1
+    for index in range(1, retry_count + 1):
+        offset = max(1, (grace_minutes * index + denominator - 1) // denominator)
+        offsets.append(min(grace_minutes, offset))
+    return sorted(set(offsets))
+
+
 def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload = dict(payload or {})
+    current = dict(current or {})
     config = dict(DEFAULT_CONFIG)
-    if current:
-        config.update({key: value for key, value in current.items() if key in CONFIG_KEYS})
-    if payload:
-        config.update({key: value for key, value in payload.items() if key in CONFIG_KEYS})
+    config.update({key: value for key, value in current.items() if key in CONFIG_KEYS})
+    config.update({key: value for key, value in payload.items() if key in CONFIG_KEYS})
+
+    if "pre_start_retry_count" not in payload and "pre_start_retry_count" not in current:
+        legacy_count = _derive_count_from_legacy_offsets(
+            payload.get("retry_offsets_minutes", current.get("retry_offsets_minutes"))
+        )
+        if legacy_count is not None:
+            config["pre_start_retry_count"] = legacy_count
+
+    if "post_start_retry_count" not in payload and "post_start_retry_count" not in current:
+        legacy_count = _derive_count_from_legacy_offsets(
+            payload.get("post_start_offsets_minutes", current.get("post_start_offsets_minutes")),
+            max_value=120,
+        )
+        if legacy_count is not None:
+            config["post_start_retry_count"] = legacy_count
 
     for key, bounds in INT_BOUNDS.items():
         config[key] = _coerce_int(config.get(key), DEFAULT_CONFIG[key], bounds)
@@ -195,19 +249,17 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     if not config["api_key_header"]:
         config["api_key_header"] = DEFAULT_CONFIG["api_key_header"]
     config["forced_profile_id"] = str(config.get("forced_profile_id") or "").strip()
-    config["retry_offsets_minutes"] = _normalize_minute_offsets(config.get("retry_offsets_minutes"))
-    config["post_start_offsets_minutes"] = _normalize_minute_offsets(
-        config.get("post_start_offsets_minutes"),
-        max_value=120,
-        reverse=False,
-    )
     for key in ("include_sports", "exclude_sports", "include_leagues", "exclude_leagues"):
         config[key] = _normalize_terms(config.get(key))
-    return config
+    return {key: config[key] for key in DEFAULT_CONFIG}
 
 
 def public_config(config: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     visible = dict(config)
+    visible["pre_start_schedule_offsets_minutes"] = _pre_start_offsets(visible)
+    visible["post_start_schedule_offsets_minutes"] = _post_start_offsets(visible)
+    visible["retry_offsets_minutes"] = visible["pre_start_schedule_offsets_minutes"][1:]
+    visible["post_start_offsets_minutes"] = visible["post_start_schedule_offsets_minutes"]
     visible["has_api_key"] = bool(visible.get("api_key"))
     visible["api_key"] = ""
     if metadata:
@@ -871,18 +923,10 @@ class TeamarrPreflightService:
             return "past", None
 
         if seconds >= 0:
-            preflight_offset = int(config["preflight_offset_minutes"])
-            retry_offsets = [
-                int(offset)
-                for offset in list(config.get("retry_offsets_minutes") or [])
-                if int(offset) <= preflight_offset
-            ]
-            offsets = [preflight_offset] + retry_offsets
-            return self._classify_bucket_offsets(event, seconds, offsets, direction="pre")
+            return self._classify_bucket_offsets(event, seconds, _pre_start_offsets(config), direction="pre")
 
         elapsed_seconds = abs(seconds)
-        post_offsets = list(config.get("post_start_offsets_minutes") or [])
-        return self._classify_bucket_offsets(event, elapsed_seconds, post_offsets, direction="post")
+        return self._classify_bucket_offsets(event, elapsed_seconds, _post_start_offsets(config), direction="post")
 
     @staticmethod
     def _next_automatic_check(
@@ -906,14 +950,7 @@ class TeamarrPreflightService:
 
         seconds = int(event.get("seconds_to_start") or 0)
         if seconds >= 0:
-            preflight_offset = int(config["preflight_offset_minutes"])
-            retry_offsets = [
-                int(offset)
-                for offset in list(config.get("retry_offsets_minutes") or [])
-                if int(offset) <= preflight_offset
-            ]
-            offsets = sorted({preflight_offset, *retry_offsets}, reverse=True)
-            next_offset = next((offset for offset in offsets if seconds > offset * 60), None)
+            next_offset = next((offset for offset in _pre_start_offsets(config) if seconds > offset * 60), None)
             if next_offset is None:
                 return None
             check_at = event_at.timestamp() - next_offset * 60
@@ -924,14 +961,7 @@ class TeamarrPreflightService:
             }
 
         elapsed_seconds = abs(seconds)
-        post_offsets = sorted(
-            {
-                int(offset)
-                for offset in list(config.get("post_start_offsets_minutes") or [])
-                if int(offset) > 0
-            }
-        )
-        next_offset = next((offset for offset in post_offsets if elapsed_seconds < offset * 60), None)
+        next_offset = next((offset for offset in _post_start_offsets(config) if elapsed_seconds < offset * 60), None)
         if next_offset is None:
             return None
         check_at = event_at.timestamp() + next_offset * 60
