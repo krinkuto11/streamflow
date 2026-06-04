@@ -169,6 +169,33 @@ def test_put_automation_config_updates_teamarr_event_window_policy():
     }]
 
 
+def test_put_automation_config_updates_run_all_due_policy():
+    app = Flask(__name__)
+    cfg = DummyConfigManager()
+    manager = DummyAutomationManager()
+
+    with app.app_context():
+        response, status_code = handle_global_automation_settings_response(
+            method="PUT",
+            updates={
+                "run_all_due_periods": True,
+                "catch_up_max_periods_per_cycle": 4,
+            },
+            get_automation_config_manager=lambda: cfg,
+            check_wizard_complete=lambda: True,
+            get_automation_manager=lambda: manager,
+        )
+
+    assert status_code == 200
+    data = response.get_json()
+    assert data["settings"]["run_all_due_periods"] is True
+    assert data["settings"]["catch_up_max_periods_per_cycle"] == 4
+    assert cfg.update_calls == [{
+        "run_all_due_periods": True,
+        "catch_up_max_periods_per_cycle": 4,
+    }]
+
+
 def test_put_automation_config_rejects_invalid_enabled_m3u_accounts_payload():
     app = Flask(__name__)
     cfg = DummyConfigManager()

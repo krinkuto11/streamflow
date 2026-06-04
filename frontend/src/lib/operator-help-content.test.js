@@ -53,6 +53,7 @@ describe('operatorHelpSections', () => {
 
     const profilesPeriods = operatorHelpSections.find(section => section.id === 'profiles-periods')
     expect(profilesPeriods.items.join(' ')).toMatch(/Missed-run grace/)
+    expect(profilesPeriods.items.join(' ')).toMatch(/Run all due periods/)
     expect(profilesPeriods.items.join(' ')).toMatch(/Catch-up cap/)
     expect(profilesPeriods.items.join(' ')).toMatch(/Maintenance window/)
     expect(profilesPeriods.items.join(' ')).toMatch(/Teamarr event window/)
@@ -161,6 +162,7 @@ describe('operatorHelpSections', () => {
     const automation = getOperatorHelpDetailTopic('automation-periods')
     expect(automation.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Catch-up cap',
+      'Run all due periods',
       'Maintenance window',
       'Teamarr event window',
     ]))
@@ -216,6 +218,7 @@ describe('operatorHelpSections', () => {
     )
 
     expect(references.map(reference => `${reference.topicId}:${reference.settingName}`)).toEqual([
+      'automation-periods:Run all due periods',
       'automation-periods:Catch-up cap',
       'teamarr-preflight:Post-Start Checks',
       'teamarr-preflight:Busy Handling',

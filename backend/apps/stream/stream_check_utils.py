@@ -192,6 +192,33 @@ def _is_dri_device_path(device: str) -> bool:
     return normalized == '/dev/dri' or normalized.startswith('/dev/dri/')
 
 
+def _default_dri_render_device() -> str:
+    for minor in range(128, 136):
+        candidate = f"/dev/dri/renderD{minor}"
+        if os.path.exists(candidate):
+            return candidate
+    return "/dev/dri/renderD128"
+
+
+def _resolve_ffmpeg_hwaccel_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Resolve operator config to the concrete hwaccel flags ffmpeg should see."""
+    hwaccel = normalize_hardware_acceleration_config(config)
+    if not hwaccel['enabled']:
+        return hwaccel
+
+    resolved = dict(hwaccel)
+    device = resolved.get('device') or ''
+    normalized_device = device.rstrip('/')
+    if _is_dri_device_path(device):
+        if normalized_device == '/dev/dri':
+            resolved['device'] = _default_dri_render_device()
+        if resolved['mode'] == 'auto':
+            # With an explicit DRI device, make the VAAPI path observable instead
+            # of leaving ffmpeg to pick an opaque "auto" backend.
+            resolved['mode'] = 'vaapi'
+    return resolved
+
+
 def collect_hardware_acceleration_diagnostics(
     config: Optional[Dict[str, Any]],
     *,
@@ -351,7 +378,7 @@ def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any
 
 
 def _get_ffmpeg_hwaccel_args(config: Optional[Dict[str, Any]]) -> list:
-    hwaccel = normalize_hardware_acceleration_config(config)
+    hwaccel = _resolve_ffmpeg_hwaccel_config(config)
     if not hwaccel['enabled']:
         return []
 
@@ -364,6 +391,26 @@ def _get_ffmpeg_hwaccel_args(config: Optional[Dict[str, Any]]) -> list:
     if device and mode != 'vaapi':
         args += ['-hwaccel_device', device]
     return args
+
+
+def _log_ffmpeg_hwaccel_request(
+    context: str,
+    hwaccel_config: Dict[str, Any],
+    hwaccel_args: List[str],
+    *,
+    decode_filters: bool = False,
+) -> None:
+    if not hwaccel_args:
+        return
+    logger.info(
+        "FFmpeg %s hardware acceleration requested: mode=%s device=%s "
+        "cpu_fallback=%s decode_filters=%s",
+        context,
+        hwaccel_config.get('mode') or 'auto',
+        hwaccel_config.get('device') or 'default',
+        bool(hwaccel_config.get('allow_fallback', True)),
+        bool(decode_filters),
+    )
 
 
 def _looks_like_hwaccel_failure(output: str) -> bool:
@@ -1033,7 +1080,7 @@ def get_stream_info_and_bitrate(
     logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url_ref(url)}")
 
     extra_args = _get_ffmpeg_extra_args()
-    hwaccel_config = normalize_hardware_acceleration_config(hardware_acceleration)
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
     hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
 
     # Flag rationale:
@@ -1096,6 +1143,13 @@ def get_stream_info_and_bitrate(
                 '-vf', ','.join(video_filters),
                 '-f', 'null', os.devnull,
             ]
+
+    _log_ffmpeg_hwaccel_request(
+        "stream analysis",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=bool(video_filters),
+    )
 
     # Total subprocess timeout: analysis window + startup headroom.
     actual_timeout = timeout + duration + stream_startup_buffer
@@ -1413,7 +1467,7 @@ def get_stream_bitrate(
     """
     logger.debug(f"Analyzing bitrate for {duration}s...")
     extra_args = _get_ffmpeg_extra_args()
-    hwaccel_config = normalize_hardware_acceleration_config(hardware_acceleration)
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
     hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
     command = [
         'ffmpeg', '-re', '-v', 'info', '-stats',
@@ -1431,6 +1485,13 @@ def get_stream_bitrate(
             '-i', url, '-t', str(duration),
             '-c', 'copy', '-f', 'mpegts', 'pipe:1'
         ]
+
+    _log_ffmpeg_hwaccel_request(
+        "bitrate analysis",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=False,
+    )
 
     bitrate = None
     status = "OK"
@@ -1575,8 +1636,14 @@ def _probe_stream_for_loops(
         f"sequence_length=3, duration_threshold=10.0s)"
     )
 
-    hwaccel_config = normalize_hardware_acceleration_config(hardware_acceleration)
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
     hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
+    _log_ffmpeg_hwaccel_request(
+        f"loop probe {stream_tag}",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=True,
+    )
 
     cmd = [
         'ffmpeg',

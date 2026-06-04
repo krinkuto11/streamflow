@@ -121,6 +121,16 @@ Periods define **when** to run. They have no profile attached; the profile is sp
 { "type": "cron", "value": "0 */4 * * *" }
 ```
 
+### Catch-up policies
+
+Automatic scheduler passes handle only the highest-priority due period by default.
+Enable `Run all due periods` in Settings -> Scheduling -> Automation Run Policy
+when missed periods should catch up together after downtime.
+
+Use `Catch-up cap` with that option to bound load. A cap of `0` means unlimited
+only when `Run all due periods` is enabled. Manual forced runs are not limited by
+these automatic-run policies.
+
 ---
 
 ## Channel Period Assignments

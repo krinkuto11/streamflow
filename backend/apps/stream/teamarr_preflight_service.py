@@ -29,9 +29,26 @@ logger = setup_logging(__name__)
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/data"))
 CONFIG_FILE = CONFIG_DIR / "teamarr_preflight_config.json"
 MAX_EVENTS = 120
+MAX_UPCOMING_EVENTS = 1000
 TEAMARR_PREFLIGHT_QUEUE_PRIORITY = 100
 
 READY_SYNC_STATES = {"in_sync", "synced", "ready"}
+EVENT_DATETIME_KEYS = (
+    "event_date",
+    "start_time",
+    "start_time_utc",
+    "starts_at",
+    "scheduled_start",
+    "scheduled_at",
+    "game_time",
+    "datetime",
+)
+DISPATCHARR_CHANNEL_ID_KEYS = (
+    "dispatcharr_channel_id",
+    "dispatcharr_id",
+    "channel_id",
+    "channelId",
+)
 DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME = "Teamarr Event Preflight"
 CONTROLLED_CHECK_DEFERRAL_REASONS = {
     "active_viewers",
@@ -213,12 +230,40 @@ def _parse_event_datetime(value: Any) -> Optional[datetime]:
     return parsed.astimezone(timezone.utc)
 
 
-def _event_identity(event: Dict[str, Any]) -> str:
-    for key in ("id", "event_id"):
+def _first_present(event: Dict[str, Any], keys: Iterable[str]) -> Any:
+    for key in keys:
         value = event.get(key)
         if value not in (None, ""):
-            return f"{key}:{value}:{event.get('event_date') or ''}"
-    return f"channel:{event.get('dispatcharr_channel_id')}:{event.get('event_date') or ''}:{event.get('event_name') or ''}"
+            return value
+    return None
+
+
+def _event_datetime_value(event: Dict[str, Any]) -> Any:
+    return _first_present(event, EVENT_DATETIME_KEYS)
+
+
+def _event_dispatcharr_channel_id(event: Dict[str, Any]) -> Any:
+    value = _first_present(event, DISPATCHARR_CHANNEL_ID_KEYS)
+    if value not in (None, ""):
+        return value
+    dispatcharr_channel = event.get("dispatcharr_channel")
+    if isinstance(dispatcharr_channel, dict):
+        return _first_present(dispatcharr_channel, ("id", "channel_id", "dispatcharr_channel_id"))
+    return None
+
+
+def _event_identity(event: Dict[str, Any]) -> str:
+    date_value = _event_datetime_value(event) or ""
+    managed_id = event.get("id")
+    if managed_id not in (None, ""):
+        return f"id:{managed_id}:{date_value}"
+
+    channel_id = _event_dispatcharr_channel_id(event) or ""
+    group_id = event.get("event_epg_group_id") or event.get("group_id") or ""
+    event_id = event.get("event_id")
+    if event_id not in (None, ""):
+        return f"event:{event_id}:channel:{channel_id}:group:{group_id}:{date_value}"
+    return f"channel:{channel_id}:{date_value}:{event.get('event_name') or event.get('channel_name') or ''}"
 
 
 class TeamarrPreflightService:
@@ -255,6 +300,9 @@ class TeamarrPreflightService:
         self._active_checks: Dict[str, Dict[str, Any]] = {}
         self._last_scan_at: Optional[float] = None
         self._last_error: Optional[str] = None
+        self._last_events_seen = 0
+        self._last_candidates_count = 0
+        self._upcoming_truncated = False
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -387,6 +435,11 @@ class TeamarrPreflightService:
                 "last_error": self._last_error,
                 "active_checks": list(self._active_checks.values()),
                 "upcoming_events": upcoming_events,
+                "managed_events_seen": self._last_events_seen,
+                "managed_candidates": self._last_candidates_count,
+                "managed_events_returned": len(upcoming_events),
+                "managed_events_truncated": self._upcoming_truncated,
+                "managed_events_limit": MAX_UPCOMING_EVENTS,
                 "recent_events": recent_events,
                 "filter_options": dict(self._filter_options),
                 "config": public_config(self._config, self._default_profile_metadata()),
@@ -464,7 +517,10 @@ class TeamarrPreflightService:
             with self._lock:
                 self._last_scan_at = self.clock()
                 self._last_error = None
-                self._upcoming = candidates[:50]
+                self._upcoming = candidates[:MAX_UPCOMING_EVENTS]
+                self._last_events_seen = len(raw_events)
+                self._last_candidates_count = len(candidates)
+                self._upcoming_truncated = len(candidates) > len(self._upcoming)
                 self._filter_options = filter_options
 
             return {
@@ -510,7 +566,10 @@ class TeamarrPreflightService:
             with self._lock:
                 self._last_scan_at = self.clock()
                 self._last_error = None
-                self._upcoming = candidates[:50]
+                self._upcoming = candidates[:MAX_UPCOMING_EVENTS]
+                self._last_events_seen = len(raw_events)
+                self._last_candidates_count = len(candidates)
+                self._upcoming_truncated = len(candidates) > len(self._upcoming)
                 self._filter_options = filter_options
 
             if target is None:
@@ -761,10 +820,10 @@ class TeamarrPreflightService:
         return candidates
 
     def _public_event(self, event: Dict[str, Any], now: datetime) -> Optional[Dict[str, Any]]:
-        event_at = _parse_event_datetime(event.get("event_date"))
+        event_at = _parse_event_datetime(_event_datetime_value(event))
         if event_at is None:
             return None
-        channel_id = event.get("dispatcharr_channel_id")
+        channel_id = _event_dispatcharr_channel_id(event)
         try:
             dispatcharr_channel_id = int(channel_id)
         except (TypeError, ValueError):
@@ -899,22 +958,34 @@ class TeamarrPreflightService:
         if self._stream_checker_active():
             return self._queue_check(event, config)
 
+        queue_due_to_capacity = False
         with self._lock:
             if len(self._active_checks) >= int(config["max_concurrent_checks"]):
-                self._record_event("concurrency_limit", event, {"bucket": event.get("trigger_bucket")})
-                return False
-            key = f"{event['identity']}:{event.get('trigger_bucket') or 'manual'}"
-            if key in self._active_checks:
-                return False
-            self._mark_attempted(event, key=key)
-            self._active_checks[key] = {
-                "identity": event["identity"],
-                "event_name": event.get("event_name"),
-                "channel_name": event.get("channel_name"),
-                "dispatcharr_channel_id": channel_id,
-                "bucket": event.get("trigger_bucket"),
-                "started_at": self.clock(),
-            }
+                queue_due_to_capacity = True
+            else:
+                key = f"{event['identity']}:{event.get('trigger_bucket') or 'manual'}"
+                if key in self._active_checks:
+                    return False
+                self._mark_attempted(event, key=key)
+                self._active_checks[key] = {
+                    "identity": event["identity"],
+                    "event_name": event.get("event_name"),
+                    "channel_name": event.get("channel_name"),
+                    "dispatcharr_channel_id": channel_id,
+                    "bucket": event.get("trigger_bucket"),
+                    "started_at": self.clock(),
+                }
+
+        if queue_due_to_capacity:
+            if self._queue_check(event, config):
+                logger.info(
+                    "Teamarr preflight direct capacity full; queued channel_id=%s identity=%s",
+                    channel_id,
+                    event.get("identity"),
+                )
+                return True
+            self._record_event("concurrency_limit", event, {"bucket": event.get("trigger_bucket")})
+            return False
 
         thread = threading.Thread(
             target=self._run_check,

@@ -88,6 +88,10 @@ class AutomationConfigManager:
                 self._get_config_dict("catch_up_max_periods_per_cycle", 0),
                 default=0,
             ),
+            "run_all_due_periods": self._coerce_bool(
+                self._get_config_dict("run_all_due_periods", False),
+                default=False,
+            ),
             "maintenance_window_enabled": self._coerce_bool(
                 self._get_config_dict("maintenance_window_enabled", False),
                 default=False,
@@ -134,6 +138,12 @@ class AutomationConfigManager:
             self._set_config_dict(
                 "catch_up_max_periods_per_cycle",
                 self._coerce_non_negative_int(updates["catch_up_max_periods_per_cycle"], default=0),
+            )
+
+        if "run_all_due_periods" in updates:
+            self._set_config_dict(
+                "run_all_due_periods",
+                self._coerce_bool(updates["run_all_due_periods"], default=False),
             )
 
         if "maintenance_window_enabled" in updates:

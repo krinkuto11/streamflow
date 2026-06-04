@@ -312,11 +312,29 @@ export default function AutomationSettings() {
             <CardHeader>
               <CardTitle>Automation Run Policy</CardTitle>
               <CardDescription>
-                Bound automatic catch-up work and reserve a daily maintenance window
+                Bound automatic catch-up work, missed periods, and event windows
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="grid gap-6 md:grid-cols-2">
+                <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="run-all-due-periods">Run all due periods</Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Off runs only the highest-priority due period per automatic pass. On allows every due period up to the catch-up cap.
+                    </p>
+                    <div className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                      <AlertCircle className="h-3.5 w-3.5" />
+                      <span>Use with a cap when downtime could queue many periods.</span>
+                    </div>
+                  </div>
+                  <Switch
+                    id="run-all-due-periods"
+                    checked={Boolean(config?.run_all_due_periods)}
+                    onCheckedChange={(checked) => handleGlobalAutomationChange('run_all_due_periods', checked)}
+                  />
+                </div>
+
                 <div className="space-y-2">
                   <Label htmlFor="catch-up-max-periods">Catch-up cap</Label>
                   <div className="flex items-center gap-2">
@@ -331,14 +349,17 @@ export default function AutomationSettings() {
                         'catch_up_max_periods_per_cycle',
                         Math.max(0, parseInt(e.target.value) || 0)
                       )}
+                      disabled={!config?.run_all_due_periods}
                     />
                     <span className="text-sm text-muted-foreground">periods</span>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    0 allows every due period. Positive values defer extra automatic periods to the next scheduler pass.
+                    Applies only when Run all due periods is on. 0 means unlimited; positive values defer extra automatic periods to the next scheduler pass.
                   </p>
                 </div>
+              </div>
 
+              <div className="grid gap-6 md:grid-cols-2">
                 <div className="flex items-start justify-between gap-4 rounded-md border p-4">
                   <div className="space-y-1">
                     <Label htmlFor="maintenance-window-enabled">Maintenance window</Label>

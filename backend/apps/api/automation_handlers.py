@@ -63,6 +63,7 @@ def handle_global_automation_settings_response(
         "validate_existing_streams",
         "playlist_update_interval_minutes",
         "catch_up_max_periods_per_cycle",
+        "run_all_due_periods",
         "maintenance_window_enabled",
         "maintenance_window_start",
         "maintenance_window_end",

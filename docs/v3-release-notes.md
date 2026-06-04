@@ -16,21 +16,30 @@ template update path.
 - Dashboard and Stream Checker progress wording now separates learning ETA,
   early ETA, no-due idle state, refresh requests, cache sync, stream matching,
   queueing, and quality-check stages.
+- Stream session creation now recovers missing volatile refresh state on reused
+  manager instances instead of failing during unusual import or reload ordering.
 - Automation runs preserve manual-stop semantics, expose clearer run metrics, and
   keep skipped M3U refresh/cache sync stages visibly neutral.
 - Teamarr-managed event checks support queued event preflights, manual checks for
   past events, event/channel/date matching, post-start checks after game start,
   provider-limit override for event windows, active-check runtime visibility,
   and focused operator controls.
+- Teamarr Preflight keeps large managed-event schedules visible, shows managed
+  record/candidate counts, accepts alternate start-time and channel-id fields
+  from Teamarr, and queues due event checks when direct preflight capacity is
+  already occupied.
 - Automation periods now include startup catch-up, missed-run grace,
-  missed-run skip history, a global catch-up cap, and a maintenance window for
-  automatic runs.
+  missed-run skip history, explicit run-all-due opt-in, a global catch-up cap,
+  and a maintenance window for automatic runs.
 - Scheduling auto-create rule previews now test every selected channel and every
   channel in selected groups instead of sampling one channel from the selection.
 - Hardware acceleration stays optional and visible, with CPU-only,
   hardware-preferred fallback, and hardware-only states separated. Intel/DRI
   paths can report VAAPI, QSV, or DRI methods without requiring NVIDIA runtime
   checks.
+- DRI `auto` stream analysis resolves to a concrete VAAPI render node for the
+  FFmpeg command and logs the requested hardware mode/device per probe while
+  leaving CUDA/NVIDIA and explicit VAAPI/QSV selections unchanged.
 - In-app Help covers startup/cache, profiles/periods, Stream Checker, Shadow
   Monitor, hardware/fallback, and troubleshooting.
 
@@ -41,8 +50,11 @@ template update path.
 - `Pre-Start Retries` no longer makes a shorter preflight offset trigger early.
 - `Missed-run grace` skips stale automatic runs after the configured window and
   records the latest skip reason in Automation Periods.
+- `Run all due periods` is off by default; automatic scheduler passes process
+  only the highest-priority due period unless the operator enables it.
 - `Catch-up cap` limits how many due periods an automatic scheduler pass handles
-  at once. Extra due periods are deferred to the next pass.
+  at once when run-all-due is enabled. Extra due periods are deferred to the
+  next pass.
 - `Maintenance window` pauses automatic runs inside a daily time range. Manual
   forced runs still work.
 - Hardware status now distinguishes runtime device, FFmpeg methods, DRI methods,

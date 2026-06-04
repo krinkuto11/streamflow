@@ -68,7 +68,7 @@ const stateLabels = {
 }
 
 const DEFAULT_PROFILE_SELECT_VALUE = '__teamarr_default_profile__'
-const MANAGED_EVENT_DISPLAY_LIMIT = 50
+const MANAGED_EVENT_DISPLAY_LIMIT = 100
 const RECENT_EVENT_DISPLAY_LIMIT = 50
 const ACTIVE_CHECK_DISPLAY_LIMIT = 20
 const DEFAULT_PREFLIGHT_STREAM_CHECKING = {
@@ -239,6 +239,7 @@ export default function TeamarrPreflight() {
   const [actionLoading, setActionLoading] = useState('')
   const [forceEvent, setForceEvent] = useState(null)
   const [eventSearch, setEventSearch] = useState('')
+  const [showAllManagedEvents, setShowAllManagedEvents] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
@@ -262,9 +263,15 @@ export default function TeamarrPreflight() {
     () => filterTeamarrEventsBySearch(activeChecks, eventSearch),
     [activeChecks, eventSearch]
   )
-  const displayedUpcomingEvents = filteredUpcomingEvents.slice(0, MANAGED_EVENT_DISPLAY_LIMIT)
+  const displayedUpcomingEvents = showAllManagedEvents
+    ? filteredUpcomingEvents
+    : filteredUpcomingEvents.slice(0, MANAGED_EVENT_DISPLAY_LIMIT)
   const displayedRecentEvents = filteredRecentEvents.slice(0, RECENT_EVENT_DISPLAY_LIMIT)
   const displayedActiveChecks = filteredActiveChecks.slice(0, ACTIVE_CHECK_DISPLAY_LIMIT)
+  const managedCandidates = Number(status?.managed_candidates ?? upcomingEvents.length)
+  const managedEventsSeen = Number(status?.managed_events_seen ?? managedCandidates)
+  const managedEventsReturned = Number(status?.managed_events_returned ?? upcomingEvents.length)
+  const managedEventsTruncated = Boolean(status?.managed_events_truncated)
   const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
   const eventFilterOptions = useMemo(
     () => collectTeamarrFilterOptions([...upcomingEvents, ...recentEvents]),
@@ -836,8 +843,9 @@ export default function TeamarrPreflight() {
               <CardTitle>Managed Events</CardTitle>
               <CardDescription>
                 {eventSearch.trim()
-                  ? `${filteredUpcomingEvents.length} of ${upcomingEvents.length} upcoming Teamarr event channels`
-                  : `${upcomingEvents.length} upcoming Teamarr event channels`}
+                  ? `${filteredUpcomingEvents.length} of ${managedCandidates} Teamarr event channels`
+                  : `${managedCandidates} Teamarr event channels`}
+                {managedEventsSeen !== managedCandidates ? ` from ${managedEventsSeen} managed records` : ''}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -919,8 +927,37 @@ export default function TeamarrPreflight() {
                     )
                   })}
                   {filteredUpcomingEvents.length > displayedUpcomingEvents.length ? (
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                      <span>
+                        Showing {displayedUpcomingEvents.length} of {filteredUpcomingEvents.length} matching managed events
+                      </span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8"
+                        onClick={() => setShowAllManagedEvents(true)}
+                      >
+                        Show all
+                      </Button>
+                    </div>
+                  ) : showAllManagedEvents && filteredUpcomingEvents.length > MANAGED_EVENT_DISPLAY_LIMIT ? (
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                      <span>Showing all {filteredUpcomingEvents.length} matching managed events</span>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-8"
+                        onClick={() => setShowAllManagedEvents(false)}
+                      >
+                        Collapse
+                      </Button>
+                    </div>
+                  ) : null}
+                  {managedEventsTruncated ? (
                     <p className="text-xs text-muted-foreground">
-                      Showing {displayedUpcomingEvents.length} of {filteredUpcomingEvents.length} matching managed events
+                      Teamarr returned {managedEventsSeen} managed records; StreamFlow kept the first {managedEventsReturned} by start time.
                     </p>
                   ) : null}
                   </div>

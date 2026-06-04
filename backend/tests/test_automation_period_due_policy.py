@@ -162,7 +162,7 @@ def test_teamarr_event_window_policy_ignores_filtered_and_outside_window_events(
     assert active is None
 
 
-def test_global_catch_up_cap_defers_lower_priority_periods():
+def test_run_all_due_periods_disabled_defers_extra_periods_by_default():
     manager = AutomatedStreamManager()
     manager._period_skip_history = {}
     manager._save_state = lambda: None
@@ -175,7 +175,29 @@ def test_global_catch_up_cap_defers_lower_priority_periods():
 
     kept = manager._apply_global_catch_up_cap(
         active_periods,
-        {"catch_up_max_periods_per_cycle": 2},
+        {"run_all_due_periods": False, "catch_up_max_periods_per_cycle": 0},
+        forced=False,
+    )
+
+    assert set(kept) == {("1", "Highest")}
+    assert manager.get_period_skip_history("2")[0]["reason"] == "run_all_due_disabled"
+    assert manager.get_period_skip_history("3")[0]["reason"] == "run_all_due_disabled"
+
+
+def test_global_catch_up_cap_defers_lower_priority_periods_when_run_all_is_enabled():
+    manager = AutomatedStreamManager()
+    manager._period_skip_history = {}
+    manager._save_state = lambda: None
+
+    active_periods = {
+        ("1", "Highest"): {"priority": 20, "period_name": "Highest", "channels": [1]},
+        ("2", "Lowest"): {"priority": 1, "period_name": "Lowest", "channels": [2]},
+        ("3", "Middle"): {"priority": 10, "period_name": "Middle", "channels": [3]},
+    }
+
+    kept = manager._apply_global_catch_up_cap(
+        active_periods,
+        {"run_all_due_periods": True, "catch_up_max_periods_per_cycle": 2},
         forced=False,
     )
 
@@ -183,6 +205,26 @@ def test_global_catch_up_cap_defers_lower_priority_periods():
     history = manager.get_period_skip_history("2")
     assert history[0]["reason"] == "global_catch_up_cap"
     assert history[0]["period_name"] == "Lowest"
+
+
+def test_run_all_due_periods_enabled_without_cap_keeps_every_due_period():
+    manager = AutomatedStreamManager()
+    manager._period_skip_history = {}
+    manager._save_state = lambda: None
+
+    active_periods = {
+        ("1", "First"): {"priority": 1, "period_name": "First", "channels": [1]},
+        ("2", "Second"): {"priority": 1, "period_name": "Second", "channels": [2]},
+    }
+
+    kept = manager._apply_global_catch_up_cap(
+        active_periods,
+        {"run_all_due_periods": True, "catch_up_max_periods_per_cycle": 0},
+        forced=False,
+    )
+
+    assert kept == active_periods
+    assert manager.get_period_skip_history("2") == []
 
 
 def test_period_catch_up_policy_persists_with_priority():
@@ -214,6 +256,7 @@ def test_global_catch_up_and_maintenance_policy_persist():
 
     assert manager.update_global_settings(settings={
         "catch_up_max_periods_per_cycle": "3",
+        "run_all_due_periods": "true",
         "maintenance_window_enabled": "true",
         "maintenance_window_start": "23:15",
         "maintenance_window_end": "02:45",
@@ -224,6 +267,7 @@ def test_global_catch_up_and_maintenance_policy_persist():
 
     settings = manager.get_global_settings()
     assert settings["catch_up_max_periods_per_cycle"] == 3
+    assert settings["run_all_due_periods"] is True
     assert settings["maintenance_window_enabled"] is True
     assert settings["maintenance_window_start"] == "23:15"
     assert settings["maintenance_window_end"] == "02:45"

@@ -246,6 +246,45 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(public_stats["duration_seconds"], 12)
         self.assertNotIn("stream_details", public_stats)
 
+    def test_status_keeps_large_managed_event_lists_visible(self):
+        events = [
+            make_event(
+                id=1000 + index,
+                event_id=f"event-{index}",
+                dispatcharr_channel_id=7700 + index,
+                event_date=f"2030-01-01T{index % 24:02d}:00:00+00:00",
+            )
+            for index in range(75)
+        ]
+        service, _, _ = self.make_service(events)
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        status = service.get_status()
+        self.assertEqual(status["managed_events_seen"], 75)
+        self.assertEqual(status["managed_candidates"], 75)
+        self.assertEqual(status["managed_events_returned"], 75)
+        self.assertFalse(status["managed_events_truncated"])
+        self.assertEqual(len(status["upcoming_events"]), 75)
+
+    def test_managed_event_accepts_alternate_start_time_and_channel_id_fields(self):
+        event = make_event(
+            event_date=None,
+            start_time="2026-05-28T22:10:00+00:00",
+            dispatcharr_channel_id=None,
+            channel_id=91,
+        )
+        service, _, _ = self.make_service([event])
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(len(upcoming), 1)
+        self.assertEqual(upcoming[0]["dispatcharr_channel_id"], 91)
+        self.assertEqual(upcoming[0]["event_date"], "2026-05-28T22:10:00+00:00")
+
     def test_controlled_guard_skip_defers_preflight_bucket_for_retry(self):
         checker = SequencedChecker([
             {
@@ -481,6 +520,27 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         _, kwargs = checker.calls[0]
         self.assertTrue(kwargs["provider_limit_override"])
         self.assertTrue(kwargs["force_check"])
+
+    def test_direct_capacity_limit_queues_due_teamarr_events_instead_of_hiding_them(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service([make_event()], checker=checker)
+        service._active_checks["busy"] = {
+            "identity": "busy",
+            "dispatcharr_channel_id": 1,
+            "started_at": FIXED_NOW,
+        }
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(checker.calls, [])
+        self.assertEqual(len(checker.queued), 1)
+        args, kwargs = checker.queued[0]
+        self.assertEqual(args[0], 77)
+        self.assertEqual(kwargs["metadata"]["source"], "teamarr_preflight")
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["type"], "preflight_queued")
 
     def test_filter_options_use_teamarr_subscription_and_cache_catalogs(self):
         def http_get(url, **kwargs):

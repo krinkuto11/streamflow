@@ -3698,8 +3698,11 @@ class AutomatedStreamManager:
     ) -> Dict[tuple, dict]:
         if forced:
             return active_periods
-        cap = self._get_catch_up_max_periods_per_cycle(global_settings)
-        if cap <= 0 or len(active_periods) <= cap:
+        run_all_due_periods = bool(global_settings.get("run_all_due_periods", False))
+        cap = self._get_catch_up_max_periods_per_cycle(global_settings) if run_all_due_periods else 1
+        if run_all_due_periods and cap <= 0:
+            return active_periods
+        if len(active_periods) <= cap:
             return active_periods
 
         def sort_key(item):
@@ -3714,6 +3717,12 @@ class AutomatedStreamManager:
         kept = dict(ordered[:cap])
         skipped = ordered[cap:]
         now = datetime.now()
+        skip_reason = "global_catch_up_cap" if run_all_due_periods else "run_all_due_disabled"
+        skip_message = (
+            "Global catch-up cap deferred this period to the next scheduler pass"
+            if run_all_due_periods
+            else "Run all due periods is disabled; this period is deferred to the next scheduler pass"
+        )
         for (period_id, _period_name), data in skipped:
             self._record_period_skip(
                 str(period_id),
@@ -3721,16 +3730,19 @@ class AutomatedStreamManager:
                     "id": str(period_id),
                     "name": data.get("period_name") or str(period_id),
                 },
-                reason="global_catch_up_cap",
+                reason=skip_reason,
                 now=now,
                 grace_minutes=0,
-                message="Global catch-up cap deferred this period to the next scheduler pass",
+                message=skip_message,
             )
         self._save_state()
         logger.info(
-            "Global catch-up cap kept %s period(s) and deferred %s period(s)",
+            "Automatic due-period policy kept %s period(s) and deferred %s period(s) "
+            "(run_all_due_periods=%s, cap=%s)",
             len(kept),
             len(skipped),
+            run_all_due_periods,
+            cap,
         )
         return kept
 

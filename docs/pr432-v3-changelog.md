@@ -37,10 +37,14 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Splits timing guidance into explicit buckets: main preflight at `-20 min`, pre-start retries at `-10 min` and `-3 min`, and post-start checks at `+2 min` and `+4 min`.
 - Adds `post_start_offsets_minutes=[2,4]` for new default configs without silently changing already-saved configs.
 - Adds shared search, filtered counts, empty search states, and larger managed/recent event windows.
+- Keeps up to 1000 managed Teamarr event candidates in backend status and shows the first 100 in the UI with a `Show all` option for large schedules.
+- Shows managed-record, candidate, returned, and truncation counts so missing event channels can be distinguished from filtered or unsupported Teamarr payloads.
+- Accepts alternate Teamarr start-time and Dispatcharr channel-id field names for managed event channels.
 - Shows active event checks with event, channel, bucket, and start-time context.
 - Shows active event-check runtime so long-running Teamarr checks are easier to spot.
 - Keeps active checks searchable in the Teamarr event list.
 - Surfaces post-start event-channel behavior in Help and Operational Notes.
+- Queues due Teamarr event checks when direct preflight capacity is already occupied, instead of hiding them until the next poll.
 
 ### Dashboard, Startup, And Automation Progress
 
@@ -63,6 +67,11 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Records watcher reconnects as `Watcher Recovered` events when continuity is restored.
 - Keeps real viewer wording distinct from shadow watcher clients in Dashboard and Shadow Monitor UI.
 
+### Session Runtime Stability
+
+- Reinitializes volatile stream-session refresh state on reused singleton instances.
+- Prevents session creation from failing when an existing manager instance is missing transient runtime fields after unusual import, test, or reload ordering.
+
 ### Hardware Diagnostics And Setup Help
 
 - Adds hardware status display and startup diagnostics.
@@ -71,6 +80,8 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Avoids NVIDIA runtime probing and warning when the selected hardware path is DRI-only.
 - Keeps CPU fallback behavior visible and documents when checks are CPU-only, hardware preferred with fallback, hardware-only, or at risk.
 - Adds platform-neutral Intel/DRI Compose guidance for `/dev/dri`, render-group access, CPU fallback, API host/port alignment, and healthcheck alignment.
+- Resolves DRI `auto` stream analysis to a concrete VAAPI render node for the FFmpeg command and logs the requested mode/device/fallback/decode-filter path per probe.
+- Leaves CUDA/NVIDIA mode and explicit VAAPI/QSV selections unchanged while making DRI auto behavior observable.
 
 ### In-App Help And Operator Guidance
 
@@ -88,6 +99,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Adds GUI-editable Startup catch-up policy for safe first/no-last-run cases.
 - Adds GUI-editable Missed-run grace for automatic missed scheduled runs.
 - Tracks bounded missed-run skip history and latest skip reason.
+- Adds explicit `Run all due periods` opt-in so automatic scheduler passes do not silently process every due period by default.
 - Adds global automatic-run policies for Catch-up cap, Maintenance window, and Teamarr event window.
 - Keeps manual forced runs separate from automatic-run policy pauses.
 
@@ -99,6 +111,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Frontend production builds have passed after UI/help changes.
 - `git diff --check` has been kept clean apart from normal CRLF notices in the Windows workspace.
 - The functional Help follow-up head passed `npm.cmd run test:ci`, `npm.cmd run build`, and a local dark-mode `/help/troubleshooting` Playwright render before push.
+- The latest DRI/Teamarr/catch-up/session head passed focused backend tests, full frontend Vitest, frontend production build, and the full backend suite with 1094 passed, 2 skipped.
 
 ### GitHub
 
