@@ -222,6 +222,50 @@ class TestEPGPastEvents(unittest.TestCase):
         self.assertEqual(len(events), 0, "Should not re-create executed event")
         self.assertEqual(result['created'], 0)
         self.assertEqual(result['skipped'], 0)
+
+    def test_scheduled_check_defers_while_stream_checker_active(self):
+        """Scheduled EPG checks must not run in parallel with active Teamarr/single checks."""
+        now = datetime.now(timezone.utc)
+        event = self.service.create_scheduled_event({
+            'channel_id': 1,
+            'program_title': 'Live Baseball',
+            'program_start_time': (now + timedelta(minutes=5)).isoformat(),
+            'program_end_time': (now + timedelta(hours=2)).isoformat(),
+            'minutes_before': 0,
+        })
+
+        mock_stream_checker = Mock()
+        mock_stream_checker.get_status.return_value = {
+            'stream_checking_mode': True,
+            'active_single_channel_checks': 1,
+            'queue': {'queue_size': 0, 'in_progress': 0},
+        }
+        mock_stream_checker.check_single_channel.return_value = {'success': True}
+
+        success = self.service.execute_scheduled_check(event['id'], mock_stream_checker)
+
+        self.assertFalse(success)
+        mock_stream_checker.check_single_channel.assert_not_called()
+        self.assertEqual(
+            [scheduled['id'] for scheduled in self.service.get_scheduled_events()],
+            [event['id']],
+            "Deferred event should remain scheduled for the next processor tick",
+        )
+
+        mock_stream_checker.get_status.return_value = {
+            'stream_checking_mode': False,
+            'active_single_channel_checks': 0,
+            'queue': {'queue_size': 0, 'in_progress': 0},
+        }
+
+        success = self.service.execute_scheduled_check(event['id'], mock_stream_checker)
+
+        self.assertTrue(success)
+        mock_stream_checker.check_single_channel.assert_called_once_with(
+            1,
+            program_name='Live Baseball',
+        )
+        self.assertEqual(self.service.get_scheduled_events(), [])
     
     def test_program_name_change_same_time(self):
         """Test that program name changes don't create duplicate events for same time."""

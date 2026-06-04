@@ -206,6 +206,7 @@ class StreamCheckerService:
         
         self.running = False
         self.checking = False
+        self._active_single_channel_checks = 0
         self.start_time = datetime.now()
         self.worker_thread = None
         self.scheduler_thread = None
@@ -4119,6 +4120,7 @@ class StreamCheckerService:
         
         with self.lock:
             sync_state = dict(self.sync_batch_state)
+            active_single_channel_checks = getattr(self, '_active_single_channel_checks', 0)
             
         if sync_state.get('active'):
             # Override queue status with our synchronous batch status
@@ -4187,6 +4189,7 @@ class StreamCheckerService:
         # - There are channels in the queue waiting to be checked
         stream_checking_mode = (
             self.checking or 
+            active_single_channel_checks > 0 or
             queue_status.get('queue_size', 0) > 0 or
             queue_status.get('in_progress', 0) > 0 or
             sync_state.get('active', False)
@@ -4205,6 +4208,7 @@ class StreamCheckerService:
         return {
             'running': self.running,
             'checking': self.checking,
+            'active_single_channel_checks': active_single_channel_checks,
             'stream_checking_mode': stream_checking_mode,
             'enabled': self.config.get('enabled', True),
             'queue': queue_status,
@@ -4490,6 +4494,8 @@ class StreamCheckerService:
         start_time = time_module.time()
         self.abort_current_check.clear()
         udi = None
+        with self.lock:
+            self._active_single_channel_checks = getattr(self, '_active_single_channel_checks', 0) + 1
         
         try:
             logger.info(f"Starting single channel check for channel {channel_id}")
@@ -5205,6 +5211,11 @@ class StreamCheckerService:
             self.progress.clear()
             return {'success': False, 'error': str(e)}
         finally:
+            with self.lock:
+                self._active_single_channel_checks = max(
+                    0,
+                    getattr(self, '_active_single_channel_checks', 0) - 1,
+                )
             if udi is not None:
                 udi.clear_automation_busy()
     
