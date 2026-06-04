@@ -498,6 +498,7 @@ export default function Dashboard() {
   const totalProcessedLabel = queueHistoryOnly ? 'Last Batch:' : 'Total Processed:'
   const streamQueueActive = streamCheckerRunDisplay.streamQueueActive
   const streamCheckerOnlyActive = streamCheckerRunDisplay.streamCheckerOnlyActive
+  const streamQueueHistory = queueHistoryOnly && ['idle', 'skipped'].includes(runState)
   const streamRunActive = streamCheckerOnlyActive
   const streamProgress = streamCheckerStatus?.progress || {}
   const singleStreamRunActive = streamRunActive && !streamQueueActive
@@ -664,6 +665,7 @@ export default function Dashboard() {
   const displayRunMetrics = getDashboardRunMetrics({
     streamCheckerStatus,
     streamQueueActive,
+    streamQueueHistory,
     streamCheckerOnlyActive,
     batchTotal,
     completed,

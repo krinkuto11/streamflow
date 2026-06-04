@@ -77,6 +77,43 @@ describe('dashboard run counts', () => {
     expect(counts.freeze).toBe(2)
   })
 
+  it('keeps last completed stream-checker batch problem counts visible after the queue goes idle', () => {
+    const metrics = getDashboardRunMetrics({
+      streamQueueHistory: true,
+      batchTotal: 2,
+      completed: 2,
+      runCounts: {
+        channels_with_periods: 0,
+        refreshed_playlists: 9,
+        assigned_channels: 8,
+        quality_checked: 2,
+        dead_streams: 0,
+        blank_streams: 0,
+        freeze_streams: 0,
+      },
+      streamCheckerStatus: {
+        queue: {
+          state: 'completed',
+          completed: 2,
+          dead_streams_count: 1,
+          blank_streams_count: 1,
+          freeze_streams_count: 0,
+        },
+      },
+    })
+
+    expect(metrics.map(metric => [metric.key, metric.label, metric.value])).toEqual([
+      ['channels', 'Queued Channels', 2],
+      ['playlists', 'Refresh Requests', null],
+      ['matched', 'Stream Matching', null],
+      ['checked', 'Channels Checked', 2],
+      ['dead', 'Dead Streams', 1],
+      ['blank', 'Blank Streams', 1],
+      ['freeze', 'Frozen Streams', 0],
+    ])
+    expect(metrics.find(metric => metric.key === 'dead').description).toMatch(/last completed Stream Checker batch/i)
+  })
+
   it('does not carry playlist or matching counts into manual quality-only metrics', () => {
     const metrics = getDashboardRunMetrics({
       streamQueueActive: true,
