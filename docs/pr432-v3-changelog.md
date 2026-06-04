@@ -14,6 +14,9 @@ Current test image: `ghcr.io/bttfw/streamflow:dashboard-manual-quality-stage-sta
 
 Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 
+The PR body tracks the mutable current PR head, image build URL, manifest digest,
+and deployed commit for external testing.
+
 ## Changelog
 
 ### Stream Checker And Provider Capacity
@@ -35,7 +38,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Adds managed-event preflight filters and operator UX refinements.
 - Shows selected quality profile behavior directly in Teamarr Preflight, including Quality Check, Dead Removal, Blank Detection, Freeze Detection, and Loop Check.
 - Splits timing guidance into explicit buckets: main preflight at `-20 min`, pre-start retries at `-10 min` and `-3 min`, and post-start checks at `+2 min` and `+4 min`.
-- Clarifies that `Poll Interval` is the Teamarr API polling interval, while `Pre-Start Retries` and `Post-Start Checks` are comma-separated minute offsets rather than continuous monitoring.
+- Clarifies that `Teamarr API Poll Interval` controls how often StreamFlow reads Teamarr, while `Pre-Start Retries` and `Post-Start Checks` remain comma-separated minute offsets rather than counts or continuous monitoring.
 - Adds `post_start_offsets_minutes=[2,4]` for new default configs without silently changing already-saved configs.
 - Adds shared search, filtered counts, empty search states, and larger managed/recent event windows.
 - Keeps up to 1000 managed Teamarr event candidates in backend status and shows the first 100 in the UI with a `Show all` option for large schedules.
@@ -116,11 +119,11 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - The functional Help follow-up head passed `npm.cmd run test:ci`, `npm.cmd run build`, and a local dark-mode `/help/troubleshooting` Playwright render before push.
 - The latest DRI/Teamarr/catch-up/session head passed focused backend tests, full frontend Vitest, frontend production build, and the full backend suite with 1094 passed, 2 skipped.
 - Feature-change head `4b151df` passed `python -m pytest tests/test_teamarr_preflight_service.py -q`, `npm.cmd test -- teamarr-preflight-schedule.test.js --run`, `npm.cmd run build`, `python scripts/run_ci_checks.py`, and full `npm.cmd run test:ci` with 117 frontend tests.
+- Final Teamarr timing help/image refresh passed `npm.cmd test -- operator-help-content.test.js teamarr-preflight-schedule.test.js --run`, full `npm.cmd run test:ci` with 117 frontend tests, `npm.cmd run build`, and `python scripts/run_ci_checks.py` with 77 tests.
 
 ### GitHub
 
-- PR checks passed on the feature-change head and were rerun after documentation
-  refreshes:
+- PR checks passed on the final Teamarr timing/help refresh head:
   - Backend smoke tests
   - Frontend build and tests
   - CodeQL Python analysis
@@ -132,8 +135,9 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - The PR body tracks the mutable current image build URL, manifest digest, and deployed commit for external testing.
 - Current V3 test images have been live-loaded and smoke-tested against API health, initialization, hardware status, Stream Checker status, Teamarr Preflight status, Shadow Monitor status, Auto-Create-Rules, browser DOM checks, and post-deploy log scans.
 - Recent live smoke completed with 217513 streams, 220 channels, and 6 accounts loaded.
-- Live Teamarr Preflight smoke on `4b151df` confirmed `Vegas Golden Knights at Carolina Hurricanes` shows the next automatic check `-20m` bucket and an enabled `Force Check` button in dark mode.
-- Read-only live smoke on `4b151df` confirmed `/scheduling`, the Auto-Create dialog opening path, and `/teamarr-preflight` without interface text errors or console errors.
+- Live Teamarr Preflight smoke on the final Teamarr timing/help image confirmed `Vegas Golden Knights at Carolina Hurricanes` shows the next automatic check `-20m` bucket and an enabled `Force Check` button in dark mode.
+- Read-only live smoke on the final Teamarr timing/help image confirmed `/scheduling`, the Auto-Create dialog opening path without saving, `/teamarr-preflight`, and the Teamarr Help screenshot accordion without interface text errors or console errors.
+- The final Teamarr timing Help crop is served from the live image as `/help/teamarr-preflight-timing-dark.jpg` with natural size `570x650`.
 - A 10-minute idle observation on a functionally identical code head passed with 20 API samples, `bad_count=0`, no Stream Checker/Teamarr/Shadow last errors, an empty 12-minute log scan, and the service still healthy.
 - Active-viewer Shadow Monitor observation passed on the live deployment: 12 samples, at least one real viewer client, at least one watcher client, one watched channel, `watching` state, max watcher uptime 135 seconds, `bad_count=0`, and no Shadow last error.
 

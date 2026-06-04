@@ -52,6 +52,8 @@ template update path.
   start when event channels appear late.
 - Teamarr Preflight timing fields now explain that the poll interval reads the
   Teamarr API, while pre-start and post-start retry fields are minute offsets.
+- `Pre-Start Retries` remains an offset list, not a retry count; V3 clarifies
+  the UI/Help wording instead of changing the saved timing semantics.
 - Teamarr scheduled event cards now show `Next auto check` and expose the
   manual one-time action as `Force Check`.
 - `Pre-Start Retries` no longer makes a shorter preflight offset trigger early.
@@ -76,19 +78,25 @@ template update path.
 
 - Backend focused tests, frontend Vitest, production build, and the repository CI
   helper passed on feature-change head `4b151df`.
-- GitHub Tests and CodeQL passed on the feature-change head and were rerun after
-  documentation refreshes.
+- Final Teamarr timing help/image refresh passed focused Help/Teamarr frontend tests,
+  full frontend Vitest with 117 tests, production build, repository CI helper
+  with 77 tests, GitHub Tests, CodeQL, and multi-arch image build.
+- Current test image is
+  `ghcr.io/bttfw/streamflow:dashboard-manual-quality-stage-state`; the PR body
+  tracks the latest mutable build URL and manifest digest.
 - The branch image was rebuilt for AMD64 and ARM64, then live-loaded through the
   existing template update path.
 - Live API smoke passed for health, version, initialization status, automation,
   Teamarr Preflight, Stream Checker, and hardware status.
 - Recent live smoke completed startup with 217513 streams, 220 channels, and 6
   accounts loaded.
-- Live Teamarr Preflight smoke confirmed the Vegas scheduled event shows
+- Live Teamarr Preflight smoke on the final Teamarr timing/help image confirmed the Vegas scheduled event shows
   `Next auto check: 5.6.2026, 01:40:00 (-20m)` and an enabled `Force Check`
   button in dark mode.
 - Read-only live Scheduling smoke confirmed navigation, the Auto-Create dialog
   opening path, Teamarr Preflight/Vegas, and no interface or console errors.
+- Live Help smoke confirmed the Teamarr timing screenshot accordion opens and
+  loads `/help/teamarr-preflight-timing-dark.jpg` with natural size `570x650`.
 - A 10-minute idle live observation on a functionally identical code head stayed
   healthy for 20 API samples with
   initialization complete, Teamarr running, Stream Checker running, Shadow
