@@ -478,6 +478,36 @@ def assign_automation_profile_group_response(
         return error_response("Internal Server Error", status_code=500, code="internal_error")
 
 
+def assign_automation_profile_groups_response(
+    *,
+    payload: Optional[Dict[str, Any]],
+    get_automation_config_manager: Callable[[], Any],
+):
+    """Assign or remove one automation profile mapping for multiple channel groups."""
+    try:
+        automation_config = get_automation_config_manager()
+        data = MultiEntityProfileAssignmentSchema.from_payload(payload or {}, entity_field="group_ids")
+        group_ids = data.entity_ids
+        profile_id = data.profile_id
+
+        if automation_config.assign_profile_to_groups(group_ids, profile_id):
+            return (
+                jsonify(
+                    {
+                        "message": f"Profile {profile_id} assigned to {len(group_ids)} groups",
+                        "group_ids": group_ids,
+                    }
+                ),
+                200,
+            )
+        return error_response("Failed to assign profile to groups", status_code=500, code="internal_error")
+    except ValidationError as exc:
+        return _validation_error(exc)
+    except Exception as exc:
+        logger.error(f"Error assigning profile to groups: {exc}")
+        return error_response("Internal Server Error", status_code=500, code="internal_error")
+
+
 def assign_epg_scheduled_profile_channel_response(
     *,
     payload: Optional[Dict[str, Any]],
@@ -583,6 +613,71 @@ def get_group_automation_periods_response(
         return jsonify(periods), 200
     except Exception as exc:
         logger.error(f"Error getting automation periods for group {group_id}: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def get_group_configuration_summary_response(
+    *,
+    get_automation_config_manager: Callable[[], Any],
+    get_regex_matcher: Callable[[], Any],
+):
+    """Return all group-level profile, period, EPG, and matching settings in one response."""
+    try:
+        automation_config = get_automation_config_manager()
+        periods = automation_config.get_all_periods()
+        profiles = automation_config.get_all_profiles()
+
+        period_by_id = {
+            str(period.get("id")): period
+            for period in periods
+            if isinstance(period, dict) and period.get("id") is not None
+        }
+        profile_by_id = {
+            str(profile.get("id")): profile
+            for profile in profiles
+            if isinstance(profile, dict) and profile.get("id") is not None
+        }
+
+        group_profiles = automation_config.get_all_group_assignments()
+        group_epg_profiles = automation_config.get_all_group_epg_scheduled_assignments()
+        group_period_assignments = automation_config.get_all_group_period_assignments()
+
+        matcher = get_regex_matcher()
+        matcher.reload_patterns()
+        get_patterns = getattr(matcher, "_get_group_patterns", None)
+        group_matching = get_patterns() if callable(get_patterns) else {}
+        if not isinstance(group_matching, dict):
+            group_matching = {}
+
+        group_ids = set()
+        group_ids.update(str(gid) for gid in group_profiles.keys())
+        group_ids.update(str(gid) for gid in group_epg_profiles.keys())
+        group_ids.update(str(gid) for gid in group_period_assignments.keys())
+        group_ids.update(str(gid) for gid in group_matching.keys())
+
+        summary = {}
+        for gid in sorted(group_ids, key=lambda value: int(value) if str(value).isdigit() else str(value)):
+            period_entries = []
+            period_map = group_period_assignments.get(gid, {})
+            if isinstance(period_map, dict):
+                for pid, profile_id in period_map.items():
+                    period_copy = dict(period_by_id.get(str(pid), {"id": str(pid), "name": f"Period {pid}"}))
+                    period_copy["profile_id"] = str(profile_id) if profile_id is not None else None
+                    profile = profile_by_id.get(str(profile_id))
+                    if isinstance(profile, dict):
+                        period_copy["profile_name"] = profile.get("name")
+                    period_entries.append(period_copy)
+
+            summary[gid] = {
+                "profile_id": group_profiles.get(gid),
+                "epg_profile_id": group_epg_profiles.get(gid),
+                "periods": period_entries,
+                "matching": group_matching.get(gid, {}),
+            }
+
+        return jsonify(summary), 200
+    except Exception as exc:
+        logger.error(f"Error getting group configuration summary: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500
 
 

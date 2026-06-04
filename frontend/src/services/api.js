@@ -61,6 +61,7 @@ export const automationAPI = {
   assignChannel: (channelId, profileId) => api.post('/automation/assign/channel', { channel_id: channelId, profile_id: profileId }),
   assignChannels: (channelIds, profileId) => api.post('/automation/assign/channels', { channel_ids: channelIds, profile_id: profileId }),
   assignGroup: (groupId, profileId) => api.post('/automation/assign/group', { group_id: groupId, profile_id: profileId }),
+  assignGroups: (groupIds, profileId) => api.post('/automation/assign/groups', { group_ids: groupIds, profile_id: profileId }),
   getGroupAssignments: () => api.get('/automation/assign/group'),
 
   // EPG Scheduled Profile Assignments
@@ -88,6 +89,7 @@ export const automationAPI = {
   removePeriodFromGroups: (periodId, groupIds) =>
     api.post(`/automation/periods/${periodId}/remove-groups`, { group_ids: groupIds }),
   getGroupPeriods: (groupId) => api.get(`/channels/groups/${groupId}/automation-periods`),
+  getGroupConfigSummary: () => api.get('/channels/groups/config-summary'),
   batchAssignPeriodsToGroups: (groupIds, periodAssignments, replace = false) =>
     api.post('/channels/groups/batch/assign-periods', { group_ids: groupIds, period_assignments: periodAssignments, replace }),
 

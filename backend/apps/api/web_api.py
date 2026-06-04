@@ -79,6 +79,7 @@ from apps.api.automation_handlers import (
     assign_automation_profile_channel_response,
     assign_automation_profile_channels_response,
     assign_automation_profile_group_response,
+    assign_automation_profile_groups_response,
     assign_epg_scheduled_profile_channel_response,
     assign_epg_scheduled_profile_channels_response,
     assign_epg_scheduled_profile_group_response,
@@ -91,6 +92,7 @@ from apps.api.automation_handlers import (
     get_automation_status_response,
     get_channel_automation_periods_response,
     get_group_automation_periods_response,
+    get_group_configuration_summary_response,
     get_period_channels_response,
     get_upcoming_automation_events_response,
     handle_automation_period_response,
@@ -1836,6 +1838,16 @@ def assign_automation_profile_group():
     )
 
 
+@app.route('/api/automation/assign/groups', methods=['POST'])
+@log_function_call
+def assign_automation_profile_groups():
+    """Assign or remove an automation profile for multiple channel groups."""
+    return assign_automation_profile_groups_response(
+        payload=request.get_json(silent=True),
+        get_automation_config_manager=get_automation_config_manager,
+    )
+
+
 @app.route('/api/automation/assign/epg-profile/channel', methods=['POST'])
 @log_function_call
 def assign_epg_scheduled_profile_channel():
@@ -1875,6 +1887,16 @@ def get_group_automation_periods(group_id):
     return get_group_automation_periods_response(
         group_id=group_id,
         get_automation_config_manager=get_automation_config_manager,
+    )
+
+
+@app.route('/api/channels/groups/config-summary', methods=['GET'])
+@log_function_call
+def get_group_configuration_summary():
+    """Return group-level automation and matching configuration in one response."""
+    return get_group_configuration_summary_response(
+        get_automation_config_manager=get_automation_config_manager,
+        get_regex_matcher=get_regex_matcher,
     )
 
 

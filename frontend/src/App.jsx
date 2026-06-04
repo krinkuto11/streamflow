@@ -7,6 +7,11 @@ import { useToast } from '@/hooks/use-toast.js'
 import { api } from '@/services/api.js'
 import { AppErrorBoundary } from '@/components/AppErrorBoundary.jsx'
 import StreamFlowInitializingScreen from '@/components/Dashboard/StreamFlowInitializingScreen.jsx'
+import {
+  getInitializationStateFromStatus,
+  getInitializationStateFromStatusError,
+  isStartupGateActive,
+} from '@/lib/startup-gate-state.js'
 
 // Page imports
 import Dashboard from '@/pages/Dashboard'
@@ -60,9 +65,11 @@ function App() {
   }
 
   const setupComplete = setupStatus?.setup_complete || false
-  const udiInitializing = Boolean(setupComplete && udiInitialization?.inProgress)
-  const udiStatusPending = Boolean(setupComplete && !udiInitializationChecked)
-  const startupGateActive = Boolean(udiStatusPending || udiInitializing)
+  const startupGateActive = isStartupGateActive({
+    setupComplete,
+    initializationChecked: udiInitializationChecked,
+    initialization: udiInitialization,
+  })
 
   useEffect(() => {
     if (!setupComplete) {
@@ -79,29 +86,12 @@ function App() {
         if (cancelled) return
 
         const data = response.data || {}
-        const hasCompletedCache = Boolean(data.last_refresh_time)
-        setUdiInitialization({
-          inProgress: data.status === 'in_progress' && !hasCompletedCache,
-          status: data.status || 'unknown',
-          percentage: data.percentage ?? 0,
-          message: data.message || '',
-          started_at: data.started_at || null,
-          elapsed_seconds: data.elapsed_seconds ?? null,
-          last_refresh_duration_seconds: data.last_refresh_duration_seconds ?? null,
-        })
+        setUdiInitialization(getInitializationStateFromStatus(data))
         setUdiInitializationChecked(true)
       } catch (err) {
         console.error('Failed to check initialization status:', err)
         if (!cancelled) {
-          setUdiInitialization({
-            inProgress: true,
-            status: 'pending',
-            percentage: 0,
-            message: 'Checking startup status...',
-            started_at: null,
-            elapsed_seconds: null,
-            last_refresh_duration_seconds: null,
-          })
+          setUdiInitialization((previous) => getInitializationStateFromStatusError(previous))
           setUdiInitializationChecked(true)
         }
       }
@@ -118,13 +108,13 @@ function App() {
 
   useEffect(() => {
     if (
-      udiInitializing &&
+      startupGateActive &&
       location.pathname !== '/' &&
       location.pathname !== '/dashboard'
     ) {
       navigate('/', { replace: true })
     }
-  }, [location.pathname, navigate, udiInitializing])
+  }, [location.pathname, navigate, startupGateActive])
 
   if (loading) {
     return (

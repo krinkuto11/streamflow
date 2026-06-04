@@ -9,11 +9,13 @@ import tempfile
 import json
 from pathlib import Path
 from unittest.mock import patch
+from flask import Flask
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.automation.automation_config_manager import AutomationConfigManager, CONFIG_DIR, AUTOMATION_CONFIG_FILE
+from apps.api.automation_handlers import get_group_configuration_summary_response
 
 
 def test_automation_periods_creation():
@@ -128,6 +130,87 @@ def test_automation_periods_channel_assignment():
             
             print("✅ Test 2 passed\n")
             
+        finally:
+            automation_config_manager.CONFIG_DIR = original_config_dir
+            automation_config_manager.AUTOMATION_CONFIG_FILE = original_config_file
+
+
+def test_automation_profile_can_be_assigned_to_multiple_groups():
+    """Test assigning one automation profile to multiple groups."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import apps.automation.automation_config_manager
+        original_config_dir = automation_config_manager.CONFIG_DIR
+        original_config_file = automation_config_manager.AUTOMATION_CONFIG_FILE
+        automation_config_manager.CONFIG_DIR = Path(tmpdir)
+        automation_config_manager.AUTOMATION_CONFIG_FILE = Path(tmpdir) / 'test_automation_config.json'
+
+        try:
+            manager = AutomationConfigManager()
+            profile_id = manager.create_profile({"name": "Group Profile"})
+
+            assert manager.assign_profile_to_groups([11, 12, 13], profile_id) is True
+            assert manager.get_all_group_assignments() == {
+                "11": profile_id,
+                "12": profile_id,
+                "13": profile_id,
+            }
+
+            assert manager.assign_profile_to_groups([12, 13], None) is True
+            assert manager.get_all_group_assignments() == {"11": profile_id}
+        finally:
+            automation_config_manager.CONFIG_DIR = original_config_dir
+            automation_config_manager.AUTOMATION_CONFIG_FILE = original_config_file
+
+
+def test_group_configuration_summary_returns_all_group_settings():
+    """Test the group summary endpoint returns profile, period, EPG, and matching settings."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        import apps.automation.automation_config_manager
+        original_config_dir = automation_config_manager.CONFIG_DIR
+        original_config_file = automation_config_manager.AUTOMATION_CONFIG_FILE
+        automation_config_manager.CONFIG_DIR = Path(tmpdir)
+        automation_config_manager.AUTOMATION_CONFIG_FILE = Path(tmpdir) / 'test_automation_config.json'
+
+        class MatcherStub:
+            def reload_patterns(self):
+                return None
+
+            def _get_group_patterns(self):
+                return {
+                    "42": {
+                        "name": "Sports",
+                        "enabled": True,
+                        "match_by_tvg_id": True,
+                        "regex_patterns": [{"pattern": ".*Sports.*", "m3u_accounts": None}],
+                    }
+                }
+
+        try:
+            manager = AutomationConfigManager()
+            profile_id = manager.create_profile({"name": "Event Profile"})
+            epg_profile_id = manager.create_profile({"name": "EPG Profile"})
+            period_id = manager.create_period({
+                "name": "Prime Time",
+                "schedule": {"type": "interval", "value": 30}
+            })
+            assert manager.assign_profile_to_groups([42], profile_id) is True
+            assert manager.assign_epg_scheduled_profile_to_group(42, epg_profile_id) is True
+            assert manager.assign_period_to_groups(period_id, [42], profile_id) is True
+
+            app = Flask(__name__)
+            with app.app_context():
+                response, status_code = get_group_configuration_summary_response(
+                    get_automation_config_manager=lambda: manager,
+                    get_regex_matcher=lambda: MatcherStub(),
+                )
+
+            assert status_code == 200
+            payload = response.get_json()
+            assert payload["42"]["profile_id"] == profile_id
+            assert payload["42"]["epg_profile_id"] == epg_profile_id
+            assert payload["42"]["periods"][0]["id"] == period_id
+            assert payload["42"]["periods"][0]["profile_name"] == "Event Profile"
+            assert payload["42"]["matching"]["match_by_tvg_id"] is True
         finally:
             automation_config_manager.CONFIG_DIR = original_config_dir
             automation_config_manager.AUTOMATION_CONFIG_FILE = original_config_file

@@ -545,6 +545,23 @@ class AutomationConfigManager:
             if gid in assignments: del assignments[gid]
         else: assignments[gid] = str(profile_id)
         return self._set_config_dict("group_assignments", assignments)
+
+    def assign_profile_to_groups(self, group_ids: List[int], profile_id: Optional[str]) -> bool:
+        assignments = self._get_config_dict("group_assignments", {})
+        changed = False
+        for gid_raw in group_ids:
+            gid = str(gid_raw)
+            if profile_id is None:
+                if gid in assignments:
+                    del assignments[gid]
+                    changed = True
+            else:
+                if assignments.get(gid) != str(profile_id):
+                    assignments[gid] = str(profile_id)
+                    changed = True
+        if changed:
+            return self._set_config_dict("group_assignments", assignments)
+        return True
             
     def get_channel_assignment(self, channel_id: int) -> Optional[str]:
         return self._get_config_dict("channel_assignments", {}).get(str(channel_id))
@@ -1013,6 +1030,11 @@ class AutomationConfigManager:
         if not isinstance(group_assignments, dict):
             return {}
         return group_assignments
+
+    def get_all_group_period_assignments(self) -> Dict[str, Dict[str, str]]:
+        """Return all group period/profile assignments as {group_id: {period_id: profile_id}}."""
+        result = self._get_config_dict("group_period_assignments", {})
+        return result if isinstance(result, dict) else {}
 
     def get_period_groups(self, period_id: str) -> List[int]:
         """Return the list of group IDs that have this period assigned."""
