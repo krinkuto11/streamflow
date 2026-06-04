@@ -94,11 +94,11 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Focused backend and frontend tests have been run for each V3 slice before push.
 - Frontend production builds have passed after UI/help changes.
 - `git diff --check` has been kept clean apart from normal CRLF notices in the Windows workspace.
-- Current code head `b862b91` passed `npm.cmd run test:ci`, `npm.cmd run build`, and a local dark-mode `/help/troubleshooting` Playwright render before push.
+- Current functional code head `b862b91` passed `npm.cmd run test:ci`, `npm.cmd run build`, and a local dark-mode `/help/troubleshooting` Playwright render before push.
 
 ### GitHub
 
-- PR checks for current code head `b862b91` passed:
+- PR checks for current PR head `6068191` passed:
   - Backend smoke tests
   - Frontend build and tests
   - CodeQL Python analysis
@@ -107,19 +107,19 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 ### Image And Live
 
 - Test image tag: `ghcr.io/bttfw/streamflow:dashboard-manual-quality-stage-state`
-- Image workflow for current code head `b862b91`: https://github.com/bttfw/streamflow/actions/runs/26934807443
-- Manifest digest for current test image: `sha256:1e5bc7ee64f04f085c1986d08f5ff5bb0771ef125b102095a5d097b638000b02`
-- Current code head `b862b91` is live-loaded and smoke-tested against API health, initialization, hardware status, Stream Checker status, Teamarr Preflight status, Shadow Monitor status, Auto-Create-Rules, browser DOM checks, and post-deploy log scans.
-- Startup completed with 217526 streams, 212 channels, and 6 accounts in 104.407 seconds.
-- A 10-minute idle observation passed with 20 API samples, `bad_count=0`, no Stream Checker/Teamarr/Shadow last errors, an empty 12-minute log scan, and the service still healthy.
+- Image workflow for current PR head `6068191`: https://github.com/bttfw/streamflow/actions/runs/26935832514
+- Manifest digest for current test image: `sha256:2c558cdcd8751d3bb576364d8222a04365115d4074845682b79f2c7c78ec7f89`
+- Current PR head `6068191` is live-loaded and smoke-tested against API health, initialization, hardware status, Stream Checker status, Teamarr Preflight status, Shadow Monitor status, Auto-Create-Rules, browser DOM checks, and post-deploy log scans.
+- Startup completed with 217526 streams, 212 channels, and 6 accounts in 110.042 seconds.
+- A 10-minute idle observation on the functionally identical code head `b862b91` passed with 20 API samples, `bad_count=0`, no Stream Checker/Teamarr/Shadow last errors, an empty 12-minute log scan, and the service still healthy.
+- Active-viewer Shadow Monitor observation passed on the live deployment: 12 samples, at least one real viewer client, at least one watcher client, one watched channel, `watching` state, max watcher uptime 135 seconds, `bad_count=0`, and no Shadow last error.
 
 ## Release Gate
 
 This PR must remain draft until:
 
-- Remaining V3 scope is finished.
+- Any remaining V3 polish requested by the operator is finished.
 - The latest image has completed multi-arch build and live smoke validation.
 - Help pages include the required platform-neutral setting explanations and verified locations.
 - Any shipped Help screenshots are cropped, optimized, and useful enough to justify image size.
-- Active-viewer Shadow Monitor observation still needs a real viewer or an explicitly approved synthetic viewer session.
 - Final release notes are reviewed and explicitly approved by the operator.

@@ -57,11 +57,16 @@ template update path.
   existing template update path.
 - Live API smoke passed for health, version, initialization status, automation,
   Teamarr Preflight, Stream Checker, and hardware status.
-- The current test image for `b862b91` completed startup with 217526 streams,
-  212 channels, and 6 accounts in 104.407 seconds.
-- A 10-minute idle live observation stayed healthy for 20 API samples with
+- The current test image for `6068191` completed startup with 217526 streams,
+  212 channels, and 6 accounts in 110.042 seconds.
+- A 10-minute idle live observation on the functionally identical code head
+  `b862b91` stayed healthy for 20 API samples with
   initialization complete, Teamarr running, Stream Checker running, Shadow
   Monitor running, `bad_count=0`, and no active watched channel.
+- Active-viewer Shadow Monitor observation passed on the live deployment with
+  12 samples, at least one real viewer client, at least one watcher client, one
+  watched channel, `watching` state, max watcher uptime 135 seconds,
+  `bad_count=0`, and no Shadow last error.
 - Post-deploy log scans found no app tracebacks, critical errors, internal server
   errors, or unhandled exceptions.
 
