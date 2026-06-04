@@ -191,6 +191,7 @@ class ShadowBlankMonitorService:
         self._watcher_absences: Dict[str, Dict[str, Any]] = {}
         self._blank_counts: Dict[str, int] = defaultdict(int)
         self._cooldowns: Dict[str, float] = {}
+        self._switch_attempts: Dict[str, Dict[str, Any]] = {}
         self._switch_history: Dict[str, deque[float]] = defaultdict(deque)
         self._active_probes: set[str] = set()
         self._last_scan_at: Optional[float] = None
@@ -511,6 +512,7 @@ class ShadowBlankMonitorService:
                 fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
                 if self._real_client_count(fresh_status, config) <= 0:
                     self._reset_blank_count(channel_uuid)
+                    self._clear_switch_attempts(channel_uuid)
                     self._record_event("viewer_left", target, {})
                     with self._lock:
                         self._watched.pop(channel_uuid, None)
@@ -556,8 +558,10 @@ class ShadowBlankMonitorService:
                 fresh_status = {}
             else:
                 fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+
             if result.get("viewer_left") or self._real_client_count(fresh_status, config) <= 0:
                 self._reset_blank_count(channel_uuid)
+                self._clear_switch_attempts(channel_uuid)
                 self._record_event("viewer_left", target, {})
                 with self._lock:
                     self._watched.pop(channel_uuid, None)
@@ -565,6 +569,7 @@ class ShadowBlankMonitorService:
 
             if not detection_reason:
                 self._reset_blank_count(channel_uuid)
+                self._clear_switch_attempts(channel_uuid)
                 self._record_event("probe_ok", target, target["last_probe"])
                 return True
 
@@ -592,12 +597,14 @@ class ShadowBlankMonitorService:
         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
         if self._real_client_count(fresh_status, config) <= 0:
             self._reset_blank_count(channel_uuid)
+            self._clear_switch_attempts(channel_uuid)
             self._record_event("viewer_left", target, {})
             return
 
         fresh_stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
         if target.get("stream_id") and fresh_stream_id != target.get("stream_id"):
             self._reset_blank_count(channel_uuid)
+            self._clear_switch_attempts(channel_uuid)
             self._record_event(
                 "stale_stream_guard",
                 target,
@@ -609,7 +616,13 @@ class ShadowBlankMonitorService:
             self._record_event("switch_rate_limited", target, {"reason": reason})
             return
 
-        alternative = self._choose_alternative_stream(udi, target.get("channel_id"), fresh_stream_id)
+        attempted_targets = self._attempted_switch_targets(channel_uuid, fresh_stream_id)
+        alternative = self._choose_alternative_stream(
+            udi,
+            target.get("channel_id"),
+            fresh_stream_id,
+            excluded_stream_ids=attempted_targets,
+        )
         if not alternative:
             self._set_cooldown(channel_uuid, config)
             self._reset_blank_count(channel_uuid)
@@ -625,19 +638,32 @@ class ShadowBlankMonitorService:
             )
             return
 
+        self._record_switch_attempt(channel_uuid, fresh_stream_id, alternative)
         success = bool(self.switch_stream(channel_uuid, stream_id=alternative))
-        self._set_cooldown(channel_uuid, config)
         self._reset_blank_count(channel_uuid)
         if success:
             with self._lock:
                 self._switch_history[channel_uuid].append(self.clock())
+        else:
+            self._set_cooldown(channel_uuid, config)
         self._record_event(
             "switch_success" if success else "switch_failed",
             target,
-            {"target_stream_ref": _ref("stream", alternative), "reason": reason},
+            {
+                "target_stream_ref": _ref("stream", alternative),
+                "reason": reason,
+                "post_switch_verification": bool(success),
+            },
         )
 
-    def _choose_alternative_stream(self, udi: Any, channel_id: Optional[int], current_stream_id: Optional[int]) -> Optional[int]:
+    def _choose_alternative_stream(
+        self,
+        udi: Any,
+        channel_id: Optional[int],
+        current_stream_id: Optional[int],
+        *,
+        excluded_stream_ids: Optional[Iterable[int]] = None,
+    ) -> Optional[int]:
         if channel_id is None:
             return None
         channel = udi.get_channel_by_id(channel_id) if hasattr(udi, "get_channel_by_id") else None
@@ -651,12 +677,17 @@ class ShadowBlankMonitorService:
         stream_ids = [int(item) for item in stream_ids if str(item).isdigit()]
         if len(stream_ids) <= 1:
             return None
+        excluded = {
+            int(item)
+            for item in (excluded_stream_ids or [])
+            if item is not None and str(item).isdigit()
+        }
         if current_stream_id in stream_ids:
             index = stream_ids.index(current_stream_id)
             ordered = stream_ids[index + 1 :] + stream_ids[:index]
         else:
             ordered = stream_ids
-        return next((sid for sid in ordered if sid != current_stream_id), None)
+        return next((sid for sid in ordered if sid != current_stream_id and sid not in excluded), None)
 
     @staticmethod
     def _detection_count_key(channel_uuid: str, reason: str) -> str:
@@ -1129,6 +1160,53 @@ class ShadowBlankMonitorService:
     def _set_cooldown(self, channel_uuid: str, config: Dict[str, Any]) -> None:
         with self._lock:
             self._cooldowns[channel_uuid] = self.clock() + int(config["channel_cooldown_seconds"])
+
+    def _attempted_switch_targets(
+        self,
+        channel_uuid: str,
+        origin_stream_id: Optional[int],
+    ) -> set[int]:
+        if origin_stream_id is None:
+            return set()
+        try:
+            origin = int(origin_stream_id)
+        except (TypeError, ValueError):
+            return set()
+        with self._lock:
+            entry = self._switch_attempts.get(channel_uuid) or {}
+            if entry.get("origin_stream_id") != origin:
+                return set()
+            return {
+                int(item)
+                for item in entry.get("target_stream_ids", [])
+                if item is not None and str(item).isdigit()
+            }
+
+    def _record_switch_attempt(
+        self,
+        channel_uuid: str,
+        origin_stream_id: Optional[int],
+        target_stream_id: Optional[int],
+    ) -> None:
+        if origin_stream_id is None or target_stream_id is None:
+            return
+        try:
+            origin = int(origin_stream_id)
+            target = int(target_stream_id)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            entry = self._switch_attempts.get(channel_uuid)
+            if not entry or entry.get("origin_stream_id") != origin:
+                entry = {"origin_stream_id": origin, "target_stream_ids": []}
+                self._switch_attempts[channel_uuid] = entry
+            targets = entry.setdefault("target_stream_ids", [])
+            if target not in targets:
+                targets.append(target)
+
+    def _clear_switch_attempts(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._switch_attempts.pop(channel_uuid, None)
 
     def _switch_allowed(self, channel_uuid: str, config: Dict[str, Any]) -> bool:
         now = self.clock()

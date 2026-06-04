@@ -416,6 +416,8 @@ def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
 
     assert switch_calls == [("uuid-1", 11, None)]
     assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["post_switch_verification"] is True
+    assert status["cooldowns"] == []
 
 
 def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):
@@ -442,6 +444,58 @@ def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):
     assert switch_calls == [("uuid-1", 11, None)]
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["reason"] == "freeze"
+    assert status["cooldowns"] == []
+
+
+def test_confirmed_blank_rechecks_after_switch_and_skips_attempted_target(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True},
+        switch_calls=switch_calls,
+    )
+    service.update_config({"enabled": False, "dry_run": False, "confirmation_count": 1})
+
+    first_status = service.run_once(force=True)
+    second_status = service.run_once(force=True)
+
+    assert switch_calls == [("uuid-1", 11, None), ("uuid-1", 12, None)]
+    assert first_status["cooldowns"] == []
+    assert second_status["cooldowns"] == []
+    assert second_status["recent_events"][0]["type"] == "switch_success"
+    assert second_status["recent_events"][0]["details"]["target_stream_ref"].startswith("stream-")
+
+
+def test_successful_proxy_probe_clears_attempted_switch_targets(tmp_path):
+    switch_calls = []
+    probe_results = iter([
+        {"blank_detected": True},
+        {"blank_detected": False},
+        {"blank_detected": True},
+    ])
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: next(probe_results),
+        switch_calls=switch_calls,
+    )
+    service.update_config({"enabled": False, "dry_run": False, "confirmation_count": 1})
+
+    service.run_once(force=True)
+    service.run_once(force=True)
+    status = service.run_once(force=True)
+
+    assert switch_calls == [("uuid-1", 11, None), ("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
 
 
 def test_single_stream_channel_records_no_alternative_without_switching(tmp_path):

@@ -104,6 +104,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "max_concurrent_checks": 1,
     "event_cooldown_minutes": 720,
     "skip_during_quality_check": True,
+    "provider_limit_override": False,
     "forced_profile_id": "",
     "include_sports": [],
     "exclude_sports": [],
@@ -170,6 +171,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
 
     config["enabled"] = bool(config.get("enabled"))
     config["skip_during_quality_check"] = bool(config.get("skip_during_quality_check"))
+    config["provider_limit_override"] = bool(config.get("provider_limit_override"))
     config["teamarr_base_url"] = str(config.get("teamarr_base_url") or "").strip().rstrip("/")
     config["api_key"] = str(config.get("api_key") or "").strip()
     config["api_key_header"] = str(config.get("api_key_header") or DEFAULT_CONFIG["api_key_header"]).strip()[:80]
@@ -954,6 +956,8 @@ class TeamarrPreflightService:
                 "trigger_bucket": event.get("trigger_bucket"),
             },
         }
+        if config.get("provider_limit_override"):
+            metadata["provider_limit_override"] = True
         queued = bool(checker.queue_channel(
             int(channel_id),
             priority=TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
@@ -1029,6 +1033,7 @@ class TeamarrPreflightService:
                 is_epg_scheduled=True,
                 forced_profile_id=forced_profile_id,
                 force_check=True,
+                **({"provider_limit_override": True} if config.get("provider_limit_override") else {}),
             )
             deferral_reason = self._controlled_deferral_reason(result)
             if deferral_reason:

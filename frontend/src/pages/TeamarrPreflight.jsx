@@ -655,7 +655,7 @@ export default function TeamarrPreflight() {
             <CardDescription>Connector, timing, profile, and filters</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            <div className="grid gap-4 md:grid-cols-2">
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <div className="flex items-center justify-between rounded-md border border-border p-4">
                 <div>
                   <Label className="text-base">Enabled</Label>
@@ -671,6 +671,16 @@ export default function TeamarrPreflight() {
                 <Switch
                   checked={Boolean(editedConfig.skip_during_quality_check)}
                   onCheckedChange={(value) => updateConfigValue('skip_during_quality_check', value)}
+                />
+              </div>
+              <div className="flex items-center justify-between gap-4 rounded-md border border-border p-4">
+                <div>
+                  <Label className="text-base">Provider Limit Override</Label>
+                  <p className="text-sm text-muted-foreground">Advanced event checks can bypass full provider slots; active viewers still stop the check</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.provider_limit_override)}
+                  onCheckedChange={(value) => updateConfigValue('provider_limit_override', value)}
                 />
               </div>
             </div>
@@ -787,6 +797,10 @@ export default function TeamarrPreflight() {
                     <div>
                       <p className="font-medium text-foreground">Manual Checks</p>
                       <p>Past events can still be checked manually. The selected profile controls the check rules used for that run.</p>
+                    </div>
+                    <div>
+                      <p className="font-medium text-foreground">Provider Override</p>
+                      <p>Only use it for event windows where queued checks must run despite full provider slots. Active viewers are never bypassed.</p>
                     </div>
                   </div>
                 </AccordionContent>

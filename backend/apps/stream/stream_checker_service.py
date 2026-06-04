@@ -321,11 +321,16 @@ class StreamCheckerService:
                 # Check this channel
                 forced_profile_id = queue_metadata.get('forced_profile_id')
                 if single_check_metadata:
+                    single_check_kwargs = {
+                        'program_name': queue_metadata.get('program_name'),
+                        'is_epg_scheduled': bool(queue_metadata.get('is_epg_scheduled')),
+                        'forced_profile_id': forced_profile_id,
+                    }
+                    if queue_metadata.get('provider_limit_override'):
+                        single_check_kwargs['provider_limit_override'] = True
                     result = self.check_single_channel(
                         channel_id,
-                        program_name=queue_metadata.get('program_name'),
-                        is_epg_scheduled=bool(queue_metadata.get('is_epg_scheduled')),
-                        forced_profile_id=forced_profile_id,
+                        **single_check_kwargs,
                     )
                     if queue_metadata.get('source') == 'teamarr_preflight':
                         try:
@@ -1247,7 +1252,13 @@ class StreamCheckerService:
     # were removed as they relied on a missing module 'empty_channel_manager'
     # and obsolete Dispatcharr features.
     
-    def _check_channel_limits(self, channel_id: int, channel_name: str, streams: List[Dict]) -> Optional[Dict]:
+    def _check_channel_limits(
+        self,
+        channel_id: int,
+        channel_name: str,
+        streams: List[Dict],
+        provider_limit_override: bool = False,
+    ) -> Optional[Dict]:
         """Check if a channel can be checked based on viewer and playlist limits.
         
         This method now uses profile-aware checking. Instead of just checking account-level
@@ -1257,6 +1268,8 @@ class StreamCheckerService:
             channel_id: ID of the channel
             channel_name: Name of the channel
             streams: List of streams for the channel
+            provider_limit_override: If True, bypass provider/profile capacity
+                skips while still protecting channels with active viewers.
             
         Returns:
             None if check can proceed, or a result dict if check should be skipped
@@ -1281,6 +1294,14 @@ class StreamCheckerService:
                 'skipped': True,
                 'skip_reason': 'active_viewers'
             }
+
+        if provider_limit_override:
+            logger.info(
+                "Provider/profile slot guard override enabled for channel %s; "
+                "active-viewer protection remains enforced",
+                channel_name,
+            )
+            return None
         
         # Check if at least one stream can run (has an available profile)
         # This replaces the old account-level checking with profile-aware logic
@@ -1481,7 +1502,13 @@ class StreamCheckerService:
 
         return result
     
-    def _check_channel(self, channel_id: int, skip_batch_changelog: bool = False, forced_profile_id: Optional[str] = None):
+    def _check_channel(
+        self,
+        channel_id: int,
+        skip_batch_changelog: bool = False,
+        forced_profile_id: Optional[str] = None,
+        provider_limit_override: bool = False,
+    ):
         """Check and reorder streams for a specific channel.
         
         Routes to either concurrent or sequential checking based on configuration.
@@ -1489,6 +1516,8 @@ class StreamCheckerService:
         Args:
             channel_id: ID of the channel to check
             skip_batch_changelog: If True, don't add this check to the batch changelog
+            provider_limit_override: If True, bypass provider/profile capacity
+                skips while still protecting active viewers.
         """
         failed_connectivity = self._require_quality_check_connectivity(
             phase='quality_check_preflight',
@@ -1503,9 +1532,19 @@ class StreamCheckerService:
         concurrent_enabled = self.config.get('concurrent_streams.enabled', True)
         
         if concurrent_enabled:
-            return self._check_channel_concurrent(channel_id, skip_batch_changelog=skip_batch_changelog, forced_profile_id=forced_profile_id)
+            return self._check_channel_concurrent(
+                channel_id,
+                skip_batch_changelog=skip_batch_changelog,
+                forced_profile_id=forced_profile_id,
+                provider_limit_override=provider_limit_override,
+            )
         else:
-            return self._check_channel_sequential(channel_id, skip_batch_changelog=skip_batch_changelog, forced_profile_id=forced_profile_id)
+            return self._check_channel_sequential(
+                channel_id,
+                skip_batch_changelog=skip_batch_changelog,
+                forced_profile_id=forced_profile_id,
+                provider_limit_override=provider_limit_override,
+            )
 
     def _complete_channel_check(self, channel_id: int, on_completed=None) -> bool:
         """Complete a queued channel and run side effects only if it is still active."""
@@ -1549,7 +1588,14 @@ class StreamCheckerService:
             return self._abort_channel_check(channel_id, channel_name)
         return None
     
-    def _check_channel_concurrent(self, channel_id: int, skip_batch_changelog: bool = False, target_stream_ids: Optional[List[str]] = None, forced_profile_id: Optional[str] = None):
+    def _check_channel_concurrent(
+        self,
+        channel_id: int,
+        skip_batch_changelog: bool = False,
+        target_stream_ids: Optional[List[str]] = None,
+        forced_profile_id: Optional[str] = None,
+        provider_limit_override: bool = False,
+    ):
         """Check and reorder streams for a specific channel using parallel thread pool.
         
         Args:
@@ -1557,6 +1603,8 @@ class StreamCheckerService:
             skip_batch_changelog: If True, don't add this check to the batch changelog
             target_stream_ids: Optional list of stream IDs. If provided, ONLY these
                                streams will be checked, bypassing all other logic.
+            provider_limit_override: If True, bypass provider/profile capacity
+                                     skips while still protecting active viewers.
         """
         import time as time_module
         from apps.stream.concurrent_stream_limiter import get_smart_scheduler, get_account_limiter, initialize_account_limits
@@ -1714,7 +1762,12 @@ class StreamCheckerService:
             logger.info(f"Found {len(streams)} streams for channel {channel_name}")
             
             # Check if channel has active viewers or if its playlist has reached max concurrent streams
-            limit_check_result = self._check_channel_limits(channel_id, channel_name, streams)
+            limit_check_result = self._check_channel_limits(
+                channel_id,
+                channel_name,
+                streams,
+                provider_limit_override=provider_limit_override,
+            )
             if limit_check_result is not None:
                 self._complete_channel_check(
                     channel_id,
@@ -2670,7 +2723,14 @@ class StreamCheckerService:
             log_function_return(logger, "_check_channel_concurrent")
 
     
-    def _check_channel_sequential(self, channel_id: int, skip_batch_changelog: bool = False, target_stream_ids: Optional[List[str]] = None, forced_profile_id: Optional[str] = None):
+    def _check_channel_sequential(
+        self,
+        channel_id: int,
+        skip_batch_changelog: bool = False,
+        target_stream_ids: Optional[List[str]] = None,
+        forced_profile_id: Optional[str] = None,
+        provider_limit_override: bool = False,
+    ):
         """Check and reorder streams for a specific channel using sequential checking.
         
         Args:
@@ -2678,6 +2738,8 @@ class StreamCheckerService:
             skip_batch_changelog: If True, don't add this check to the batch changelog
             target_stream_ids: Optional list of stream IDs. If provided, ONLY these
                                streams will be checked, bypassing all other logic.
+            provider_limit_override: If True, bypass provider/profile capacity
+                                     skips while still protecting active viewers.
         """
         import time as time_module
         start_time = time_module.time()
@@ -2826,7 +2888,12 @@ class StreamCheckerService:
             logger.info(f"Found {len(streams)} streams for channel {channel_name}")
             
             # Check if channel has active viewers or if its playlist has reached max concurrent streams
-            limit_check_result = self._check_channel_limits(channel_id, channel_name, streams)
+            limit_check_result = self._check_channel_limits(
+                channel_id,
+                channel_name,
+                streams,
+                provider_limit_override=provider_limit_override,
+            )
             if limit_check_result is not None:
                 self._complete_channel_check(
                     channel_id,
@@ -4380,7 +4447,15 @@ class StreamCheckerService:
                 
         return results
 
-    def check_single_channel(self, channel_id: int, program_name: Optional[str] = None, is_epg_scheduled: bool = False, forced_profile_id: Optional[str] = None, force_check: bool = False) -> Dict:
+    def check_single_channel(
+        self,
+        channel_id: int,
+        program_name: Optional[str] = None,
+        is_epg_scheduled: bool = False,
+        forced_profile_id: Optional[str] = None,
+        force_check: bool = False,
+        provider_limit_override: bool = False,
+    ) -> Dict:
         """Check a single channel immediately and return results.
         
         This performs a targeted channel refresh for a single channel:
@@ -4405,6 +4480,8 @@ class StreamCheckerService:
             program_name: Optional program name if this is a scheduled EPG check
             is_epg_scheduled: If True, prefer the channel's EPG scheduled profile over the period profile
             force_check: If True, bypass stream-check immunity and re-analyze all streams
+            provider_limit_override: If True, bypass provider/profile capacity
+                skips while still protecting active viewers.
             
         Returns:
             Dict with check results and statistics
@@ -4583,7 +4660,12 @@ class StreamCheckerService:
             # Check if channel has active viewers or if its playlist has reached max concurrent streams
             current_streams = fetch_channel_streams(channel_id)
             if current_streams:
-                limit_check_result = self._check_channel_limits(channel_id, channel_name, current_streams)
+                limit_check_result = self._check_channel_limits(
+                    channel_id,
+                    channel_name,
+                    current_streams,
+                    provider_limit_override=provider_limit_override,
+                )
                 if limit_check_result is not None:
                     # A limit guard skip is an intentional no-op, not a failed
                     # single-channel check. Returning success keeps callers such
@@ -4878,6 +4960,8 @@ class StreamCheckerService:
                 _check_kwargs = {'skip_batch_changelog': True}
                 if _effective_profile_id:
                     _check_kwargs['forced_profile_id'] = _effective_profile_id
+                if provider_limit_override:
+                    _check_kwargs['provider_limit_override'] = True
                 if force_check:
                     self.update_tracker.mark_channel_for_force_check(channel_id)
                 try:

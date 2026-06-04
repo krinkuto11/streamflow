@@ -170,6 +170,8 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(config["include_sports"], ["soccer"])
         self.assertEqual(config["exclude_leagues"], ["mlb"])
         self.assertEqual(normalize_config({})["post_start_offsets_minutes"], [2, 4])
+        self.assertFalse(normalize_config({})["provider_limit_override"])
+        self.assertTrue(normalize_config({"provider_limit_override": True})["provider_limit_override"])
 
         service, _, _ = self.make_service([])
         public_config = service.get_config()
@@ -450,6 +452,35 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["event_name"], "Home vs Away")
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 2)
         self.assertNotIn("priority", recent[0]["details"])
+
+    def test_provider_limit_override_is_queued_only_when_enabled(self):
+        checker = BusyChecker()
+        service, _, _ = self.make_service([make_event()], checker=checker)
+        service.update_config({"provider_limit_override": True})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(len(checker.queued), 1)
+        _, kwargs = checker.queued[0]
+        self.assertTrue(kwargs["metadata"]["provider_limit_override"])
+
+    def test_provider_limit_override_is_passed_to_direct_check(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service([make_event()], checker=checker)
+        service.update_config({"provider_limit_override": True})
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(len(checker.calls), 1)
+        _, kwargs = checker.calls[0]
+        self.assertTrue(kwargs["provider_limit_override"])
+        self.assertTrue(kwargs["force_check"])
 
     def test_filter_options_use_teamarr_subscription_and_cache_catalogs(self):
         def http_get(url, **kwargs):

@@ -267,6 +267,81 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.check_queue.mark_completed.assert_called_once_with(8441)
         service.check_queue.mark_failed.assert_not_called()
 
+    def test_worker_passes_teamarr_provider_limit_override_when_requested(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.running = True
+        service.batch_start_time = None
+        service.abort_current_check = threading.Event()
+        service.check_queue = Mock()
+        service._start_batch_changelog = Mock()
+        service._finalize_batch_changelog = Mock()
+        service._check_channel = Mock()
+        service.check_single_channel = Mock(return_value={'success': True})
+        teamarr_service = Mock()
+
+        def pull_entry(timeout):
+            service.running = False
+            return {
+                'channel_id': 8441,
+                'metadata': {
+                    'source': 'teamarr_preflight',
+                    'program_name': 'Home vs Away',
+                    'is_epg_scheduled': True,
+                    'forced_profile_id': '42',
+                    'provider_limit_override': True,
+                },
+            }
+
+        service.check_queue.get_next_entry.side_effect = pull_entry
+        service.check_queue.mark_completed = Mock()
+        service.check_queue.mark_failed = Mock()
+
+        with patch(
+            'apps.stream.teamarr_preflight_service.get_teamarr_preflight_service',
+            return_value=teamarr_service,
+        ):
+            service._worker_loop()
+
+        service.check_single_channel.assert_called_once_with(
+            8441,
+            program_name='Home vs Away',
+            is_epg_scheduled=True,
+            forced_profile_id='42',
+            provider_limit_override=True,
+        )
+        service.check_queue.mark_completed.assert_called_once_with(8441)
+
+    def test_provider_limit_override_bypasses_capacity_but_not_active_viewers(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        streams = [{'id': 1, 'name': 'Event stream', 'm3u_account': 7}]
+        udi = Mock()
+        udi.is_channel_active.return_value = False
+        udi.check_stream_can_run.return_value = (False, 'profile limit reached')
+
+        with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi):
+            self.assertIsNone(
+                service._check_channel_limits(
+                    77,
+                    'Event Channel',
+                    streams,
+                    provider_limit_override=True,
+                )
+            )
+            skipped = service._check_channel_limits(77, 'Event Channel', streams)
+
+        self.assertEqual(skipped['skip_reason'], 'max_streams_reached')
+
+        udi.is_channel_active.return_value = True
+        with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi):
+            active_skip = service._check_channel_limits(
+                77,
+                'Event Channel',
+                streams,
+                provider_limit_override=True,
+            )
+
+        self.assertEqual(active_skip['skip_reason'], 'active_viewers')
+
     def test_clear_queue_resets_active_sync_batch_state(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.check_queue = StreamCheckQueue(max_size=10)

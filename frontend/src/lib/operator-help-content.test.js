@@ -154,7 +154,10 @@ describe('operatorHelpSections', () => {
     expect(teamarr.smokeChecks.join(' ')).toMatch(/dead-stream removal off/i)
     expect(teamarr.steps.join(' ')).toMatch(/automation can defer/i)
     expect(teamarr.settings.find(setting => setting.name === 'Busy Handling').effect).toMatch(/priority queue/i)
+    expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override').defaultValue).toBe('Off')
+    expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override').risk).toMatch(/active-viewer protection/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/queued or deferred event-check context/i)
+    expect(teamarr.smokeChecks.join(' ')).toMatch(/active-viewer events/i)
     const automation = getOperatorHelpDetailTopic('automation-periods')
     expect(automation.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Catch-up cap',

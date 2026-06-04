@@ -454,6 +454,15 @@ export const operatorHelpDetailTopics = [
           height: 158,
         },
       },
+      {
+        name: 'Provider Limit Override',
+        controlType: 'Visible UI setting',
+        defaultValue: 'Off',
+        location: 'Teamarr Preflight -> Configuration card -> Provider Limit Override',
+        effect: 'Lets Teamarr event checks run when provider or profile slots appear full.',
+        useWhen: 'Use only for event windows where a kickoff check must run despite provider-slot contention.',
+        risk: 'It does not bypass active-viewer protection. Leaving it on broadly can make event checks compete with provider capacity.',
+      },
     ],
     smokeChecks: [
       'Teamarr Preflight status shows running and no last error.',
@@ -462,6 +471,7 @@ export const operatorHelpDetailTopics = [
       'A second post-start bucket can run at 4 minutes when the 2-minute bucket already ran.',
       'A 2-minute post-start check is skipped as past if post-start grace is only 1 minute, so keep grace larger than the post-start offsets.',
       'A busy Stream Checker state shows queued or deferred event-check context instead of losing the event check.',
+      'Provider Limit Override still defers active-viewer events while allowing provider-slot deferrals to be intentionally bypassed.',
       'The default event profile keeps dead-stream removal off; enable destructive removal only after a dry event run proves the timing is reliable.',
     ],
     links: [
