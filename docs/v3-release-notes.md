@@ -28,6 +28,9 @@ template update path.
   record/candidate counts, accepts alternate start-time and channel-id fields
   from Teamarr, and queues due event checks when direct preflight capacity is
   already occupied.
+- Scheduled Teamarr event cards show the next automatic check bucket/time and
+  label the manual event action as `Force Check`, making planned events with no
+  previous check easier to read.
 - Automation periods now include startup catch-up, missed-run grace,
   missed-run skip history, explicit run-all-due opt-in, a global catch-up cap,
   and a maintenance window for automatic runs.
@@ -47,6 +50,8 @@ template update path.
 
 - `Post-Start Checks` in Teamarr Preflight lets event checks run after game
   start when event channels appear late.
+- Teamarr scheduled event cards now show `Next auto check` and expose the
+  manual one-time action as `Force Check`.
 - `Pre-Start Retries` no longer makes a shorter preflight offset trigger early.
 - `Missed-run grace` skips stale automatic runs after the configured window and
   records the latest skip reason in Automation Periods.
@@ -68,14 +73,19 @@ template update path.
 ## Validation Snapshot
 
 - Backend focused tests, frontend Vitest, production build, and the repository CI
-  helper passed on the final V3 draft head.
-- GitHub Tests and CodeQL passed on the final V3 draft head.
+  helper passed on current head `4b151df`.
+- GitHub Tests and CodeQL passed on current head `4b151df`.
 - The branch image was rebuilt for AMD64 and ARM64, then live-loaded through the
   existing template update path.
 - Live API smoke passed for health, version, initialization status, automation,
   Teamarr Preflight, Stream Checker, and hardware status.
-- Recent live smoke completed startup with 217526 streams, 212 channels, and 6
+- Recent live smoke completed startup with 217513 streams, 220 channels, and 6
   accounts loaded.
+- Live Teamarr Preflight smoke confirmed the Vegas scheduled event shows
+  `Next auto check: 5.6.2026, 01:40:00 (-20m)` and an enabled `Force Check`
+  button in dark mode.
+- Read-only live Scheduling smoke confirmed navigation, the Auto-Create dialog
+  opening path, Teamarr Preflight/Vegas, and no interface or console errors.
 - A 10-minute idle live observation on a functionally identical code head stayed
   healthy for 20 API samples with
   initialization complete, Teamarr running, Stream Checker running, Shadow

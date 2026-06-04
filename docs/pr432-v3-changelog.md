@@ -46,6 +46,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Surfaces post-start event-channel behavior in Help and Operational Notes.
 - Queues due Teamarr event checks when direct preflight capacity is already occupied, instead of hiding them until the next poll.
 - Documents that event priority sorts waiting checks only; it does not interrupt the channel currently being checked.
+- Shows the next automatic check bucket/time on scheduled Teamarr event cards and labels the manual event action as `Force Check`.
 
 ### Dashboard, Startup, And Automation Progress
 
@@ -113,10 +114,11 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - `git diff --check` has been kept clean apart from normal CRLF notices in the Windows workspace.
 - The functional Help follow-up head passed `npm.cmd run test:ci`, `npm.cmd run build`, and a local dark-mode `/help/troubleshooting` Playwright render before push.
 - The latest DRI/Teamarr/catch-up/session head passed focused backend tests, full frontend Vitest, frontend production build, and the full backend suite with 1094 passed, 2 skipped.
+- Current head `4b151df` passed `python -m pytest tests/test_teamarr_preflight_service.py -q`, `npm.cmd test -- teamarr-preflight-schedule.test.js --run`, `npm.cmd run build`, `python scripts/run_ci_checks.py`, and full `npm.cmd run test:ci` with 117 frontend tests.
 
 ### GitHub
 
-- PR checks passed after the validation-doc update:
+- PR checks passed on current head `4b151df`:
   - Backend smoke tests
   - Frontend build and tests
   - CodeQL Python analysis
@@ -125,9 +127,13 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 ### Image And Live
 
 - Test image tag: `ghcr.io/bttfw/streamflow:dashboard-manual-quality-stage-state`
+- Current image build: https://github.com/bttfw/streamflow/actions/runs/26963161477
+- Current manifest digest: `sha256:6f1630e43d1327d36b21a4ffdb6189a2eaaa2b6e5ddb0d5fe3e101e5633603a3`
 - The PR body tracks the mutable current image build URL, manifest digest, and deployed commit for external testing.
 - Current V3 test images have been live-loaded and smoke-tested against API health, initialization, hardware status, Stream Checker status, Teamarr Preflight status, Shadow Monitor status, Auto-Create-Rules, browser DOM checks, and post-deploy log scans.
-- Recent live smoke completed with 217526 streams, 212 channels, and 6 accounts loaded.
+- Recent live smoke completed with 217513 streams, 220 channels, and 6 accounts loaded.
+- Live Teamarr Preflight smoke on `4b151df` confirmed `Vegas Golden Knights at Carolina Hurricanes` shows the next automatic check `-20m` bucket and an enabled `Force Check` button in dark mode.
+- Read-only live smoke on `4b151df` confirmed `/scheduling`, the Auto-Create dialog opening path, and `/teamarr-preflight` without interface text errors or console errors.
 - A 10-minute idle observation on a functionally identical code head passed with 20 API samples, `bad_count=0`, no Stream Checker/Teamarr/Shadow last errors, an empty 12-minute log scan, and the service still healthy.
 - Active-viewer Shadow Monitor observation passed on the live deployment: 12 samples, at least one real viewer client, at least one watcher client, one watched channel, `watching` state, max watcher uptime 135 seconds, `bad_count=0`, and no Shadow last error.
 

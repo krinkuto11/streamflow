@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stream Checker profile matrix** - Adds an expandable provider/profile matrix with safe profile ID, limit, active viewer, checking, free-slot, and status details.
 - **Teamarr event preflight override** - Adds a warned provider/profile capacity override for event checks while keeping active-viewer protection enforced.
 - **Teamarr managed-event visibility** - Keeps larger managed-event schedules visible, accepts alternate Teamarr start-time/channel-id fields, exposes managed-record counts, and queues due events when direct preflight capacity is full.
+- **Teamarr scheduled-event clarity** - Scheduled Teamarr events now expose the next automatic check bucket/time and label the manual event action as `Force Check`, so `Scheduled` + `No Check` cards still show the available one-time check path.
 - **Hardware acceleration probe logging** - Resolves DRI `auto` analysis to a concrete VAAPI render node, logs the requested FFmpeg hardware path per probe, and leaves CUDA/NVIDIA plus explicit VAAPI/QSV paths unchanged.
 - **Stream Session runtime guard** - Reinitializes volatile session refresh state on reused singleton instances so session creation does not fail after unusual import or test ordering.
 - **Shadow Monitor recovery defaults** - Uses the live-validated continuous watcher defaults, enables freeze detection, disables dry-run by default when the monitor is enabled, and keeps switching rate limits in place.
