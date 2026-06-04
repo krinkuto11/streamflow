@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   getOperatorHelpDetailTopic,
   operatorHelpDetailGuidePrinciples,
@@ -6,6 +9,8 @@ import {
   operatorHelpQuickChecks,
   operatorHelpSections,
 } from './operator-help-content.js'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 describe('operatorHelpSections', () => {
   it('covers the non-Teamarr V3 operator areas', () => {
@@ -153,5 +158,30 @@ describe('operatorHelpSections', () => {
     const visibleText = JSON.stringify(operatorHelpDetailTopics)
     expect(visibleText).not.toMatch(new RegExp('un' + 'raid', 'i'))
     expect(visibleText).not.toMatch(/platform-specific/i)
+  })
+
+  it('uses small lazy visual references only for settings that benefit from a UI crop', () => {
+    const references = operatorHelpDetailTopics.flatMap(topic =>
+      topic.settings
+        .filter(setting => setting.reference)
+        .map(setting => ({ topicId: topic.id, settingName: setting.name, ...setting.reference })),
+    )
+
+    expect(references.map(reference => `${reference.topicId}:${reference.settingName}`)).toEqual([
+      'automation-periods:Catch-up cap',
+      'teamarr-preflight:Post-Start Checks',
+      'teamarr-preflight:Busy Handling',
+    ])
+
+    for (const reference of references) {
+      expect(reference.imageSrc).toMatch(/^\/help\/.+-dark\.jpg$/)
+      expect(reference.alt).toMatch(/Dark mode crop/i)
+      expect(reference.caption.length).toBeGreaterThan(40)
+
+      const assetPath = path.resolve(__dirname, '../../public', reference.imageSrc.replace(/^\//, ''))
+      const stat = fs.statSync(assetPath)
+      expect(stat.size).toBeGreaterThan(1000)
+      expect(stat.size).toBeLessThan(80_000)
+    }
   })
 })

@@ -251,6 +251,11 @@ export const operatorHelpDetailTopics = [
         effect: 'Limits how many due periods an automatic scheduler pass may start.',
         useWhen: 'Use a positive cap when many missed periods could otherwise start together after downtime.',
         risk: 'Too low can defer useful work repeatedly; 0 allows every due period.',
+        reference: {
+          imageSrc: '/help/automation-run-policy-dark.jpg',
+          alt: 'Dark mode crop of Automation Run Policy settings with catch-up, maintenance, and Teamarr event window controls.',
+          caption: 'This same Settings section contains Catch-up cap, Maintenance window, and Teamarr event window.',
+        },
       },
       {
         name: 'Maintenance window',
@@ -390,6 +395,11 @@ export const operatorHelpDetailTopics = [
         effect: 'Schedules two separate post-start buckets so channels that appear at kickoff or a few minutes later are not unfairly demoted.',
         useWhen: 'Use for event providers that rename or publish streams at kickoff.',
         risk: 'Too late can miss early viewer protection for short events.',
+        reference: {
+          imageSrc: '/help/teamarr-preflight-timing-dark.jpg',
+          alt: 'Dark mode crop of Teamarr Preflight timing fields including preflight offset, retries, grace, cooldown, and post-start checks.',
+          caption: 'Timing values are entered as minutes or comma-separated minute offsets in Teamarr Preflight configuration.',
+        },
       },
       {
         name: 'Post-Start Grace',
@@ -426,6 +436,11 @@ export const operatorHelpDetailTopics = [
         effect: 'Separates automatic-run deferral from checker queueing: automation write/pipeline phases wait, while event checks blocked by Stream Checker capacity enter the priority queue.',
         useWhen: 'Keep on so event checks are not silently dropped when normal stream work is already active.',
         risk: 'Turning it off can overload provider/profile capacity or make kickoff checks race with regular maintenance.',
+        reference: {
+          imageSrc: '/help/teamarr-preflight-busy-dark.jpg',
+          alt: 'Dark mode crop of the Teamarr Preflight Busy Handling toggle.',
+          caption: 'Busy Handling lives in the Teamarr Preflight configuration card near the service enable switch.',
+        },
       },
     ],
     smokeChecks: [

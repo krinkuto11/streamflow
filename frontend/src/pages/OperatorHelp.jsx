@@ -159,6 +159,24 @@ export default function OperatorHelp() {
                       <dd>{setting.risk}</dd>
                     </div>
                   </dl>
+                  {setting.reference ? (
+                    <details className="mt-3 border-t border-border pt-3">
+                      <summary className="cursor-pointer text-sm font-medium text-foreground">
+                        Visual Reference
+                      </summary>
+                      <figure className="mt-3 space-y-2">
+                        <img
+                          src={setting.reference.imageSrc}
+                          alt={setting.reference.alt}
+                          loading="lazy"
+                          className="max-h-72 w-full rounded-md border border-border object-contain"
+                        />
+                        <figcaption className="text-xs text-muted-foreground">
+                          {setting.reference.caption}
+                        </figcaption>
+                      </figure>
+                    </details>
+                  ) : null}
                 </div>
               ))}
             </CardContent>
