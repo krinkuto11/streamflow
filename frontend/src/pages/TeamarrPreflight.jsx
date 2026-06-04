@@ -14,7 +14,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
 import { filterTeamarrEventsBySearch } from '@/lib/teamarr-preflight-event-search.js'
-import { getTeamarrNextAutomaticCheck } from '@/lib/teamarr-preflight-schedule.js'
+import { getTeamarrAutomaticCheck } from '@/lib/teamarr-preflight-schedule.js'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import {
   Activity,
@@ -176,7 +176,7 @@ const eventCheckSummary = (event, lastPreflightEvent) => {
 }
 
 const eventAutomaticCheckSummary = (event, config) => {
-  const nextCheck = getTeamarrNextAutomaticCheck(event, config)
+  const nextCheck = getTeamarrAutomaticCheck(event, config)
   if (!nextCheck) return ''
   const bucket = nextCheck.bucket ? ` (${nextCheck.bucket})` : ''
   if (!nextCheck.timestamp) return `${nextCheck.label}${bucket}`
@@ -894,8 +894,8 @@ export default function TeamarrPreflight() {
                                   <Button
                                     type="button"
                                     variant="outline"
-                                    size="icon"
-                                    className="h-8 w-8"
+                                    size="sm"
+                                    className="h-8 gap-1.5 px-2"
                                     disabled={!canForceEvent(event) || actionLoading !== ''}
                                     onClick={() => setForceEvent(event)}
                                     aria-label={`Run event check for ${event.event_name || 'managed event'}`}
@@ -905,6 +905,7 @@ export default function TeamarrPreflight() {
                                     ) : (
                                       <PlayCircle className="h-4 w-4" />
                                     )}
+                                    <span className="whitespace-nowrap text-xs font-medium">Force Check</span>
                                   </Button>
                                 </span>
                               </TooltipTrigger>
@@ -918,16 +919,17 @@ export default function TeamarrPreflight() {
                           <span>{event.league || 'League N/A'}</span>
                         </div>
                         <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                          {automaticCheckSummary ? (
+                            <span className="basis-full inline-flex items-center gap-1 text-xs text-muted-foreground">
+                              <Clock className="h-3.5 w-3.5" />
+                              {automaticCheckSummary}
+                            </span>
+                          ) : null}
                           <span className="mr-1 text-xs text-muted-foreground">
                             {lastPreflightEvent
                               ? `${checkSummary} at ${formatTimestamp(lastPreflightEvent.timestamp)}`
                               : checkSummary}
                           </span>
-                          {!lastPreflightEvent && automaticCheckSummary ? (
-                            <span className="basis-full text-xs text-muted-foreground">
-                              {automaticCheckSummary}
-                            </span>
-                          ) : null}
                           {lastPreflightEvent ? (
                             <>
                             {lastPreflightDetails.map(part => (

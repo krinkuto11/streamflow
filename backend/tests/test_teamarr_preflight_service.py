@@ -349,6 +349,25 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         upcoming = service.get_status()["upcoming_events"]
         self.assertEqual(upcoming[0]["state"], "scheduled")
 
+    def test_scheduled_event_exposes_next_automatic_check(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2026-05-28T22:45:00+00:00")],
+            checker=checker,
+        )
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "scheduled")
+        self.assertEqual(upcoming[0]["next_automatic_check"], {
+            "label": "Next auto check",
+            "bucket": "-20m",
+            "timestamp": "2026-05-28T22:25:00+00:00",
+        })
+
     def test_post_start_offset_launches_after_game_start(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(

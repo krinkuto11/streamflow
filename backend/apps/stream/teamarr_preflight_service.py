@@ -814,6 +814,12 @@ class TeamarrPreflightService:
             state, bucket = self._classify_event(candidate, config, now)
             candidate["state"] = state
             candidate["trigger_bucket"] = bucket
+            candidate["next_automatic_check"] = self._next_automatic_check(
+                candidate,
+                config,
+                state,
+                bucket,
+            )
             candidates.append(candidate)
 
         candidates.sort(key=lambda item: item.get("seconds_to_start", 10**12))
@@ -877,6 +883,63 @@ class TeamarrPreflightService:
         elapsed_seconds = abs(seconds)
         post_offsets = list(config.get("post_start_offsets_minutes") or [])
         return self._classify_bucket_offsets(event, elapsed_seconds, post_offsets, direction="post")
+
+    @staticmethod
+    def _next_automatic_check(
+        event: Dict[str, Any],
+        config: Dict[str, Any],
+        state: str,
+        bucket: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if state == "due":
+            return {
+                "label": "Due now",
+                "bucket": bucket,
+                "timestamp": None,
+            }
+        if state not in {"scheduled", "already_attempted"}:
+            return None
+
+        event_at = _parse_event_datetime(event.get("event_date"))
+        if event_at is None:
+            return None
+
+        seconds = int(event.get("seconds_to_start") or 0)
+        if seconds >= 0:
+            preflight_offset = int(config["preflight_offset_minutes"])
+            retry_offsets = [
+                int(offset)
+                for offset in list(config.get("retry_offsets_minutes") or [])
+                if int(offset) <= preflight_offset
+            ]
+            offsets = sorted({preflight_offset, *retry_offsets}, reverse=True)
+            next_offset = next((offset for offset in offsets if seconds > offset * 60), None)
+            if next_offset is None:
+                return None
+            check_at = event_at.timestamp() - next_offset * 60
+            return {
+                "label": "Next auto check",
+                "bucket": f"-{next_offset}m",
+                "timestamp": datetime.fromtimestamp(check_at, tz=timezone.utc).isoformat(),
+            }
+
+        elapsed_seconds = abs(seconds)
+        post_offsets = sorted(
+            {
+                int(offset)
+                for offset in list(config.get("post_start_offsets_minutes") or [])
+                if int(offset) > 0
+            }
+        )
+        next_offset = next((offset for offset in post_offsets if elapsed_seconds < offset * 60), None)
+        if next_offset is None:
+            return None
+        check_at = event_at.timestamp() + next_offset * 60
+        return {
+            "label": "Next auto check",
+            "bucket": f"+{next_offset}m",
+            "timestamp": datetime.fromtimestamp(check_at, tz=timezone.utc).isoformat(),
+        }
 
     def _classify_bucket_offsets(
         self,

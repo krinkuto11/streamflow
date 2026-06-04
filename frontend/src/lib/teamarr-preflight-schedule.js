@@ -62,3 +62,7 @@ export const getTeamarrNextAutomaticCheck = (event = {}, config = {}) => {
     timestamp: new Date(eventAt.getTime() + nextOffset * 60 * 1000).toISOString(),
   }
 }
+
+export const getTeamarrAutomaticCheck = (event = {}, config = {}) => (
+  event?.next_automatic_check || getTeamarrNextAutomaticCheck(event, config)
+)

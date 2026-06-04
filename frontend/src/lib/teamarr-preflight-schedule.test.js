@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { getTeamarrNextAutomaticCheck } from './teamarr-preflight-schedule'
+import { getTeamarrAutomaticCheck, getTeamarrNextAutomaticCheck } from './teamarr-preflight-schedule'
 
 describe('Teamarr preflight schedule helpers', () => {
   const config = {
@@ -54,5 +54,20 @@ describe('Teamarr preflight schedule helpers', () => {
       bucket: '3m',
       timestamp: null,
     })
+  })
+
+  it('prefers the backend-provided next automatic check when present', () => {
+    const backendCheck = {
+      label: 'Next auto check',
+      bucket: '-20m',
+      timestamp: '2026-06-04T23:40:00+00:00',
+    }
+
+    expect(getTeamarrAutomaticCheck({
+      event_date: '2026-06-05T00:00:00Z',
+      next_automatic_check: backendCheck,
+      seconds_to_start: 35092,
+      state: 'scheduled',
+    }, config)).toBe(backendCheck)
   })
 })
