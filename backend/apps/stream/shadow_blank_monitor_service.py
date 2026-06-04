@@ -806,13 +806,17 @@ class ShadowBlankMonitorService:
         reader.start()
 
         try:
-            blank_required = max(
-                float(config.get("blank_min_duration_seconds", DEFAULT_CONFIG["blank_min_duration_seconds"])),
-                float(duration) * float(config.get("blank_ratio_threshold", DEFAULT_CONFIG["blank_ratio_threshold"])),
+            # Continuous probes are protecting a real viewer that is already on
+            # the channel. Waiting for probe_duration * ratio turns a 60s
+            # watcher into a 48s blank wait before even the first confirmation.
+            # For open segments, use the configured minimum duration as the
+            # real-time trigger and let confirmation_count provide the safety
+            # against one-off black frames.
+            blank_required = float(
+                config.get("blank_min_duration_seconds", DEFAULT_CONFIG["blank_min_duration_seconds"])
             )
-            freeze_required = max(
-                float(config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])),
-                float(duration) * float(config.get("freeze_ratio_threshold", DEFAULT_CONFIG["freeze_ratio_threshold"])),
+            freeze_required = float(
+                config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
             )
             last_media_time = 0.0
             active_blank_start: Optional[float] = None

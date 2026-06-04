@@ -80,6 +80,62 @@ class TestSingleChannelForceCheck(unittest.TestCase):
         
         # Verify _check_channel was called
         service._check_channel.assert_called_once_with(16, skip_batch_changelog=True)
+
+    @patch('stream_checker_service.StreamCheckConfig')
+    @patch('stream_checker_service.get_udi_manager')
+    @patch('stream_checker_service.fetch_channel_streams')
+    @patch('automated_stream_manager.AutomatedStreamManager')
+    @patch('api_utils.refresh_m3u_playlists')
+    def test_single_channel_force_check_marks_and_clears_immunity_bypass(
+        self, mock_refresh, mock_automation_class, mock_fetch_streams, mock_udi, mock_config_class
+    ):
+        """Explicit force_check should make the synchronous check re-analyze all streams."""
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        mock_config = Mock()
+        mock_config.get = Mock(side_effect=lambda key, default=None: default)
+        mock_config_class.return_value = mock_config
+
+        mock_udi_instance = Mock()
+        mock_udi.return_value = mock_udi_instance
+        mock_udi_instance.get_channel_by_id.return_value = {
+            'id': 16,
+            'name': 'DAZN F1',
+            'logo_id': None
+        }
+
+        mock_streams = [
+            {'id': 1, 'name': 'Stream 1', 'url': 'http://example.com/1', 'm3u_account': 1,
+             'stream_stats': {'status': 'ok'}},
+            {'id': 2, 'name': 'Stream 2', 'url': 'http://example.com/2', 'm3u_account': 1,
+             'stream_stats': {'status': 'ok'}},
+        ]
+        mock_fetch_streams.return_value = mock_streams
+        mock_udi_instance.refresh_streams = Mock()
+        mock_udi_instance.refresh_channels = Mock()
+        mock_udi_instance.get_streams = Mock(return_value=mock_streams)
+
+        mock_automation_instance = Mock()
+        mock_automation_class.return_value = mock_automation_instance
+        mock_automation_instance.discover_and_assign_streams = Mock(return_value={})
+
+        service = StreamCheckerService()
+
+        def fake_check(channel_id, **kwargs):
+            assert service.update_tracker.should_force_check(channel_id)
+            return {
+                'dead_streams_count': 0,
+                'revived_streams_count': 0,
+                'analyzed_streams': [],
+            }
+
+        service._check_channel = Mock(side_effect=fake_check)
+
+        result = service.check_single_channel(channel_id=16, force_check=True)
+
+        self.assertTrue(result['success'])
+        self.assertFalse(service.update_tracker.should_force_check(16))
+        service._check_channel.assert_called_once_with(16, skip_batch_changelog=True)
     
     @patch('stream_checker_service.StreamCheckConfig')
     @patch('stream_checker_service.get_udi_manager')

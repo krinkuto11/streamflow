@@ -4380,7 +4380,7 @@ class StreamCheckerService:
                 
         return results
 
-    def check_single_channel(self, channel_id: int, program_name: Optional[str] = None, is_epg_scheduled: bool = False, forced_profile_id: Optional[str] = None) -> Dict:
+    def check_single_channel(self, channel_id: int, program_name: Optional[str] = None, is_epg_scheduled: bool = False, forced_profile_id: Optional[str] = None, force_check: bool = False) -> Dict:
         """Check a single channel immediately and return results.
         
         This performs a targeted channel refresh for a single channel:
@@ -4404,6 +4404,7 @@ class StreamCheckerService:
             channel_id: ID of the channel to check
             program_name: Optional program name if this is a scheduled EPG check
             is_epg_scheduled: If True, prefer the channel's EPG scheduled profile over the period profile
+            force_check: If True, bypass stream-check immunity and re-analyze all streams
             
         Returns:
             Dict with check results and statistics
@@ -4868,7 +4869,7 @@ class StreamCheckerService:
             if checking_enabled:
                 logger.info(
                     f"Step 6/6: Checking streams for channel {channel_name} "
-                    f"(respecting profile grace period settings)..."
+                    f"({'force checking all streams' if force_check else 'respecting profile grace period settings'})..."
                 )
                 
                 # Perform the check using normal profile logic.
@@ -4877,7 +4878,13 @@ class StreamCheckerService:
                 _check_kwargs = {'skip_batch_changelog': True}
                 if _effective_profile_id:
                     _check_kwargs['forced_profile_id'] = _effective_profile_id
-                check_result = self._check_channel(channel_id, **_check_kwargs)
+                if force_check:
+                    self.update_tracker.mark_channel_for_force_check(channel_id)
+                try:
+                    check_result = self._check_channel(channel_id, **_check_kwargs)
+                finally:
+                    if force_check and self.update_tracker.should_force_check(channel_id):
+                        self.update_tracker.clear_force_check(channel_id)
                 if not check_result or not isinstance(check_result, dict):
                     # This should not happen with updated methods, but provide safe fallback
                     logger.warning(f"_check_channel did not return expected result dict, using defaults")

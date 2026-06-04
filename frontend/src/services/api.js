@@ -196,9 +196,10 @@ export const streamCheckerAPI = {
   getProgress: () => api.get('/stream-checker/progress'),
   checkChannel: (channelId) => api.post('/stream-checker/check-channel', { channel_id: channelId }),
   // Use longer timeout for single channel check as it can take time
-  checkSingleChannel: (channelId, profileId = null) => api.post('/stream-checker/check-single-channel', {
+  checkSingleChannel: (channelId, profileId = null, forceCheck = true) => api.post('/stream-checker/check-single-channel', {
     channel_id: channelId,
     ...(profileId ? { profile_id: profileId } : {}),
+    force_check: forceCheck,
   }, { timeout: 120000 }),
   markUpdated: (data) => api.post('/stream-checker/mark-updated', data),
   queueAllChannels: (options = {}) => api.post('/stream-checker/queue-all', options),

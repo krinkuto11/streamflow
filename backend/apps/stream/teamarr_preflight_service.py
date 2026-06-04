@@ -1028,6 +1028,7 @@ class TeamarrPreflightService:
                 program_name=event.get("event_name"),
                 is_epg_scheduled=True,
                 forced_profile_id=forced_profile_id,
+                force_check=True,
             )
             deferral_reason = self._controlled_deferral_reason(result)
             if deferral_reason:
