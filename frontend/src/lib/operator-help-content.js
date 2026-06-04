@@ -258,8 +258,8 @@ export const operatorHelpDetailTopics = [
           triggerLabel: 'UI Screenshot',
           alt: 'Dark mode crop of Automation Run Policy settings with run-all-due, catch-up, maintenance, and Teamarr event window controls.',
           caption: 'Run all due periods and Catch-up cap live together in Automation Run Policy.',
-          width: 1056,
-          height: 554,
+          width: 1000,
+          height: 712,
         },
       },
       {
@@ -275,8 +275,8 @@ export const operatorHelpDetailTopics = [
           triggerLabel: 'UI Screenshot',
           alt: 'Dark mode crop of Automation Run Policy settings with run-all-due, catch-up, maintenance, and Teamarr event window controls.',
           caption: 'Catch-up cap is disabled until Run all due periods is enabled.',
-          width: 1056,
-          height: 554,
+          width: 1000,
+          height: 712,
         },
       },
       {
