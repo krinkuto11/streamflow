@@ -19,6 +19,9 @@ describe('getStartupDurationDisplay', () => {
     expect(getStartupDurationDisplay({ elapsed_seconds: 91 })).toEqual({
       elapsedLabel: '1m 31s',
       remainingLabel: null,
+      estimateLabel: 'Expected',
+      estimateValue: '2-5 minutes',
+      estimateHint: 'Large playlists can take a few minutes on first load.',
       expectation: 'Large playlists can take 2-5 minutes on first load.',
     })
   })
@@ -30,6 +33,9 @@ describe('getStartupDurationDisplay', () => {
     })).toEqual({
       elapsedLabel: '45s',
       remainingLabel: '1m 15s',
+      estimateLabel: 'Remaining',
+      estimateValue: 'About 1m 15s',
+      estimateHint: 'Based on the last cache refresh.',
       expectation: 'About 1m 15s remaining based on the last cache refresh.',
     })
   })

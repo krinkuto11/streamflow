@@ -27,10 +27,18 @@ export const getStartupDurationDisplay = (initialization = {}) => {
   const remainingLabel = hasLastDuration && hasElapsed
     ? formatStartupDuration(Math.max(0, lastDuration - elapsed))
     : null
+  const estimateLabel = remainingLabel ? 'Remaining' : 'Expected'
+  const estimateValue = remainingLabel ? `About ${remainingLabel}` : '2-5 minutes'
+  const estimateHint = remainingLabel
+    ? 'Based on the last cache refresh.'
+    : 'Large playlists can take a few minutes on first load.'
 
   return {
     elapsedLabel,
     remainingLabel,
+    estimateLabel,
+    estimateValue,
+    estimateHint,
     expectation: remainingLabel
       ? `About ${remainingLabel} remaining based on the last cache refresh.`
       : 'Large playlists can take 2-5 minutes on first load.',

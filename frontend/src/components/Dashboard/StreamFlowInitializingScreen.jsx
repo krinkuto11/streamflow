@@ -33,7 +33,11 @@ export default function StreamFlowInitializingScreen({ initialization = null }) 
               <span className="ml-2 tabular-nums">{durationDisplay.elapsedLabel || 'Starting...'}</span>
             </div>
             <div className="sm:text-right">
-              {durationDisplay.expectation}
+              <span className="font-medium text-foreground">{durationDisplay.estimateLabel}:</span>
+              <span className="ml-2 tabular-nums">{durationDisplay.estimateValue}</span>
+              <div className="text-xs text-muted-foreground">
+                {durationDisplay.estimateHint}
+              </div>
             </div>
           </div>
           <p className="text-sm text-muted-foreground">
