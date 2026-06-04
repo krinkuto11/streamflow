@@ -15,6 +15,7 @@ import { useToast } from '@/hooks/use-toast.js'
 import { schedulingAPI, channelsAPI, automationAPI } from '@/services/api.js'
 import { Plus, Trash2, Clock, Calendar, RefreshCw, Loader2, Settings, ChevronsUpDown, Check, Edit, Download, Upload, FileJson } from 'lucide-react'
 import { cn } from '@/lib/utils.js'
+import { getAutoCreateRuleTestToast } from '@/lib/scheduling-auto-create-display.js'
 
 // Schedule type descriptions
 const SCHEDULE_TYPE_INFO = {
@@ -316,30 +317,12 @@ export default function Scheduling() {
       })
 
       setRegexMatches(response.data.programs || [])
-      const channelsTested = response.data.channels_tested || selectedChannelIds.length
-      const channelsWithoutTvg = response.data.channels_without_tvg || []
-
-      // SCH-002: backend signals the selected channels have no TVG-ID configured
-      if (response.data.no_tvg_id) {
-        toast({
-          title: "No TVG-ID Configured",
-          description: channelsTested > 1
-            ? "None of the selected channels have a TVG-ID set. EPG matching requires TVG-IDs on the source channels."
-            : "This channel has no TVG-ID set. EPG matching requires a TVG-ID.",
-          variant: "destructive"
-        })
-      } else if (response.data.matches === 0) {
-        toast({
-          title: "No Matches",
-          description: `The regex pattern didn't match any EPG programs across ${channelsTested} selected channel${channelsTested === 1 ? '' : 's'}.`,
-          variant: "default"
-        })
-      } else if (channelsWithoutTvg.length > 0) {
-        toast({
-          title: "Partial TVG-ID Coverage",
-          description: `${channelsWithoutTvg.length} selected channel${channelsWithoutTvg.length === 1 ? '' : 's'} had no TVG-ID and could not be tested.`,
-          variant: "default"
-        })
+      const testToast = getAutoCreateRuleTestToast({
+        responseData: response.data,
+        selectedChannelCount: selectedChannelIds.length,
+      })
+      if (testToast) {
+        toast(testToast)
       }
     } catch (err) {
       console.error('Failed to test regex:', err)
