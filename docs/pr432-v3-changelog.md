@@ -21,6 +21,7 @@ Package page: https://github.com/bttfw/streamflow/pkgs/container/streamflow
 - Adds provider/profile-aware slot reservation for stream checks.
 - Shows per-account profile slot usage and reserved profile names during Stream Checker progress.
 - Adds safe profile-slot ID and limit details to Stream Checker tooltips without exposing credentials.
+- Adds an expandable Stream Checker profile matrix with safe profile ID, limit, active viewer, checking, free-slot, and status details.
 - Lets real viewers preempt quality probes when the viewer needs the slot.
 - Cleans up manual quality queue progress and stage semantics.
 - Honors both `m3u_account_id` and legacy `m3u_account` stream payloads for UDI indexes, slot reservation, and stream sorting.

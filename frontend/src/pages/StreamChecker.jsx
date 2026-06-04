@@ -11,12 +11,13 @@ import { Separator } from '@/components/ui/separator.jsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from '@/components/ui/pagination.jsx'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
-import { getParallelProgressBadgeText, getProfileSlotDisplay, getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
+import { getParallelProgressBadgeText, getProfileSlotDisplay, getProfileSlotMatrixRows, getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
 import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
   Activity,
@@ -695,6 +696,85 @@ export default function StreamChecker() {
                     })}
                   </div>
                 </div>
+                {(() => {
+                  const profileMatrixRows = getProfileSlotMatrixRows(providerProgress)
+                  if (profileMatrixRows.length === 0) return null
+
+                  return (
+                    <Accordion type="single" collapsible className="rounded-md border px-3">
+                      <AccordionItem value="profile-slot-matrix" className="border-b-0">
+                        <AccordionTrigger className="py-3 text-sm hover:no-underline">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="font-medium">Profile Matrix</span>
+                            <Badge variant="secondary" className="shrink-0 text-[10px]">
+                              {profileMatrixRows.length} profiles
+                            </Badge>
+                          </span>
+                        </AccordionTrigger>
+                        <AccordionContent>
+                          <div className="overflow-x-auto pb-3">
+                            <table className="w-full min-w-[760px] text-sm">
+                              <thead className="border-b text-xs uppercase text-muted-foreground">
+                                <tr>
+                                  <th className="px-2 py-2 text-left font-medium">Account</th>
+                                  <th className="px-2 py-2 text-left font-medium">Profile</th>
+                                  <th className="px-2 py-2 text-right font-medium">ID</th>
+                                  <th className="px-2 py-2 text-right font-medium">Used / Limit</th>
+                                  <th className="px-2 py-2 text-right font-medium">Real Viewers</th>
+                                  <th className="px-2 py-2 text-right font-medium">Checking</th>
+                                  <th className="px-2 py-2 text-right font-medium">Free</th>
+                                  <th className="px-2 py-2 text-left font-medium">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y">
+                                {profileMatrixRows.map((slot) => (
+                                  <tr key={slot.key}>
+                                    <td className="max-w-[12rem] truncate px-2 py-2" title={slot.accountName}>
+                                      {slot.accountName}
+                                    </td>
+                                    <td className="max-w-[14rem] truncate px-2 py-2 font-medium" title={slot.name}>
+                                      {slot.name}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums text-muted-foreground">
+                                      {slot.id ?? 'N/A'}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.used}/{slot.limitText}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.activeViewers}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.checking}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.availableText}
+                                    </td>
+                                    <td className="px-2 py-2">
+                                      <Badge
+                                        variant="outline"
+                                        className={`text-[10px] ${
+                                          slot.full
+                                            ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                                            : slot.checking > 0
+                                              ? 'border-blue-500/30 bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
+                                              : 'text-muted-foreground'
+                                        }`}
+                                        title={slot.title}
+                                      >
+                                        {slot.status}
+                                      </Badge>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </AccordionContent>
+                      </AccordionItem>
+                    </Accordion>
+                  )
+                })()}
               </div>
             )}
 

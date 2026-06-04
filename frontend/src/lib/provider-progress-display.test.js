@@ -4,6 +4,7 @@ import {
   getCheckerConcurrencyDisplay,
   getParallelProgressBadgeText,
   getProfileSlotDisplay,
+  getProfileSlotMatrixRows,
   getProviderWaitReasonDisplay,
 } from './provider-progress-display'
 
@@ -71,7 +72,52 @@ describe('getProviderWaitReasonDisplay', () => {
       text: 'Default: open',
       title: 'Default, 0 viewer, 2 checking, unlimited capacity',
       unlimited: true,
+      status: 'Checking',
     })
+  })
+
+  it('builds safe profile matrix rows from provider progress', () => {
+    expect(getProfileSlotMatrixRows([
+      {
+        account_id: 7,
+        name: 'Provider A',
+        profile_slots: [
+          {
+            id: 70,
+            name: 'Main',
+            active_viewers: 1,
+            checking: 0,
+            used: 1,
+            limit: 3,
+            available: 2,
+          },
+          {
+            id: 71,
+            name: 'Backup',
+            unlimited: true,
+          },
+        ],
+      },
+    ])).toEqual([
+      expect.objectContaining({
+        key: '7:70',
+        accountName: 'Provider A',
+        accountId: 7,
+        id: 70,
+        name: 'Main',
+        limitText: '3',
+        availableText: '2',
+        status: 'Viewer active',
+      }),
+      expect.objectContaining({
+        key: '7:71',
+        accountName: 'Provider A',
+        id: 71,
+        limitText: 'unlimited',
+        availableText: 'open',
+        status: 'Available',
+      }),
+    ])
   })
 
   it('does not render a zero-worker parallel badge while active checks are visible', () => {

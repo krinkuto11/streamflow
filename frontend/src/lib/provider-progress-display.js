@@ -42,9 +42,17 @@ export function getProfileSlotDisplay(slot = {}) {
   const available = slot.available == null ? null : Number(slot.available)
 
   const capacityText = unlimited ? 'open' : `${used}/${limit}`
+  const availableValue = Number.isFinite(available) ? available : 0
   const freeText = unlimited
     ? 'unlimited capacity'
-    : `${Number.isFinite(available) ? available : 0} free`
+    : `${availableValue} free`
+  const status = slot.full
+    ? 'Full'
+    : checking > 0
+      ? 'Checking'
+      : activeViewers > 0
+        ? 'Viewer active'
+        : 'Available'
 
   return {
     id: slot.id,
@@ -57,8 +65,31 @@ export function getProfileSlotDisplay(slot = {}) {
     checking,
     activeViewers,
     used,
+    limit,
+    available: availableValue,
     unlimited,
+    capacityText,
+    freeText,
+    status,
   }
+}
+
+export function getProfileSlotMatrixRows(providers = []) {
+  return providers.flatMap((provider) => {
+    const accountName = provider.name || 'Unknown'
+    const accountId = provider.account_id ?? null
+    return (provider.profile_slots || []).map((slot) => {
+      const display = getProfileSlotDisplay(slot)
+      return {
+        ...display,
+        accountName,
+        accountId,
+        key: `${accountId ?? accountName}:${display.id ?? display.name}`,
+        limitText: display.unlimited ? 'unlimited' : String(display.limit),
+        availableText: display.unlimited ? 'open' : String(display.available),
+      }
+    })
+  })
 }
 
 export function getParallelProgressBadgeText(status = {}, providerSummary = {}) {
