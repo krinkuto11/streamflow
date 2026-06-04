@@ -41,13 +41,21 @@ describe('getHardwareRuntimeDeviceLabel', () => {
 
 describe('getHardwareAnalysisPathDisplay', () => {
   it('describes CPU-only analysis when hardware acceleration is disabled', () => {
-    expect(getHardwareAnalysisPathDisplay({
+    const display = getHardwareAnalysisPathDisplay({
       config: { enabled: false, mode: 'auto', allow_fallback: true },
       mode_supported: true,
-    })).toMatchObject({
+    })
+    const note = getHardwareOperatorNote({
+      config: { enabled: false, mode: 'auto', allow_fallback: true },
+      mode_supported: true,
+    })
+
+    expect(display).toMatchObject({
       label: 'CPU only',
       variant: 'secondary',
     })
+    expect(note.description).toContain('hardware device')
+    expect(note.description).not.toContain('GPU')
   })
 
   it('describes supported hardware with fallback as preferred hardware', () => {
@@ -72,14 +80,22 @@ describe('getHardwareAnalysisPathDisplay', () => {
   })
 
   it('describes unsupported hardware with fallback as fallback ready', () => {
-    expect(getHardwareAnalysisPathDisplay({
+    const display = getHardwareAnalysisPathDisplay({
       config: { enabled: true, mode: 'vaapi', allow_fallback: true },
       mode_supported: false,
-    })).toMatchObject({
+    })
+    const note = getHardwareOperatorNote({
+      config: { enabled: true, mode: 'vaapi', allow_fallback: true },
+      mode_supported: false,
+    })
+
+    expect(display).toMatchObject({
       label: 'Fallback ready',
       variant: 'secondary',
       description: expect.stringContaining('VAAPI is not reported available'),
     })
+    expect(note.description).toContain('hardware path')
+    expect(note.description).not.toContain(['G', 'PU path'].join(''))
   })
 
   it('summarizes the live hardware path with fallback for operators', () => {

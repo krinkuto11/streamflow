@@ -84,7 +84,7 @@ export function getHardwareOperatorNote(hardwareStatus) {
     return {
       variant: 'default',
       title: 'CPU Analysis Active',
-      description: 'Hardware acceleration is off; checks run on CPU even if a GPU is visible.',
+      description: 'Hardware acceleration is off; checks run on CPU even if a hardware device is visible.',
     }
   }
 
@@ -108,7 +108,7 @@ export function getHardwareOperatorNote(hardwareStatus) {
     return {
       variant: 'default',
       title: 'CPU Fallback Ready',
-      description: `${formatMode(mode)} is not reported by ffmpeg; checks can continue on CPU while the container GPU path is adjusted.`,
+      description: `${formatMode(mode)} is not reported by ffmpeg; checks can continue on CPU while the hardware path is adjusted.`,
     }
   }
 

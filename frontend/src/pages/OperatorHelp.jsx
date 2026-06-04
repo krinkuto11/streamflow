@@ -121,14 +121,20 @@ export default function OperatorHelp() {
             <CardContent className="space-y-3">
               {topic.settings.map((setting) => (
                 <div key={setting.name} className="rounded-md border border-border p-3">
-                  <div className="mb-2 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                     <h3 className="text-sm font-semibold">{setting.name}</h3>
-                    <Badge variant="outline" className="w-fit">{setting.defaultValue}</Badge>
+                    <Badge variant="secondary" className="w-fit max-w-full whitespace-normal text-left">
+                      {setting.controlType || 'Visible UI setting'}
+                    </Badge>
                   </div>
                   <dl className="grid gap-2 text-sm text-muted-foreground">
                     <div>
                       <dt className="font-medium text-foreground">Where</dt>
                       <dd>{setting.location}</dd>
+                    </div>
+                    <div>
+                      <dt className="font-medium text-foreground">Default</dt>
+                      <dd>{setting.defaultValue}</dd>
                     </div>
                     <div>
                       <dt className="font-medium text-foreground">Effect</dt>

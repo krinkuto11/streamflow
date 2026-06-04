@@ -46,6 +46,7 @@ describe('operatorHelpSections', () => {
     expect(shadowMonitor.items.join(' ')).toMatch(/per-channel rolling-hour guard/)
 
     const hardware = operatorHelpSections.find(section => section.id === 'hardware')
+    expect(hardware.title).toBe('Hardware And Fallback')
     expect(hardware.items.join(' ')).toMatch(/Intel\/DRI/)
     expect(hardware.items.join(' ')).toMatch(/VAAPI, QSV, or DRI/)
 
@@ -95,6 +96,10 @@ describe('operatorHelpSections', () => {
         }))
       }
     }
+
+    const setup = getOperatorHelpDetailTopic('setup')
+    expect(setup.settings.find(setting => setting.name === 'API_HOST').controlType).toBe('Container setting')
+    expect(setup.settings.find(setting => setting.name === 'Startup cache readiness').controlType).toBe('Status/API')
 
     expect(getOperatorHelpDetailTopic('teamarr-preflight').settings.map(setting => setting.name)).toContain('Post-Start Checks')
     const teamarr = getOperatorHelpDetailTopic('teamarr-preflight')

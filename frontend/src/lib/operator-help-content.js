@@ -81,10 +81,10 @@ export const operatorHelpSections = [
   },
   {
     id: 'hardware',
-    title: 'GPU And Fallback',
+    title: 'Hardware And Fallback',
     summary: 'Hardware acceleration is optional and should stay visible through the normal container management path.',
     items: [
-      'CPU only is valid; hardware preferred with CPU fallback is the safer GPU mode for mixed providers.',
+      'CPU only is valid; hardware preferred with CPU fallback is the safer mode for mixed providers.',
       'Hardware-only mode should be used carefully because failed hardware init cannot retry on CPU.',
       'Intel/DRI paths should show VAAPI, QSV, or DRI methods even when no NVIDIA runtime is present.',
       'Use the hardware status panel before changing runtime, device, or acceleration settings.',
@@ -117,7 +117,7 @@ export const operatorHelpQuickChecks = [
   'Cache ready before starting automation',
   'Profile mode matches intended priority behavior',
   'Teamarr post-start window is intentional',
-  'GPU path and fallback state are visible',
+  'Hardware path and fallback state are visible',
   'Stream Checker is idle or intentionally running',
   'Shadow Monitor excludes are intentional',
 ]
@@ -145,6 +145,7 @@ export const operatorHelpDetailTopics = [
     settings: [
       {
         name: 'API_HOST',
+        controlType: 'Container setting',
         defaultValue: '0.0.0.0',
         location: 'Container manager -> environment variables',
         effect: 'Controls which network interface the backend listens on inside the container.',
@@ -153,6 +154,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'API_PORT',
+        controlType: 'Container setting',
         defaultValue: '5000 or the configured application port',
         location: 'Container manager -> environment variables, port mapping, and healthcheck',
         effect: 'Defines the backend port used by the UI, API, and healthcheck.',
@@ -161,6 +163,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'CONFIG_DIR',
+        controlType: 'Container setting',
         defaultValue: '/app/data',
         location: 'Container manager -> volume mapping and environment variables',
         effect: 'Stores persistent config, caches, profiles, and runtime state.',
@@ -169,6 +172,7 @@ export const operatorHelpDetailTopics = [
       },
       {
         name: 'Startup cache readiness',
+        controlType: 'Status/API',
         defaultValue: 'Wait for completion',
         location: 'Dashboard startup screen and /api/dispatcharr/initialization-status',
         effect: 'Prevents automation and manual checks from using partial Dispatcharr data.',
