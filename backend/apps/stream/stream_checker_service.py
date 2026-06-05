@@ -21,6 +21,7 @@ integrates with the stream_check_utils.py module for stream analysis.
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -4181,6 +4182,41 @@ class StreamCheckerService:
         return max(0.0, (now - started_at).total_seconds())
 
     @staticmethod
+    def _active_worker_context(progress: Optional[Dict[str, Any]]) -> Dict[str, int]:
+        if not isinstance(progress, dict):
+            return {'active': 0, 'waiting': 0}
+
+        provider_summary = progress.get('provider_summary') or {}
+        try:
+            active = int(provider_summary.get('checking_streams') or 0)
+        except (TypeError, ValueError):
+            active = 0
+        try:
+            waiting = int(provider_summary.get('waiting_streams') or 0)
+        except (TypeError, ValueError):
+            waiting = 0
+
+        if active <= 0 or waiting <= 0:
+            streams_detail = progress.get('streams_detail') or []
+            if isinstance(streams_detail, list):
+                if active <= 0:
+                    active = sum(
+                        1
+                        for stream in streams_detail
+                        if isinstance(stream, dict)
+                        and stream.get('status') in {'checking', 'probing'}
+                    )
+                if waiting <= 0:
+                    waiting = sum(
+                        1
+                        for stream in streams_detail
+                        if isinstance(stream, dict)
+                        and stream.get('status') == 'waiting_provider_limit'
+                    )
+
+        return {'active': max(0, active), 'waiting': max(0, waiting)}
+
+    @staticmethod
     def _clear_active_stream_reason(stream_status: Dict) -> None:
         for key in (
             'reason_detail',
@@ -4194,31 +4230,53 @@ class StreamCheckerService:
         avg_seconds = self._queue_number(queue_status.get('avg_stream_process_time_sec'))
         analysis_config = self.config.get('stream_analysis', {}) or {}
         configured_stream_seconds = 0.0
+        configured_timeout_floor_seconds = 0.0
         if isinstance(analysis_config, dict):
             configured_stream_seconds = self._queue_number(analysis_config.get('ffmpeg_duration'))
-        effective_stream_seconds = max(avg_seconds, configured_stream_seconds)
+            configured_timeout = self._queue_number(analysis_config.get('timeout'))
+            startup_buffer = self._queue_number(analysis_config.get('stream_startup_buffer'))
+            if configured_timeout > 0 or startup_buffer > 0:
+                configured_timeout_floor_seconds = (
+                    configured_stream_seconds
+                    + configured_timeout
+                    + startup_buffer
+                )
+        effective_stream_seconds = max(
+            avg_seconds,
+            configured_stream_seconds,
+            configured_timeout_floor_seconds,
+        )
         remaining_streams = (
             self._queue_number(queue_status.get('queued_streams_count'))
             + self._queue_number(queue_status.get('in_progress_streams_count'))
         )
 
+        configured_workers = 1
+        if self.config.get('concurrent_streams.enabled', True):
+            concurrent_config = self.config.get('concurrent_streams', {}) or {}
+            max_workers = self.config.get('concurrent_streams.global_limit', None)
+            if isinstance(concurrent_config, dict):
+                max_workers = concurrent_config.get(
+                    'global_limit',
+                    concurrent_config.get('max_workers', max_workers),
+                )
+            try:
+                configured_workers = int(max_workers or 1)
+            except (TypeError, ValueError):
+                configured_workers = 1
+            if configured_workers <= 0:
+                configured_workers = max(1, int(remaining_streams or 1))
+
+        effective_workers = configured_workers
+        observed_workers = self._queue_number(queue_status.get('eta_active_stream_workers'))
+        provider_waiting = self._queue_number(queue_status.get('eta_provider_waiting_streams'))
+        if provider_waiting > 0 and observed_workers > 0:
+            effective_workers = max(1, min(configured_workers, int(observed_workers)))
+
         stream_eta_seconds = 0.0
         if effective_stream_seconds > 0 and remaining_streams > 0:
             if self.config.get('concurrent_streams.enabled', True):
-                concurrent_config = self.config.get('concurrent_streams', {}) or {}
-                max_workers = self.config.get('concurrent_streams.global_limit', None)
-                if isinstance(concurrent_config, dict):
-                    max_workers = concurrent_config.get(
-                        'global_limit',
-                        concurrent_config.get('max_workers', max_workers),
-                    )
-                try:
-                    max_workers = int(max_workers or 1)
-                except (TypeError, ValueError):
-                    max_workers = 1
-                if max_workers <= 0:
-                    max_workers = max(1, int(remaining_streams or 1))
-                stream_eta_seconds = (effective_stream_seconds * remaining_streams) / max_workers
+                stream_eta_seconds = (effective_stream_seconds * remaining_streams) / effective_workers
             else:
                 stream_eta_seconds = effective_stream_seconds * remaining_streams
 
@@ -4243,22 +4301,56 @@ class StreamCheckerService:
             elapsed_avg = self._elapsed_seconds_since(queue_status.get('started_at')) / completed_channels
             avg_channel_seconds = max(avg_channel_seconds, elapsed_avg)
 
+        channel_floor_seconds = 0.0
+        if effective_stream_seconds > 0 and remaining_channels > 0:
+            if remaining_streams > 0:
+                avg_streams_per_channel = remaining_streams / max(1.0, remaining_channels)
+                channel_batches = max(1, math.ceil(avg_streams_per_channel / max(1, effective_workers)))
+            else:
+                channel_batches = 1
+            channel_floor_seconds = effective_stream_seconds * channel_batches * remaining_channels
+
         channel_eta_seconds = 0.0
         if avg_channel_seconds > 0 and remaining_channels > 0:
             channel_eta_seconds = avg_channel_seconds * remaining_channels
+        channel_eta_seconds = max(channel_eta_seconds, channel_floor_seconds)
 
         eta_seconds = max(stream_eta_seconds, channel_eta_seconds)
         queue_status['eta_stream_seconds'] = int(stream_eta_seconds)
         queue_status['eta_channel_seconds'] = int(channel_eta_seconds)
         queue_status['eta_stream_observed_seconds'] = int(avg_seconds)
         queue_status['eta_stream_floor_seconds'] = int(configured_stream_seconds)
-        queue_status['eta_basis'] = 'channel' if channel_eta_seconds >= stream_eta_seconds and channel_eta_seconds > 0 else 'stream'
+        queue_status['eta_stream_timeout_floor_seconds'] = int(configured_timeout_floor_seconds)
+        queue_status['eta_channel_floor_seconds'] = int(channel_floor_seconds)
+        queue_status['eta_configured_workers'] = int(configured_workers)
+        queue_status['eta_effective_workers'] = int(effective_workers)
+        if channel_eta_seconds > stream_eta_seconds and channel_eta_seconds > 0:
+            queue_status['eta_basis'] = 'channel'
+            queue_status['eta_basis_detail'] = (
+                'channel_floor'
+                if channel_floor_seconds >= channel_eta_seconds and channel_floor_seconds > 0
+                else 'observed_channel'
+            )
+        elif configured_timeout_floor_seconds > configured_stream_seconds and configured_timeout_floor_seconds >= avg_seconds:
+            queue_status['eta_basis'] = 'stream_timeout_floor'
+            queue_status['eta_basis_detail'] = 'stream_timeout_floor'
+        elif configured_stream_seconds >= avg_seconds and configured_stream_seconds > 0:
+            queue_status['eta_basis'] = 'stream_floor'
+            queue_status['eta_basis_detail'] = 'stream_floor'
+        else:
+            queue_status['eta_basis'] = 'observed_stream'
+            queue_status['eta_basis_detail'] = 'observed_stream'
         return int(eta_seconds)
 
     def get_status(self) -> Dict:
         """Get current service status."""
         queue_status = self.check_queue.get_status()
         progress = self.progress.get()
+        worker_context = self._active_worker_context(progress)
+        if worker_context['active'] > 0:
+            queue_status['eta_active_stream_workers'] = worker_context['active']
+        if worker_context['waiting'] > 0:
+            queue_status['eta_provider_waiting_streams'] = worker_context['waiting']
         
         with self.lock:
             sync_state = dict(self.sync_batch_state)

@@ -294,7 +294,8 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         eta_seconds = service._calculate_queue_eta_seconds(queue_status)
 
         self.assertEqual(queue_status['eta_stream_seconds'], 250)
-        self.assertEqual(queue_status['eta_basis'], 'stream')
+        self.assertEqual(queue_status['eta_basis'], 'observed_stream')
+        self.assertEqual(queue_status['eta_basis_detail'], 'observed_stream')
         self.assertEqual(eta_seconds, 250)
 
     def test_queue_eta_uses_configured_stream_duration_floor(self):
@@ -322,10 +323,13 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         eta_seconds = service._calculate_queue_eta_seconds(queue_status)
 
         self.assertEqual(queue_status['eta_stream_seconds'], 750)
+        self.assertEqual(queue_status['eta_channel_floor_seconds'], 1200)
+        self.assertEqual(queue_status['eta_channel_seconds'], 1200)
         self.assertEqual(queue_status['eta_stream_observed_seconds'], 6)
         self.assertEqual(queue_status['eta_stream_floor_seconds'], 30)
-        self.assertEqual(queue_status['eta_basis'], 'stream')
-        self.assertEqual(eta_seconds, 750)
+        self.assertEqual(queue_status['eta_basis'], 'channel')
+        self.assertEqual(queue_status['eta_basis_detail'], 'channel_floor')
+        self.assertEqual(eta_seconds, 1200)
 
     def test_queue_eta_can_start_from_configured_stream_duration_before_samples(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
@@ -353,8 +357,74 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
 
         self.assertEqual(queue_status['eta_stream_seconds'], 300)
         self.assertEqual(queue_status['eta_stream_floor_seconds'], 30)
-        self.assertEqual(queue_status['eta_basis'], 'stream')
+        self.assertEqual(queue_status['eta_basis'], 'stream_floor')
+        self.assertEqual(queue_status['eta_basis_detail'], 'stream_floor')
         self.assertEqual(eta_seconds, 300)
+
+    def test_queue_eta_uses_timeout_and_channel_floor_for_large_full_run(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: (
+            True if key == 'concurrent_streams.enabled'
+            else 10 if key == 'concurrent_streams.global_limit'
+            else {'global_limit': 10} if key == 'concurrent_streams'
+            else {
+                'ffmpeg_duration': 30,
+                'timeout': 30,
+                'stream_startup_buffer': 10,
+            } if key == 'stream_analysis'
+            else default
+        )
+        queue_status = {
+            'completed': 23,
+            'failed': 0,
+            'queued': 188,
+            'in_progress': 1,
+            'total_queued': 212,
+            'queued_streams_count': 3060,
+            'in_progress_streams_count': 19,
+            'avg_stream_process_time_sec': 6,
+            'avg_channel_process_time_sec': 0,
+        }
+
+        eta_seconds = service._calculate_queue_eta_seconds(queue_status)
+
+        self.assertGreaterEqual(eta_seconds, 7 * 3600)
+        self.assertEqual(queue_status['eta_stream_timeout_floor_seconds'], 70)
+        self.assertEqual(queue_status['eta_channel_floor_seconds'], 26460)
+        self.assertEqual(queue_status['eta_basis'], 'channel')
+        self.assertEqual(queue_status['eta_basis_detail'], 'channel_floor')
+
+    def test_queue_eta_uses_observed_workers_when_provider_waiting(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: (
+            True if key == 'concurrent_streams.enabled'
+            else 10 if key == 'concurrent_streams.global_limit'
+            else {'global_limit': 10} if key == 'concurrent_streams'
+            else {'ffmpeg_duration': 30} if key == 'stream_analysis'
+            else default
+        )
+        queue_status = {
+            'completed': 0,
+            'failed': 0,
+            'queued': 1,
+            'in_progress': 0,
+            'total_queued': 1,
+            'queued_streams_count': 300,
+            'in_progress_streams_count': 0,
+            'avg_stream_process_time_sec': 0,
+            'avg_channel_process_time_sec': 0,
+            'eta_active_stream_workers': 3,
+            'eta_provider_waiting_streams': 20,
+        }
+
+        eta_seconds = service._calculate_queue_eta_seconds(queue_status)
+
+        self.assertEqual(queue_status['eta_configured_workers'], 10)
+        self.assertEqual(queue_status['eta_effective_workers'], 3)
+        self.assertEqual(queue_status['eta_stream_seconds'], 3000)
+        self.assertEqual(eta_seconds, 3000)
 
     def test_queue_eta_uses_elapsed_channel_rate_when_channel_average_missing(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
