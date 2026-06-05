@@ -1828,14 +1828,15 @@ class AutomatedStreamManager:
             ("channels", "Syncing channel cache", udi_manager.refresh_channels),
         ]
         total = len(steps)
+        progress_total = max(1, total * 2)
         all_success = True
         successful_steps = 0
 
         for index, (name, message, refresh_func) in enumerate(steps):
             self._update_run_progress(
                 stage_key="cache_sync",
-                current=index,
-                total=total,
+                current=(index * 2) + 1,
+                total=progress_total,
                 message=message,
             )
             try:
@@ -1848,8 +1849,8 @@ class AutomatedStreamManager:
             all_success = all_success and success
             self._update_run_progress(
                 stage_key="cache_sync",
-                current=successful_steps,
-                total=total,
+                current=(index + 1) * 2,
+                total=progress_total,
                 message=f"{message} {'completed' if success else 'reported warnings'}",
             )
 
@@ -1923,14 +1924,22 @@ class AutomatedStreamManager:
             "is_queued",
         }
         busy_statuses = {
+            "building",
+            "downloading",
+            "fetching",
+            "importing",
             "refreshing",
-            "updating",
-            "processing",
-            "running",
-            "queued",
-            "pending",
             "in_progress",
+            "loading",
+            "parsing",
+            "pending",
+            "preparing",
+            "processing",
+            "queued",
+            "running",
             "started",
+            "syncing",
+            "updating",
         }
 
         for key in busy_keys:
@@ -4886,6 +4895,8 @@ class AutomatedStreamManager:
                     durations={"m3u_refresh_seconds": time.time() - m3u_refresh_started},
                     message=wait_result.get("message", "Playlist refresh wait completed"),
                 )
+                if self._abort_run_if_manual_stop_requested():
+                    return
                 if not wait_result.get("ok"):
                     cycle_abort_message = wait_result.get("message") or "Playlist refresh did not settle"
                     logger.error(cycle_abort_message)
@@ -5023,6 +5034,8 @@ class AutomatedStreamManager:
                     stage="cache_sync" if refresh_success else "aborted",
                     stage_label="Syncing Cache" if refresh_success else "Aborted",
                 )
+                if self._abort_run_if_manual_stop_requested():
+                    return
             
             if refresh_success:
                 if channels_to_quality_check:

@@ -402,6 +402,38 @@ class AutomationRunStatusTests(unittest.TestCase):
         udi.refresh_streams.assert_not_called()
         sleep_mock.assert_called_once_with(1)
 
+    def test_m3u_refresh_wait_treats_parsing_account_as_busy(self):
+        manager = self._manager()
+        manager.config = {
+            "m3u_refresh_wait": {
+                "timeout_seconds": 30,
+                "poll_interval_seconds": 1,
+                "stable_polls_required": 1,
+                "min_wait_seconds": 0,
+            },
+        }
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.side_effect = [
+            [{"id": 1, "name": "One", "status": "parsing"}],
+            [{"id": 1, "name": "One", "status": "success"}],
+        ]
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
+        udi.get_streams.return_value = [{"id": 10}, {"id": 11}]
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
+            "apps.automation.automated_stream_manager.time.sleep"
+        ) as sleep_mock:
+            result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "settled")
+        self.assertEqual(events[0]["wait_busy_accounts"], 1)
+        self.assertEqual(events[-1]["state"], "settled")
+        udi.refresh_streams.assert_not_called()
+        sleep_mock.assert_called_once_with(1)
+
     def test_m3u_refresh_wait_reports_failed_account_status(self):
         manager = self._manager()
         manager.config = {"m3u_refresh_wait": {"stable_polls_required": 2, "min_wait_seconds": 0}}
@@ -496,6 +528,43 @@ class AutomationRunStatusTests(unittest.TestCase):
         refresh_mock.assert_called_once_with(account_id=1)
         self.assertIn("retrying_failed", [event["state"] for event in events])
         udi.refresh_streams.assert_not_called()
+
+    def test_cache_sync_reports_progress_before_long_fetch_completes(self):
+        manager = self._manager()
+        manager._start_run_status(forced=True)
+        manager._update_run_status(
+            stage="cache_sync",
+            stage_label="Syncing Cache",
+            message="Refreshing cache after playlist update",
+        )
+
+        udi = Mock()
+
+        def refresh_streams():
+            status = manager.get_run_status()
+            self.assertEqual(status["current"], 1)
+            self.assertEqual(status["total"], 4)
+            self.assertEqual(status["percent"], 25)
+            stages = {stage["key"]: stage for stage in status["stages"]}
+            self.assertEqual(stages["cache_sync"]["percent"], 25)
+            return True
+
+        def refresh_channels():
+            status = manager.get_run_status()
+            self.assertEqual(status["current"], 3)
+            self.assertEqual(status["total"], 4)
+            self.assertEqual(status["percent"], 75)
+            return True
+
+        udi.refresh_streams.side_effect = refresh_streams
+        udi.refresh_channels.side_effect = refresh_channels
+
+        self.assertTrue(manager._sync_udi_cache_after_playlist_refresh(udi))
+        status = manager.get_run_status()
+        self.assertEqual(status["current"], 4)
+        self.assertEqual(status["percent"], 100)
+        self.assertEqual(status["counts"]["cache_sync_successful_steps"], 2)
+        self.assertEqual(status["counts"]["cache_sync_total_steps"], 2)
 
 
 class FetcherTimingSummaryTests(unittest.TestCase):
