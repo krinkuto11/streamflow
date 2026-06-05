@@ -231,6 +231,40 @@ class TestRegexMatchingIntegration(unittest.TestCase):
         self.assertEqual(events[0]['program_title'], 'Live: MLB')
         self.assertEqual(events[0]['tvg_id'], 'WashingtonNationals.mlb')
 
+    def test_match_programs_uses_program_title_alias_and_channel_id_identifier(self):
+        """Auto-create should match visible EPG titles even when Dispatcharr omits tvg_id/title."""
+        now = datetime.now(timezone.utc)
+        self.mock_udi.return_value.get_channel_by_id.return_value = {
+            'id': 1,
+            'name': 'Boston Celtics',
+            'tvg_id': 'BossSports.NBA_Teams.bostonceltics',
+            'logo_id': None,
+        }
+        programs = [{
+            'program_title': 'Live: NBA',
+            'start_time': (now + timedelta(hours=1)).isoformat(),
+            'end_time': (now + timedelta(hours=4)).isoformat(),
+            'channel_id': 1,
+        }]
+
+        with self.service._lock:
+            self.service._auto_create_rules = [{
+                'id': 'nba-rule',
+                'name': 'NBA Auto Create',
+                'channel_id': 1,
+                'regex_pattern': '^Live: NBA',
+                'minutes_before': 0,
+            }]
+
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs):
+            result = self.service.match_programs_to_rules(force_refresh=True)
+
+        events = self.service.get_scheduled_events()
+        self.assertEqual(result['created'], 1)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['program_title'], 'Live: NBA')
+        self.assertEqual(events[0]['tvg_id'], 'BossSports.NBA_Teams.bostonceltics')
+
     def test_regex_preview_uses_effective_epg_tvg_id(self):
         """The test popup should use the same effective EPG identity as matching."""
         now = datetime.now(timezone.utc)
@@ -258,6 +292,35 @@ class TestRegexMatchingIntegration(unittest.TestCase):
         self.assertEqual(result['channels_with_matches'], 1)
         self.assertEqual(result['channels_without_programs'], [])
         self.assertEqual(result['channels_without_matches'], [])
+
+    def test_regex_preview_uses_program_title_alias_and_channel_id_identifier(self):
+        """The test popup should match the same visible EPG titles as auto-create."""
+        now = datetime.now(timezone.utc)
+        self.mock_udi.return_value.get_channel_by_id.return_value = {
+            'id': 1,
+            'name': 'Boston Celtics',
+            'tvg_id': 'BossSports.NBA_Teams.bostonceltics',
+            'logo_id': None,
+        }
+        programs = [{
+            'program_title': 'Live: NBA',
+            'start_time': (now + timedelta(hours=1)).isoformat(),
+            'end_time': (now + timedelta(hours=4)).isoformat(),
+            'channel_id': 1,
+        }]
+
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs):
+            result = self.service.test_regex_against_epg_for_rule(
+                channel_ids=[1],
+                regex_pattern='^Live: NBA',
+                force_refresh=True,
+            )
+
+        self.assertEqual(result['matches'], 1)
+        self.assertEqual(result['channels_with_matches'], 1)
+        self.assertEqual(result['channels_without_programs'], [])
+        self.assertEqual(result['channels_without_matches'], [])
+        self.assertEqual(result['programs'][0]['title'], 'Live: NBA')
     
     def test_match_programs_completes_without_deadlock(self):
         """Test that match_programs_to_rules completes without deadlock."""

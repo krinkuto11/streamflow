@@ -744,6 +744,76 @@ class SchedulingService:
         if value and value not in values:
             values.append(value)
 
+    @staticmethod
+    def _channel_program_lookup_id(channel_id: Any) -> Optional[str]:
+        if channel_id in (None, ""):
+            return None
+        return f"dispatcharr_channel:{channel_id}"
+
+    @staticmethod
+    def _program_title(program: Dict[str, Any]) -> str:
+        for key in (
+            'title',
+            'program_title',
+            'programTitle',
+            'program_name',
+            'programName',
+            'name',
+            'event_title',
+            'eventTitle',
+        ):
+            value = program.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        for nested_key in ('program', 'epg_program', 'epgProgram'):
+            nested = program.get(nested_key)
+            if not isinstance(nested, dict):
+                continue
+            for key in ('title', 'name', 'program_title', 'programTitle'):
+                value = nested.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        return ''
+
+    def _program_epg_identifiers(self, program: Dict[str, Any]) -> List[str]:
+        identifiers: List[str] = []
+        for key in (
+            'tvg_id',
+            'tvgId',
+            'effective_tvg_id',
+            'effectiveTvgId',
+            'tvc_guide_stationid',
+            'tvcGuideStationid',
+            'station_id',
+            'stationId',
+            'epg_data_id',
+            'epgDataId',
+            'effective_epg_data_id',
+            'effectiveEpgDataId',
+        ):
+            self._append_unique_identifier(identifiers, program.get(key))
+
+        for key in (
+            'channel_id',
+            'channelId',
+            'dispatcharr_channel_id',
+            'dispatcharrChannelId',
+        ):
+            channel_lookup_id = self._channel_program_lookup_id(program.get(key))
+            self._append_unique_identifier(identifiers, channel_lookup_id)
+
+        channel = program.get('channel')
+        if isinstance(channel, dict):
+            for key in ('tvg_id', 'tvgId', 'effective_tvg_id', 'station_id', 'stationId'):
+                self._append_unique_identifier(identifiers, channel.get(key))
+            for key in ('id', 'channel_id', 'channelId', 'dispatcharr_channel_id'):
+                channel_lookup_id = self._channel_program_lookup_id(channel.get(key))
+                self._append_unique_identifier(identifiers, channel_lookup_id)
+
+        return identifiers
+
     def _channel_epg_identifiers(self, channel: Dict[str, Any]) -> List[str]:
         """Return Dispatcharr EPG identifiers in effective-to-raw order.
 
@@ -766,6 +836,8 @@ class SchedulingService:
         if isinstance(epg_data, dict):
             for key in ('tvg_id', 'station_id', 'tvc_guide_stationid', 'id'):
                 self._append_unique_identifier(identifiers, epg_data.get(key))
+
+        self._append_unique_identifier(identifiers, self._channel_program_lookup_id(channel.get('id')))
 
         return identifiers
 
@@ -1036,7 +1108,7 @@ class SchedulingService:
 
         matching_programs = []
         for program in programs:
-            title = program.get('title', '')
+            title = self._program_title(program)
             if not pattern.search(title):
                 continue
             matching_programs.append(program)
@@ -1136,7 +1208,7 @@ class SchedulingService:
             channel_matches = []
             sample_titles = []
             for program in channel_programs:
-                title = program.get('title', '')
+                title = self._program_title(program)
                 if len(sample_titles) < 3 and title:
                     sample_titles.append(title)
                 if pattern.search(title):
@@ -1153,6 +1225,7 @@ class SchedulingService:
 
             for program in channel_matches:
                 enriched_program = dict(program)
+                enriched_program['title'] = self._program_title(program)
                 enriched_program['channel_id'] = channel_id
                 enriched_program['channel_name'] = channel_name
                 enriched_program['tvg_id'] = channel_info.get('tvg_id')
@@ -1306,7 +1379,7 @@ class SchedulingService:
                     now = datetime.now(timezone.utc)
 
                     for program in programs_by_epg_key.get(epg_key, []):
-                        title = program.get('title', '')
+                        title = self._program_title(program)
                         if not pattern.search(title):
                             continue
 
@@ -1615,7 +1688,7 @@ class SchedulingService:
                     program.get('tvg_id'),
                     program.get('start_time'),
                     program.get('end_time'),
-                    program.get('title'),
+                    self._program_title(program),
                 )
                 if dedup_key in seen_programs:
                     continue
@@ -1690,7 +1763,7 @@ class SchedulingService:
         return os.getenv("DISPATCHARR_TOKEN")
 
     def _fetch_and_cache_all_programs(self, force_refresh: bool = False) -> Dict[str, List[Dict[str, Any]]]:
-        """Fetch ALL EPG programs in one HTTP call and return them grouped by tvg_id.
+        """Fetch ALL EPG programs in one HTTP call and return them grouped by EPG identifier.
 
         SCH-001: Dispatcharr ignores tvg_id/start_time filter params, returning the
         full program list regardless. Fetching once and grouping client-side is
@@ -1719,8 +1792,10 @@ class SchedulingService:
         if not force_refresh and isinstance(legacy_cache, list):
             by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             for program in legacy_cache:
-                if isinstance(program, dict) and program.get('tvg_id'):
-                    by_tvg_id[program['tvg_id']].append(program)
+                if not isinstance(program, dict):
+                    continue
+                for identifier in self._program_epg_identifiers(program):
+                    by_tvg_id[identifier].append(program)
             if by_tvg_id:
                 return dict(by_tvg_id)
 
@@ -1786,17 +1861,18 @@ class SchedulingService:
             for p in raw:
                 if not isinstance(p, dict):
                     continue
-                tid = p.get('tvg_id')
-                if not tid:
+                identifiers = self._program_epg_identifiers(p)
+                if not identifiers:
                     skipped += 1
                     continue
-                by_tvg_id[tid].append(p)
+                for identifier in identifiers:
+                    by_tvg_id[identifier].append(p)
 
             if skipped:
-                logger.debug(f"Skipped {skipped} EPG programs with no tvg_id field")
+                logger.debug(f"Skipped {skipped} EPG programs with no EPG identifier field")
 
             logger.debug(
-                f"Fetched {len(raw)} EPG programs across {len(by_tvg_id)} tvg_ids "
+                f"Fetched {len(raw)} EPG programs across {len(by_tvg_id)} EPG identifiers "
                 f"from {page_count} page(s)"
             )
 
