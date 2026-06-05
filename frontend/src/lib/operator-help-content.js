@@ -302,7 +302,7 @@ export const operatorHelpDetailTopics = [
         name: 'Teamarr event window',
         controlType: 'Visible UI setting',
         defaultValue: 'Configured globally, disabled by default',
-        location: 'Settings -> Scheduling tab -> Automation Run Policy -> Teamarr event window before/after',
+        location: 'Settings -> Scheduling tab -> Automation Run Policy -> Teamarr event window -> Pause before event start / Continue pause after start',
         effect: 'Pauses automatic automation runs around cached Teamarr event starts.',
         useWhen: 'Use when normal automation should avoid event-channel windows while manual forced runs remain possible.',
         risk: 'Too wide can defer regular automation for long event blocks.',
