@@ -48,7 +48,10 @@ def _build_manager(monkeypatch, *, m3u_enabled: bool) -> AutomatedStreamManager:
     mock_udi = Mock()
     mock_udi.get_channels.return_value = [{"id": 101, "name": "Channel 101", "streams": []}]
     mock_udi.get_channel_by_id.return_value = {"id": 101, "name": "Channel 101", "streams": []}
+    mock_udi.get_cache_age_description.return_value = "fresh"
+    mock_udi.is_network_ready.return_value = False
     monkeypatch.setattr("apps.automation.automated_stream_manager.get_udi_manager", lambda: mock_udi)
+    monkeypatch.setattr("apps.automation.automated_stream_manager.get_streams", lambda *args, **kwargs: [])
 
     mock_stream_checker = Mock()
     mock_stream_checker.get_status.return_value = {"stream_checking_mode": False}

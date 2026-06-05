@@ -4,6 +4,7 @@ from apps.api.schemas import (
     AutomationProfileCreateSchema,
     AutomationProfileUpdateSchema,
     AutoCreateRuleCreateSchema,
+    AutoCreateRuleTestSchema,
     BulkRegexPatternsSchema,
     ChannelMatchSettingsSchema,
     GroupRegexConfigSchema,
@@ -116,7 +117,27 @@ def test_auto_create_rule_schema_requires_channel_binding():
     with pytest.raises(ValidationError) as exc:
         AutoCreateRuleCreateSchema.from_payload({"name": "Rule", "regex_pattern": ".*"})
 
-    assert "channel_id or channel_ids" in str(exc.value)
+    assert "channel_id, channel_ids, or channel_group_ids" in str(exc.value)
+
+
+def test_auto_create_rule_schema_accepts_channel_group_binding():
+    parsed = AutoCreateRuleCreateSchema.from_payload({
+        "name": "Rule",
+        "regex_pattern": ".*",
+        "channel_group_ids": [10],
+    })
+
+    assert parsed.rule_data["channel_group_ids"] == [10]
+
+
+def test_auto_create_rule_test_schema_accepts_channel_group_binding():
+    parsed = AutoCreateRuleTestSchema.from_payload({
+        "regex_pattern": "Cup",
+        "channel_group_ids": [10],
+    })
+
+    assert parsed.channel_ids == []
+    assert parsed.channel_group_ids == [10]
 
 
 def test_automation_profile_schema_normalizes_remove_dead_streams_flag():

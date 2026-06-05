@@ -104,6 +104,28 @@ def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
     return True
 
 
+def _check_nonempty_live_fetch(entity: str, result: FetchResult, existing_count: int) -> bool:
+    """Reject suspicious empty live fetches before they replace a good cache.
+
+    A confirmed ``expected_count == 0`` from Dispatcharr is valid. An empty
+    result with an unknown expected count usually means the endpoint could not be
+    reached or did not return the expected payload shape.
+    """
+    if len(result) > 0:
+        return True
+
+    if result.expected_count == 0:
+        return True
+
+    logger.warning(
+        "UDI live fetch for %s returned zero records without a confirmed zero "
+        "count; preserving existing cache with %s records",
+        entity,
+        existing_count,
+    )
+    return False
+
+
 class UDIManager:
     """
     Universal Data Index Manager - Singleton class for all Dispatcharr data access.
@@ -180,6 +202,7 @@ class UDIManager:
             'percentage': 0,
             'message': '',
             'current_step': '',
+            'started_at': None,
             'total_steps': 6,       # channels, streams, groups, logos, m3u_accounts, profiles
             # entity_counts is populated after each full refresh_all() run.
             # Each entry: { 'received': int, 'expected': int | None }
@@ -344,7 +367,7 @@ class UDIManager:
         self._stream_account_id = {}
         for st in self._streams_cache:
             sid = st.get('id')
-            aid = st.get('m3u_account')
+            aid = self._get_stream_m3u_account_id(st)
             if sid is not None and aid is not None:
                 self._stream_account_id[sid] = aid
                 self._streams_by_account_id.setdefault(aid, []).append(st)
@@ -373,6 +396,19 @@ class UDIManager:
             if gid is not None:
                 self._channels_by_group_id.setdefault(gid, []).append(ch)
 
+    @staticmethod
+    def _get_stream_m3u_account_id(stream: Dict[str, Any]) -> Optional[Any]:
+        """Return a stream's M3U account id across legacy and SQL payloads."""
+        if not isinstance(stream, dict):
+            return None
+        account_id = stream.get('m3u_account_id')
+        if account_id in (None, ''):
+            account_id = stream.get('m3u_account')
+        try:
+            return int(account_id) if account_id not in (None, '') else None
+        except (TypeError, ValueError):
+            return account_id
+
     # === Data Access Methods ===
     
     def get_init_progress(self) -> Dict[str, Any]:
@@ -386,6 +422,9 @@ class UDIManager:
         progress['api_timing'] = self.get_api_timing_summary()
         progress['last_refresh_duration_seconds'] = round(self._last_refresh_duration_seconds, 3)
         progress['last_refresh_time'] = self._last_refresh_time.isoformat() if self._last_refresh_time else None
+        started_at = self._init_progress.get('started_at')
+        progress['elapsed_seconds'] = round((datetime.now() - started_at).total_seconds(), 3) if started_at else None
+        progress['started_at'] = started_at.isoformat() if started_at else None
         return progress
     
     def _update_init_progress(
@@ -408,6 +447,12 @@ class UDIManager:
                            existing dict so partial updates are safe.
         """
         if status:
+            if status == 'in_progress':
+                current_status = self._init_progress.get('status')
+                if current_status != 'in_progress' or not self._init_progress.get('started_at'):
+                    self._init_progress['started_at'] = datetime.now()
+            elif status in {'idle', 'completed', 'failed'}:
+                self._init_progress['started_at'] = None
             self._init_progress['status'] = status
         if percentage is not None:
             self._init_progress['percentage'] = percentage
@@ -443,6 +488,14 @@ class UDIManager:
             network. False during startup before the network refresh finishes.
         """
         return self._network_ready
+
+    def is_initialization_pending(self) -> bool:
+        """Return True while the startup/live UDI refresh is actively building caches."""
+        with self._lock:
+            return bool(
+                self._init_in_progress
+                or self._init_progress.get("status") == "in_progress"
+            )
 
     def get_last_refresh_duration(self) -> float:
         """Return seconds taken by the last successful refresh_all().
@@ -954,8 +1007,16 @@ class UDIManager:
                 streams_result.expected_count = pre_counts['streams']
                 logger.info(f"UDI integrity: using /ids/ oracle for streams — expected {streams_result.expected_count}")
 
-            channels_ok = _check_fetch_integrity('channels', channels_result)
-            streams_ok  = _check_fetch_integrity('streams',  streams_result)
+            existing_channel_count = len(self._channels_cache)
+            existing_stream_count = len(self._streams_cache)
+            channels_ok = (
+                _check_fetch_integrity('channels', channels_result)
+                and _check_nonempty_live_fetch('channels', channels_result, existing_channel_count)
+            )
+            streams_ok = (
+                _check_fetch_integrity('streams', streams_result)
+                and _check_nonempty_live_fetch('streams', streams_result, existing_stream_count)
+            )
             _check_fetch_integrity('logos', logos_result)
 
             # Profile channels are embedded in the profiles list response — no
@@ -1050,7 +1111,7 @@ class UDIManager:
             new_stream_account_id: Dict[int, int] = {}
             for st in new_streams:
                 sid = st.get('id')
-                aid = st.get('m3u_account')
+                aid = self._get_stream_m3u_account_id(st)
                 if sid is not None and aid is not None:
                     new_stream_account_id[sid] = aid
                     new_streams_by_account.setdefault(aid, []).append(st)
@@ -1239,7 +1300,7 @@ class UDIManager:
                 if st.get('url'):
                     self._streams_by_url[st['url']] = st
                 self._valid_stream_ids.add(sid)
-                aid = st.get('m3u_account')
+                aid = self._get_stream_m3u_account_id(st)
                 if aid is not None:
                     self._stream_account_id[sid] = aid
                     self._streams_by_account_id.setdefault(aid, []).append(st)
@@ -1394,7 +1455,7 @@ class UDIManager:
                 self._stream_account_id = {}
                 for st in result.items:
                     sid = st.get('id')
-                    aid = st.get('m3u_account')
+                    aid = self._get_stream_m3u_account_id(st)
                     if sid is not None and aid is not None:
                         self._stream_account_id[sid] = aid
                         self._streams_by_account_id.setdefault(aid, []).append(st)
@@ -1799,8 +1860,8 @@ class UDIManager:
             logger.warning(f"Profile {profile_id} not found in any M3U account")
             return 0
         
-        # Count active streams for this account
-        active_count = self._count_active_streams(account_id)
+        profile_counts = self.get_active_streams_count_per_profile(account_id)
+        active_count = profile_counts.get(profile_id, 0)
         logger.debug(f"Profile {profile_id} has {active_count} active streams")
         return active_count
     
@@ -1986,7 +2047,7 @@ class UDIManager:
         """
         self._ensure_initialized()
         
-        account_id = stream.get('m3u_account')
+        account_id = self._get_stream_m3u_account_id(stream)
         stream_id = stream.get('id')
         
         if not account_id:
@@ -2070,7 +2131,7 @@ class UDIManager:
         """
         self._ensure_initialized()
         
-        account_id = stream.get('m3u_account')
+        account_id = self._get_stream_m3u_account_id(stream)
         if not account_id:
             # Custom stream without M3U account - can always run
             return (True, None)

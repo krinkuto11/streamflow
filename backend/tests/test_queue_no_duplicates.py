@@ -74,6 +74,52 @@ class TestQueueNoDuplicates(unittest.TestCase):
         self.assertEqual(status['queue_size'], 5, "Queue should still have exactly 5 items")
         self.assertEqual(status['queued'], 5, "Queued set should have 5 channels")
         self.assertEqual(status['total_queued'], 5, "Total queued stat should be 5")
+
+    def test_add_channels_does_not_initialize_udi_for_stream_counts(self):
+        """Queue ETA counts should not trigger UDI auto-init or network fetches."""
+        queue = StreamCheckQueue(max_size=100)
+
+        class UninitializedUdi:
+            def is_initialized(self):
+                return False
+
+            def get_channel_by_id(self, channel_id, fetch_if_missing=True):
+                raise AssertionError("queue stream-count lookup must stay cache-only")
+
+        with patch('apps.udi.get_udi_manager', return_value=UninitializedUdi()):
+            added = queue.add_channels([1, 2, 3], priority=10)
+
+        self.assertEqual(added, 3)
+        status = queue.get_status()
+        self.assertEqual(status['queued_streams_count'], 3)
+
+    def test_add_channels_uses_cache_only_udi_lookup_for_stream_counts(self):
+        """When UDI is initialized, stream counts use cached data only."""
+        queue = StreamCheckQueue(max_size=100)
+
+        class InitializedUdi:
+            def __init__(self):
+                self.fetch_flags = []
+
+            def is_initialized(self):
+                return True
+
+            def get_channel_by_id(self, channel_id, fetch_if_missing=True):
+                self.fetch_flags.append(fetch_if_missing)
+                streams_by_channel = {
+                    1: [10, 11, 12],
+                    2: [20, 21],
+                }
+                return {'id': channel_id, 'streams': streams_by_channel.get(channel_id, [])}
+
+        udi = InitializedUdi()
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            added = queue.add_channels([1, 2], priority=10)
+
+        self.assertEqual(added, 2)
+        self.assertEqual(udi.fetch_flags, [False, False])
+        status = queue.get_status()
+        self.assertEqual(status['queued_streams_count'], 5)
     
     def test_channel_can_be_requeued_after_completion(self):
         """Test that a channel can be queued again after it's completed."""

@@ -15,7 +15,8 @@ import {
   Eye,
   ChevronLeft,
   ChevronRight,
-  TrendingUp
+  TrendingUp,
+  CircleHelp
 } from 'lucide-react'
 import { Button } from '@/components/ui/button.jsx'
 import { ThemeToggle } from '@/components/ThemeToggle.jsx'
@@ -37,10 +38,11 @@ const menuItems = [
   { text: 'Scheduling', icon: Calendar, path: '/scheduling' },
   { text: 'Analytics', icon: TrendingUp, path: '/stats' },
   { text: 'Settings', icon: Settings, path: '/settings' },
+  { text: 'Help', icon: CircleHelp, path: '/help' },
   { text: 'Changelog', icon: History, path: '/changelog' },
 ]
 
-export function Sidebar({ isCollapsed, setIsCollapsed }) {
+export function Sidebar({ isCollapsed, setIsCollapsed, navigationDisabled = false }) {
   const [isOpen, setIsOpen] = useState(false)
   const [version, setVersion] = useState(null)
   const [publicIp, setPublicIp] = useState(null)
@@ -132,18 +134,29 @@ export function Sidebar({ isCollapsed, setIsCollapsed }) {
           <TooltipProvider delayDuration={0}>
             {menuItems.map((item) => {
               const Icon = item.icon
-              const isActive = location.pathname === item.path
+              const isDashboard = item.path === '/'
+              const isDisabled = navigationDisabled && !isDashboard
+              const isActive = location.pathname === item.path || (navigationDisabled && isDashboard)
 
               const linkContent = (
                 <Link
                   key={item.path}
                   to={item.path}
-                  onClick={() => setIsOpen(false)}
+                  aria-disabled={isDisabled}
+                  tabIndex={isDisabled ? -1 : undefined}
+                  onClick={(event) => {
+                    if (isDisabled) {
+                      event.preventDefault()
+                      return
+                    }
+                    setIsOpen(false)
+                  }}
                   className={cn(
                     "flex items-center gap-3 px-3 py-2 rounded-lg transition-all duration-200 group relative",
                     isActive
                       ? "bg-primary text-primary-foreground shadow-md"
                       : "hover:bg-accent hover:text-accent-foreground",
+                    isDisabled && "cursor-not-allowed opacity-40 hover:bg-transparent hover:text-muted-foreground",
                     isCollapsed ? "justify-center px-0 w-12 h-12 mx-auto" : "w-full"
                   )}
                 >

@@ -82,6 +82,31 @@ function getActionColor(action) {
   }
 }
 
+const entrySearchText = (entry) => JSON.stringify(entry || {}).toLowerCase()
+
+function entryMatchesSourceFilter(entry, sourceFilter) {
+  if (sourceFilter === 'all') return true
+  const action = entry?.action
+  const text = entrySearchText(entry)
+
+  if (sourceFilter === 'single_checks') {
+    return action === 'single_channel_check'
+  }
+  if (sourceFilter === 'full_runs') {
+    return ['automation_run', 'global_check', 'batch_stream_check'].includes(action)
+  }
+  if (sourceFilter === 'dead_revive') {
+    return text.includes('dead_stream') || text.includes('revived_stream') || text.includes('streams_revived')
+  }
+  if (sourceFilter === 'blank_freeze_loop') {
+    return text.includes('blank') || text.includes('freeze') || text.includes('loop')
+  }
+  if (sourceFilter === 'teamarr_preflight') {
+    return text.includes('teamarr') || text.includes('preflight')
+  }
+  return true
+}
+
 function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
   const [logoError, setLogoError] = useState(false)
   const channelLabel = item.channel_name
@@ -797,12 +822,13 @@ export default function Changelog() {
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [actionFilter, setActionFilter] = useState('all')
+  const [sourceFilter, setSourceFilter] = useState('all')
   const { toast } = useToast()
 
   useEffect(() => {
     // Reset page when filter changes
     setPage(1)
-  }, [days, actionFilter])
+  }, [days, actionFilter, sourceFilter])
 
   useEffect(() => {
     loadChangelog()
@@ -838,10 +864,11 @@ export default function Changelog() {
   }
 
   const filteredEntries = useMemo(() => {
-    return actionFilter === 'all'
+    const actionFiltered = actionFilter === 'all'
       ? entries
       : entries.filter(entry => entry.action === actionFilter)
-  }, [entries, actionFilter])
+    return actionFiltered.filter(entry => entryMatchesSourceFilter(entry, sourceFilter))
+  }, [entries, actionFilter, sourceFilter])
 
   return (
     <div className="space-y-6">
@@ -854,6 +881,20 @@ export default function Changelog() {
         </div>
 
         <div className="flex gap-3">
+          <Select value={sourceFilter} onValueChange={setSourceFilter}>
+            <SelectTrigger className="w-[190px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Sources</SelectItem>
+              <SelectItem value="single_checks">Single Checks</SelectItem>
+              <SelectItem value="full_runs">Full Runs</SelectItem>
+              <SelectItem value="dead_revive">Dead / Revive</SelectItem>
+              <SelectItem value="blank_freeze_loop">Blank / Freeze / Loop</SelectItem>
+              <SelectItem value="teamarr_preflight">Teamarr Preflight</SelectItem>
+            </SelectContent>
+          </Select>
+
           <Select value={actionFilter} onValueChange={setActionFilter}>
             <SelectTrigger className="w-[200px]">
               <SelectValue />

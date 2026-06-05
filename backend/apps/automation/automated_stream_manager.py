@@ -18,9 +18,9 @@ import time
 import threading
 import copy
 from functools import lru_cache
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Callable, Dict, List, Optional, Tuple, Any, Union
 import concurrent.futures
 from collections import defaultdict
 
@@ -1321,6 +1321,7 @@ class AutomatedStreamManager:
         self.running = False
         self.state_file = CONFIG_DIR / "automation_state.json"
         self.last_playlist_update = None
+        self._period_skip_history = {}
         self.period_last_run = self._load_state()  # Tracks last run time per period ID
         self.automation_start_time = None
         
@@ -1332,6 +1333,7 @@ class AutomatedStreamManager:
         self.automation_thread = None
         self.automation_running = False
         self.automation_wake_event = threading.Event()
+        self._manual_stop_requested = threading.Event()
         self.force_next_run = False
         self.forced_period_id = None
         
@@ -1369,6 +1371,20 @@ class AutomatedStreamManager:
                     parsed_runs[pid] = datetime.fromisoformat(iso_str)
                 except (ValueError, TypeError):
                     pass
+
+            loaded_skip_history = state.get('period_skip_history', {})
+            parsed_skip_history = {}
+            if isinstance(loaded_skip_history, dict):
+                for pid, entries in loaded_skip_history.items():
+                    if not isinstance(entries, list):
+                        continue
+                    normalized_entries = []
+                    for entry in entries[:10]:
+                        if isinstance(entry, dict):
+                            normalized_entries.append(dict(entry))
+                    if normalized_entries:
+                        parsed_skip_history[str(pid)] = normalized_entries
+            self._period_skip_history = parsed_skip_history
             
             if parsed_runs:
                 logger.info(f"Loaded {len(parsed_runs)} period last-run timestamps from state file")
@@ -1391,7 +1407,10 @@ class AutomatedStreamManager:
                 for pid, dt in self.period_last_run.items() 
                 if isinstance(dt, datetime)
             }
-            state = {'period_last_run': serializable_runs}
+            state = {
+                'period_last_run': serializable_runs,
+                'period_skip_history': getattr(self, '_period_skip_history', {}),
+            }
             
             session = get_session()
             setting = session.query(SystemSetting).filter(SystemSetting.key == 'automation_state').first()
@@ -1582,6 +1601,8 @@ class AutomatedStreamManager:
             self._run_status_lock = threading.RLock()
         if not hasattr(self, "_run_sequence"):
             self._run_sequence = 0
+        if not hasattr(self, "_manual_stop_requested"):
+            self._manual_stop_requested = threading.Event()
         if not hasattr(self, "_run_status"):
             self._run_status = self._build_run_status(
                 run_id=None,
@@ -1593,6 +1614,7 @@ class AutomatedStreamManager:
 
     def _start_run_status(self, *, forced: bool = False, forced_period_id: Optional[str] = None) -> None:
         self._ensure_run_status_fields()
+        self._manual_stop_requested.clear()
         with self._run_status_lock:
             self._run_sequence += 1
             run_id = f"automation-{int(time.time())}-{self._run_sequence}"
@@ -1789,6 +1811,47 @@ class AutomatedStreamManager:
                         stage["message"] = message
                     break
 
+    def _sync_udi_cache_after_playlist_refresh(self, udi_manager: Any) -> bool:
+        """Refresh UDI streams/channels while surfacing coarse run progress."""
+        steps = [
+            ("streams", "Syncing stream cache", udi_manager.refresh_streams),
+            ("channels", "Syncing channel cache", udi_manager.refresh_channels),
+        ]
+        total = len(steps)
+        all_success = True
+        successful_steps = 0
+
+        for index, (name, message, refresh_func) in enumerate(steps):
+            self._update_run_progress(
+                stage_key="cache_sync",
+                current=index,
+                total=total,
+                message=message,
+            )
+            try:
+                success = bool(refresh_func())
+            except Exception as exc:
+                logger.warning("UDI %s cache sync failed: %s", name, exc)
+                success = False
+            if success:
+                successful_steps += 1
+            all_success = all_success and success
+            self._update_run_progress(
+                stage_key="cache_sync",
+                current=successful_steps,
+                total=total,
+                message=f"{message} {'completed' if success else 'reported warnings'}",
+            )
+
+        self._update_run_status(
+            counts={
+                "cache_sync_successful_steps": successful_steps,
+                "cache_sync_total_steps": total,
+                "cache_sync_state": "completed" if all_success else "warning",
+            },
+        )
+        return all_success
+
     def _finish_run_status(
         self,
         status: Optional[str] = None,
@@ -1842,6 +1905,28 @@ class AutomatedStreamManager:
                 if stage_item["key"] == active_stage and stage_item["status"] == "running":
                     stage_item["status"] = "completed" if final_state == "completed" else final_state
 
+    def _manual_stop_message(self) -> str:
+        return "Automation run was stopped by the user"
+
+    def _is_manual_stop_requested(self) -> bool:
+        self._ensure_run_status_fields()
+        return self._manual_stop_requested.is_set()
+
+    def _abort_run_if_manual_stop_requested(self) -> bool:
+        if not self._is_manual_stop_requested():
+            return False
+
+        message = self._manual_stop_message()
+        self._finish_run_status(
+            state="aborted",
+            stage="aborted",
+            stage_label="Aborted",
+            message=message,
+            error=message,
+        )
+        self._manual_stop_requested.clear()
+        return True
+
     def _finish_cycle_outcome(
         self,
         *,
@@ -1849,6 +1934,9 @@ class AutomatedStreamManager:
         cycle_abort_message: Optional[str],
         cycle_failed_message: Optional[str] = None,
     ) -> str:
+        if not cycle_abort_message and self._is_manual_stop_requested():
+            cycle_abort_message = self._manual_stop_message()
+
         if refresh_success and not cycle_abort_message and not cycle_failed_message:
             self._finish_run_status(
                 state="completed",
@@ -1995,7 +2083,13 @@ class AutomatedStreamManager:
         # letting the specific logic (assignment/validation) handle per-channel profiles.
         return all_channels
     
-    def refresh_playlists(self, force: bool = False, account_id: Optional[int] = None, skip_changelog: bool = False) -> Tuple[bool, List[Dict]]:
+    def refresh_playlists(
+        self,
+        force: bool = False,
+        account_id: Optional[int] = None,
+        skip_changelog: bool = False,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> Tuple[bool, List[Dict]]:
         """Refresh M3U playlists and track changes.
         
         Args:
@@ -2008,6 +2102,15 @@ class AutomatedStreamManager:
         """
         refreshed_accounts = []
         refresh_failed = False
+
+        def emit_refresh_progress(payload: Dict[str, Any]) -> None:
+            if not progress_callback:
+                return
+            try:
+                progress_callback(payload)
+            except Exception as callback_error:
+                logger.debug(f"M3U refresh progress callback failed: {callback_error}")
+
         try:
             if not force and not self.config.get("enabled_features", {}).get("auto_playlist_update", True):
                 if not force:  # Allow force to override feature flag
@@ -2049,34 +2152,93 @@ class AutomatedStreamManager:
                          accounts_to_process = non_custom_accounts
 
                 # Execute refresh
-                for account in accounts_to_process:
+                total_accounts = len(accounts_to_process)
+                if total_accounts:
+                    emit_refresh_progress({
+                        "state": "planned",
+                        "current": 0,
+                        "total": total_accounts,
+                        "message": f"Preparing {total_accounts} playlist refresh request(s)",
+                    })
+
+                for index, account in enumerate(accounts_to_process, start=1):
                     acc_id = account.get('id')
                     if acc_id is not None:
-                        logger.info(f"Refreshing M3U account {acc_id}: {account.get('name')}")
+                        account_name = account.get('name', f"Account {acc_id}")
+                        logger.info(f"Refreshing M3U account {acc_id}: {account_name}")
+                        emit_refresh_progress({
+                            "state": "requesting",
+                            "current": index - 1,
+                            "total": total_accounts,
+                            "account_id": acc_id,
+                            "account_name": account_name,
+                            "message": f"Refreshing playlist {index}/{total_accounts}: {account_name}",
+                        })
                         response = refresh_m3u_playlists(account_id=acc_id)
                         if self._is_m3u_refresh_response_success(response):
                             refreshed_accounts.append({
                                 "id": acc_id,
-                                "name": account.get('name', f"Account {acc_id}")
+                                "name": account_name,
+                            })
+                            emit_refresh_progress({
+                                "state": "accepted",
+                                "current": index,
+                                "total": total_accounts,
+                                "account_id": acc_id,
+                                "account_name": account_name,
+                                "message": f"Playlist {index}/{total_accounts} refresh accepted: {account_name}",
                             })
                         else:
                             refresh_failed = True
                             status = getattr(response, 'status_code', None)
                             logger.error(
-                                f"M3U refresh failed for account {acc_id} ({account.get('name')}), "
+                                f"M3U refresh failed for account {acc_id} ({account_name}), "
                                 f"status={status}"
                             )
+                            emit_refresh_progress({
+                                "state": "failed",
+                                "current": index,
+                                "total": total_accounts,
+                                "account_id": acc_id,
+                                "account_name": account_name,
+                                "message": f"Playlist {index}/{total_accounts} failed: {account_name}",
+                            })
                 
                 if not accounts_to_process:
                     logger.info("No accounts matched criteria for refresh.")
+                    emit_refresh_progress({
+                        "state": "skipped",
+                        "current": 0,
+                        "total": 0,
+                        "message": "No active playlists matched the refresh request",
+                    })
             else:
                 # Fallback: if we can't get accounts, refresh all (legacy behavior)
                 logger.warning("Could not fetch M3U accounts, refreshing all as fallback")
+                emit_refresh_progress({
+                    "state": "requesting",
+                    "current": 0,
+                    "total": 1,
+                    "message": "Refreshing all playlists through Dispatcharr",
+                })
                 response = refresh_m3u_playlists()
                 if not self._is_m3u_refresh_response_success(response):
                     refresh_failed = True
                     status = getattr(response, 'status_code', None)
                     logger.error(f"Fallback M3U refresh failed, status={status}")
+                    emit_refresh_progress({
+                        "state": "failed",
+                        "current": 1,
+                        "total": 1,
+                        "message": "Fallback playlist refresh failed",
+                    })
+                else:
+                    emit_refresh_progress({
+                        "state": "accepted",
+                        "current": 1,
+                        "total": 1,
+                        "message": "Fallback playlist refresh request accepted",
+                    })
 
             if refresh_failed:
                 logger.error("Playlist refresh encountered one or more failed account refreshes")
@@ -2102,7 +2264,7 @@ class AutomatedStreamManager:
                 # Continue even if EPG refresh fails
 
             self.last_playlist_update = datetime.now()
-            logger.info("M3U playlist refresh completed successfully")
+            logger.info("M3U playlist refresh requests accepted successfully")
 
             # Note: Channel marking for stream quality checking is handled in discover_and_assign_streams()
             # after streams are actually assigned to specific channels. This prevents marking all channels
@@ -2986,25 +3148,29 @@ class AutomatedStreamManager:
                         elif added_count > 0:
                             logger.debug(f"Skipped verification for channel {channel_id} (disabled in config)")
                         
-                        # Prepare detailed assignment info
-                        channel_assignment = {
-                            "channel_id": channel_id,
-                            "channel_name": channel_names.get(channel_id, f'Channel {channel_id}'),
-                            "logo_url": channel_logo_urls.get(channel_id),
-                            "stream_count": added_count,
-                            "streams": assignment_details[channel_id][:20],  # Limit to first 20 for changelog
-                            "added_to_session": False
-                        }
-                        detailed_assignments.append(channel_assignment)
+                        if added_count > 0:
+                            channel_assignment = {
+                                "channel_id": channel_id,
+                                "channel_name": channel_names.get(channel_id, f'Channel {channel_id}'),
+                                "logo_url": channel_logo_urls.get(channel_id),
+                                "stream_count": added_count,
+                                "streams": assignment_details[channel_id][:20],  # Limit to first 20 for changelog
+                                "added_to_session": False
+                            }
+                            detailed_assignments.append(channel_assignment)
                         
                         
                     except Exception as e:
                         logger.error(f"Failed to assign streams to channel {channel_id}: {e}")
             
+            accepted_assignment_count = {
+                channel_id: count
+                for channel_id, count in assignment_count.items()
+                if count > 0
+            }
+            total_assigned = sum(accepted_assignment_count.values())
+            accepted_channel_count = len(accepted_assignment_count)
             # Add comprehensive changelog entry
-            total_assigned = sum(assignment_count.values())
-            # Add comprehensive changelog entry
-            total_assigned = sum(assignment_count.values())
             if self.config.get("enabled_features", {}).get("changelog_tracking", True) and not skip_changelog:
                 # Limit detailed assignments to prevent oversized changelog entries
                 # Sort by stream count (descending) to show the most significant updates
@@ -3013,30 +3179,29 @@ class AutomatedStreamManager:
                 
                 self.changelog.add_entry("streams_assigned", {
                     "total_assigned": total_assigned,
-                    "channel_count": len(assignment_count),
+                    "channel_count": accepted_channel_count,
                     "assignments": sorted_assignments[:max_channels_in_changelog],
                     "has_more_channels": len(sorted_assignments) > max_channels_in_changelog,
                     "timestamp": datetime.now().isoformat()
                 })
             
-            logger.info(f"Stream discovery completed. Assigned {total_assigned} new streams across {len(assignment_count)} channels")
+            logger.info(f"Stream discovery completed. Assigned {total_assigned} new streams across {accepted_channel_count} channels")
             
             # Mark channels that received new streams for stream quality checking
-            if total_assigned > 0 and assignment_count:
+            if total_assigned > 0 and accepted_assignment_count:
                 try:
                     # Get updated stream counts for channels that received new streams
                     channel_ids_to_mark = []
                     stream_counts = {}
                     
-                    for channel_id in assignment_count.keys():
-                        if assignment_count[channel_id] > 0:
-                            channel_ids_to_mark.append(int(channel_id))
-                            # Avoid a post-write UDI/network fetch here. The checker
-                            # only needs a best-effort current count for its update
-                            # tracker, and we already know the pre-assignment set plus
-                            # how many streams Dispatcharr accepted.
-                            existing_streams = channel_streams.get(str(channel_id), set())
-                            stream_counts[int(channel_id)] = len(existing_streams) + int(assignment_count[channel_id])
+                    for channel_id, added_count in accepted_assignment_count.items():
+                        channel_ids_to_mark.append(int(channel_id))
+                        # Avoid a post-write UDI/network fetch here. The checker
+                        # only needs a best-effort current count for its update
+                        # tracker, and we already know the pre-assignment set plus
+                        # how many streams Dispatcharr accepted.
+                        existing_streams = channel_streams.get(str(channel_id), set())
+                        stream_counts[int(channel_id)] = len(existing_streams) + int(added_count)
                     
                     # Try to get stream checker service and mark channels
                     if channel_ids_to_mark:
@@ -3066,10 +3231,16 @@ class AutomatedStreamManager:
             if checking_only_channel_ids:
                 self._mark_checking_only_channels(checking_only_channel_ids, udi, skip_check_trigger)
             
+            accepted_assigned_stream_ids = {
+                str(channel_id): stream_ids
+                for channel_id, stream_ids in assignments.items()
+                if accepted_assignment_count.get(str(channel_id), 0) > 0
+            }
+
             return {
-                "assignment_count": assignment_count,
+                "assignment_count": accepted_assignment_count,
                 "assignment_details": detailed_assignments,
-                "assigned_stream_ids": dict(assignments)
+                "assigned_stream_ids": dict(accepted_assigned_stream_ids)
             }
             
         except Exception as e:
@@ -3373,12 +3544,269 @@ class AutomatedStreamManager:
             }
     
     
+    def _get_missed_run_grace_minutes(self, period_info: dict) -> int:
+        try:
+            grace_minutes = int(period_info.get("missed_run_grace_minutes") or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, grace_minutes)
+
+    def _record_period_skip(
+        self,
+        period_id: str,
+        period_info: dict,
+        *,
+        reason: str,
+        due_at: Optional[datetime] = None,
+        now: datetime,
+        grace_minutes: int,
+        message: Optional[str] = None,
+    ) -> None:
+        if not hasattr(self, "_period_skip_history") or not isinstance(self._period_skip_history, dict):
+            self._period_skip_history = {}
+
+        entry = {
+            "reason": reason,
+            "period_id": str(period_id),
+            "period_name": period_info.get("name") or str(period_id),
+            "due_at": due_at.isoformat() if isinstance(due_at, datetime) else None,
+            "skipped_at": now.isoformat(),
+            "grace_minutes": max(0, int(grace_minutes or 0)),
+            "message": message or "Missed-run grace expired before the scheduler observed this period",
+        }
+        history = [entry] + list(self._period_skip_history.get(str(period_id), []))
+        self._period_skip_history[str(period_id)] = history[:10]
+
+    def get_period_skip_history(self, period_id: Optional[str] = None, *, limit: int = 10) -> Any:
+        if not hasattr(self, "_period_skip_history") or not isinstance(self._period_skip_history, dict):
+            self._period_skip_history = {}
+
+        try:
+            normalized_limit = max(1, min(int(limit), 50))
+        except (TypeError, ValueError):
+            normalized_limit = 10
+
+        if period_id is not None:
+            return list(self._period_skip_history.get(str(period_id), []))[:normalized_limit]
+
+        return {
+            str(pid): list(entries)[:normalized_limit]
+            for pid, entries in self._period_skip_history.items()
+        }
+
+    def _get_catch_up_max_periods_per_cycle(self, global_settings: dict) -> int:
+        try:
+            cap = int(global_settings.get("catch_up_max_periods_per_cycle") or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, cap)
+
+    def _parse_policy_time(self, value: Any) -> Optional[tuple[int, int]]:
+        parts = str(value or "").strip().split(":")
+        if len(parts) != 2:
+            return None
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except (TypeError, ValueError):
+            return None
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+        return None
+
+    def _is_maintenance_window_active(self, global_settings: dict, now: Optional[datetime] = None) -> bool:
+        if not global_settings.get("maintenance_window_enabled"):
+            return False
+        start = self._parse_policy_time(global_settings.get("maintenance_window_start"))
+        end = self._parse_policy_time(global_settings.get("maintenance_window_end"))
+        if start is None or end is None or start == end:
+            return False
+
+        current = now or datetime.now()
+        current_minutes = current.hour * 60 + current.minute
+        start_minutes = start[0] * 60 + start[1]
+        end_minutes = end[0] * 60 + end[1]
+        if start_minutes < end_minutes:
+            return start_minutes <= current_minutes < end_minutes
+        return current_minutes >= start_minutes or current_minutes < end_minutes
+
+    def _get_teamarr_event_window_minutes(self, global_settings: dict, key: str, default: int) -> int:
+        try:
+            value = int(global_settings.get(key, default))
+        except (TypeError, ValueError):
+            return default
+        return max(0, min(value, 1440))
+
+    def _get_active_teamarr_event_window(self, global_settings: dict, now: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
+        if not global_settings.get("teamarr_event_window_enabled"):
+            return None
+
+        before_minutes = self._get_teamarr_event_window_minutes(
+            global_settings,
+            "teamarr_event_window_before_minutes",
+            30,
+        )
+        after_minutes = self._get_teamarr_event_window_minutes(
+            global_settings,
+            "teamarr_event_window_after_minutes",
+            10,
+        )
+        if before_minutes <= 0 and after_minutes <= 0:
+            return None
+
+        try:
+            from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+            status = get_teamarr_preflight_service().get_status()
+        except Exception as exc:
+            logger.debug("Could not read Teamarr event window status: %s", exc)
+            return None
+
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+
+        for event in status.get("upcoming_events") or []:
+            if not isinstance(event, dict):
+                continue
+            if not event.get("dispatcharr_channel_id"):
+                continue
+
+            state = str(event.get("state") or "").strip().lower()
+            if state in {"filtered", "past", "no_dispatcharr_channel"}:
+                continue
+
+            event_date = event.get("event_date")
+            try:
+                event_at = datetime.fromisoformat(str(event_date).replace("Z", "+00:00"))
+            except (TypeError, ValueError):
+                continue
+            if event_at.tzinfo is None:
+                event_at = event_at.replace(tzinfo=timezone.utc)
+
+            window_start = event_at - timedelta(minutes=before_minutes)
+            window_end = event_at + timedelta(minutes=after_minutes)
+            if window_start <= current <= window_end:
+                return {
+                    "event_name": event.get("event_name") or event.get("channel_name") or "Teamarr event",
+                    "channel_name": event.get("channel_name"),
+                    "event_date": event_at.isoformat(),
+                    "state": state or None,
+                    "seconds_to_start": int((event_at - current).total_seconds()),
+                    "window_before_minutes": before_minutes,
+                    "window_after_minutes": after_minutes,
+                }
+
+        return None
+
+    def _apply_global_catch_up_cap(
+        self,
+        active_periods: Dict[tuple, dict],
+        global_settings: dict,
+        *,
+        forced: bool,
+    ) -> Dict[tuple, dict]:
+        if forced:
+            return active_periods
+        run_all_due_periods = bool(global_settings.get("run_all_due_periods", False))
+        cap = self._get_catch_up_max_periods_per_cycle(global_settings) if run_all_due_periods else 1
+        if run_all_due_periods and cap <= 0:
+            return active_periods
+        if len(active_periods) <= cap:
+            return active_periods
+
+        def sort_key(item):
+            (period_id, period_name), data = item
+            try:
+                numeric_period_id = int(period_id)
+            except (TypeError, ValueError):
+                numeric_period_id = 0
+            return (-int(data.get("priority") or 0), numeric_period_id, str(period_name))
+
+        ordered = sorted(active_periods.items(), key=sort_key)
+        kept = dict(ordered[:cap])
+        skipped = ordered[cap:]
+        now = datetime.now()
+        skip_reason = "global_catch_up_cap" if run_all_due_periods else "run_all_due_disabled"
+        skip_message = (
+            "Global catch-up cap deferred this period to the next scheduler pass"
+            if run_all_due_periods
+            else "Run all due periods is disabled; this period is deferred to the next scheduler pass"
+        )
+        for (period_id, _period_name), data in skipped:
+            self._record_period_skip(
+                str(period_id),
+                {
+                    "id": str(period_id),
+                    "name": data.get("period_name") or str(period_id),
+                },
+                reason=skip_reason,
+                now=now,
+                grace_minutes=0,
+                message=skip_message,
+            )
+        self._save_state()
+        logger.info(
+            "Automatic due-period policy kept %s period(s) and deferred %s period(s) "
+            "(run_all_due_periods=%s, cap=%s)",
+            len(kept),
+            len(skipped),
+            run_all_due_periods,
+            cap,
+        )
+        return kept
+
+    def _period_due_inside_grace(
+        self,
+        period_id: str,
+        period_info: dict,
+        due_at: datetime,
+        now: datetime,
+    ) -> bool:
+        if now < due_at:
+            return False
+
+        grace_minutes = self._get_missed_run_grace_minutes(period_info)
+        if grace_minutes <= 0:
+            return True
+
+        grace_until = due_at + timedelta(minutes=grace_minutes)
+        if now <= grace_until:
+            return True
+
+        self.period_last_run[period_id] = now
+        self._record_period_skip(
+            period_id,
+            period_info,
+            reason="missed_run_grace_expired",
+            due_at=due_at,
+            now=now,
+            grace_minutes=grace_minutes,
+        )
+        self._save_state()
+        logger.info(
+            "Skipping missed automation period %s because its grace window expired "
+            "(due_at=%s, grace_minutes=%s, now=%s)",
+            period_id,
+            due_at.isoformat(),
+            grace_minutes,
+            now.isoformat(),
+        )
+        return False
+
     def _is_period_due(self, period_id: str, period_info: dict) -> bool:
         """Check if a specific period is due to run based on its schedule."""
+        now = datetime.now()
         last_run = self.period_last_run.get(period_id)
         if not last_run:
+            if period_info.get("catch_up_missed_runs", False):
+                logger.info(
+                    f"Period {period_id} has no last_run timestamp and startup catch-up is enabled; "
+                    "running once on this scheduler pass"
+                )
+                return True
+
             # If no previous run, initialize to now() so it waits for the first interval/cron schedule block
-            self.period_last_run[period_id] = datetime.now()
+            self.period_last_run[period_id] = now
             logger.info(f"Initialized last_run for period {period_id} to now() to wait for next schedule run")
             return False
             
@@ -3391,12 +3819,13 @@ class AutomatedStreamManager:
             except ValueError:
                 logger.warning(f"Invalid interval value for period {period_id}, using default 60")
                 interval_mins = 60
-            return datetime.now() - last_run >= timedelta(minutes=interval_mins)
+            due_at = last_run + timedelta(minutes=interval_mins)
+            return self._period_due_inside_grace(period_id, period_info, due_at, now)
         elif schedule_type == "cron" and CRONITER_AVAILABLE:
             try:
                 cron = croniter(schedule.get("value"), last_run)
                 next_run = cron.get_next(datetime)
-                return datetime.now() >= next_run
+                return self._period_due_inside_grace(period_id, period_info, next_run, now)
             except Exception as e:
                 logger.error(
                     f"Invalid cron expression for period {period_id} "
@@ -3486,6 +3915,8 @@ class AutomatedStreamManager:
             stage_label="Preparing Automation",
             message="Reading automation configuration",
         )
+        if self._abort_run_if_manual_stop_requested():
+            return
             
         # 1. Check Global Automation Switch
         from apps.automation.automation_config_manager import get_automation_config_manager
@@ -3516,6 +3947,35 @@ class AutomatedStreamManager:
                 stage="skipped",
                 stage_label="Skipped",
                 message="Regular automation is disabled",
+            )
+            return
+
+        if not forced and self._is_maintenance_window_active(global_settings):
+            logger.debug("Maintenance window is active. Skipping automation cycle.")
+            self._finish_run_status(
+                state="skipped",
+                stage="skipped",
+                stage_label="Skipped",
+                message="Maintenance window is active",
+            )
+            return
+
+        teamarr_event_window = self._get_active_teamarr_event_window(global_settings)
+        if not forced and not forced_period_id and teamarr_event_window:
+            event_name = teamarr_event_window.get("event_name") or "Teamarr event"
+            logger.info(
+                "Teamarr event window is active for %s. Skipping automatic automation cycle.",
+                event_name,
+            )
+            self._update_run_status(
+                counts={"teamarr_event_window_active": True},
+                message=f"Teamarr event window active for {event_name}",
+            )
+            self._finish_run_status(
+                state="skipped",
+                stage="skipped",
+                stage_label="Skipped",
+                message=f"Teamarr event window active for {event_name}",
             )
             return
 
@@ -3557,6 +4017,9 @@ class AutomatedStreamManager:
         automation_busy_guard.set_automation_busy()
 
         try:
+            if self._abort_run_if_manual_stop_requested():
+                return
+
             # 2. Determine which playlists to update and group channels by period
             self._update_run_status(
                 stage="period_discovery",
@@ -3601,11 +4064,24 @@ class AutomatedStreamManager:
                                 active_periods[key] = {
                                     'profile_id': profile_id,
                                     'profile_name': profile.get('name') if profile else "Default",
+                                    'period_name': p_name,
+                                    'priority': period_info.get('priority', 0),
                                     'channels': []
                                 }
                             active_periods[key]['channels'].append(channel)
                             if profile_id:
                                 active_profile_ids.add(profile_id)
+
+            active_periods = self._apply_global_catch_up_cap(
+                active_periods,
+                global_settings,
+                forced=bool(forced or forced_period_id),
+            )
+            active_profile_ids = {
+                str(entry.get('profile_id'))
+                for entry in active_periods.values()
+                if entry.get('profile_id') is not None
+            }
             
             if not active_periods:
                 logger.debug("No channels with active automation periods found. Skipping cycle.")
@@ -3628,6 +4104,8 @@ class AutomatedStreamManager:
             )
             logger.info(f"Processing {channels_with_periods} channel assignments across {len(active_periods)} active period(s)")
             logger.info(f"UDI cache {udi.get_cache_age_description()}")
+            if self._abort_run_if_manual_stop_requested():
+                return
             
             # Determine playlists to update
             playlists_to_update = set()
@@ -3714,14 +4192,79 @@ class AutomatedStreamManager:
             else:
                 before_stream_ids = {}
 
+            def update_m3u_refresh_progress(
+                payload: Dict[str, Any],
+                *,
+                current_override: Optional[int] = None,
+                total_override: Optional[int] = None,
+                message_override: Optional[str] = None,
+            ) -> None:
+                total = total_override if total_override is not None else payload.get("total")
+                current = current_override if current_override is not None else payload.get("current", 0)
+                message = message_override or payload.get("message") or "Refreshing configured playlists"
+                self._update_run_status(
+                    stage="m3u_refresh",
+                    stage_label="Refreshing M3U",
+                    message=message,
+                    counts={
+                        "m3u_refresh_current": current,
+                        "m3u_refresh_total": total,
+                        "m3u_refresh_state": payload.get("state", "running"),
+                    },
+                    progress={
+                        "current": current,
+                        "total": total,
+                        "message": message,
+                    },
+                )
+
             if update_all_playlists:
                 logger.info("Updating ALL playlists (requested by one or more profiles)")
-                refresh_success, refreshed_accounts = self.refresh_playlists(account_id=None, skip_changelog=True)
+                refresh_success, refreshed_accounts = self.refresh_playlists(
+                    account_id=None,
+                    skip_changelog=True,
+                    progress_callback=update_m3u_refresh_progress,
+                )
             elif playlists_to_update:
                 logger.info(f"Updating {len(playlists_to_update)} specific playlists: {playlists_to_update}")
                 refresh_success = True
-                for acc_id in playlists_to_update:
-                    success, accs = self.refresh_playlists(account_id=int(acc_id), skip_changelog=True)
+                ordered_playlist_ids = list(playlists_to_update)
+                total_specific_playlists = len(ordered_playlist_ids)
+                for refresh_index, acc_id in enumerate(ordered_playlist_ids, start=1):
+                    def specific_refresh_progress(payload: Dict[str, Any], *, _index: int = refresh_index, _acc_id: Any = acc_id) -> None:
+                        state = payload.get("state", "running")
+                        account_name = payload.get("account_name") or f"Account {_acc_id}"
+                        if state == "skipped":
+                            current_value = _index
+                            message = f"Playlist {_index}/{total_specific_playlists} skipped: {account_name}"
+                        elif state in {"accepted", "completed", "failed"}:
+                            current_value = _index
+                            if state == "accepted":
+                                verb = "accepted"
+                            elif state == "completed":
+                                verb = "refreshed"
+                            else:
+                                verb = "failed"
+                            message = f"Playlist {_index}/{total_specific_playlists} {verb}: {account_name}"
+                        elif state == "requesting":
+                            current_value = _index - 1
+                            message = f"Refreshing playlist {_index}/{total_specific_playlists}: {account_name}"
+                        else:
+                            current_value = _index - 1
+                            message = f"Preparing playlist {_index}/{total_specific_playlists}: {account_name}"
+
+                        update_m3u_refresh_progress(
+                            payload,
+                            current_override=current_value,
+                            total_override=total_specific_playlists,
+                            message_override=message,
+                        )
+
+                    success, accs = self.refresh_playlists(
+                        account_id=int(acc_id),
+                        skip_changelog=True,
+                        progress_callback=specific_refresh_progress,
+                    )
                     if not success:
                         refresh_success = False
                     if accs:
@@ -3741,11 +4284,13 @@ class AutomatedStreamManager:
                 },
                 durations={"m3u_refresh_seconds": time.time() - m3u_refresh_started},
                 message=(
-                    f"Playlist refresh {'completed' if refresh_success else 'failed'}"
+                    f"Playlist refresh requests {'accepted' if refresh_success else 'failed'}"
                     if playlists_refreshed
                     else "Current cache selected for stream matching"
                 ),
             )
+            if self._abort_run_if_manual_stop_requested():
+                return
 
             validation_details = []
             assignment_details = []
@@ -3777,11 +4322,17 @@ class AutomatedStreamManager:
                     "Syncing UDI cache after provider refresh — "
                     "matching and safety gate will use current stream IDs..."
                 )
+                sync_ok = False
                 try:
                     _sync_udi = get_udi_manager()
-                    _sync_udi.refresh_streams()
-                    _sync_udi.refresh_channels()
-                    logger.info("✓ UDI cache synced after provider refresh")
+                    sync_ok = self._sync_udi_cache_after_playlist_refresh(_sync_udi)
+                    if sync_ok:
+                        logger.info("UDI cache synced after provider refresh")
+                    else:
+                        logger.warning(
+                            "UDI cache sync after provider refresh reported warnings - "
+                            "proceeding with available cache"
+                        )
                 except Exception as _sync_err:
                     logger.warning(
                         f"UDI sync after provider refresh failed: {_sync_err} — "
@@ -3865,10 +4416,13 @@ class AutomatedStreamManager:
                 self._update_run_status(
                     counts={
                         "post_refresh_streams": post_refresh_stream_count,
+                        "cache_sync_state": "completed" if sync_ok else "warning",
                     },
                     durations={"udi_sync_seconds": time.time() - udi_sync_started},
                     message=(
                         "Cache sync completed after playlist refresh"
+                        if refresh_success and sync_ok
+                        else "Cache sync completed with warnings after playlist refresh"
                         if refresh_success
                         else "Safety gate stopped matching after playlist refresh"
                     ),
@@ -4396,6 +4950,7 @@ class AutomatedStreamManager:
         finally:
             self._m3u_accounts_cache = None
             automation_busy_guard.clear_automation_busy()
+            self._manual_stop_requested.clear()
 
             # Background UDI sync — pull all writes from this cycle back into cache.
             # Only fires when the cycle actually completed matching/checking work.
@@ -4458,6 +5013,8 @@ class AutomatedStreamManager:
             return
             
         logger.info("Starting automation service...")
+        self._ensure_run_status_fields()
+        self._manual_stop_requested.clear()
         self.automation_running = True
         self.running = True
         self.automation_start_time = datetime.now()
@@ -4469,6 +5026,16 @@ class AutomatedStreamManager:
     def stop_automation(self):
         """Stop the automation background thread."""
         logger.info("Stopping automation service...")
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            active_run = bool(
+                self._run_status.get("active") or self._run_status.get("state") == "running"
+            )
+        if active_run:
+            self._manual_stop_requested.set()
+            self._update_run_status(
+                message="Stop requested; automation is shutting down",
+            )
         self.automation_running = False
         self.running = False
         self.automation_wake_event.set()  # Wake up thread to exit

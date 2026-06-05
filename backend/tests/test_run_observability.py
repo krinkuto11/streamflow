@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 import threading
 import unittest
+from unittest.mock import Mock, patch
 
 from apps.automation.automated_stream_manager import AutomatedStreamManager
 from apps.udi.fetcher import UDIFetcher
@@ -11,6 +12,12 @@ class AutomationRunStatusTests(unittest.TestCase):
         manager = AutomatedStreamManager.__new__(AutomatedStreamManager)
         manager._run_status_lock = threading.RLock()
         manager._run_sequence = 0
+        manager._manual_stop_requested = threading.Event()
+        manager.automation_thread = None
+        manager.automation_running = False
+        manager.running = False
+        manager.automation_wake_event = threading.Event()
+        manager.automation_start_time = None
         manager._run_status = manager._build_run_status(
             run_id=None,
             state="idle",
@@ -146,6 +153,58 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["stage_label"], "Failed")
         self.assertEqual(status["last_error"], "Quality check stage failed: boom")
 
+    def test_manual_stop_request_finishes_cycle_as_aborted(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._update_run_status(stage="stream_matching", stage_label="Matching Streams")
+        manager._manual_stop_requested.set()
+        outcome = manager._finish_cycle_outcome(
+            refresh_success=True,
+            cycle_abort_message=None,
+        )
+
+        status = manager.get_run_status()
+        self.assertEqual(outcome, "aborted")
+        self.assertEqual(status["state"], "aborted")
+        self.assertEqual(status["stage"], "aborted")
+        self.assertEqual(status["message"], "Automation run was stopped by the user")
+        self.assertEqual(status["last_error"], "Automation run was stopped by the user")
+
+    def test_stop_automation_requests_abort_for_active_run(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager.automation_running = True
+        manager.running = True
+        manager.stop_automation()
+
+        status = manager.get_run_status()
+        self.assertTrue(manager._manual_stop_requested.is_set())
+        self.assertFalse(manager.automation_running)
+        self.assertFalse(manager.running)
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(status["message"], "Stop requested; automation is shutting down")
+
+    def test_stop_automation_does_not_rewrite_completed_run(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._finish_run_status(
+            state="completed",
+            stage="completed",
+            stage_label="Completed",
+            message="Automation cycle completed",
+        )
+        manager.automation_running = True
+        manager.running = True
+        manager.stop_automation()
+
+        status = manager.get_run_status()
+        self.assertFalse(manager._manual_stop_requested.is_set())
+        self.assertEqual(status["state"], "completed")
+        self.assertEqual(status["message"], "Automation cycle completed")
+
     def test_quality_summary_flags_connectivity_abort_and_incomplete_run(self):
         summary = AutomatedStreamManager._summarize_quality_check_results(
             {
@@ -165,6 +224,86 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(summary["aborted_count"], 1)
         self.assertEqual(summary["incomplete_count"], 3)
         self.assertEqual(summary["abort_message"], "dispatcharr_api connectivity probe timed out")
+
+    def test_refresh_playlists_emits_account_progress(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {
+                "auto_playlist_update": True,
+                "changelog_tracking": False,
+            },
+            "enabled_m3u_accounts": [],
+        }
+        events = []
+        response = Mock(status_code=200)
+        scheduling_service = Mock()
+
+        with patch(
+            "apps.automation.automated_stream_manager.get_m3u_accounts",
+            return_value=[
+                {"id": 1, "name": "One", "is_active": True},
+                {"id": 2, "name": "Two", "is_active": True},
+                {"id": 3, "name": "custom", "is_active": True},
+            ],
+        ), patch(
+            "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+            return_value=response,
+        ), patch(
+            "apps.automation.scheduling_service.get_scheduling_service",
+            return_value=scheduling_service,
+        ):
+            success, accounts = manager.refresh_playlists(
+                skip_changelog=True,
+                progress_callback=events.append,
+            )
+
+        self.assertTrue(success)
+        self.assertEqual([account["id"] for account in accounts], [1, 2])
+        self.assertEqual(
+            [(event["state"], event["current"], event["total"]) for event in events],
+            [
+                ("planned", 0, 2),
+                ("requesting", 0, 2),
+                ("accepted", 1, 2),
+                ("requesting", 1, 2),
+                ("accepted", 2, 2),
+            ],
+        )
+        self.assertEqual(events[1]["message"], "Refreshing playlist 1/2: One")
+        self.assertEqual(events[-1]["message"], "Playlist 2/2 refresh accepted: Two")
+
+    def test_refresh_playlists_reports_missing_account_as_skipped(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {
+                "auto_playlist_update": True,
+                "changelog_tracking": False,
+            },
+            "enabled_m3u_accounts": [],
+        }
+        events = []
+        scheduling_service = Mock()
+
+        with patch(
+            "apps.automation.automated_stream_manager.get_m3u_accounts",
+            return_value=[{"id": 2, "name": "Two", "is_active": True}],
+        ), patch(
+            "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+        ) as refresh_mock, patch(
+            "apps.automation.scheduling_service.get_scheduling_service",
+            return_value=scheduling_service,
+        ):
+            success, accounts = manager.refresh_playlists(
+                account_id=99,
+                skip_changelog=True,
+                progress_callback=events.append,
+            )
+
+        self.assertTrue(success)
+        self.assertEqual(accounts, [])
+        refresh_mock.assert_not_called()
+        self.assertEqual(events[-1]["state"], "skipped")
+        self.assertEqual(events[-1]["message"], "No active playlists matched the refresh request")
 
 
 class FetcherTimingSummaryTests(unittest.TestCase):

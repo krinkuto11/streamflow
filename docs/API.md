@@ -87,6 +87,7 @@ Configure via environment variables:
 | POST   | `/api/stream-checker/check-channel` | Check a single channel                           |
 | GET    | `/api/stream-checker/config`        | Stream checker config                            |
 | POST   | `/api/stream-checker/config`        | Update stream checker config                     |
+| GET    | `/api/stream-checker/hardware-status` | Effective ffmpeg hardware/GPU status           |
 
 ---
 

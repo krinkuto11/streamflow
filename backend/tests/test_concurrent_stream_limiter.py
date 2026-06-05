@@ -440,6 +440,130 @@ class TestSmartStreamScheduler(unittest.TestCase):
         self.assertEqual(len(free_result), 1)
         self.assertEqual(free_result[0]['status'], 'OK')
 
+    def test_parallel_checks_reserve_distinct_profiles(self):
+        """Concurrent checks for one account should not reuse the same credential."""
+        class FakeUDI:
+            account = {
+                'id': 1,
+                'name': 'Provider A',
+                'profiles': [
+                    {'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True},
+                    {'id': 11, 'name': 'Credential 2', 'max_streams': 1, 'is_active': True},
+                ],
+            }
+
+            def get_active_streams_for_account(self, _account_id):
+                return 0
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def check_stream_can_run(self, _stream):
+                return (True, None)
+
+            def apply_profile_url_transformation(self, stream, profile=None):
+                profile_id = profile.get('id') if profile else 'none'
+                return f"{stream['url']}?profile={profile_id}"
+
+            def get_stream_by_id(self, _stream_id):
+                return None
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(
+            1,
+            0,
+            profiles=[
+                {'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True},
+                {'id': 11, 'name': 'Credential 2', 'max_streams': 1, 'is_active': True},
+            ],
+        )
+        scheduler = SmartStreamScheduler(limiter, global_limit=2)
+
+        started_urls = []
+        both_started = threading.Event()
+        lock = threading.Lock()
+
+        def mock_check(**kwargs):
+            with lock:
+                started_urls.append(kwargs['stream_url'])
+                if len(started_urls) == 2:
+                    both_started.set()
+            both_started.wait(0.5)
+            return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+        results = scheduler.check_streams_with_limits(
+            streams=[
+                {'id': 1, 'name': 'Stream 1', 'url': 'http://test.com/1', 'm3u_account': 1},
+                {'id': 2, 'name': 'Stream 2', 'url': 'http://test.com/2', 'm3u_account': 1},
+            ],
+            check_function=mock_check,
+            provider_wait_timeout=0.1,
+        )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(sorted(url.rsplit('=', 1)[-1] for url in started_urls), ['10', '11'])
+
+    def test_active_profile_does_not_block_free_sibling_profile(self):
+        """A viewer on one credential should still leave a sibling credential usable."""
+        class FakeUDI:
+            account = {
+                'id': 1,
+                'name': 'Provider A',
+                'profiles': [
+                    {'id': 10, 'name': 'Busy Credential', 'max_streams': 1, 'is_active': True},
+                    {'id': 11, 'name': 'Free Credential', 'max_streams': 1, 'is_active': True},
+                ],
+            }
+
+            def get_active_streams_for_account(self, _account_id):
+                return 1
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {10: 1, 11: 0}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def check_stream_can_run(self, _stream):
+                return (True, None)
+
+            def apply_profile_url_transformation(self, stream, profile=None):
+                profile_id = profile.get('id') if profile else 'none'
+                return f"{stream['url']}?profile={profile_id}"
+
+            def get_stream_by_id(self, _stream_id):
+                return None
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(
+            1,
+            0,
+            profiles=[
+                {'id': 10, 'name': 'Busy Credential', 'max_streams': 1, 'is_active': True},
+                {'id': 11, 'name': 'Free Credential', 'max_streams': 1, 'is_active': True},
+            ],
+        )
+        scheduler = SmartStreamScheduler(limiter, global_limit=1)
+
+        checked_urls = []
+
+        def mock_check(**kwargs):
+            checked_urls.append(kwargs['stream_url'])
+            return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+        results = scheduler.check_streams_with_limits(
+            streams=[{'id': 1, 'name': 'Stream 1', 'url': 'http://test.com/1', 'm3u_account': 1}],
+            check_function=mock_check,
+            provider_wait_timeout=0.1,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['status'], 'OK')
+        self.assertEqual(checked_urls, ['http://test.com/1?profile=11'])
+
     def test_deferred_provider_stream_runs_after_capacity_frees(self):
         """A deferred stream should run once provider capacity becomes available."""
         self.limiter.set_account_limit(1, 1)
@@ -519,6 +643,78 @@ class TestSmartStreamScheduler(unittest.TestCase):
         self.assertEqual(results[0]['status'], 'SKIPPED_PROVIDER_LIMIT')
         self.assertTrue(results[0]['provider_limit_skipped'])
         self.assertEqual(results[0]['skipped_reason'], 'quota_consumed_by_active_viewers')
+
+    def test_viewer_preempts_reserved_profile_probe(self):
+        """A viewer taking a reserved credential should abort only that probe."""
+        class FakeUDI:
+            account = {
+                'id': 1,
+                'name': 'Provider A',
+                'profiles': [
+                    {'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True},
+                ],
+            }
+
+            def __init__(self):
+                self.active_count = 0
+
+            def get_active_streams_for_account(self, _account_id):
+                return self.active_count
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {10: self.active_count}
+
+            def get_active_streams_for_profile(self, profile_id):
+                return self.active_count if profile_id == 10 else 0
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def check_stream_can_run(self, _stream):
+                return (True, None)
+
+            def apply_profile_url_transformation(self, stream, profile=None):
+                profile_id = profile.get('id') if profile else 'none'
+                return f"{stream['url']}?profile={profile_id}"
+
+            def get_stream_by_id(self, _stream_id):
+                return {'stream_stats': {'resolution': '1920x1080', 'ffmpeg_output_bitrate': 5000}}
+
+        fake_udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=fake_udi)
+        limiter.set_account_limit(
+            1,
+            0,
+            profiles=[{'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True}],
+        )
+        scheduler = SmartStreamScheduler(limiter, global_limit=1)
+
+        def mock_check(**kwargs):
+            self.assertIn('preempt_check', kwargs)
+            self.assertFalse(kwargs['preempt_check']())
+            fake_udi.active_count = 1
+            self.assertTrue(kwargs['preempt_check']())
+            return {
+                'stream_id': kwargs['stream_id'],
+                'stream_name': kwargs['stream_name'],
+                'stream_url': kwargs['stream_url'],
+                'status': 'PREEMPTED',
+                'preempted': True,
+                'preempt_reason': 'viewer_preempted',
+            }
+
+        results = scheduler.check_streams_with_limits(
+            streams=[{'id': 1, 'name': 'Stream 1', 'url': 'http://test.com/1', 'm3u_account': 1}],
+            check_function=mock_check,
+            provider_wait_timeout=0.1,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['status'], 'SKIPPED_PROVIDER_LIMIT')
+        self.assertTrue(results[0]['provider_limit_skipped'])
+        self.assertEqual(results[0]['skipped_reason'], 'viewer_preempted')
+        self.assertEqual(results[0]['reason_detail'], 'viewer_preempted')
+        self.assertTrue(results[0]['cached'])
 
     def test_default_provider_wait_timeout_is_visible_config(self):
         self.assertEqual(

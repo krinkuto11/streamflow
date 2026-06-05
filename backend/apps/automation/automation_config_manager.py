@@ -22,6 +22,11 @@ logger = setup_logging(__name__)
 # Configuration directory
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
 AUTOMATION_CONFIG_FILE = CONFIG_DIR / 'automation_config.json'
+PERIOD_EXTRA_SETTING_KEYS = {
+    "priority",
+    "catch_up_missed_runs",
+    "missed_run_grace_minutes",
+}
 
 class AutomationConfigManager:
     """
@@ -78,7 +83,39 @@ class AutomationConfigManager:
         return {
             "regular_automation_enabled": self._get_config_dict("regular_automation_enabled", False),
             "playlist_update_interval_minutes": self._get_config_dict("playlist_update_interval_minutes", {"type": "interval", "value": 5}),
-            "validate_existing_streams": self._get_config_dict("validate_existing_streams", False)
+            "validate_existing_streams": self._get_config_dict("validate_existing_streams", False),
+            "catch_up_max_periods_per_cycle": self._coerce_non_negative_int(
+                self._get_config_dict("catch_up_max_periods_per_cycle", 0),
+                default=0,
+            ),
+            "run_all_due_periods": self._coerce_bool(
+                self._get_config_dict("run_all_due_periods", False),
+                default=False,
+            ),
+            "maintenance_window_enabled": self._coerce_bool(
+                self._get_config_dict("maintenance_window_enabled", False),
+                default=False,
+            ),
+            "maintenance_window_start": self._coerce_time_string(
+                self._get_config_dict("maintenance_window_start", "02:00"),
+                default="02:00",
+            ),
+            "maintenance_window_end": self._coerce_time_string(
+                self._get_config_dict("maintenance_window_end", "04:00"),
+                default="04:00",
+            ),
+            "teamarr_event_window_enabled": self._coerce_bool(
+                self._get_config_dict("teamarr_event_window_enabled", False),
+                default=False,
+            ),
+            "teamarr_event_window_before_minutes": self._coerce_non_negative_int(
+                self._get_config_dict("teamarr_event_window_before_minutes", 30),
+                default=30,
+            ),
+            "teamarr_event_window_after_minutes": self._coerce_non_negative_int(
+                self._get_config_dict("teamarr_event_window_after_minutes", 10),
+                default=10,
+            ),
         }
 
     def update_global_settings(self, regular_automation_enabled: Optional[bool] = None, settings: Dict[str, Any] = None) -> bool:
@@ -92,7 +129,58 @@ class AutomationConfigManager:
             self._set_config_dict("regular_automation_enabled", bool(updates["regular_automation_enabled"]))
         
         if "validate_existing_streams" in updates:
-            self._set_config_dict("validate_existing_streams", bool(updates["validate_existing_streams"]))
+            self._set_config_dict(
+                "validate_existing_streams",
+                self._coerce_bool(updates["validate_existing_streams"], default=False),
+            )
+
+        if "catch_up_max_periods_per_cycle" in updates:
+            self._set_config_dict(
+                "catch_up_max_periods_per_cycle",
+                self._coerce_non_negative_int(updates["catch_up_max_periods_per_cycle"], default=0),
+            )
+
+        if "run_all_due_periods" in updates:
+            self._set_config_dict(
+                "run_all_due_periods",
+                self._coerce_bool(updates["run_all_due_periods"], default=False),
+            )
+
+        if "maintenance_window_enabled" in updates:
+            self._set_config_dict(
+                "maintenance_window_enabled",
+                self._coerce_bool(updates["maintenance_window_enabled"], default=False),
+            )
+
+        if "maintenance_window_start" in updates:
+            self._set_config_dict(
+                "maintenance_window_start",
+                self._coerce_time_string(updates["maintenance_window_start"], default="02:00"),
+            )
+
+        if "maintenance_window_end" in updates:
+            self._set_config_dict(
+                "maintenance_window_end",
+                self._coerce_time_string(updates["maintenance_window_end"], default="04:00"),
+            )
+
+        if "teamarr_event_window_enabled" in updates:
+            self._set_config_dict(
+                "teamarr_event_window_enabled",
+                self._coerce_bool(updates["teamarr_event_window_enabled"], default=False),
+            )
+
+        if "teamarr_event_window_before_minutes" in updates:
+            self._set_config_dict(
+                "teamarr_event_window_before_minutes",
+                self._coerce_non_negative_int(updates["teamarr_event_window_before_minutes"], default=30),
+            )
+
+        if "teamarr_event_window_after_minutes" in updates:
+            self._set_config_dict(
+                "teamarr_event_window_after_minutes",
+                self._coerce_non_negative_int(updates["teamarr_event_window_after_minutes"], default=10),
+            )
 
         if "playlist_update_interval_minutes" in updates:
             new_val = updates["playlist_update_interval_minutes"]
@@ -120,6 +208,7 @@ class AutomationConfigManager:
         cron_val = per.cron_schedule or ""
         sched_type = "interval" if cron_val.isdigit() else "cron"
         sched_value = int(cron_val) if sched_type == "interval" and cron_val else cron_val
+        extra = self._normalize_extra_settings(per.extra_settings)
         res = {
             "id": str(per.id),
             "name": per.name,
@@ -129,12 +218,54 @@ class AutomationConfigManager:
             "exclude_regex": per.exclude_regex,
             "matching_type": per.matching_type,
             "automation_type": per.automation_type,
-            "schedule": {"type": sched_type, "value": sched_value}
+            "schedule": {"type": sched_type, "value": sched_value},
         }
-        extra = self._normalize_extra_settings(per.extra_settings)
         if extra:
             res.update(extra)
+        try:
+            res["priority"] = int(res.get("priority") or 0)
+        except (TypeError, ValueError):
+            res["priority"] = 0
+        res["catch_up_missed_runs"] = bool(res.get("catch_up_missed_runs", False))
+        res["missed_run_grace_minutes"] = self._coerce_non_negative_int(
+            res.get("missed_run_grace_minutes"),
+            default=0,
+        )
         return res
+
+    def _coerce_non_negative_int(self, value: Any, default: int = 0) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(0, number)
+
+    def _coerce_bool(self, value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"true", "1", "yes", "on"}:
+                return True
+            if lowered in {"false", "0", "no", "off"}:
+                return False
+        if value in (0, 1):
+            return bool(value)
+        return default
+
+    def _coerce_time_string(self, value: Any, default: str = "00:00") -> str:
+        text = str(value or "").strip()
+        parts = text.split(":")
+        if len(parts) != 2:
+            return default
+        try:
+            hour = int(parts[0])
+            minute = int(parts[1])
+        except (TypeError, ValueError):
+            return default
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return f"{hour:02d}:{minute:02d}"
+        return default
 
     def _normalize_extra_settings(self, extra_settings: Any) -> Dict[str, Any]:
         """Normalize persisted extra_settings to a dict for safe API serialization."""
@@ -154,6 +285,36 @@ class AutomationConfigManager:
             type(extra_settings).__name__,
         )
         return {}
+
+    def _period_extra_settings_from_payload(
+        self,
+        period_data: Dict[str, Any],
+        current_extra_settings: Any = None,
+    ) -> Dict[str, Any]:
+        """Merge period UI-only fields into the existing JSON settings payload."""
+        extra = self._normalize_extra_settings(current_extra_settings)
+        payload_extra = self._normalize_extra_settings(period_data.get("extra_settings"))
+        if payload_extra:
+            extra.update(payload_extra)
+
+        for key in PERIOD_EXTRA_SETTING_KEYS:
+            if key in period_data:
+                extra[key] = period_data[key]
+
+        if "catch_up_missed_runs" in extra:
+            extra["catch_up_missed_runs"] = bool(extra["catch_up_missed_runs"])
+        if "priority" in extra:
+            try:
+                extra["priority"] = int(extra["priority"])
+            except (TypeError, ValueError):
+                extra["priority"] = 0
+        if "missed_run_grace_minutes" in extra:
+            extra["missed_run_grace_minutes"] = self._coerce_non_negative_int(
+                extra["missed_run_grace_minutes"],
+                default=0,
+            )
+
+        return extra
 
     # --- Profile Management ---
 
@@ -394,6 +555,23 @@ class AutomationConfigManager:
             if gid in assignments: del assignments[gid]
         else: assignments[gid] = str(profile_id)
         return self._set_config_dict("group_assignments", assignments)
+
+    def assign_profile_to_groups(self, group_ids: List[int], profile_id: Optional[str]) -> bool:
+        assignments = self._get_config_dict("group_assignments", {})
+        changed = False
+        for gid_raw in group_ids:
+            gid = str(gid_raw)
+            if profile_id is None:
+                if gid in assignments:
+                    del assignments[gid]
+                    changed = True
+            else:
+                if assignments.get(gid) != str(profile_id):
+                    assignments[gid] = str(profile_id)
+                    changed = True
+        if changed:
+            return self._set_config_dict("group_assignments", assignments)
+        return True
             
     def get_channel_assignment(self, channel_id: int) -> Optional[str]:
         return self._get_config_dict("channel_assignments", {}).get(str(channel_id))
@@ -541,6 +719,7 @@ class AutomationConfigManager:
         try:
             sched = period_data.get("schedule", {})
             cron = sched.get("value") if isinstance(sched, dict) else period_data.get("cron_schedule", "0 * * * *")
+            extra_settings = self._period_extra_settings_from_payload(period_data)
             p = AutomationPeriod(
                 name=period_data.get("name", "New Period"),
                 profile_id=int(period_data.get("profile_id", 1)),
@@ -550,7 +729,7 @@ class AutomationConfigManager:
                 exclude_regex=period_data.get("exclude_regex"),
                 matching_type=period_data.get("matching_type"),
                 automation_type=period_data.get("automation_type"),
-                extra_settings=period_data.get("extra_settings", {})
+                extra_settings=extra_settings
             )
             session.add(p)
             session.commit()
@@ -580,7 +759,10 @@ class AutomationConfigManager:
             if "exclude_regex" in period_data: p.exclude_regex = period_data["exclude_regex"]
             if "matching_type" in period_data: p.matching_type = period_data["matching_type"]
             if "automation_type" in period_data: p.automation_type = period_data["automation_type"]
-            if "extra_settings" in period_data: p.extra_settings = period_data["extra_settings"]
+            if "extra_settings" in period_data or any(key in period_data for key in PERIOD_EXTRA_SETTING_KEYS):
+                p.extra_settings = self._period_extra_settings_from_payload(period_data, p.extra_settings)
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(p, "extra_settings")
             
             # Map schedule dictionary back to cron_schedule column
             if "schedule" in period_data:
@@ -737,24 +919,33 @@ class AutomationConfigManager:
                 groups_with_period[gid] = str(profile_id)
 
         valid_channel_ids: Optional[set] = None
+        udi = None
         try:
             from apps.udi import get_udi_manager
             udi = get_udi_manager()
-            udi_channels = udi.get_channels() or []
-            # When UDI has no loaded channel inventory (for example in isolated
-            # tests or before initialization), do not filter explicit assignments.
-            if udi_channels:
-                valid_channel_ids = {
-                    int(ch.get('id'))
-                    for ch in udi_channels
-                    if isinstance(ch, dict) and ch.get('id') is not None
-                }
+            is_initialized = getattr(udi, "is_initialized", None)
+            if callable(is_initialized) and not is_initialized():
+                # Event previews and automation policy checks must not trigger a
+                # UDI network init. Explicit channel assignments remain valid
+                # when no cached channel inventory is available yet.
+                udi = None
             else:
-                valid_channel_ids = None
+                udi_channels = udi.get_channels() or []
+                # When UDI has no loaded channel inventory (for example in isolated
+                # tests or before initialization), do not filter explicit assignments.
+                if udi_channels:
+                    valid_channel_ids = {
+                        int(ch.get('id'))
+                        for ch in udi_channels
+                        if isinstance(ch, dict) and ch.get('id') is not None
+                    }
+                else:
+                    valid_channel_ids = None
         except Exception:
+            udi = None
             valid_channel_ids = None
 
-        if groups_with_period:
+        if groups_with_period and udi is not None:
             try:
                 for gid, profile_id in groups_with_period.items():
                     channels = udi.get_channels_by_group(gid) or []
@@ -849,6 +1040,11 @@ class AutomationConfigManager:
         if not isinstance(group_assignments, dict):
             return {}
         return group_assignments
+
+    def get_all_group_period_assignments(self) -> Dict[str, Dict[str, str]]:
+        """Return all group period/profile assignments as {group_id: {period_id: profile_id}}."""
+        result = self._get_config_dict("group_period_assignments", {})
+        return result if isinstance(result, dict) else {}
 
     def get_period_groups(self, period_id: str) -> List[int]:
         """Return the list of group IDs that have this period assigned."""

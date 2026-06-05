@@ -11,9 +11,14 @@ import { Separator } from '@/components/ui/separator.jsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from '@/components/ui/pagination.jsx'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
+import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
+import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
+import { getParallelProgressBadgeText, getProfileSlotDisplay, getProfileSlotMatrixRows, getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
+import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
   Activity,
   CheckCircle2,
@@ -369,6 +374,7 @@ export default function StreamChecker() {
   const batchProgress = totalBatch > 0 ? ((completed + failed) / totalBatch) * 100 : 0
   const providerProgress = progress?.provider_progress || []
   const providerSummary = progress?.provider_summary || {}
+  const parallelProgressBadgeText = getParallelProgressBadgeText(status, providerSummary)
   const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
   const selectedStartChannel = startChannels.find(channel => String(channel.id) === String(queueStartChannelId))
   const firstStartChannel = startChannels[0]
@@ -379,18 +385,16 @@ export default function StreamChecker() {
       ? (selectedStartChannel?.name || 'Select a channel')
       : (firstStartChannel?.name || 'First channel')
   const queueAllDisabled = isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || (queueStartMode === 'channel' && !queueStartChannelId)
-  const detectedGpuCount = Number.isFinite(Number(hardwareStatus?.nvidia_gpu_count)) ? Number(hardwareStatus?.nvidia_gpu_count) : 0
-  const detectedGpuLabel = detectedGpuCount > 0
-    ? `${detectedGpuCount} detected`
-    : hardwareStatus?.nvidia_checked
-      ? 'No GPU reported'
-      : 'Not checked'
+  const runtimeDeviceLabel = getHardwareRuntimeDeviceLabel(hardwareStatus)
   const ffmpegModeLabel = hardwareStatus?.config?.enabled
-    ? (hardwareStatus?.mode_supported ? 'Available' : 'Not reported')
+    ? (hardwareStatus?.mode_supported ? 'Reported' : 'Not reported')
     : 'Disabled'
   const ffmpegMethodsLabel = Array.isArray(hardwareStatus?.ffmpeg_hwaccels) && hardwareStatus.ffmpeg_hwaccels.length > 0
     ? hardwareStatus.ffmpeg_hwaccels.join(', ')
     : (hardwareStatus?.config?.enabled ? 'No methods reported' : 'Not checked')
+  const analysisPathDisplay = getHardwareAnalysisPathDisplay(hardwareStatus)
+  const hardwareOperatorNote = getHardwareOperatorNote(hardwareStatus)
+  const queueEtaDisplay = getQueueEtaDisplay(status?.queue)
 
   return (
     <div className="space-y-6">
@@ -549,14 +553,12 @@ export default function StreamChecker() {
           <CardHeader className="pb-2">
             <div className="flex justify-between items-center">
               <CardTitle>Batch Progress</CardTitle>
-              {status?.queue?.eta_seconds > 0 ? (
-                <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md">
-                  ~{formatDuration(status.queue.eta_seconds)} remaining
+              {queueEtaDisplay.label ? (
+                <span className={`text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md ${queueEtaDisplay.pulse ? 'animate-pulse text-primary/70' : ''}`}>
+                  {queueEtaDisplay.label}
                 </span>
               ) : (
-                <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md animate-pulse">
-                  Calculating ETA...
-                </span>
+                null
               )}
             </div>
             <CardDescription>Checking {totalBatch} channels</CardDescription>
@@ -594,9 +596,9 @@ export default function StreamChecker() {
 
             <div className="flex items-center gap-2 text-sm pb-2 border-b">
               <Badge variant="outline">{progress.status}</Badge>
-              {status?.parallel?.enabled && (
+              {parallelProgressBadgeText && (
                 <Badge variant="secondary">
-                  Parallel ({status.parallel.max_workers} workers)
+                  {parallelProgressBadgeText}
                 </Badge>
               )}
             </div>
@@ -622,17 +624,19 @@ export default function StreamChecker() {
                   </div>
                 </div>
                 <div className="rounded-md border overflow-hidden">
-                  <div className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground">
+                  <div className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground">
                     <span>Account</span>
-                    <span className="text-right">Checking</span>
-                    <span className="text-right">Waiting</span>
-                    <span className="text-right">Done</span>
+                    <span className="justify-self-end text-right">Checking</span>
+                    <span className="justify-self-end text-right">Waiting</span>
+                    <span className="justify-self-end text-right">Done</span>
                   </div>
                   <div className="divide-y">
                     {providerProgress.map((provider) => {
                       const finishedPercent = provider.total > 0 ? Math.round((provider.finished / provider.total) * 100) : 0
+                      const waitReason = getProviderWaitReasonDisplay(provider)
+                      const profileSlots = (provider.profile_slots || []).map(getProfileSlotDisplay)
                       return (
-                        <div key={provider.name} className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] gap-3 px-3 py-2 text-sm">
+                        <div key={provider.account_id ?? provider.name} className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 px-3 py-2 text-sm">
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="truncate font-medium" title={provider.name}>{provider.name}</span>
@@ -646,19 +650,131 @@ export default function StreamChecker() {
                                   Active
                                 </Badge>
                               )}
+                              {waitReason && (
+                                <Badge
+                                  variant="outline"
+                                  className="shrink-0 text-[10px] text-muted-foreground"
+                                  title={waitReason.title}
+                                >
+                                  {waitReason.text}
+                                </Badge>
+                              )}
                             </div>
                             <div className="mt-1 h-1.5 rounded-full bg-muted">
                               <div className="h-1.5 rounded-full bg-primary" style={{ width: `${finishedPercent}%` }} />
                             </div>
+                            {profileSlots.length > 0 && (
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {profileSlots.slice(0, 5).map((slot) => (
+                                  <span
+                                    key={slot.id ?? slot.name}
+                                    className={`max-w-[12rem] truncate rounded border px-1.5 py-0.5 text-[10px] leading-none ${
+                                      slot.full
+                                        ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                                        : slot.checking > 0
+                                          ? 'border-blue-500/30 bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
+                                          : 'border-border text-muted-foreground'
+                                    }`}
+                                    title={slot.title}
+                                  >
+                                    {slot.text}
+                                  </span>
+                                ))}
+                                {profileSlots.length > 5 && (
+                                  <span className="rounded border px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                                    +{profileSlots.length - 5}
+                                  </span>
+                                )}
+                              </div>
+                            )}
                           </div>
-                          <span className="text-right font-mono">{provider.checking}</span>
-                          <span className="text-right font-mono text-amber-600 dark:text-amber-400">{provider.waiting}</span>
-                          <span className="text-right font-mono">{provider.finished}/{provider.total}</span>
+                          <span className="justify-self-end text-right font-mono tabular-nums">{provider.checking}</span>
+                          <span className="justify-self-end text-right font-mono tabular-nums text-amber-600 dark:text-amber-400">{provider.waiting}</span>
+                          <span className="justify-self-end text-right font-mono tabular-nums">{provider.finished}/{provider.total}</span>
                         </div>
                       )
                     })}
                   </div>
                 </div>
+                {(() => {
+                  const profileMatrixRows = getProfileSlotMatrixRows(providerProgress)
+                  if (profileMatrixRows.length === 0) return null
+
+                  return (
+                    <Accordion type="single" collapsible className="rounded-md border px-3">
+                      <AccordionItem value="profile-slot-matrix" className="border-b-0">
+                        <AccordionTrigger className="py-3 text-sm hover:no-underline">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="font-medium">Profile Matrix</span>
+                            <Badge variant="secondary" className="shrink-0 text-[10px]">
+                              {profileMatrixRows.length} profiles
+                            </Badge>
+                          </span>
+                        </AccordionTrigger>
+                        <AccordionContent>
+                          <div className="overflow-x-auto pb-3">
+                            <table className="w-full min-w-[760px] text-sm">
+                              <thead className="border-b text-xs uppercase text-muted-foreground">
+                                <tr>
+                                  <th className="px-2 py-2 text-left font-medium">Account</th>
+                                  <th className="px-2 py-2 text-left font-medium">Profile</th>
+                                  <th className="px-2 py-2 text-right font-medium">ID</th>
+                                  <th className="px-2 py-2 text-right font-medium">Used / Limit</th>
+                                  <th className="px-2 py-2 text-right font-medium">Real Viewers</th>
+                                  <th className="px-2 py-2 text-right font-medium">Checking</th>
+                                  <th className="px-2 py-2 text-right font-medium">Free</th>
+                                  <th className="px-2 py-2 text-left font-medium">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y">
+                                {profileMatrixRows.map((slot) => (
+                                  <tr key={slot.key}>
+                                    <td className="max-w-[12rem] truncate px-2 py-2" title={slot.accountName}>
+                                      {slot.accountName}
+                                    </td>
+                                    <td className="max-w-[14rem] truncate px-2 py-2 font-medium" title={slot.name}>
+                                      {slot.name}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums text-muted-foreground">
+                                      {slot.id ?? 'N/A'}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.used}/{slot.limitText}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.activeViewers}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.checking}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.availableText}
+                                    </td>
+                                    <td className="px-2 py-2">
+                                      <Badge
+                                        variant="outline"
+                                        className={`text-[10px] ${
+                                          slot.full
+                                            ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                                            : slot.checking > 0
+                                              ? 'border-blue-500/30 bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
+                                              : 'text-muted-foreground'
+                                        }`}
+                                        title={slot.title}
+                                      >
+                                        {slot.status}
+                                      </Badge>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </AccordionContent>
+                      </AccordionItem>
+                    </Accordion>
+                  )
+                })()}
               </div>
             )}
 
@@ -669,7 +785,7 @@ export default function StreamChecker() {
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
                 ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
-                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, provider_limit_wait_timeout: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
+                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, viewer_preempted: 4, provider_limit_wait_timeout: 5, error: 6, low_quality: 7, blank: 8, freeze: 9, dead: 10 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -721,6 +837,13 @@ export default function StreamChecker() {
                               )
                             }
                           }
+                          const qualityReason = getQualityReasonDisplay(stream)
+                          const showMeasuredSpecs = ['completed', 'loop_detected', 'low_quality', 'dead', 'blank', 'freeze'].includes(stream.status)
+                          const reservedProfileTitle = [
+                            stream.reserved_profile_name ? `Profile: ${stream.reserved_profile_name}` : null,
+                            stream.reserved_profile_id != null ? `ID: ${stream.reserved_profile_id}` : null,
+                            stream.reserved_profile_limit != null ? `Limit: ${stream.reserved_profile_limit || 'unlimited'}` : null,
+                          ].filter(Boolean).join(' | ')
 
                           return (
                             <tr key={stream.id} className="hover:bg-muted/50 transition-colors bg-card">
@@ -728,9 +851,9 @@ export default function StreamChecker() {
                                 <div className="font-medium max-w-[200px] truncate" title={stream.name}>
                                   {stream.name}
                                 </div>
-                                {stream.reason_detail && (
-                                  <div className="max-w-[200px] truncate text-[10px] text-muted-foreground" title={stream.reason_detail}>
-                                    {stream.reason_detail}
+                                {qualityReason && (
+                                  <div className="max-w-[200px] truncate text-[10px] text-muted-foreground" title={qualityReason.title}>
+                                    {qualityReason.text}
                                   </div>
                                 )}
                               </td>
@@ -738,11 +861,20 @@ export default function StreamChecker() {
                                 <div className="text-xs text-muted-foreground max-w-[150px] truncate" title={stream.m3u_account}>
                                   {stream.m3u_account}
                                 </div>
+                                {stream.reserved_profile_name && (
+                                  <div
+                                    className="text-[10px] text-muted-foreground/80 max-w-[150px] truncate"
+                                    title={reservedProfileTitle}
+                                  >
+                                    {stream.reserved_profile_name}
+                                  </div>
+                                )}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-center">
                                 {stream.status === 'pending' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Pending</Badge>}
                                 {stream.status === 'checking' && <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">Checking</Badge>}
                                 {stream.status === 'waiting_provider_limit' && <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Waiting</Badge>}
+                                {stream.status === 'viewer_preempted' && <Badge variant="outline" className="text-[10px] border-cyan-500/40 bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300">Preempted</Badge>}
                                 {stream.status === 'provider_limit_wait_timeout' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Skipped</Badge>}
                                 {stream.status === 'completed' && <Badge variant="outline" className="text-[10px] bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Completed</Badge>}
                                 {stream.status === 'error' && <Badge variant="destructive" className="text-[10px]">Error</Badge>}
@@ -761,7 +893,7 @@ export default function StreamChecker() {
                                 {countdownCell}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right text-xs text-muted-foreground whitespace-nowrap">
-                                {stream.status === 'completed' || stream.status === 'loop_detected' ? (
+                                {showMeasuredSpecs ? (
                                   <div className="flex flex-col items-end gap-0.5">
                                     <span>{stream.video_codec || 'N/A'} • <span className="text-foreground">{stream.fps || 0} fps </span></span>
                                     {(stream.resolution || stream.bitrate) && (
@@ -1015,7 +1147,7 @@ export default function StreamChecker() {
                             </SelectContent>
                           </Select>
                           <p className="text-xs text-muted-foreground">
-                            Use CUDA for NVIDIA containers when available
+                            Auto resolves DRI devices to VAAPI; use QSV only after a probe proves it initializes on this host
                           </p>
                         </div>
 
@@ -1034,7 +1166,7 @@ export default function StreamChecker() {
                             Optional ffmpeg device path or index
                           </p>
                           <p className="text-xs text-muted-foreground">
-                            Detected GPU: {detectedGpuLabel}
+                            Runtime device: {runtimeDeviceLabel}
                           </p>
                         </div>
 
@@ -1054,10 +1186,10 @@ export default function StreamChecker() {
                         </div>
                       </div>
 
-                      <div className="grid gap-3 text-xs md:grid-cols-3">
+                      <div className="grid gap-3 text-xs md:grid-cols-4">
                         <div className="rounded-md border border-border px-3 py-2">
                           <div className="text-muted-foreground">Runtime Device</div>
-                          <div className="mt-1 font-medium text-foreground">{detectedGpuLabel}</div>
+                          <div className="mt-1 font-medium text-foreground">{runtimeDeviceLabel}</div>
                         </div>
                         <div className="rounded-md border border-border px-3 py-2">
                           <div className="text-muted-foreground">Selected Mode</div>
@@ -1071,16 +1203,47 @@ export default function StreamChecker() {
                           </div>
                         </div>
                         <div className="rounded-md border border-border px-3 py-2">
-                          <div className="text-muted-foreground">FFmpeg Methods</div>
+                          <div className="text-muted-foreground">FFmpeg Reported Methods</div>
                           <div className="mt-1 font-medium text-foreground">{ffmpegMethodsLabel}</div>
                         </div>
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">Analysis Path</div>
+                          <div className="mt-1 flex flex-col gap-1">
+                            <Badge variant={analysisPathDisplay.variant} className="w-fit">
+                              {analysisPathDisplay.label}
+                            </Badge>
+                            <div className="text-muted-foreground">
+                              {analysisPathDisplay.description}
+                            </div>
+                          </div>
+                        </div>
                       </div>
+
+                      <Alert variant={hardwareOperatorNote.variant === 'destructive' ? 'destructive' : undefined}>
+                        {hardwareOperatorNote.variant === 'destructive' ? (
+                          <ShieldAlert className="h-4 w-4" />
+                        ) : (
+                          <ShieldCheck className="h-4 w-4" />
+                        )}
+                        <AlertTitle>{hardwareOperatorNote.title}</AlertTitle>
+                        <AlertDescription>
+                          {hardwareOperatorNote.description}
+                        </AlertDescription>
+                      </Alert>
                     </div>
                   </div>
                 </TabsContent>
 
                 {/* Queue Tab */}
                 <TabsContent value="queue" className="mt-4 space-y-4">
+                  <Alert>
+                    <List className="h-4 w-4" />
+                    <AlertTitle>Priority Queue</AlertTitle>
+                    <AlertDescription>
+                      Higher-priority waiting channels run before lower-priority work, while the channel already being checked is allowed to finish. Event checks use the same queue and continue after the current channel.
+                    </AlertDescription>
+                  </Alert>
+
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="default_queue_start_mode">Default Run Start</Label>
@@ -1150,6 +1313,14 @@ export default function StreamChecker() {
 
                 {/* Concurrent Checking Tab */}
                 <TabsContent value="concurrent" className="mt-4 space-y-4">
+                  <Alert>
+                    <Activity className="h-4 w-4" />
+                    <AlertTitle>Check Capacity</AlertTitle>
+                    <AlertDescription>
+                      `Check slots full` means the checker is waiting for global workers, provider/profile slots, or viewer-protected capacity. Viewer-preempted probes are skipped safely and can be checked again later.
+                    </AlertDescription>
+                  </Alert>
+
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
                       <Label htmlFor="concurrent_enabled">Enable Concurrent Checking</Label>

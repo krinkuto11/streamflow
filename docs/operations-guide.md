@@ -186,6 +186,8 @@ Key rules:
 - Include/exclude sport and league filters can restrict which managed events are
   preflighted.
 - The safest default is scoring/reorder only.
+- Teamarr event checks use high waiting priority, but priority only sorts work
+  that is still waiting. It does not stop the channel currently being checked.
 
 StreamFlow creates a `Teamarr Event Preflight` automation profile if it is
 missing. That default profile is intentionally conservative: no playlist
@@ -197,9 +199,26 @@ it on the Teamarr Preflight page and save. The selected profile controls whether
 the preflight only scores/reorders streams or also runs stricter checks such as
 dead, blank, or freeze handling.
 
-Use retry offsets for events that receive streams shortly before start. For
-example, run a safe preflight 20 minutes before start and retry 10 minutes and
-3 minutes before start if the channel was not ready.
+`Teamarr API Poll Interval` controls how often StreamFlow reads Teamarr managed
+event state. Use 30-60 seconds for normal event automation; longer intervals can
+miss narrow windows such as a 1-minute preflight offset or a short post-start
+grace.
+
+`Preflight Offset` is the main automatic check before event start. `Pre-Start
+Retries` are one or more minute offsets before start, not a retry count. A
+single value such as `3` is valid; multiple values such as `10,3` create
+multiple extra buckets. For example, run a safe preflight 20 minutes before
+start and retry 10 minutes and 3 minutes before start if the channel was not
+ready.
+
+`Post-Start Checks` are one or more minute offsets after start for providers
+that publish or rename event channels at kickoff. A single value such as `2` is
+valid; multiple values such as `2,4` create multiple post-start buckets. The
+default post-start checks are 2 minutes and 4 minutes after start; keep
+post-start grace at least as large as the largest post-start offset and wide
+enough for the poll interval. If the Stream Checker is already busy, the event
+check is queued ahead of lower-priority
+waiting work and runs after the active channel finishes.
 
 ## Hardware Acceleration
 
@@ -229,6 +248,37 @@ detection filters still run as software filters, but hardware decode can be used
 when ffmpeg supports the selected mode. CPU fallback only retries failures that
 look like hardware/device initialization errors; normal dead streams, HTTP
 failures, and timeouts are still handled as stream results.
+
+### Container Template Notes
+
+When using a GUI-managed container template or app template, keep the StreamFlow
+container managed through that template so future edits stay visible and
+reversible in the host UI. Do not make GPU or path changes only through an
+ad-hoc `docker run` command and then treat that as the finished install.
+
+Recommended template-managed flow:
+
+1. Keep the image repository/tag in the template.
+2. Keep `/app/data` mapped to persistent application storage.
+3. Add GPU runtime settings, device mappings, or environment variables through
+   template fields so they remain GUI-editable.
+4. For NVIDIA passthrough, expose the NVIDIA runtime or devices supported by the
+   host and set `NVIDIA_VISIBLE_DEVICES` plus
+   `NVIDIA_DRIVER_CAPABILITIES=compute,utility,video` when required by the host
+   plugin/runtime.
+5. Start in CPU mode or Auto mode with CPU fallback enabled.
+6. Run a short targeted quality check, then review Stream Checker hardware
+   status before using hardware decode for larger checks.
+
+The Stream Checker page should show the effective analysis path. The hardware
+status API is also useful for remote checks: it reports the configured mode,
+fallback setting, detected ffmpeg methods, GPU visibility, and whether
+StreamFlow currently expects CPU-only, hardware-preferred, or hardware-only
+probing.
+
+If a template definition is updated by hand, take a timestamped backup first and
+keep only the latest few backups. This makes it easy to roll back while avoiding
+old template copies piling up.
 
 ### Docker Compose Examples
 
@@ -299,10 +349,46 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
 ```
 
-After starting either template, open StreamFlow, keep CPU fallback enabled, and
-run a targeted quality check before enabling GPU decode for large full checks.
-The hardware status API and startup logs should show whether CUDA is available
-or whether StreamFlow is safely using CPU fallback.
+For Intel/DRI probing, pass the host DRI devices into the container and keep CPU
+fallback enabled while testing. Set `RENDER_GID` to the group ID that owns the
+host render device, often visible with `ls -l /dev/dri/renderD128`:
+
+```yaml
+services:
+  streamflow:
+    image: ghcr.io/krinkuto11/streamflow:latest
+    container_name: streamflow
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:-109}"
+    volumes:
+      - /srv/streamflow/data:/app/data
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 5000
+      TZ: Europe/Berlin
+      CONFIG_DIR: /app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+```
+
+If you change `API_PORT`, keep the port mapping and healthcheck URL in sync. For
+example, `API_PORT: 4919` should use a `4919:4919` mapping and
+`http://localhost:4919/api/health` in the healthcheck.
+
+After starting a hardware template, open StreamFlow, keep CPU fallback enabled,
+and run a targeted quality check before enabling GPU decode for large full
+checks. The hardware status API and startup logs should show whether CUDA or
+DRI/VAAPI/QSV methods are available, or whether StreamFlow is safely using CPU
+fallback.
 
 ## Dashboard, Changelog, And Logs
 

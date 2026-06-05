@@ -1,10 +1,18 @@
 import { describe, expect, it } from 'vitest'
 import {
+  getAbortedRunDisplay,
   getDashboardActionStates,
   getAutomationStageCards,
+  getCacheSyncCardDetail,
+  getRunHistoryBaseline,
+  getM3uRefreshCardDetail,
+  getRunDurationCardValue,
   getRunDurationValue,
+  getSkippedRunDisplay,
   getStreamCheckerRunDisplay,
+  isM3uRefreshSkipped,
   preferLiveRunSeconds,
+  shouldShowAutomationRunCard,
 } from './dashboard-run-display.js'
 
 const stages = [
@@ -138,6 +146,33 @@ describe('dashboard stream checker run display', () => {
     expect(display.streamCheckerElapsedSeconds).toBe(60)
   })
 
+  it('ignores completed queue history when the stream checker is idle', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'skipped',
+      runStage: 'quality_checking',
+      batchTotal: 5,
+      completed: 5,
+      now: Date.parse('2026-06-02T12:00:00Z'),
+      streamCheckerStatus: {
+        stream_checking_mode: false,
+        queue: {
+          state: 'completed',
+          queue_size: 0,
+          in_progress: 0,
+          completed: 5,
+          failed: 0,
+          started_at: '2026-06-02T11:46:33Z',
+        },
+      },
+    })
+
+    expect(display.isProcessing).toBe(false)
+    expect(display.streamCheckerOnlyActive).toBe(false)
+    expect(display.streamQueueActive).toBe(false)
+    expect(display.streamCheckerElapsedSeconds).toBeNull()
+    expect(display.stageCards).toEqual([])
+  })
+
   it('uses live stage timing while an automation stage is active', () => {
     expect(preferLiveRunSeconds({
       active: true,
@@ -196,18 +231,49 @@ describe('dashboard stream checker run display', () => {
     expect(cards.find(stage => stage.id === 'quality_checking').status).toBe('aborted')
   })
 
-  it('synthesizes completed predecessors for manual stream checker runs', () => {
+  it('keeps automation-only stages neutral for manual stream checker runs', () => {
     const cards = getAutomationStageCards({
       stages,
+      runStatusStages: [
+        { key: 'settings', status: 'completed' },
+        { key: 'm3u_refresh', status: 'completed' },
+        { key: 'stream_matching', status: 'completed' },
+      ],
       displayRunStageId: 'quality_checking',
       displayRunningRun: true,
       streamRunActive: true,
     })
 
-    expect(cards[0].status).toBe('completed')
-    expect(cards[5].status).toBe('completed')
+    expect(cards[0].status).toBe('pending')
+    expect(cards[2].status).toBe('pending')
+    expect(cards[4].status).toBe('pending')
+    expect(cards[5].status).toBe('pending')
     expect(cards[6].status).toBe('running')
     expect(cards[7].status).toBe('pending')
+  })
+
+  it('keeps no-due skipped automation stages neutral', () => {
+    const cards = getAutomationStageCards({
+      stages,
+      runStatusStages: [
+        { key: 'settings', status: 'completed' },
+        { key: 'period_discovery', status: 'pending' },
+      ],
+      displayRunStageId: 'skipped',
+      displayRunningRun: false,
+      neutralRun: true,
+    })
+
+    expect(cards.map(stage => stage.status)).toEqual([
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+      'pending',
+    ])
   })
 
   it('uses live stage timing while a duration card is actively running', () => {
@@ -238,9 +304,9 @@ describe('dashboard stream checker run display', () => {
     expect(value).toBe(128)
   })
 
-  it('shows zero-second placeholders for synthetic manual predecessors', () => {
+  it('keeps manual stream checker predecessor durations neutral', () => {
     const value = getRunDurationValue({
-      runDurations: {},
+      runDurations: { m3u_refresh_seconds: 0 },
       durationKey: 'm3u_refresh_seconds',
       stageId: 'm3u_refresh',
       displayRunStageId: 'quality_checking',
@@ -248,7 +314,207 @@ describe('dashboard stream checker run display', () => {
       stages,
     })
 
-    expect(value).toBe(0)
+    expect(value).toBeNull()
+  })
+
+  it('marks M3U refresh as skipped when no playlist refresh was requested', () => {
+    expect(isM3uRefreshSkipped({
+      runCounts: {
+        playlists_to_refresh: 0,
+        refreshed_playlists: 0,
+      },
+    })).toBe(true)
+  })
+
+  it('does not mark M3U refresh as skipped when playlists were requested', () => {
+    expect(isM3uRefreshSkipped({
+      runCounts: {
+        playlists_to_refresh: 2,
+        refreshed_playlists: 0,
+      },
+    })).toBe(false)
+  })
+
+  it('does not apply M3U skipped semantics to manual stream checker runs', () => {
+    expect(isM3uRefreshSkipped({
+      streamRunActive: true,
+      runCounts: {
+        playlists_to_refresh: 0,
+        refreshed_playlists: 0,
+      },
+    })).toBe(false)
+  })
+
+  it('renders duration cards as skipped or formatted duration', () => {
+    expect(getRunDurationCardValue({ skipped: true, seconds: 0 })).toBe('Skipped')
+    expect(getRunDurationCardValue({ seconds: 61 })).toBe('1m 1s')
+    expect(getRunDurationCardValue({ seconds: null })).toBe('N/A')
+  })
+
+  it('summarizes running M3U refresh request progress for the duration card', () => {
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'requesting',
+        m3u_refresh_current: 1,
+        m3u_refresh_total: 3,
+      },
+    })).toBe('Refreshing playlist 2/3')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'accepted',
+        m3u_refresh_current: 2,
+        m3u_refresh_total: 3,
+      },
+    })).toBe('2/3 refresh requests accepted')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'failed',
+        m3u_refresh_current: 2,
+        m3u_refresh_total: 3,
+      },
+    })).toBe('2/3 refresh requests failed')
+  })
+
+  it('keeps skipped and manual-check M3U refresh card details explicit', () => {
+    expect(getM3uRefreshCardDetail({ skipped: true })).toBe('No playlist refresh requested')
+    expect(getM3uRefreshCardDetail({ streamRunActive: true })).toBeNull()
+  })
+
+  it('summarizes cache sync step progress for the duration card', () => {
+    expect(getCacheSyncCardDetail({
+      runCounts: {
+        cache_sync_state: 'completed',
+        cache_sync_successful_steps: 2,
+        cache_sync_total_steps: 2,
+      },
+    })).toBe('2/2 cache sync steps completed')
+
+    expect(getCacheSyncCardDetail({
+      runCounts: {
+        cache_sync_state: 'warning',
+        cache_sync_successful_steps: 1,
+        cache_sync_total_steps: 2,
+      },
+    })).toBe('1/2 cache sync steps completed with warnings')
+
+    expect(getCacheSyncCardDetail({ skipped: true })).toBe('No cache sync requested')
+    expect(getCacheSyncCardDetail({ streamRunActive: true })).toBeNull()
+  })
+
+  it('normalizes recent automation run history for dashboard display', () => {
+    expect(getRunHistoryBaseline({
+      summary: {
+        sample_count: 3,
+        latest: {
+          duration_seconds: 120,
+          total_channels: 12,
+        },
+        typical_duration_seconds: 90,
+        average_duration_seconds: 100,
+        typical_seconds_per_channel: 7.5,
+        per_channel_sample_count: 3,
+        per_channel_baseline_stable: true,
+      },
+    })).toEqual({
+      available: true,
+      sampleCount: 3,
+      latest: {
+        duration_seconds: 120,
+        total_channels: 12,
+      },
+      typicalDurationSeconds: 90,
+      averageDurationSeconds: 100,
+      typicalSecondsPerChannel: 7.5,
+      perChannelSampleCount: 3,
+      perChannelBaselineStable: true,
+    })
+  })
+
+  it('keeps empty automation run history quiet', () => {
+    expect(getRunHistoryBaseline({ summary: { sample_count: 0 } })).toEqual({
+      available: false,
+      sampleCount: 0,
+      latest: null,
+      typicalDurationSeconds: null,
+      averageDurationSeconds: null,
+      typicalSecondsPerChannel: null,
+      perChannelSampleCount: 0,
+      perChannelBaselineStable: false,
+    })
+  })
+
+  it('uses explicit idle wording for skipped no-due automation runs', () => {
+    const display = getSkippedRunDisplay({
+      skippedRun: true,
+      runStatusMessage: 'No active automation periods were due',
+    })
+
+    expect(display).toEqual({
+      badgeLabel: 'Idle',
+      message: 'Waiting for next scheduled run',
+      progressDetail: 'No active automation periods were due',
+      stageLabel: 'No Due Periods',
+    })
+  })
+
+  it('does not override skipped automation wording during manual stream checks', () => {
+    const display = getSkippedRunDisplay({
+      skippedRun: true,
+      streamRunActive: true,
+      streamQueueActive: true,
+      runStatusMessage: 'No active automation periods were due',
+    })
+
+    expect(display.badgeLabel).toBeNull()
+    expect(display.message).toBeNull()
+    expect(display.progressDetail).toBeNull()
+    expect(display.stageLabel).toBeNull()
+  })
+
+  it('uses terminal abort wording instead of stale stage progress', () => {
+    const display = getAbortedRunDisplay({
+      runState: 'aborted',
+      runStatus: {
+        last_error: 'Automation run was stopped by the user',
+        message: 'Automation run was stopped by the user',
+        progress: {
+          current: 2,
+          message: 'Syncing channel cache completed',
+          percent: 100,
+          total: 2,
+        },
+      },
+    })
+
+    expect(display).toEqual({
+      message: 'Automation run was stopped by the user',
+      progressDetail: 'Automation run was stopped by the user',
+      progressPercent: 0,
+    })
+  })
+
+  it('hides the automation run card for idle no-due runs', () => {
+    const display = getSkippedRunDisplay({
+      skippedRun: true,
+      runStatusMessage: 'No active automation periods were due',
+    })
+
+    expect(shouldShowAutomationRunCard({
+      showRunProgress: true,
+      skippedRunDisplay: display,
+    })).toBe(false)
+  })
+
+  it('keeps the automation run card visible for real progress', () => {
+    expect(shouldShowAutomationRunCard({
+      showRunProgress: true,
+      skippedRunDisplay: {
+        badgeLabel: null,
+        stageLabel: null,
+      },
+    })).toBe(true)
   })
 
   it('keeps UDI reload available during stream checks but blocks conflicting automation starts', () => {
@@ -261,6 +527,20 @@ describe('dashboard stream checker run display', () => {
     expect(actions.reloadUdi.disabled).toBe(false)
     expect(actions.runAutomation.disabled).toBe(true)
     expect(actions.runAutomation.reason).toMatch(/stream check/i)
+  })
+
+  it('blocks automation actions while Dispatcharr cache refresh is running', () => {
+    const actions = getDashboardActionStates({
+      actionLoading: '',
+      isStreamCheckerProcessing: false,
+      udiInitializing: true,
+      udiSyncing: false,
+    })
+
+    expect(actions.reloadUdi.disabled).toBe(true)
+    expect(actions.reloadUdi.reason).toMatch(/cache refresh/i)
+    expect(actions.runAutomation.disabled).toBe(true)
+    expect(actions.runAutomation.reason).toMatch(/cache is ready/i)
   })
 
   it('blocks dashboard actions while another action is already running', () => {

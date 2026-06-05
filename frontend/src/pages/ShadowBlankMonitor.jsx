@@ -9,6 +9,14 @@ import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { shadowBlankMonitorAPI } from '@/services/api.js'
 import {
+  formatViewerClientCount,
+  formatWatcherClientCount,
+} from '@/lib/viewer-activity-display.js'
+import {
+  shadowMonitorNumberFields,
+  shadowMonitorThresholdFields,
+} from '@/lib/shadow-monitor-config-fields.js'
+import {
   Activity,
   AlertCircle,
   CheckCircle2,
@@ -20,25 +28,6 @@ import {
   Shield,
   StopCircle,
 } from 'lucide-react'
-
-const numberFields = [
-  { key: 'poll_interval_seconds', label: 'Poll Interval', suffix: 'sec', min: 5, max: 3600 },
-  { key: 'watch_gap_seconds', label: 'Watch Gap', suffix: 'sec', min: 1, max: 300 },
-  { key: 'probe_duration_seconds', label: 'Probe Duration', suffix: 'sec', min: 3, max: 120 },
-  { key: 'confirmation_count', label: 'Confirmations', suffix: 'hits', min: 1, max: 5 },
-  { key: 'channel_cooldown_seconds', label: 'Cooldown', suffix: 'sec', min: 30, max: 86400 },
-  { key: 'max_switches_per_hour', label: 'Switch Limit', suffix: 'per hour', min: 1, max: 20 },
-  { key: 'max_concurrent_watchers', label: 'Watchers', suffix: 'max', min: 1, max: 10 },
-]
-
-const thresholdFields = [
-  { key: 'blank_min_duration_seconds', label: 'Blank Duration', step: '0.5', min: 0.5, max: 30 },
-  { key: 'blank_pixel_threshold', label: 'Pixel Threshold', step: '0.01', min: 0, max: 1 },
-  { key: 'blank_ratio_threshold', label: 'Blank Ratio', step: '0.01', min: 0.1, max: 1 },
-  { key: 'freeze_min_duration_seconds', label: 'Freeze Duration', step: '0.5', min: 1, max: 120 },
-  { key: 'freeze_noise_threshold', label: 'Freeze Noise', step: '0.001', min: 0, max: 1 },
-  { key: 'freeze_ratio_threshold', label: 'Freeze Ratio', step: '0.01', min: 0.1, max: 1 },
-]
 
 const eventLabels = {
   probe_ok: 'Probe OK',
@@ -53,6 +42,8 @@ const eventLabels = {
   switch_rate_limited: 'Rate Limited',
   viewer_left: 'Viewer Left',
   quality_check_active: 'Quality Check Active',
+  watcher_reconnecting: 'Watcher Reconnecting',
+  watcher_recovered: 'Watcher Recovered',
 }
 
 const parseCsv = (value, numeric = false) => {
@@ -67,6 +58,16 @@ const parseCsv = (value, numeric = false) => {
 const formatTime = (timestamp) => {
   if (!timestamp) return 'Never'
   return new Date(timestamp * 1000).toLocaleTimeString()
+}
+
+const formatDuration = (seconds) => {
+  const value = Number(seconds)
+  if (!Number.isFinite(value) || value < 0) return null
+  if (value < 60) return `${Math.floor(value)}s`
+  const minutes = Math.floor(value / 60)
+  const hours = Math.floor(minutes / 60)
+  if (hours > 0) return `${hours}h ${minutes % 60}m`
+  return `${minutes}m`
 }
 
 const formatEvent = (event) => eventLabels[event?.type] || event?.type || 'Unknown'
@@ -189,8 +190,9 @@ export default function ShadowBlankMonitor() {
   const running = Boolean(status?.running)
   const enabled = Boolean(editedConfig?.enabled)
   const dryRun = Boolean(editedConfig?.dry_run)
-  const watchMode = editedConfig?.watch_mode || 'periodic'
+  const watchMode = editedConfig?.watch_mode || 'continuous'
   const hasKey = Boolean(config?.has_watcher_api_key)
+  const continuousWatcherActive = running && watchMode === 'continuous'
 
   return (
     <div className="space-y-6">
@@ -226,14 +228,16 @@ export default function ShadowBlankMonitor() {
               Start
             </Button>
           )}
-          <Button
-            variant="outline"
-            onClick={() => runAction('scan', shadowBlankMonitorAPI.runOnce, 'Shadow monitor scan completed')}
-            disabled={actionLoading !== ''}
-          >
-            {actionLoading === 'scan' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-            Scan Now
-          </Button>
+          {!continuousWatcherActive && (
+            <Button
+              variant="outline"
+              onClick={() => runAction('scan', shadowBlankMonitorAPI.runOnce, 'Shadow monitor scan completed')}
+              disabled={actionLoading !== ''}
+            >
+              {actionLoading === 'scan' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+              Scan Now
+            </Button>
+          )}
         </div>
       </div>
 
@@ -345,11 +349,14 @@ export default function ShadowBlankMonitor() {
                     Continuous
                   </Button>
                 </div>
+                <div className="mt-3 rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+                  Continuous mode keeps watching active viewer sessions as they appear. Use excludes for channels the watcher should ignore; `Scan Now` is hidden while continuous watching is already active.
+                </div>
               </div>
             </div>
 
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {numberFields.map(field => (
+              {shadowMonitorNumberFields.map(field => (
                 <div key={field.key} className="space-y-2">
                   <Label htmlFor={field.key}>{field.label}</Label>
                   <div className="flex items-center gap-2">
@@ -363,6 +370,9 @@ export default function ShadowBlankMonitor() {
                     />
                     <span className="w-16 shrink-0 text-xs text-muted-foreground">{field.suffix}</span>
                   </div>
+                  {field.help ? (
+                    <p className="text-xs text-muted-foreground">{field.help}</p>
+                  ) : null}
                 </div>
               ))}
             </div>
@@ -370,7 +380,7 @@ export default function ShadowBlankMonitor() {
             <Separator />
 
             <div className="grid gap-4 md:grid-cols-3">
-              {thresholdFields.map(field => (
+              {shadowMonitorThresholdFields.map(field => (
                 <div key={field.key} className="space-y-2">
                   <Label htmlFor={field.key}>{field.label}</Label>
                   <Input
@@ -422,17 +432,19 @@ export default function ShadowBlankMonitor() {
 
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
-                <Label htmlFor="excluded_channel_ids">Excluded Channel IDs</Label>
+                <Label htmlFor="excluded_channel_ids">Exclude Channel IDs</Label>
                 <Input
                   id="excluded_channel_ids"
+                  placeholder="None"
                   value={excludedIds}
                   onChange={(event) => setExcludedIds(event.target.value)}
                 />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="excluded_channel_uuids">Excluded Channel UUIDs</Label>
+                <Label htmlFor="excluded_channel_uuids">Exclude Channel UUIDs</Label>
                 <Input
                   id="excluded_channel_uuids"
+                  placeholder="None"
                   value={excludedUuids}
                   onChange={(event) => setExcludedUuids(event.target.value)}
                 />
@@ -456,11 +468,31 @@ export default function ShadowBlankMonitor() {
                     <div key={channel.channel_ref} className="rounded-md border p-3">
                       <div className="flex items-center justify-between gap-3">
                         <span className="font-mono text-xs">{channel.channel_ref}</span>
-                        <Badge variant="outline">{channel.real_client_count || 0} viewers</Badge>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                          <Badge variant="outline">{formatViewerClientCount(channel.real_client_count)}</Badge>
+                          {(channel.watcher_client_count || 0) > 0 && (
+                            <Badge variant="secondary">{formatWatcherClientCount(channel.watcher_client_count)}</Badge>
+                          )}
+                        </div>
                       </div>
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         <span>{channel.stream_ref}</span>
-                        {channel.last_event && <Badge variant="secondary">{formatEvent(channel.last_event)}</Badge>}
+                        {channel.watcher_client_ref && <span>{channel.watcher_client_ref}</span>}
+                        {formatDuration(channel.watcher_uptime_seconds) && (
+                          <span>watching for {formatDuration(channel.watcher_uptime_seconds)}</span>
+                        )}
+                        {channel.watcher_state === 'reconnecting' && (
+                          <Badge variant="outline">Watcher reconnecting</Badge>
+                        )}
+                        {channel.watcher_state === 'reconnecting' && formatDuration(channel.watcher_absent_seconds) && (
+                          <span>missing for {formatDuration(channel.watcher_absent_seconds)}</span>
+                        )}
+                        {channel.last_event?.type === 'watcher_recovered' && (
+                          <Badge variant="secondary">Watcher recovered</Badge>
+                        )}
+                        {channel.last_event && !['watcher_reconnecting', 'watcher_recovered'].includes(channel.last_event.type) && (
+                          <Badge variant="secondary">{formatEvent(channel.last_event)}</Badge>
+                        )}
                         {channel.last_probe?.freeze_detected && <Badge variant="outline">Frozen</Badge>}
                         {channel.last_probe?.blank_detected && <Badge variant="outline">Blank</Badge>}
                       </div>
@@ -494,7 +526,7 @@ export default function ShadowBlankMonitor() {
                           {event.channel_ref} / {event.stream_ref}
                         </p>
                       </div>
-                      <span className="shrink-0 text-xs text-muted-foreground">{event.real_client_count || 0} viewers</span>
+                      <span className="shrink-0 text-xs text-muted-foreground">{formatViewerClientCount(event.real_client_count)}</span>
                     </div>
                   ))}
                 </div>

@@ -14,7 +14,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { channelsAPI, regexAPI, streamCheckerAPI, channelOrderAPI, automationAPI, m3uAPI } from '@/services/api.js'
-import { CheckCircle, Edit, Plus, Trash2, Loader2, Search, X, Download, Upload, GripVertical, Save, RotateCcw, ArrowUpDown, MoreVertical, Eye, ChevronDown, Info, Activity, Edit2, ArrowRight, Clock, Calendar, CalendarClock } from 'lucide-react'
+import { CheckCircle, Edit, Plus, Trash2, Loader2, Search, X, Download, Upload, GripVertical, Save, RotateCcw, ArrowUpDown, MoreVertical, Eye, ChevronDown, Info, Activity, Edit2, ArrowRight, Clock, Calendar, CalendarClock, UserRound } from 'lucide-react'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger, DropdownMenuCheckboxItem } from '@/components/ui/dropdown-menu.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Tooltip, TooltipContent, TooltipTrigger, TooltipProvider } from '@/components/ui/tooltip.jsx'
@@ -76,6 +76,21 @@ const normalizePatternData = (channelPatterns) => {
   }
 
   return []
+}
+
+const normalizeGroupConfigSummary = (groups, summary = {}) => {
+  const configMap = {}
+  groups.forEach((group) => {
+    const key = String(group.id)
+    const item = summary[key] || summary[group.id] || {}
+    configMap[group.id] = {
+      profile_id: item.profile_id || null,
+      epg_profile_id: item.epg_profile_id || null,
+      periods: Array.isArray(item.periods) ? item.periods : [],
+      matching: item.matching || {},
+    }
+  })
+  return configMap
 }
 
 // Dialog for assigning automation periods to a group
@@ -487,6 +502,9 @@ export default function ChannelConfiguration() {
   const [savingGroupMatching, setSavingGroupMatching] = useState(false)
   const [groupEpgProfileId, setGroupEpgProfileId] = useState('')
   const [savingGroupEpgProfile, setSavingGroupEpgProfile] = useState(false)
+  const [selectedGroups, setSelectedGroups] = useState(new Set())
+  const [bulkGroupProfileId, setBulkGroupProfileId] = useState('')
+  const [savingBulkGroupProfile, setSavingBulkGroupProfile] = useState(false)
 
   // Edit common regex dialog state
   const [editCommonDialogOpen, setEditCommonDialogOpen] = useState(false)
@@ -532,6 +550,12 @@ export default function ChannelConfiguration() {
       loadGroupsConfig()
     }
   }, [activeTab, groups])
+
+  useEffect(() => {
+    if (groups.length === 0 || selectedGroups.size === 0) return
+    const validGroupIds = new Set(groups.map(group => group.id))
+    setSelectedGroups(prev => new Set([...prev].filter(groupId => validGroupIds.has(groupId))))
+  }, [groups, selectedGroups.size])
 
   // Bulk match count — fires when Regex tab is active, on page change, pattern edits,
   // or after groupsConfig populates (so group-inherited channels get their counts too).
@@ -960,38 +984,15 @@ export default function ChannelConfiguration() {
     if (groups.length === 0) return
     try {
       setLoadingGroupsConfig(true)
-      const configMap = {}
-      const [, epgAssignmentsRes, profileAssignmentsRes] = await Promise.all([
-        Promise.all(groups.map(async (group) => {
-          try {
-            const [periodsRes, regexCfgRes] = await Promise.all([
-              automationAPI.getGroupPeriods(group.id),
-              regexAPI.getGroupConfig(group.id).catch(() => ({ data: {} }))
-            ])
-            configMap[group.id] = {
-              periods: periodsRes.data || [],
-              matching: regexCfgRes.data || {}
-            }
-          } catch {
-            configMap[group.id] = { periods: [], matching: {} }
-          }
-        })),
-        automationAPI.getGroupEpgAssignments().catch(() => ({ data: {} })),
-        automationAPI.getGroupAssignments().catch(() => ({ data: {} }))
-      ])
-      const epgAssignments = epgAssignmentsRes.data || {}
-      const profileAssignments = profileAssignmentsRes.data || {}
-      // Merge EPG and automation profile assignments into configMap
-      groups.forEach((group) => {
-        if (!configMap[group.id]) {
-          configMap[group.id] = { periods: [], matching: {} }
-        }
-        configMap[group.id].epg_profile_id = epgAssignments[String(group.id)] || null
-        configMap[group.id].profile_id = profileAssignments[String(group.id)] || null
-      })
-      setGroupsConfig(configMap)
+      const summaryResponse = await automationAPI.getGroupConfigSummary()
+      setGroupsConfig(normalizeGroupConfigSummary(groups, summaryResponse.data || {}))
     } catch (err) {
       console.error('Failed to load groups config:', err)
+      toast({
+        title: "Error",
+        description: "Failed to load group configuration",
+        variant: "destructive"
+      })
     } finally {
       setLoadingGroupsConfig(false)
     }
@@ -1016,7 +1017,6 @@ export default function ChannelConfiguration() {
           : `Automation profile removed from group "${selectedGroupForConfig.name}"`
       })
       setGroupAssignProfileDialogOpen(false)
-      await loadData()
       await loadGroupsConfig()
     } catch (err) {
       toast({
@@ -1026,6 +1026,55 @@ export default function ChannelConfiguration() {
       })
     } finally {
       setSavingGroupProfile(false)
+    }
+  }
+
+  const toggleGroupSelection = (groupId) => {
+    setSelectedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(groupId)) {
+        next.delete(groupId)
+      } else {
+        next.add(groupId)
+      }
+      return next
+    })
+  }
+
+  const toggleAllGroupsSelection = (checked) => {
+    setSelectedGroups(checked ? new Set(groups.map(group => group.id)) : new Set())
+  }
+
+  const handleBulkAssignGroupProfile = async () => {
+    const groupIds = Array.from(selectedGroups)
+    if (groupIds.length === 0) {
+      toast({
+        title: "No Groups Selected",
+        description: "Please select at least one group",
+        variant: "destructive"
+      })
+      return
+    }
+
+    try {
+      setSavingBulkGroupProfile(true)
+      const profileId = bulkGroupProfileId === 'none' ? null : (bulkGroupProfileId || null)
+      await automationAPI.assignGroups(groupIds, profileId)
+      toast({
+        title: "Success",
+        description: profileId
+          ? `Automation profile assigned to ${groupIds.length} group${groupIds.length !== 1 ? 's' : ''}`
+          : `Automation profile removed from ${groupIds.length} group${groupIds.length !== 1 ? 's' : ''}`
+      })
+      await loadGroupsConfig()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to assign profile to groups",
+        variant: "destructive"
+      })
+    } finally {
+      setSavingBulkGroupProfile(false)
     }
   }
 
@@ -2896,16 +2945,65 @@ export default function ChannelConfiguration() {
           <TabsContent value="groups" className="space-y-6">
             <Card>
               <CardHeader>
-                <div className="flex items-center justify-between">
+                <div className="flex items-start justify-between gap-4">
                   <div>
                     <CardTitle>Group Configuration</CardTitle>
                     <CardDescription>
                       Assign automation profiles and periods to channel groups. New channels added to a group will inherit these settings.
                     </CardDescription>
                   </div>
-                  <Button variant="outline" size="sm" onClick={loadGroupsConfig} disabled={loadingGroupsConfig}>
-                    {loadingGroupsConfig ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
-                  </Button>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <Button variant="outline" size="sm" onClick={loadGroupsConfig} disabled={loadingGroupsConfig} className="h-8">
+                      {loadingGroupsConfig ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                    </Button>
+                  </div>
+                </div>
+                <div className="rounded-md border bg-muted/20 p-3">
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 text-sm font-medium">
+                        <UserRound className="h-4 w-4" />
+                        Bulk Automation Profile
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        Select one or more groups below, choose a profile, then apply it to all selected groups.
+                      </p>
+                    </div>
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <Badge variant="secondary" className="h-8 justify-center px-3 text-xs">
+                        {selectedGroups.size} selected
+                      </Badge>
+                      <Select
+                        value={bulkGroupProfileId}
+                        onValueChange={setBulkGroupProfileId}
+                        disabled={savingBulkGroupProfile}
+                      >
+                        <SelectTrigger className="h-8 w-full sm:w-[240px] text-xs">
+                          <SelectValue placeholder="Choose profile" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="none">Remove profile assignment</SelectItem>
+                          {profiles.map((profile) => (
+                            <SelectItem key={profile.id} value={profile.id}>{profile.name}</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleBulkAssignGroupProfile}
+                        disabled={selectedGroups.size === 0 || savingBulkGroupProfile || !bulkGroupProfileId}
+                        className="h-8 min-w-[170px]"
+                      >
+                        {savingBulkGroupProfile ? (
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        ) : (
+                          <UserRound className="mr-2 h-4 w-4" />
+                        )}
+                        Apply to selected groups
+                      </Button>
+                    </div>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent>
@@ -2919,6 +3017,21 @@ export default function ChannelConfiguration() {
                   </div>
                 ) : (
                   <div className="space-y-3">
+                    <div className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2">
+                      <div className="flex items-center gap-2">
+                        <Checkbox
+                          id="select-all-groups"
+                          checked={groups.length > 0 && selectedGroups.size === groups.length}
+                          onCheckedChange={(checked) => toggleAllGroupsSelection(Boolean(checked))}
+                        />
+                        <Label htmlFor="select-all-groups" className="text-sm cursor-pointer">
+                          {selectedGroups.size} selected
+                        </Label>
+                      </div>
+                      <Badge variant="secondary" className="text-xs">
+                        {groups.length} groups
+                      </Badge>
+                    </div>
                     {groups.map((group) => {
                       const config = groupsConfig[group.id] || { periods: [], matching: {} }
                       const matching = config.matching || {}
@@ -2930,10 +3043,19 @@ export default function ChannelConfiguration() {
                       const groupEpgProfile = config.epg_profile_id
                         ? (profiles || []).find(p => String(p.id) === String(config.epg_profile_id))
                         : null
+                      const groupAutomationProfile = config.profile_id
+                        ? (profiles || []).find(p => String(p.id) === String(config.profile_id))
+                        : null
                       return (
                         <Card key={group.id} className="border">
                           <CardContent className="p-4">
                             <div className="flex items-start justify-between gap-4">
+                              <Checkbox
+                                checked={selectedGroups.has(group.id)}
+                                onCheckedChange={() => toggleGroupSelection(group.id)}
+                                className="mt-1 flex-shrink-0"
+                                aria-label={`Select group ${group.name}`}
+                              />
                               <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-2">
                                   <h3 className="font-semibold text-base">{group.name}</h3>
@@ -2972,6 +3094,21 @@ export default function ChannelConfiguration() {
                                   )}
                                 </div>
 
+                                {/* Automation Profile section */}
+                                <div className="space-y-1 mt-4">
+                                  <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider mb-1">
+                                    Automation Profile
+                                  </div>
+                                  {groupAutomationProfile ? (
+                                    <Badge variant="outline" className="gap-1 text-xs">
+                                      <UserRound className="h-3 w-3" />
+                                      {groupAutomationProfile.name}
+                                    </Badge>
+                                  ) : (
+                                    <p className="text-sm text-muted-foreground italic">No profile assigned</p>
+                                  )}
+                                </div>
+
                                 {/* Matching section */}
                                 <div className="space-y-1 mt-4">
                                   <div className="text-xs text-muted-foreground font-medium uppercase tracking-wider mb-1">
@@ -3005,6 +3142,20 @@ export default function ChannelConfiguration() {
 
                               {/* Action buttons */}
                               <div className="flex gap-2 flex-shrink-0 flex-wrap">
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      onClick={() => handleOpenGroupAssignProfile(group)}
+                                      className="h-8"
+                                    >
+                                      <UserRound className="h-4 w-4 mr-1" />
+                                      Profile
+                                    </Button>
+                                  </TooltipTrigger>
+                                  <TooltipContent>Assign automation profile to group</TooltipContent>
+                                </Tooltip>
                                 <Tooltip>
                                   <TooltipTrigger asChild>
                                     <Button
@@ -3059,6 +3210,50 @@ export default function ChannelConfiguration() {
             </Card>
           </TabsContent>
         </Tabs>
+
+        {/* Group Assign Automation Profile Dialog */}
+        <Dialog open={groupAssignProfileDialogOpen} onOpenChange={setGroupAssignProfileDialogOpen}>
+          <DialogContent className="sm:max-w-[450px]">
+            <DialogHeader>
+              <DialogTitle>Assign Automation Profile to Group</DialogTitle>
+              <DialogDescription>
+                {selectedGroupForConfig
+                  ? `Assign an automation profile to group "${selectedGroupForConfig.name}".`
+                  : ''}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              <div className="space-y-2">
+                <Label>Automation Profile</Label>
+                <Select
+                  value={groupProfileId || 'none'}
+                  onValueChange={(v) => setGroupProfileId(v === 'none' ? '' : v)}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select a profile" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="none">Remove profile assignment</SelectItem>
+                    {profiles.map((profile) => (
+                      <SelectItem key={profile.id} value={profile.id}>
+                        {profile.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setGroupAssignProfileDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button onClick={handleSaveGroupProfile} disabled={savingGroupProfile}>
+                {savingGroupProfile && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Save
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* Group Assign Periods Dialog */}
         {selectedGroupForConfig && (

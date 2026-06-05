@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import queue
 import subprocess
 import threading
 import time
@@ -20,7 +21,17 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.api_utils import change_channel_stream
 from apps.core.logging_config import setup_logging
-from apps.stream.stream_check_utils import _parse_blank_detection, _parse_freeze_detection
+from apps.stream.stream_check_utils import (
+    BLACK_DURATION_RE,
+    BLACK_END_RE,
+    BLACK_START_RE,
+    FREEZE_DURATION_RE,
+    FREEZE_END_RE,
+    FREEZE_START_RE,
+    _parse_blank_detection,
+    _parse_ffmpeg_progress_time,
+    _parse_freeze_detection,
+)
 from apps.udi import get_udi_manager
 
 logger = setup_logging(__name__)
@@ -31,15 +42,15 @@ MAX_EVENTS = 100
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
-    "dry_run": True,
-    "watch_mode": "periodic",
-    "poll_interval_seconds": 30,
+    "dry_run": False,
+    "watch_mode": "continuous",
+    "poll_interval_seconds": 5,
     "watch_gap_seconds": 1,
-    "probe_duration_seconds": 8,
+    "probe_duration_seconds": 60,
     "blank_min_duration_seconds": 2.0,
     "blank_pixel_threshold": 0.10,
     "blank_ratio_threshold": 0.80,
-    "freeze_detection_enabled": False,
+    "freeze_detection_enabled": True,
     "freeze_min_duration_seconds": 5.0,
     "freeze_noise_threshold": 0.001,
     "freeze_ratio_threshold": 0.80,
@@ -177,8 +188,10 @@ class ShadowBlankMonitorService:
         self._config = self._load_config()
         self._events: deque[Dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._watched: Dict[str, Dict[str, Any]] = {}
+        self._watcher_absences: Dict[str, Dict[str, Any]] = {}
         self._blank_counts: Dict[str, int] = defaultdict(int)
         self._cooldowns: Dict[str, float] = {}
+        self._switch_attempts: Dict[str, Dict[str, Any]] = {}
         self._switch_history: Dict[str, deque[float]] = defaultdict(deque)
         self._active_probes: set[str] = set()
         self._last_scan_at: Optional[float] = None
@@ -246,6 +259,7 @@ class ShadowBlankMonitorService:
                 self._save_config()
             self._stop_event.set()
             self._watched = {}
+            self._watcher_absences = {}
             thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=5)
@@ -325,6 +339,19 @@ class ShadowBlankMonitorService:
 
         targets: List[Dict[str, Any]] = []
         watched: Dict[str, Dict[str, Any]] = {}
+        continuity_events: List[tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        continuous_mode = config.get("watch_mode") == "continuous"
+        now = self.clock()
+        with self._lock:
+            previous_watched = {
+                channel_uuid: dict(target)
+                for channel_uuid, target in self._watched.items()
+            }
+            previous_absences = {
+                channel_uuid: dict(absence)
+                for channel_uuid, absence in self._watcher_absences.items()
+            }
+        next_absences: Dict[str, Dict[str, Any]] = {}
 
         for key, raw_status in proxy_status.items():
             if not self._is_status_active(raw_status):
@@ -345,7 +372,8 @@ class ShadowBlankMonitorService:
             real_clients = self._real_client_count(raw_status, config)
             if real_clients <= 0:
                 continue
-            watcher_clients = self._watcher_client_count(raw_status, config)
+            watcher_details = self._watcher_client_details(raw_status, config)
+            watcher_clients = int(watcher_details.get("watcher_client_count") or 0)
 
             stream_id = self._extract_stream_id(raw_status)
             target = {
@@ -359,11 +387,75 @@ class ShadowBlankMonitorService:
                 "state": raw_status.get("state") or "active",
                 "cooldown_seconds": self._cooldown_remaining(channel_uuid),
             }
+            target.update(watcher_details)
+            if continuous_mode:
+                previous_target = previous_watched.get(channel_uuid) or {}
+                previous_absence = previous_absences.get(channel_uuid)
+                previous_watcher_count = int(previous_target.get("watcher_client_count") or 0)
+                previous_watcher_ref = previous_target.get("watcher_client_ref")
+                watcher_ref = target.get("watcher_client_ref")
+                if watcher_clients > 0:
+                    target["watcher_state"] = "watching"
+                    if previous_absence:
+                        since = float(previous_absence.get("since") or now)
+                        recovered_after = max(0, int(now - since))
+                        target["watcher_recovered_after_seconds"] = recovered_after
+                        continuity_events.append((
+                            "watcher_recovered",
+                            dict(target),
+                            {
+                                "downtime_seconds": recovered_after,
+                                "last_watcher_client_ref": previous_absence.get("last_watcher_client_ref"),
+                                "watcher_client_ref": target.get("watcher_client_ref"),
+                            },
+                        ))
+                    elif (
+                        previous_watcher_count > 0
+                        and previous_watcher_ref
+                        and watcher_ref
+                        and watcher_ref != previous_watcher_ref
+                    ):
+                        target["watcher_recovered_after_seconds"] = 0
+                        continuity_events.append((
+                            "watcher_recovered",
+                            dict(target),
+                            {
+                                "downtime_seconds": 0,
+                                "last_watcher_client_ref": previous_watcher_ref,
+                                "watcher_client_ref": watcher_ref,
+                            },
+                        ))
+                elif previous_watcher_count > 0 or previous_absence:
+                    absence = previous_absence or {
+                        "since": now,
+                        "last_watcher_client_ref": previous_target.get("watcher_client_ref"),
+                    }
+                    since = float(absence.get("since") or now)
+                    target["watcher_state"] = "reconnecting"
+                    target["watcher_absent_since"] = since
+                    target["watcher_absent_seconds"] = max(0, int(now - since))
+                    if absence.get("last_watcher_client_ref"):
+                        target["last_watcher_client_ref"] = absence.get("last_watcher_client_ref")
+                    next_absences[channel_uuid] = dict(absence)
+                    if not previous_absence:
+                        continuity_events.append((
+                            "watcher_reconnecting",
+                            dict(target),
+                            {
+                                "last_watcher_client_ref": absence.get("last_watcher_client_ref"),
+                                "watcher_absent_seconds": target["watcher_absent_seconds"],
+                            },
+                        ))
+                else:
+                    target["watcher_state"] = "waiting"
             targets.append(target)
             watched[channel_uuid] = dict(target)
 
         with self._lock:
             self._watched = watched
+            self._watcher_absences = next_absences if continuous_mode else {}
+        for event_type, event_target, details in continuity_events:
+            self._record_event(event_type, event_target, details)
         return targets
 
     def _probe_targets(self, udi: Any, targets: Iterable[Dict[str, Any]], config: Dict[str, Any]) -> None:
@@ -420,6 +512,7 @@ class ShadowBlankMonitorService:
                 fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
                 if self._real_client_count(fresh_status, config) <= 0:
                     self._reset_blank_count(channel_uuid)
+                    self._clear_switch_attempts(channel_uuid)
                     self._record_event("viewer_left", target, {})
                     with self._lock:
                         self._watched.pop(channel_uuid, None)
@@ -427,11 +520,15 @@ class ShadowBlankMonitorService:
 
                 target = dict(target)
                 target["real_client_count"] = self._real_client_count(fresh_status, config)
-                target["watcher_client_count"] = self._watcher_client_count(fresh_status, config)
+                target.update(self._watcher_client_details(fresh_status, config))
+                watcher_count = int(target.get("watcher_client_count") or 0)
+                target["watcher_state"] = "watching" if watcher_count > 0 else "reconnecting"
                 stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
                 target["stream_id"] = stream_id
                 target["stream_ref"] = _ref("stream", stream_id)
                 with self._lock:
+                    if watcher_count > 0:
+                        self._watcher_absences.pop(channel_uuid, None)
                     self._watched[channel_uuid] = dict(target)
         finally:
             with self._lock:
@@ -461,8 +558,10 @@ class ShadowBlankMonitorService:
                 fresh_status = {}
             else:
                 fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+
             if result.get("viewer_left") or self._real_client_count(fresh_status, config) <= 0:
                 self._reset_blank_count(channel_uuid)
+                self._clear_switch_attempts(channel_uuid)
                 self._record_event("viewer_left", target, {})
                 with self._lock:
                     self._watched.pop(channel_uuid, None)
@@ -470,6 +569,7 @@ class ShadowBlankMonitorService:
 
             if not detection_reason:
                 self._reset_blank_count(channel_uuid)
+                self._clear_switch_attempts(channel_uuid)
                 self._record_event("probe_ok", target, target["last_probe"])
                 return True
 
@@ -497,12 +597,14 @@ class ShadowBlankMonitorService:
         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
         if self._real_client_count(fresh_status, config) <= 0:
             self._reset_blank_count(channel_uuid)
+            self._clear_switch_attempts(channel_uuid)
             self._record_event("viewer_left", target, {})
             return
 
         fresh_stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
         if target.get("stream_id") and fresh_stream_id != target.get("stream_id"):
             self._reset_blank_count(channel_uuid)
+            self._clear_switch_attempts(channel_uuid)
             self._record_event(
                 "stale_stream_guard",
                 target,
@@ -514,7 +616,13 @@ class ShadowBlankMonitorService:
             self._record_event("switch_rate_limited", target, {"reason": reason})
             return
 
-        alternative = self._choose_alternative_stream(udi, target.get("channel_id"), fresh_stream_id)
+        attempted_targets = self._attempted_switch_targets(channel_uuid, fresh_stream_id)
+        alternative = self._choose_alternative_stream(
+            udi,
+            target.get("channel_id"),
+            fresh_stream_id,
+            excluded_stream_ids=attempted_targets,
+        )
         if not alternative:
             self._set_cooldown(channel_uuid, config)
             self._reset_blank_count(channel_uuid)
@@ -530,19 +638,32 @@ class ShadowBlankMonitorService:
             )
             return
 
+        self._record_switch_attempt(channel_uuid, fresh_stream_id, alternative)
         success = bool(self.switch_stream(channel_uuid, stream_id=alternative))
-        self._set_cooldown(channel_uuid, config)
         self._reset_blank_count(channel_uuid)
         if success:
             with self._lock:
                 self._switch_history[channel_uuid].append(self.clock())
+        else:
+            self._set_cooldown(channel_uuid, config)
         self._record_event(
             "switch_success" if success else "switch_failed",
             target,
-            {"target_stream_ref": _ref("stream", alternative), "reason": reason},
+            {
+                "target_stream_ref": _ref("stream", alternative),
+                "reason": reason,
+                "post_switch_verification": bool(success),
+            },
         )
 
-    def _choose_alternative_stream(self, udi: Any, channel_id: Optional[int], current_stream_id: Optional[int]) -> Optional[int]:
+    def _choose_alternative_stream(
+        self,
+        udi: Any,
+        channel_id: Optional[int],
+        current_stream_id: Optional[int],
+        *,
+        excluded_stream_ids: Optional[Iterable[int]] = None,
+    ) -> Optional[int]:
         if channel_id is None:
             return None
         channel = udi.get_channel_by_id(channel_id) if hasattr(udi, "get_channel_by_id") else None
@@ -556,12 +677,17 @@ class ShadowBlankMonitorService:
         stream_ids = [int(item) for item in stream_ids if str(item).isdigit()]
         if len(stream_ids) <= 1:
             return None
+        excluded = {
+            int(item)
+            for item in (excluded_stream_ids or [])
+            if item is not None and str(item).isdigit()
+        }
         if current_stream_id in stream_ids:
             index = stream_ids.index(current_stream_id)
             ordered = stream_ids[index + 1 :] + stream_ids[:index]
         else:
             ordered = stream_ids
-        return next((sid for sid in ordered if sid != current_stream_id), None)
+        return next((sid for sid in ordered if sid != current_stream_id and sid not in excluded), None)
 
     @staticmethod
     def _detection_count_key(channel_uuid: str, reason: str) -> str:
@@ -586,7 +712,7 @@ class ShadowBlankMonitorService:
         return f"{base_url}/proxy/ts/stream/{channel_uuid}"
 
     @staticmethod
-    def _blank_probe_command(url: str, config: Dict[str, Any]) -> tuple[List[str], int]:
+    def _blank_probe_command(url: str, config: Dict[str, Any], *, continuous: bool = False) -> tuple[List[str], int]:
         duration = int(config["probe_duration_seconds"])
         headers = ""
         api_key = config.get("watcher_api_key")
@@ -619,8 +745,6 @@ class ShadowBlankMonitorService:
             [
                 "-i",
                 url,
-                "-t",
-                str(duration),
                 "-vf",
                 ",".join(video_filters),
                 "-an",
@@ -629,6 +753,9 @@ class ShadowBlankMonitorService:
                 "-",
             ]
         )
+        if not continuous:
+            input_index = command.index("-vf")
+            command[input_index:input_index] = ["-t", str(duration)]
         return command, duration
 
     def _run_blank_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
@@ -678,59 +805,223 @@ class ShadowBlankMonitorService:
         udi: Any,
         target: Dict[str, Any],
     ) -> Dict[str, Any]:
-        command, duration = self._blank_probe_command(url, config)
-        deadline = time.monotonic() + duration + 15
+        command, duration = self._blank_probe_command(url, config, continuous=True)
         viewer_left = False
-        timed_out = False
+        stopped = False
+        detected_reason = ""
+        detected_duration = 0.0
+        lines: List[str] = []
+        line_queue: queue.Queue[str] = queue.Queue()
         process = subprocess.Popen(
             command,
-            stdout=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             text=True,
+            bufsize=1,
         )
 
+        def read_stderr() -> None:
+            if process.stderr is None:
+                return
+            try:
+                for line in iter(process.stderr.readline, ""):
+                    line_queue.put(line)
+            except Exception as exc:
+                logger.debug(f"Shadow blank monitor stderr reader stopped: {exc}")
+
+        reader = threading.Thread(
+            target=read_stderr,
+            name=f"ShadowBlankProbeReader-{str(target.get('channel_uuid') or '')[:8]}",
+            daemon=True,
+        )
+        reader.start()
+
         try:
-            while process.poll() is None:
-                if time.monotonic() >= deadline:
-                    timed_out = True
-                    process.kill()
+            # Continuous probes are protecting a real viewer that is already on
+            # the channel. Waiting for probe_duration * ratio turns a 60s
+            # watcher into a 48s blank wait before even the first confirmation.
+            # For open segments, use the configured minimum duration as the
+            # real-time trigger and let confirmation_count provide the safety
+            # against one-off black frames.
+            blank_required = float(
+                config.get("blank_min_duration_seconds", DEFAULT_CONFIG["blank_min_duration_seconds"])
+            )
+            freeze_required = float(
+                config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
+            )
+            last_media_time = 0.0
+            active_blank_start: Optional[float] = None
+            active_blank_wall: Optional[float] = None
+            active_freeze_start: Optional[float] = None
+            active_freeze_wall: Optional[float] = None
+            last_viewer_poll = 0.0
+
+            def observed_duration(media_start: Optional[float], wall_start: Optional[float]) -> float:
+                media_duration = 0.0
+                if media_start is not None:
+                    media_duration = max(0.0, last_media_time - media_start)
+                wall_duration = 0.0
+                if wall_start is not None:
+                    wall_duration = max(0.0, time.monotonic() - wall_start)
+                return max(media_duration, wall_duration)
+
+            def mark_detection(reason: str, event_duration: float) -> bool:
+                nonlocal detected_reason, detected_duration
+                detected_reason = reason
+                detected_duration = max(0.0, event_duration)
+                if process.poll() is None:
+                    process.terminate()
+                return True
+
+            while process.poll() is None and not self._stop_event.is_set():
+                now = time.monotonic()
+                while True:
+                    try:
+                        line = line_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    lines.append(line)
+
+                    progress_time = _parse_ffmpeg_progress_time(line)
+                    if progress_time is not None:
+                        last_media_time = max(last_media_time, progress_time)
+
+                    blank_start_match = BLACK_START_RE.search(line)
+                    if blank_start_match:
+                        try:
+                            active_blank_start = max(0.0, float(blank_start_match.group("start")))
+                            active_blank_wall = now
+                        except (TypeError, ValueError):
+                            active_blank_start = None
+                            active_blank_wall = None
+
+                    blank_end_match = BLACK_END_RE.search(line)
+                    if blank_end_match:
+                        segment_duration = None
+                        duration_match = BLACK_DURATION_RE.search(line)
+                        if duration_match:
+                            try:
+                                segment_duration = max(0.0, float(duration_match.group("duration")))
+                            except (TypeError, ValueError):
+                                segment_duration = None
+                        if segment_duration is None and active_blank_start is not None:
+                            try:
+                                segment_duration = max(0.0, float(blank_end_match.group("end")) - active_blank_start)
+                            except (TypeError, ValueError):
+                                segment_duration = 0.0
+                        active_blank_start = None
+                        active_blank_wall = None
+                        if segment_duration is not None and segment_duration >= blank_required:
+                            if mark_detection("blank", segment_duration):
+                                break
+
+                    freeze_start_match = FREEZE_START_RE.search(line)
+                    if freeze_start_match:
+                        try:
+                            active_freeze_start = max(0.0, float(freeze_start_match.group("start")))
+                            active_freeze_wall = now
+                        except (TypeError, ValueError):
+                            active_freeze_start = None
+                            active_freeze_wall = None
+
+                    freeze_end_match = FREEZE_END_RE.search(line)
+                    if freeze_end_match:
+                        segment_duration = None
+                        duration_match = FREEZE_DURATION_RE.search(line)
+                        if duration_match:
+                            try:
+                                segment_duration = max(0.0, float(duration_match.group("duration")))
+                            except (TypeError, ValueError):
+                                segment_duration = None
+                        if segment_duration is None and active_freeze_start is not None:
+                            try:
+                                segment_duration = max(0.0, float(freeze_end_match.group("end")) - active_freeze_start)
+                            except (TypeError, ValueError):
+                                segment_duration = 0.0
+                        active_freeze_start = None
+                        active_freeze_wall = None
+                        if segment_duration is not None and segment_duration >= freeze_required:
+                            if mark_detection("freeze", segment_duration):
+                                break
+
+                if detected_reason:
+                    break
+
+                if (
+                    active_blank_start is not None
+                    and observed_duration(active_blank_start, active_blank_wall) >= blank_required
+                ):
+                    mark_detection("blank", observed_duration(active_blank_start, active_blank_wall))
+                    break
+
+                if (
+                    active_freeze_start is not None
+                    and observed_duration(active_freeze_start, active_freeze_wall) >= freeze_required
+                ):
+                    mark_detection("freeze", observed_duration(active_freeze_start, active_freeze_wall))
                     break
 
                 try:
-                    fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                    if self._real_client_count(fresh_status, config) <= 0:
-                        viewer_left = True
-                        process.terminate()
-                        break
+                    if now - last_viewer_poll >= 1.0:
+                        last_viewer_poll = now
+                        fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                        if self._real_client_count(fresh_status, config) <= 0:
+                            viewer_left = True
+                            process.terminate()
+                            break
                 except Exception as exc:
                     logger.warning(f"Shadow blank monitor viewer poll failed: {exc}")
 
-                time.sleep(1)
+                time.sleep(0.2)
+
+            if self._stop_event.is_set() and process.poll() is None:
+                stopped = True
+                process.terminate()
 
             try:
-                _, stderr = process.communicate(timeout=5)
+                process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
-                _, stderr = process.communicate()
-                timed_out = True
+                process.wait(timeout=5)
+                stopped = True
 
-            output = stderr or ""
+            while True:
+                try:
+                    lines.append(line_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            output = "".join(lines)
+            observed_probe_duration = max(
+                duration,
+                int(last_media_time) if last_media_time else 0,
+                int(detected_duration) if detected_duration else 0,
+            )
             parsed = _parse_blank_detection(
                 output,
-                duration,
+                observed_probe_duration,
                 blank_ratio_threshold=float(config["blank_ratio_threshold"]),
             )
             if config.get("freeze_detection_enabled"):
                 parsed.update(_parse_freeze_detection(
                     output,
-                    duration,
+                    observed_probe_duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
             parsed["returncode"] = process.returncode
+            if detected_reason == "blank":
+                parsed["blank_detected"] = True
+                parsed["blank_duration_secs"] = round(detected_duration, 3)
+                parsed["blank_ratio"] = round(min(1.0, detected_duration / float(duration or 1)), 4)
+            elif detected_reason == "freeze":
+                parsed.setdefault("blank_detected", False)
+                parsed["freeze_detected"] = True
+                parsed["freeze_duration_secs"] = round(detected_duration, 3)
+                parsed["freeze_ratio"] = round(min(1.0, detected_duration / float(duration or 1)), 4)
             if viewer_left:
                 parsed["viewer_left"] = True
-            if timed_out:
-                parsed["timeout"] = True
+            if stopped:
+                parsed["stopped"] = True
             return parsed
         finally:
             if process.poll() is None:
@@ -822,15 +1113,45 @@ class ShadowBlankMonitorService:
         return 1 if self._is_status_active(status) else 0
 
     def _watcher_client_count(self, status: Dict[str, Any], config: Dict[str, Any]) -> int:
+        return int(self._watcher_client_details(status, config).get("watcher_client_count") or 0)
+
+    def _watcher_client_details(self, status: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
         marker = str(config.get("watcher_user_agent") or "").lower()
         if not marker:
-            return 0
+            return {"watcher_client_count": 0}
         clients = status.get("clients")
         if isinstance(clients, dict):
             clients = list(clients.values())
         if not isinstance(clients, list):
-            return 0
-        return sum(1 for client in clients if marker in self._client_text(client).lower())
+            return {"watcher_client_count": 0}
+
+        watcher_clients = [
+            (index, client)
+            for index, client in enumerate(clients)
+            if marker in self._client_text(client).lower()
+        ]
+        details: Dict[str, Any] = {"watcher_client_count": len(watcher_clients)}
+        if not watcher_clients:
+            return details
+
+        index, client = watcher_clients[0]
+        raw_client_id: Any = None
+        connected_at: Any = None
+        if isinstance(client, dict):
+            raw_client_id = client.get("client_id") or client.get("id") or client.get("session_id")
+            connected_at = client.get("connected_at") or client.get("started_at")
+        if raw_client_id is None:
+            raw_client_id = f"{index}:{self._client_text(client)}"
+
+        details["watcher_client_ref"] = _ref("client", raw_client_id)
+        try:
+            connected_at_float = float(connected_at)
+        except (TypeError, ValueError):
+            connected_at_float = None
+        if connected_at_float is not None:
+            details["watcher_connected_at"] = connected_at_float
+            details["watcher_uptime_seconds"] = max(0, int(self.clock() - connected_at_float))
+        return details
 
     def _cooldown_remaining(self, channel_uuid: str) -> int:
         with self._lock:
@@ -839,6 +1160,53 @@ class ShadowBlankMonitorService:
     def _set_cooldown(self, channel_uuid: str, config: Dict[str, Any]) -> None:
         with self._lock:
             self._cooldowns[channel_uuid] = self.clock() + int(config["channel_cooldown_seconds"])
+
+    def _attempted_switch_targets(
+        self,
+        channel_uuid: str,
+        origin_stream_id: Optional[int],
+    ) -> set[int]:
+        if origin_stream_id is None:
+            return set()
+        try:
+            origin = int(origin_stream_id)
+        except (TypeError, ValueError):
+            return set()
+        with self._lock:
+            entry = self._switch_attempts.get(channel_uuid) or {}
+            if entry.get("origin_stream_id") != origin:
+                return set()
+            return {
+                int(item)
+                for item in entry.get("target_stream_ids", [])
+                if item is not None and str(item).isdigit()
+            }
+
+    def _record_switch_attempt(
+        self,
+        channel_uuid: str,
+        origin_stream_id: Optional[int],
+        target_stream_id: Optional[int],
+    ) -> None:
+        if origin_stream_id is None or target_stream_id is None:
+            return
+        try:
+            origin = int(origin_stream_id)
+            target = int(target_stream_id)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            entry = self._switch_attempts.get(channel_uuid)
+            if not entry or entry.get("origin_stream_id") != origin:
+                entry = {"origin_stream_id": origin, "target_stream_ids": []}
+                self._switch_attempts[channel_uuid] = entry
+            targets = entry.setdefault("target_stream_ids", [])
+            if target not in targets:
+                targets.append(target)
+
+    def _clear_switch_attempts(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._switch_attempts.pop(channel_uuid, None)
 
     def _switch_allowed(self, channel_uuid: str, config: Dict[str, Any]) -> bool:
         now = self.clock()
@@ -911,6 +1279,15 @@ class ShadowBlankMonitorService:
             "channel_ref",
             "stream_ref",
             "real_client_count",
+            "watcher_client_count",
+            "watcher_client_ref",
+            "watcher_connected_at",
+            "watcher_uptime_seconds",
+            "watcher_state",
+            "watcher_absent_since",
+            "watcher_absent_seconds",
+            "watcher_recovered_after_seconds",
+            "last_watcher_client_ref",
             "state",
             "cooldown_seconds",
             "last_probe",

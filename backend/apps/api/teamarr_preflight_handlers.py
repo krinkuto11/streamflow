@@ -62,3 +62,31 @@ def run_teamarr_preflight_once_response(*, get_service: Callable[[], Any]):
     except Exception as exc:
         logger.error(f"Error running Teamarr preflight scan: {exc}", exc_info=True)
         return error_response("Internal Server Error", status_code=500, code="internal_error")
+
+
+def force_teamarr_preflight_event_response(
+    *,
+    payload: Optional[Dict[str, Any]],
+    get_service: Callable[[], Any],
+):
+    try:
+        identity = (payload or {}).get("identity")
+        result = get_service().force_check_event(identity)
+        if result.get("success"):
+            return jsonify(result), 200
+
+        code = str(result.get("code") or "manual_preflight_failed")
+        status_code = 404 if code == "event_not_found" else 400
+        return error_response(
+            str(result.get("error") or "Manual preflight failed"),
+            status_code=status_code,
+            code=code,
+            details={
+                key: value
+                for key, value in result.items()
+                if key not in {"success", "error", "code"}
+            },
+        )
+    except Exception as exc:
+        logger.error(f"Error forcing Teamarr preflight event: {exc}", exc_info=True)
+        return error_response("Internal Server Error", status_code=500, code="internal_error")

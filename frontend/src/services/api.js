@@ -61,6 +61,7 @@ export const automationAPI = {
   assignChannel: (channelId, profileId) => api.post('/automation/assign/channel', { channel_id: channelId, profile_id: profileId }),
   assignChannels: (channelIds, profileId) => api.post('/automation/assign/channels', { channel_ids: channelIds, profile_id: profileId }),
   assignGroup: (groupId, profileId) => api.post('/automation/assign/group', { group_id: groupId, profile_id: profileId }),
+  assignGroups: (groupIds, profileId) => api.post('/automation/assign/groups', { group_ids: groupIds, profile_id: profileId }),
   getGroupAssignments: () => api.get('/automation/assign/group'),
 
   // EPG Scheduled Profile Assignments
@@ -70,7 +71,7 @@ export const automationAPI = {
   getGroupEpgAssignments: () => api.get('/automation/assign/epg-profile/group'),
 
   // Automation Periods
-  getPeriods: () => api.get('/automation/periods'),
+  getPeriods: (params = undefined) => api.get('/automation/periods', params ? { params } : undefined),
   createPeriod: (period) => api.post('/automation/periods', period),
   getPeriod: (periodId) => api.get(`/automation/periods/${periodId}`),
   updatePeriod: (periodId, period) => api.put(`/automation/periods/${periodId}`, period),
@@ -88,6 +89,7 @@ export const automationAPI = {
   removePeriodFromGroups: (periodId, groupIds) =>
     api.post(`/automation/periods/${periodId}/remove-groups`, { group_ids: groupIds }),
   getGroupPeriods: (groupId) => api.get(`/channels/groups/${groupId}/automation-periods`),
+  getGroupConfigSummary: () => api.get('/channels/groups/config-summary'),
   batchAssignPeriodsToGroups: (groupIds, periodAssignments, replace = false) =>
     api.post('/channels/groups/batch/assign-periods', { group_ids: groupIds, period_assignments: periodAssignments, replace }),
 
@@ -194,9 +196,10 @@ export const streamCheckerAPI = {
   getProgress: () => api.get('/stream-checker/progress'),
   checkChannel: (channelId) => api.post('/stream-checker/check-channel', { channel_id: channelId }),
   // Use longer timeout for single channel check as it can take time
-  checkSingleChannel: (channelId, profileId = null) => api.post('/stream-checker/check-single-channel', {
+  checkSingleChannel: (channelId, profileId = null, forceCheck = true) => api.post('/stream-checker/check-single-channel', {
     channel_id: channelId,
     ...(profileId ? { profile_id: profileId } : {}),
+    force_check: forceCheck,
   }, { timeout: 120000 }),
   markUpdated: (data) => api.post('/stream-checker/mark-updated', data),
   queueAllChannels: (options = {}) => api.post('/stream-checker/queue-all', options),
@@ -223,6 +226,7 @@ export const teamarrPreflightAPI = {
   start: () => api.post('/teamarr-preflight/start'),
   stop: () => api.post('/teamarr-preflight/stop'),
   runOnce: () => api.post('/teamarr-preflight/run-once'),
+  forceEventCheck: (identity) => api.post('/teamarr-preflight/events/force-check', { identity }),
 };
 
 export const changelogAPI = {

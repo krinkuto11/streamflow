@@ -6,27 +6,8 @@ import sys
 import os
 from pathlib import Path
 
-# Add backend to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-# Mock external dependencies
-sys.modules['udi'] = MagicMock()
-sys.modules['logging_config'] = MagicMock()
-sys.modules['api_utils'] = MagicMock()
-sys.modules['automated_stream_manager'] = MagicMock()
-sys.modules['stream_checker_service'] = MagicMock()
-sys.modules['scheduling_service'] = MagicMock()
-sys.modules['channel_settings_manager'] = MagicMock()
-sys.modules['dispatcharr_config'] = MagicMock()
-sys.modules['channel_order_manager'] = MagicMock()
-sys.modules['stream_stats_utils'] = MagicMock()
-
-# Import the app to test
-# Hack to mock the log_function_call decorator which is used in web_api.py
-# This must be done BEFORE importing web_api
-def mock_decorator(f):
-    return f
-sys.modules['logging_config'].log_function_call = mock_decorator
+# Add backend to path so the real compatibility modules are imported.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from web_api import app
 from apps.stream.stream_session_manager import StreamInfo, SessionInfo

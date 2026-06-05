@@ -1,3 +1,5 @@
+import { formatDuration } from './time-format.js'
+
 export const earliestStreamStart = (streams = []) => {
   const startedAtValues = streams
     .map(stream => Date.parse(stream?.started_at))
@@ -41,6 +43,7 @@ export const getAutomationStageCards = ({
   displayRunStageId = 'idle',
   displayRunningRun = false,
   completedRun = false,
+  neutralRun = false,
   streamRunActive = false,
 } = {}) => {
   const normalizedDisplayStageId = normalizeRunStageKey(displayRunStageId)
@@ -53,16 +56,14 @@ export const getAutomationStageCards = ({
     const backendStage = backendStages.get(stage.id)
     let status = backendStage?.status
 
-    if (!status || status === 'pending') {
-      if (streamRunActive && displayCurrentStageIndex >= 0) {
-        if (index < displayCurrentStageIndex) {
-          status = 'completed'
-        } else if (index === displayCurrentStageIndex) {
-          status = displayRunningRun ? 'running' : 'completed'
-        } else {
-          status = 'pending'
-        }
-      } else if (completedRun) {
+    if (neutralRun && !streamRunActive) {
+      status = 'pending'
+    } else if (streamRunActive) {
+      status = stage.id === normalizedDisplayStageId
+        ? (displayRunningRun ? 'running' : 'completed')
+        : 'pending'
+    } else if (!status || status === 'pending') {
+      if (completedRun) {
         status = 'completed'
       } else if (displayRunningRun && displayCurrentStageIndex >= 0 && index < displayCurrentStageIndex) {
         status = 'completed'
@@ -94,11 +95,6 @@ export const getRunDurationValue = ({
   displayRunStageElapsedSeconds = null,
   stages = [],
 } = {}) => {
-  const reportedSeconds = runDurations?.[durationKey]
-  if (reportedSeconds !== null && reportedSeconds !== undefined) {
-    return reportedSeconds
-  }
-
   const normalizedStageId = normalizeRunStageKey(stageId)
   const normalizedDisplayStageId = normalizeRunStageKey(displayRunStageId)
 
@@ -107,11 +103,12 @@ export const getRunDurationValue = ({
       return streamCheckerElapsedSeconds
     }
 
-    const stageIndex = stages.findIndex(stage => stage.id === normalizedStageId)
-    const currentIndex = stages.findIndex(stage => stage.id === normalizedDisplayStageId)
-    if (stageIndex >= 0 && currentIndex >= 0 && stageIndex < currentIndex) {
-      return 0
-    }
+    return null
+  }
+
+  const reportedSeconds = runDurations?.[durationKey]
+  if (reportedSeconds !== null && reportedSeconds !== undefined) {
+    return reportedSeconds
   }
 
   if (displayRunningRun && normalizedStageId === normalizedDisplayStageId) {
@@ -119,6 +116,153 @@ export const getRunDurationValue = ({
   }
 
   return reportedSeconds
+}
+
+export const isM3uRefreshSkipped = ({
+  runCounts = {},
+  streamRunActive = false,
+} = {}) => {
+  if (streamRunActive) {
+    return false
+  }
+
+  const playlistsToRefresh = runCounts.playlists_to_refresh
+  const refreshedPlaylists = runCounts.refreshed_playlists ?? 0
+
+  return refreshedPlaylists === 0 && (
+    playlistsToRefresh === 0 ||
+    playlistsToRefresh === '0' ||
+    playlistsToRefresh === false
+  )
+}
+
+export const getRunDurationCardValue = ({
+  seconds = null,
+  skipped = false,
+} = {}) => {
+  if (skipped) {
+    return 'Skipped'
+  }
+
+  return formatDuration(seconds) || 'N/A'
+}
+
+const finiteNumber = (value) => {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+export const getM3uRefreshCardDetail = ({
+  runCounts = {},
+  skipped = false,
+  streamRunActive = false,
+} = {}) => {
+  if (streamRunActive) {
+    return null
+  }
+
+  if (skipped) {
+    return 'No playlist refresh requested'
+  }
+
+  const state = runCounts.m3u_refresh_state
+  const current = finiteNumber(runCounts.m3u_refresh_current)
+  const total = finiteNumber(runCounts.m3u_refresh_total)
+  const refreshed = finiteNumber(runCounts.refreshed_playlists)
+  const playlistsToRefresh = runCounts.playlists_to_refresh
+
+  if (state === 'skipped') {
+    return 'No active playlists matched'
+  }
+
+  if (state === 'planned' && total !== null && total > 0) {
+    return `Preparing ${total} playlist refresh request${total === 1 ? '' : 's'}`
+  }
+
+  if (state === 'requesting' && total !== null && total > 0) {
+    const active = current !== null ? Math.min(current + 1, total) : 1
+    return `Refreshing playlist ${active}/${total}`
+  }
+
+  if (['accepted', 'completed'].includes(state) && current !== null && total !== null && total > 0) {
+    return `${current}/${total} refresh request${total === 1 ? '' : 's'} accepted`
+  }
+
+  if (state === 'failed' && current !== null && total !== null && total > 0) {
+    return `${current}/${total} refresh request${total === 1 ? '' : 's'} failed`
+  }
+
+  if (refreshed !== null && refreshed > 0) {
+    return `${refreshed} refresh request${refreshed === 1 ? '' : 's'} accepted`
+  }
+
+  if (playlistsToRefresh === 'all') {
+    return 'All playlists selected'
+  }
+
+  return null
+}
+
+export const getCacheSyncCardDetail = ({
+  runCounts = {},
+  skipped = false,
+  streamRunActive = false,
+} = {}) => {
+  if (streamRunActive) {
+    return null
+  }
+
+  if (skipped) {
+    return 'No cache sync requested'
+  }
+
+  const state = runCounts.cache_sync_state
+  const current = finiteNumber(runCounts.cache_sync_successful_steps)
+  const total = finiteNumber(runCounts.cache_sync_total_steps)
+
+  if (current !== null && total !== null && total > 0) {
+    const suffix = state === 'warning' ? 'completed with warnings' : 'completed'
+    return `${current}/${total} cache sync steps ${suffix}`
+  }
+
+  if (state === 'warning') {
+    return 'Cache sync reported warnings'
+  }
+
+  if (state === 'completed') {
+    return 'Cache sync completed'
+  }
+
+  return null
+}
+
+export const getRunHistoryBaseline = ({
+  summary = {},
+} = {}) => {
+  const sampleCount = finiteNumber(summary?.sample_count) ?? 0
+  if (sampleCount <= 0) {
+    return {
+      available: false,
+      sampleCount: 0,
+      latest: null,
+      typicalDurationSeconds: null,
+      averageDurationSeconds: null,
+      typicalSecondsPerChannel: null,
+      perChannelSampleCount: 0,
+      perChannelBaselineStable: false,
+    }
+  }
+
+  return {
+    available: true,
+    sampleCount,
+    latest: summary.latest || null,
+    typicalDurationSeconds: finiteNumber(summary.typical_duration_seconds),
+    averageDurationSeconds: finiteNumber(summary.average_duration_seconds),
+    typicalSecondsPerChannel: finiteNumber(summary.typical_seconds_per_channel),
+    perChannelSampleCount: finiteNumber(summary.per_channel_sample_count) ?? 0,
+    perChannelBaselineStable: Boolean(summary.per_channel_baseline_stable),
+  }
 }
 
 export const getStreamCheckerRunDisplay = ({
@@ -130,12 +274,15 @@ export const getStreamCheckerRunDisplay = ({
   now = Date.now(),
 } = {}) => {
   const isProcessing = Boolean(streamCheckerStatus?.stream_checking_mode)
-  const qualityStageActive = runStage === 'quality_checking' && batchTotal > 0
+  const activeBatchTotal = isProcessing ? batchTotal : 0
+  const qualityStageActive = runStage === 'quality_checking' && activeBatchTotal > 0
   const streamCheckerOnlyActive = isProcessing && runState !== 'running'
-  const streamQueueActive = (qualityStageActive || streamCheckerOnlyActive) && batchTotal > 0
-  const queueStartedAt = parseTimestamp(streamCheckerStatus?.queue?.started_at)
-  const currentStreamStartedAt = earliestStreamStart(streamCheckerStatus?.progress?.streams_detail || [])
-  const progressTimestamp = parseTimestamp(streamCheckerStatus?.progress?.timestamp)
+  const streamQueueActive = (qualityStageActive || streamCheckerOnlyActive) && activeBatchTotal > 0
+  const queueStartedAt = isProcessing ? parseTimestamp(streamCheckerStatus?.queue?.started_at) : null
+  const currentStreamStartedAt = isProcessing
+    ? earliestStreamStart(streamCheckerStatus?.progress?.streams_detail || [])
+    : null
+  const progressTimestamp = isProcessing ? parseTimestamp(streamCheckerStatus?.progress?.timestamp) : null
   const streamCheckerStartedAt = queueStartedAt ?? currentStreamStartedAt ?? progressTimestamp
   const streamCheckerElapsedSeconds = streamCheckerStartedAt !== null
     ? Math.max(0, Math.floor((now - streamCheckerStartedAt) / 1000))
@@ -163,18 +310,85 @@ export const getStreamCheckerRunDisplay = ({
   }
 }
 
+export const getSkippedRunDisplay = ({
+  skippedRun = false,
+  streamRunActive = false,
+  streamQueueActive = false,
+  runProgressMessage = '',
+  runStatusMessage = '',
+} = {}) => {
+  const noDueRun = skippedRun && !streamRunActive && !streamQueueActive
+  if (!noDueRun) {
+    return {
+      badgeLabel: null,
+      message: null,
+      progressDetail: null,
+      stageLabel: null,
+    }
+  }
+
+  return {
+    badgeLabel: 'Idle',
+    message: 'Waiting for next scheduled run',
+    progressDetail: runProgressMessage || runStatusMessage || 'No active automation periods are due',
+    stageLabel: 'No Due Periods',
+  }
+}
+
+export const getAbortedRunDisplay = ({
+  runState = 'idle',
+  runStatus = {},
+} = {}) => {
+  const aborted = runState === 'aborted'
+    || runStatus?.status === 'aborted'
+    || runStatus?.stage === 'aborted'
+
+  if (!aborted) {
+    return {
+      message: null,
+      progressDetail: null,
+      progressPercent: null,
+    }
+  }
+
+  const message = runStatus?.last_error
+    || runStatus?.message
+    || 'Automation run was stopped by the user'
+
+  return {
+    message,
+    progressDetail: message,
+    progressPercent: 0,
+  }
+}
+
+export const shouldShowAutomationRunCard = ({
+  showRunProgress = false,
+  skippedRunDisplay = {},
+} = {}) => {
+  const idleNoDueRun = skippedRunDisplay?.badgeLabel === 'Idle'
+    && skippedRunDisplay?.stageLabel === 'No Due Periods'
+
+  return Boolean(showRunProgress && !idleNoDueRun)
+}
+
 export const getDashboardActionStates = ({
   actionLoading = '',
   isStreamCheckerProcessing = false,
+  udiInitializing = false,
   udiSyncing = false,
 } = {}) => {
   const actionBusy = actionLoading !== ''
   const reloadUdiReason = udiSyncing
     ? 'UDI sync is already running.'
+    : udiInitializing
+      ? 'Dispatcharr cache refresh is still running.'
     : actionBusy
       ? 'Another dashboard action is running.'
       : null
-  const runAutomationReason = isStreamCheckerProcessing
+  const runAutomationReason = udiInitializing
+    ? 'Automation can start after the Dispatcharr cache is ready.'
+    : isStreamCheckerProcessing
     ? 'Automation cannot start while a stream check is already active.'
     : actionBusy
       ? 'Another dashboard action is running.'
@@ -182,11 +396,11 @@ export const getDashboardActionStates = ({
 
   return {
     reloadUdi: {
-      disabled: udiSyncing || actionBusy,
+      disabled: udiSyncing || udiInitializing || actionBusy,
       reason: reloadUdiReason,
     },
     runAutomation: {
-      disabled: isStreamCheckerProcessing || actionBusy,
+      disabled: udiInitializing || isStreamCheckerProcessing || actionBusy,
       reason: runAutomationReason,
     },
   }

@@ -12,12 +12,18 @@ import { automationAPI, streamCheckerAPI, dispatcharrAPI, sessionSettingsAPI, sc
 import AutomationProfileStudio from '@/components/Automation/AutomationProfileStudio.jsx'
 import AutomationPeriods from '@/components/Automation/AutomationPeriods.jsx'
 
+const DEFAULT_UDI_REFRESH_INTERVAL_MINUTES = 240
+
 export default function AutomationSettings() {
   const [config, setConfig] = useState(null)
   const [streamCheckerConfig, setStreamCheckerConfig] = useState(null)
   const [dispatcharrConfig, setDispatcharrConfig] = useState(null)
   const [sessionConfig, setSessionConfig] = useState({ review_duration: 60 })
-  const [schedulingConfig, setSchedulingConfig] = useState({ epg_schedule: { type: 'interval', value: 60 }, udi_refresh_schedule: null, enabled: true })
+  const [schedulingConfig, setSchedulingConfig] = useState({
+    epg_schedule: { type: 'interval', value: 60 },
+    udi_refresh_schedule: { type: 'interval', value: DEFAULT_UDI_REFRESH_INTERVAL_MINUTES },
+    enabled: true
+  })
   const [orchestratorConfig, setOrchestratorConfig] = useState({ host: '', port: 8000, has_api_key: false, api_key: '' })
   const [testingConnection, setTestingConnection] = useState(false)
   const [connectionTestResult, setConnectionTestResult] = useState(null)
@@ -276,7 +282,7 @@ export default function AutomationSettings() {
                       max="720"
                       step="15"
                       className="max-w-[120px]"
-                      value={schedulingConfig?.udi_refresh_schedule?.value || 0}
+                      value={schedulingConfig?.udi_refresh_schedule?.value ?? 0}
                       onChange={(e) => {
                         const raw = parseInt(e.target.value) || 0
                         const snapped = Math.floor(Math.min(Math.max(raw, 0), 720) / 15) * 15
@@ -294,6 +300,162 @@ export default function AutomationSettings() {
                 </div>
               </div>
               <div className="flex justify-end pt-4">
+                <Button onClick={handleSave} disabled={saving}>
+                  {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Save Settings
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Automation Run Policy</CardTitle>
+              <CardDescription>
+                Bound automatic catch-up work, missed periods, and event windows
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="run-all-due-periods">Run all due periods</Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Off runs only the highest-priority due period per automatic pass. On allows every due period up to the catch-up cap.
+                    </p>
+                    <div className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
+                      <AlertCircle className="h-3.5 w-3.5" />
+                      <span>Use with a cap when downtime could queue many periods.</span>
+                    </div>
+                  </div>
+                  <Switch
+                    id="run-all-due-periods"
+                    checked={Boolean(config?.run_all_due_periods)}
+                    onCheckedChange={(checked) => handleGlobalAutomationChange('run_all_due_periods', checked)}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="catch-up-max-periods">Catch-up cap</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id="catch-up-max-periods"
+                      type="number"
+                      min="0"
+                      max="50"
+                      className="max-w-[120px]"
+                      value={config?.catch_up_max_periods_per_cycle || 0}
+                      onChange={(e) => handleGlobalAutomationChange(
+                        'catch_up_max_periods_per_cycle',
+                        Math.max(0, parseInt(e.target.value) || 0)
+                      )}
+                      disabled={!config?.run_all_due_periods}
+                    />
+                    <span className="text-sm text-muted-foreground">periods</span>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Applies only when Run all due periods is on. 0 means unlimited; positive values defer extra automatic periods to the next scheduler pass.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="maintenance-window-enabled">Maintenance window</Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Automatic runs pause inside this daily window. Manual forced runs still work.
+                    </p>
+                  </div>
+                  <Switch
+                    id="maintenance-window-enabled"
+                    checked={Boolean(config?.maintenance_window_enabled)}
+                    onCheckedChange={(checked) => handleGlobalAutomationChange('maintenance_window_enabled', checked)}
+                  />
+                </div>
+              </div>
+
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="space-y-2">
+                  <Label htmlFor="maintenance-window-start">Maintenance start</Label>
+                  <Input
+                    id="maintenance-window-start"
+                    type="time"
+                    value={config?.maintenance_window_start || '02:00'}
+                    onChange={(e) => handleGlobalAutomationChange('maintenance_window_start', e.target.value || '02:00')}
+                    disabled={!config?.maintenance_window_enabled}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="maintenance-window-end">Maintenance end</Label>
+                  <Input
+                    id="maintenance-window-end"
+                    type="time"
+                    value={config?.maintenance_window_end || '04:00'}
+                    onChange={(e) => handleGlobalAutomationChange('maintenance_window_end', e.target.value || '04:00')}
+                    disabled={!config?.maintenance_window_enabled}
+                  />
+                </div>
+              </div>
+
+              <Separator />
+
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="teamarr-event-window-enabled">Teamarr event window</Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      Automatic runs pause around cached Teamarr events. Manual forced runs still work.
+                    </p>
+                  </div>
+                  <Switch
+                    id="teamarr-event-window-enabled"
+                    checked={Boolean(config?.teamarr_event_window_enabled)}
+                    onCheckedChange={(checked) => handleGlobalAutomationChange('teamarr_event_window_enabled', checked)}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="teamarr-event-window-before">Before start</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="teamarr-event-window-before"
+                        type="number"
+                        min="0"
+                        max="1440"
+                        value={config?.teamarr_event_window_before_minutes ?? 30}
+                        onChange={(e) => handleGlobalAutomationChange(
+                          'teamarr_event_window_before_minutes',
+                          Math.max(0, parseInt(e.target.value) || 0)
+                        )}
+                        disabled={!config?.teamarr_event_window_enabled}
+                      />
+                      <span className="text-sm text-muted-foreground">min</span>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="teamarr-event-window-after">After start</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="teamarr-event-window-after"
+                        type="number"
+                        min="0"
+                        max="1440"
+                        value={config?.teamarr_event_window_after_minutes ?? 10}
+                        onChange={(e) => handleGlobalAutomationChange(
+                          'teamarr_event_window_after_minutes',
+                          Math.max(0, parseInt(e.target.value) || 0)
+                        )}
+                        disabled={!config?.teamarr_event_window_enabled}
+                      />
+                      <span className="text-sm text-muted-foreground">min</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end pt-2">
                 <Button onClick={handleSave} disabled={saving}>
                   {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                   Save Settings

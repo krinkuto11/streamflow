@@ -188,6 +188,18 @@ def get_viewer_activity_status_response(
         except Exception as exc:
             logger.debug(f"Could not read shadow monitor config for viewer activity: {exc}")
 
+        if getattr(udi, "is_initialization_pending", lambda: False)():
+            status = build_viewer_activity_status(
+                proxy_status={},
+                channels=[],
+                watcher_user_agent=watcher_user_agent,
+            )
+            shadow_status = shadow_monitor.get_status() if hasattr(shadow_monitor, "get_status") else {}
+            status["shadow_monitor_running"] = bool(shadow_status.get("running"))
+            status["shadow_monitor_enabled"] = bool(shadow_status.get("enabled"))
+            status["initializing"] = True
+            return jsonify(status), 200
+
         status = build_viewer_activity_status(
             proxy_status=udi.get_proxy_status() if hasattr(udi, "get_proxy_status") else {},
             channels=udi.get_channels() if hasattr(udi, "get_channels") else [],

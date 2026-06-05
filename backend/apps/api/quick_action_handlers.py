@@ -36,7 +36,7 @@ def refresh_playlist_response(*, payload: Any, get_automation_manager: Callable[
         success, _ = manager.refresh_playlists(force=True)
 
         if success:
-            return jsonify({"message": "Playlist refresh completed successfully"})
+            return jsonify({"message": "Playlist refresh request accepted"})
         return jsonify({"error": "Playlist refresh failed"}), 500
     except Exception as exc:
         logger.error(f"Error refreshing playlist: {exc}")

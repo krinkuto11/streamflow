@@ -34,6 +34,7 @@ EXECUTED_EVENTS_FILE = CONFIG_DIR / 'executed_events.json'
 # Constants
 DUPLICATE_DETECTION_WINDOW_SECONDS = 300  # 5 minutes window for detecting duplicate events
 EXECUTED_EVENTS_RETENTION_DAYS = 7  # Keep executed events history for 7 days
+DEFAULT_UDI_REFRESH_INTERVAL_MINUTES = 240
 
 
 # ── SCH-002 ────────────────────────────────────────────────────────────────
@@ -101,7 +102,7 @@ class SchedulingService:
         default_config = {
             'epg_schedule': {'type': 'interval', 'value': 60},
             'epg_refresh_interval_minutes': 60,
-            'udi_refresh_schedule': None,
+            'udi_refresh_schedule': {'type': 'interval', 'value': DEFAULT_UDI_REFRESH_INTERVAL_MINUTES},
             'enabled': True
         }
         from apps.database.connection import get_session
@@ -125,7 +126,10 @@ class SchedulingService:
 
                 # Ensure udi_refresh_schedule key exists in older configs
                 if 'udi_refresh_schedule' not in config:
-                    config['udi_refresh_schedule'] = None
+                    config['udi_refresh_schedule'] = {
+                        'type': 'interval',
+                        'value': DEFAULT_UDI_REFRESH_INTERVAL_MINUTES
+                    }
                     needs_save = True
                 if 'epg_refresh_interval_minutes' not in config:
                     config['epg_refresh_interval_minutes'] = int(
@@ -652,7 +656,124 @@ class SchedulingService:
 
     def get_auto_create_rules(self) -> List[Dict[str, Any]]:
         """Get all auto-create rules."""
-        return self._auto_create_rules.copy()
+        udi = get_udi_manager()
+        return [
+            self._normalize_auto_create_rule_selection(rule, udi=udi, persist=False)
+            for rule in self._auto_create_rules
+        ]
+
+    def _resolve_auto_create_rule_channel_selection(
+        self,
+        channel_ids: List[Any],
+        channel_group_ids: List[Any],
+        udi: Any,
+    ) -> tuple[List[int], List[Dict[str, Any]], List[int]]:
+        """Resolve rule channel selection while keeping explicit channels explicit.
+
+        Older rules stored every channel from selected groups in channel_ids, which
+        made group-only rules look like hundreds of manually selected channels.
+        The stored channel_ids now represent only channels outside the selected
+        groups; group membership is resolved at preview/match time.
+        """
+        explicit_ids: List[int] = []
+        seen_explicit_ids = set()
+        for raw_channel_id in channel_ids or []:
+            if raw_channel_id in (None, ""):
+                continue
+            try:
+                channel_id = int(raw_channel_id)
+            except (TypeError, ValueError):
+                continue
+            if channel_id not in seen_explicit_ids:
+                explicit_ids.append(channel_id)
+                seen_explicit_ids.add(channel_id)
+
+        channel_groups_info: List[Dict[str, Any]] = []
+        group_channel_ids = set()
+        for raw_group_id in channel_group_ids or []:
+            if raw_group_id in (None, ""):
+                continue
+            try:
+                group_id = int(raw_group_id)
+            except (TypeError, ValueError):
+                continue
+
+            group = udi.get_channel_group_by_id(group_id)
+            if not group:
+                continue
+            group_channels = udi.get_channels_by_group(group_id) or []
+            channel_groups_info.append({
+                'id': group_id,
+                'name': group.get('name', ''),
+                'channel_count': len(group_channels),
+            })
+            for channel in group_channels:
+                raw_channel_id = channel.get('id')
+                if raw_channel_id in (None, ""):
+                    continue
+                try:
+                    group_channel_ids.add(int(raw_channel_id))
+                except (TypeError, ValueError):
+                    continue
+
+        stored_channel_ids = [
+            channel_id for channel_id in explicit_ids
+            if channel_id not in group_channel_ids
+        ]
+
+        resolved_channel_ids: List[int] = []
+        seen_resolved_ids = set()
+        for channel_id in [*stored_channel_ids, *sorted(group_channel_ids)]:
+            if channel_id not in seen_resolved_ids:
+                resolved_channel_ids.append(channel_id)
+                seen_resolved_ids.add(channel_id)
+
+        return stored_channel_ids, channel_groups_info, resolved_channel_ids
+
+    def _build_channels_info(self, channel_ids: List[int], udi: Any) -> List[Dict[str, Any]]:
+        channels_info = []
+        for channel_id in channel_ids:
+            channel = udi.get_channel_by_id(channel_id)
+            if not channel:
+                continue
+            logo_url = None
+            logo_id = channel.get('logo_id')
+            if logo_id:
+                logo_url = f"/api/logos/{logo_id}"
+            channels_info.append({
+                'id': channel_id,
+                'name': channel.get('name', ''),
+                'logo_url': logo_url,
+                'tvg_id': channel.get('tvg_id'),
+            })
+        return channels_info
+
+    def _normalize_auto_create_rule_selection(
+        self,
+        rule: Dict[str, Any],
+        *,
+        udi: Any,
+        persist: bool = True,
+    ) -> Dict[str, Any]:
+        channel_ids = list(rule.get('channel_ids') or ([rule.get('channel_id')] if rule.get('channel_id') else []))
+        channel_group_ids = list(rule.get('channel_group_ids') or [])
+        stored_channel_ids, channel_groups_info, resolved_channel_ids = (
+            self._resolve_auto_create_rule_channel_selection(channel_ids, channel_group_ids, udi)
+        )
+        channels_info = self._build_channels_info(resolved_channel_ids, udi)
+
+        target = rule if persist else rule.copy()
+        target['channel_ids'] = stored_channel_ids
+        target['channel_group_ids'] = channel_group_ids
+        target['channel_groups_info'] = channel_groups_info
+        target['channels_info'] = channels_info
+
+        if channels_info:
+            target['channel_id'] = channels_info[0]['id']
+            target['channel_name'] = channels_info[0]['name']
+            target['tvg_id'] = channels_info[0].get('tvg_id')
+
+        return target
 
     def create_auto_create_rule(self, rule_data: Dict[str, Any]) -> Dict[str, Any]:
         """Create a new auto-create rule."""
@@ -674,37 +795,11 @@ class SchedulingService:
             if not channel_ids and not channel_group_ids:
                 raise ValueError("Missing required field: channel_id, channel_ids, or channel_group_ids")
 
-            # Expand channel groups
-            channel_groups_info = []
-            for group_id in channel_group_ids:
-                group = udi.get_channel_group_by_id(group_id)
-                if group:
-                    group_channels = udi.get_channels_by_group(group_id) or []
-                    channel_groups_info.append({
-                        'id': group_id,
-                        'name': group.get('name', ''),
-                        'channel_count': len(group_channels),
-                    })
-                    for ch in group_channels:
-                        if ch.get('id') not in channel_ids:
-                            channel_ids.append(ch.get('id'))
+            channel_ids, channel_groups_info, resolved_channel_ids = (
+                self._resolve_auto_create_rule_channel_selection(channel_ids, channel_group_ids, udi)
+            )
 
-            # Validate channels
-            channels_info = []
-            for channel_id in channel_ids:
-                channel = udi.get_channel_by_id(channel_id)
-                if not channel:
-                    continue
-                logo_url = None
-                logo_id = channel.get('logo_id')
-                if logo_id:
-                    logo_url = f"/api/logos/{logo_id}"
-                channels_info.append({
-                    'id': channel_id,
-                    'name': channel.get('name', ''),
-                    'logo_url': logo_url,
-                    'tvg_id': channel.get('tvg_id'),
-                })
+            channels_info = self._build_channels_info(resolved_channel_ids, udi)
 
             if not channels_info:
                 raise ValueError("No valid channels found for this rule")
@@ -784,31 +879,10 @@ class SchedulingService:
                 elif 'channel_id' in rule_data:
                     channel_ids = [rule_data['channel_id']]
 
-                channel_groups_info = []
-                for group_id in channel_group_ids:
-                    group = udi.get_channel_group_by_id(group_id)
-                    if group:
-                        group_channels = udi.get_channels_by_group(group_id) or []
-                        channel_groups_info.append({
-                            'id': group_id,
-                            'name': group.get('name', ''),
-                            'channel_count': len(group_channels),
-                        })
-                        for ch in group_channels:
-                            if ch.get('id') not in channel_ids:
-                                channel_ids.append(ch.get('id'))
-
-                channels_info = []
-                for cid in channel_ids:
-                    channel = udi.get_channel_by_id(cid)
-                    if channel:
-                        logo_url = f"/api/logos/{channel['logo_id']}" if channel.get('logo_id') else None
-                        channels_info.append({
-                            'id': cid,
-                            'name': channel.get('name', ''),
-                            'logo_url': logo_url,
-                            'tvg_id': channel.get('tvg_id'),
-                        })
+                channel_ids, channel_groups_info, resolved_channel_ids = (
+                    self._resolve_auto_create_rule_channel_selection(channel_ids, channel_group_ids, udi)
+                )
+                channels_info = self._build_channels_info(resolved_channel_ids, udi)
 
                 rule['channel_ids'] = channel_ids
                 rule['channel_group_ids'] = channel_group_ids
@@ -926,6 +1000,143 @@ class SchedulingService:
         logger.debug(f"Regex '{effective_pattern}' matched {len(matching_programs)} programs for channel {channel_id}")
         return matching_programs
 
+    def test_regex_against_epg_for_rule(
+        self,
+        *,
+        channel_ids: Optional[List[Any]] = None,
+        channel_group_ids: Optional[List[Any]] = None,
+        regex_pattern: str,
+    ) -> Dict[str, Any]:
+        """Test an auto-create regex against every selected channel and group channel."""
+        if not regex_pattern or not regex_pattern.strip():
+            raise ValueError("Regex pattern must not be empty.")
+
+        udi = get_udi_manager()
+        resolved_channel_ids: List[int] = []
+        seen_channel_ids = set()
+
+        def add_channel_id(raw_channel_id: Any) -> None:
+            if raw_channel_id in (None, ""):
+                return
+            try:
+                channel_id = int(raw_channel_id)
+            except (TypeError, ValueError):
+                raise ValueError("channel_ids must contain integer IDs") from None
+            if channel_id not in seen_channel_ids:
+                seen_channel_ids.add(channel_id)
+                resolved_channel_ids.append(channel_id)
+
+        for raw_channel_id in channel_ids or []:
+            add_channel_id(raw_channel_id)
+
+        channel_groups_info: List[Dict[str, Any]] = []
+        for raw_group_id in channel_group_ids or []:
+            if raw_group_id in (None, ""):
+                continue
+            try:
+                group_id = int(raw_group_id)
+            except (TypeError, ValueError):
+                raise ValueError("channel_group_ids must contain integer IDs") from None
+
+            group = udi.get_channel_group_by_id(group_id)
+            if not group:
+                continue
+
+            group_channels = udi.get_channels_by_group(group_id) or []
+            channel_groups_info.append({
+                'id': group_id,
+                'name': group.get('name', ''),
+                'channel_count': len(group_channels),
+            })
+            for channel in group_channels:
+                add_channel_id(channel.get('id'))
+
+        channels_info: List[Dict[str, Any]] = []
+        for channel_id in resolved_channel_ids:
+            channel = udi.get_channel_by_id(channel_id)
+            if not channel:
+                continue
+            channels_info.append({
+                'id': channel_id,
+                'name': channel.get('name', f'Channel {channel_id}'),
+                'tvg_id': channel.get('tvg_id'),
+            })
+
+        if not channels_info:
+            raise ValueError("No valid channels found for this rule")
+
+        matching_programs: List[Dict[str, Any]] = []
+        channels_without_tvg: List[Dict[str, Any]] = []
+        channels_without_programs: List[Dict[str, Any]] = []
+        channels_without_matches: List[Dict[str, Any]] = []
+        channels_with_matches = set()
+
+        for channel_info in channels_info:
+            channel_id = channel_info['id']
+            channel_name = channel_info.get('name', f'Channel {channel_id}')
+            effective_pattern = regex_pattern.replace('CHANNEL_NAME', re.escape(channel_name))
+
+            try:
+                if is_dangerous_regex(effective_pattern):
+                    raise ValueError("Regex pattern contains dangerous nested quantifiers (ReDoS risk)")
+                pattern = re.compile(effective_pattern, re.IGNORECASE)
+            except re.error as e:
+                raise ValueError(f"Invalid regex pattern: {e}")
+
+            try:
+                channel_programs = self.get_programs_by_channel(channel_id)
+            except NoTvgIdError:
+                channels_without_tvg.append(channel_info)
+                continue
+
+            if not channel_programs:
+                channels_without_programs.append(channel_info)
+                continue
+
+            channel_matches = []
+            sample_titles = []
+            for program in channel_programs:
+                title = program.get('title', '')
+                if len(sample_titles) < 3 and title:
+                    sample_titles.append(title)
+                if pattern.search(title):
+                    channel_matches.append(program)
+
+            if channel_matches:
+                channels_with_matches.add(channel_id)
+            else:
+                channels_without_matches.append({
+                    **channel_info,
+                    'program_count': len(channel_programs),
+                    'sample_titles': sample_titles,
+                })
+
+            for program in channel_matches:
+                enriched_program = dict(program)
+                enriched_program['channel_id'] = channel_id
+                enriched_program['channel_name'] = channel_name
+                enriched_program['tvg_id'] = channel_info.get('tvg_id')
+                matching_programs.append(enriched_program)
+
+        logger.debug(
+            "Auto-create regex preview matched %s programs across %s/%s channels",
+            len(matching_programs),
+            len(channels_with_matches),
+            len(channels_info),
+        )
+
+        return {
+            'matches': len(matching_programs),
+            'programs': matching_programs,
+            'channels_tested': len(channels_info),
+            'channels_with_matches': len(channels_with_matches),
+            'channels_without_tvg': channels_without_tvg,
+            'channels_without_programs': channels_without_programs,
+            'channels_without_matches': channels_without_matches,
+            'channel_groups_info': channel_groups_info,
+            'no_tvg_id': len(channels_without_tvg) == len(channels_info),
+        }
+
     def match_programs_to_rules(self, force_refresh: bool = False) -> Dict[str, Any]:
         """Match EPG programs to auto-create rules and create/update scheduled events.
 
@@ -994,10 +1205,18 @@ class SchedulingService:
                     )
                     continue
 
-                # Bug 6: always resolve channels from UDI so tvg_ids are current
-                channel_ids = set(rule.get('channel_ids') or
-                                  ([rule.get('channel_id')] if rule.get('channel_id') else []))
-                for group_id in rule.get('channel_group_ids', []):
+                # Bug 6: always resolve channels from UDI so tvg_ids are current.
+                # channel_id is only a legacy single-channel fallback; group rules
+                # store channel_ids as explicit extra channels only.
+                rule_channel_group_ids = rule.get('channel_group_ids', []) or []
+                if 'channel_ids' in rule:
+                    channel_ids = set(rule.get('channel_ids') or [])
+                elif rule.get('channel_id') and not rule_channel_group_ids:
+                    channel_ids = {rule.get('channel_id')}
+                else:
+                    channel_ids = set()
+
+                for group_id in rule_channel_group_ids:
                     for ch in (udi.get_channels_by_group(group_id) or []):
                         channel_ids.add(ch.get('id'))
 
@@ -1072,12 +1291,12 @@ class SchedulingService:
 
                         try:
                             start_dt = _parse_dt(program_start)
-                            _parse_dt(program_end)
+                            end_dt = _parse_dt(program_end)
                         except (ValueError, AttributeError) as e:
                             logger.warning(f"Invalid program times for '{title}': {e}")
                             continue
 
-                        if start_dt <= now:
+                        if end_dt <= now:
                             continue
 
                         if self._is_event_executed(channel_id, program_start):

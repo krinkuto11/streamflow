@@ -183,6 +183,7 @@ def test_connectivity_guard_fails_after_configured_dispatcharr_timeout_retries()
     assert requests_timeout.dispatcharr_attempts == 3
     assert result.details["attempts"] == 3
     assert result.details["max_attempts"] == 3
+    assert result.details["timeout_seconds"] == 1
 
 
 def test_connectivity_guard_fails_closed_on_dns_failure():

@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [Unreleased]
+
+### Added
+- **StreamFlow V3 reliability stack** - Draft-gated work for provider/profile-aware Stream Checker capacity, Teamarr managed-event preflight, Shadow Monitor continuity, startup progress, hardware diagnostics, and in-app operator Help.
+- **Detailed V3 changelog** - Added `docs/pr432-v3-changelog.md` so PR #432 has a readable branch-level changelog and validation record instead of relying on an oversized PR body.
+- **M3U priority modes** - Added `Playlist Priority -> Score` and `Score -> Playlist Priority` modes for automation profiles.
+
+### Changed
+- **Operator-facing progress and setup wording** - Clarified Stream Checker ETA labels, dashboard run counters, startup duration estimates, Teamarr timing buckets, Shadow Monitor switch limits, and Help `Where` locations.
+- **Help and setup guidance** - Keeps V3 Help platform neutral, points settings to visible UI or explicit status/API locations, and shows shipped UI screenshots as cropped, optimized, collapsible, lazy-loaded references.
+- **Stream Checker ETA** - Batch and full-run ETA now uses a conservative channel-throughput floor alongside stream-level progress, preventing long full checks from reporting unrealistically short remaining time.
+
+### Fixed
+- **V3 reliability fixes** - Preserves active batch dead/blank/freeze counters, avoids misleading DRI hardware warnings, improves Teamarr post-start checks, validates auto-create group previews across channels, and keeps real-viewer wording distinct from watcher probes.
+- **V3 final polish** - Adds safe profile-slot ID/limit tooltips, active Teamarr check runtime text, and explicit checker-capacity/global-worker quality reason wording.
+- **Stream Checker profile matrix** - Adds an expandable provider/profile matrix with safe profile ID, limit, active viewer, checking, free-slot, and status details.
+- **Teamarr event preflight override** - Adds a warned provider/profile capacity override for event checks while keeping active-viewer protection enforced.
+- **Teamarr managed-event visibility** - Keeps larger managed-event schedules visible, accepts alternate Teamarr start-time/channel-id fields, exposes managed-record counts, and queues due events when direct preflight capacity is full.
+- **Teamarr scheduled-event clarity** - Scheduled Teamarr events now expose the next automatic check bucket/time and label the manual event action as `Force Check`, so `Scheduled` + `No Check` cards still show the available one-time check path.
+- **Hardware acceleration probe logging** - Resolves DRI `auto` analysis to a concrete VAAPI render node, logs the requested FFmpeg hardware path per probe, and leaves CUDA/NVIDIA plus explicit VAAPI/QSV paths unchanged.
+- **Stream Session runtime guard** - Reinitializes volatile session refresh state on reused singleton instances so session creation does not fail after unusual import or test ordering.
+- **Shadow Monitor recovery defaults** - Uses the live-validated continuous watcher defaults, enables freeze detection, disables dry-run by default when the monitor is enabled, and keeps switching rate limits in place.
+- **Viewer-proxy blank recovery** - Shadow Monitor now verifies the real viewer proxy path after stream switches and does not hide a failed replacement behind the normal channel cooldown.
+- **Automation catch-up policy** - Adds explicit `Run all due periods` opt-in; automatic scheduler passes now default to the highest-priority due period and only process all due periods when the operator enables it, with Catch-up cap as the load guard.
+- **Stream Checker run metrics** - Keeps synchronous batch blank/freeze totals visible, counts only accepted stream assignments in matching metrics, and clears stale waiting reasons once streams start checking or probing.
+
 
 ## [2.5.6] - 2026-05-07
 

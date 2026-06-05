@@ -282,7 +282,11 @@ class StreamConnectivityGuard:
         parsed = urlparse(url)
         host = parsed.hostname
         port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        safe_details: Dict[str, Any] = {"label": label, "host": host}
+        safe_details: Dict[str, Any] = {
+            "label": label,
+            "host": host,
+            "timeout_seconds": timeout_seconds,
+        }
 
         if parsed.scheme not in {"http", "https"} or not host:
             return ConnectivityCheckResult(

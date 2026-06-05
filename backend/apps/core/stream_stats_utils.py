@@ -18,10 +18,19 @@ from collections import Counter
 
 
 class DeadStreamResult(tuple):
-    """Tuple-compatible dead-stream result with boolean semantics."""
+    """Tuple-compatible dead-stream result with optional detail metadata."""
 
-    def __new__(cls, is_dead: bool, reason: str):
-        return super().__new__(cls, (is_dead, reason))
+    def __new__(
+        cls,
+        is_dead: bool,
+        reason: str,
+        reason_detail: Optional[str] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ):
+        obj = super().__new__(cls, (is_dead, reason))
+        obj.reason_detail = reason_detail or reason
+        obj.details = details or {}
+        return obj
 
     @property
     def is_dead(self) -> bool:
@@ -436,6 +445,35 @@ def calculate_channel_averages(streams: list, dead_stream_ids: set = None) -> Di
     }
 
 
+def _compact_context(values: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in values.items() if value not in (None, '', [], {})}
+
+
+def _analysis_failure_context(stream_data: Dict[str, Any]) -> Dict[str, Any]:
+    return _compact_context({
+        'elapsed_seconds': stream_data.get('elapsed_seconds', stream_data.get('elapsed_time')),
+        'timeout_seconds': stream_data.get(
+            'timeout_seconds',
+            stream_data.get('analysis_timeout_seconds', stream_data.get('timeout')),
+        ),
+        'operation_timeout_seconds': stream_data.get('operation_timeout_seconds'),
+        'ffmpeg_duration_seconds': stream_data.get(
+            'ffmpeg_duration_seconds',
+            stream_data.get('ffmpeg_duration'),
+        ),
+        'startup_buffer_seconds': stream_data.get(
+            'startup_buffer_seconds',
+            stream_data.get('stream_startup_buffer'),
+        ),
+        'attempt': stream_data.get('attempt'),
+        'attempts': stream_data.get('attempts'),
+        'max_attempts': stream_data.get('max_attempts'),
+        'stage': stream_data.get('stage'),
+        'message': stream_data.get('error_message') or stream_data.get('message'),
+        'error': stream_data.get('error'),
+    })
+
+
 def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -> DeadStreamResult:
     """Check if a stream should be considered dead based on its statistics.
     
@@ -476,6 +514,22 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     # elapsed_time and ffmpeg_duration are set by analyze_stream() and flow
     # through the analyzed dict.  If they are absent (e.g. cached streams or
     # legacy callers) the check is skipped safely.
+    status = str(stream_data.get('status') or '').strip().lower()
+    if status in {'timeout', 'stream_timeout', 'probe_timeout'}:
+        return DeadStreamResult(
+            True,
+            'offline',
+            'stream_timeout',
+            _analysis_failure_context(stream_data),
+        )
+    if status in {'error', 'failed'}:
+        return DeadStreamResult(
+            True,
+            'offline',
+            'error',
+            _analysis_failure_context(stream_data),
+        )
+
     EARLY_EXIT_THRESHOLD = 0.8
     elapsed  = stream_data.get('elapsed_time')
     expected = stream_data.get('ffmpeg_duration')
@@ -485,7 +539,12 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
         and expected > 0
         and elapsed < expected * EARLY_EXIT_THRESHOLD
     ):
-        return DeadStreamResult(True, 'unstable')
+        return DeadStreamResult(
+            True,
+            'unstable',
+            'probe_exited_early',
+            {'actual_seconds': elapsed, 'expected_seconds': expected},
+        )
 
     stream_stats = stream_data.get('stream_stats')
     if isinstance(stream_stats, str):
@@ -501,13 +560,35 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     blank_detected = stream_data.get('blank_detected', stream_stats.get('blank_detected'))
     treat_blank_as_dead = True if config is None else config.get('treat_blank_as_dead', True)
     if _coerce_bool(treat_blank_as_dead) and _coerce_bool(blank_probe_ran) and _coerce_bool(blank_detected):
-        return DeadStreamResult(True, 'blank')
+        return DeadStreamResult(
+            True,
+            'blank',
+            'blank_detected',
+            {
+                'blank_ratio': stream_data.get('blank_ratio', stream_stats.get('blank_ratio')),
+                'blank_duration_secs': stream_data.get(
+                    'blank_duration_secs',
+                    stream_stats.get('blank_duration_secs'),
+                ),
+            },
+        )
 
     freeze_probe_ran = stream_data.get('freeze_probe_ran', stream_stats.get('freeze_probe_ran'))
     freeze_detected = stream_data.get('freeze_detected', stream_stats.get('freeze_detected'))
     treat_freeze_as_dead = True if config is None else config.get('treat_freeze_as_dead', True)
     if _coerce_bool(treat_freeze_as_dead) and _coerce_bool(freeze_probe_ran) and _coerce_bool(freeze_detected):
-        return DeadStreamResult(True, 'freeze')
+        return DeadStreamResult(
+            True,
+            'freeze',
+            'freeze_detected',
+            {
+                'freeze_ratio': stream_data.get('freeze_ratio', stream_stats.get('freeze_ratio')),
+                'freeze_duration_secs': stream_data.get(
+                    'freeze_duration_secs',
+                    stream_stats.get('freeze_duration_secs'),
+                ),
+            },
+        )
 
     # Extract normalized stats
     stats = extract_stream_stats(stream_data)
@@ -517,7 +598,7 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     if resolution and resolution != 'N/A':
         # Check if resolution is exactly 0x0
         if resolution == '0x0':
-            return DeadStreamResult(True, 'offline')
+            return DeadStreamResult(True, 'offline', 'zero_resolution', {'actual': resolution})
         # Check if width or height is 0 (e.g., "0x1080" or "1920x0")
         if 'x' in resolution:
             try:
@@ -525,16 +606,31 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
                 if len(parts) == 2:
                     width, height = int(parts[0]), int(parts[1])
                     if width == 0 or height == 0:
-                        return DeadStreamResult(True, 'offline')
+                        return DeadStreamResult(
+                            True,
+                            'offline',
+                            'zero_resolution_dimension',
+                            {'actual_width': width, 'actual_height': height},
+                        )
                     
                     # Check against configured minimum thresholds if provided
                     if config:
                         min_width = config.get('min_resolution_width', 0)
                         min_height = config.get('min_resolution_height', 0)
                         if min_width > 0 and width < min_width:
-                            return DeadStreamResult(True, 'low_quality')
+                            return DeadStreamResult(
+                                True,
+                                'low_quality',
+                                'resolution_width_below_threshold',
+                                {'actual': width, 'threshold': min_width},
+                            )
                         if min_height > 0 and height < min_height:
-                            return DeadStreamResult(True, 'low_quality')
+                            return DeadStreamResult(
+                                True,
+                                'low_quality',
+                                'resolution_height_below_threshold',
+                                {'actual': height, 'threshold': min_height},
+                            )
             except (ValueError, IndexError):
                 pass
     
@@ -542,20 +638,30 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     bitrate = stats['bitrate_kbps']
     # Refined logic: only mark as dead if bitrate is explicitly 0, not just missing (None)
     if isinstance(bitrate, (int, float)) and bitrate == 0:
-        return DeadStreamResult(True, 'offline')
+        return DeadStreamResult(True, 'offline', 'zero_bitrate', {'actual': bitrate})
     
     # Check against configured minimum bitrate if provided
     if config and bitrate:
         min_bitrate = config.get('min_bitrate_kbps', 0)
         if min_bitrate > 0 and bitrate < min_bitrate:
-            return DeadStreamResult(True, 'low_quality')
+            return DeadStreamResult(
+                True,
+                'low_quality',
+                'bitrate_below_threshold',
+                {'actual': bitrate, 'threshold': min_bitrate},
+            )
     
     # Check against configured minimum FPS if provided
     fps = stats['fps']
     if config and fps is not None:
         min_fps = config.get('min_fps', 0)
         if min_fps > 0 and fps < min_fps:
-            return DeadStreamResult(True, 'low_quality')
+            return DeadStreamResult(
+                True,
+                'low_quality',
+                'fps_below_threshold',
+                {'actual': fps, 'threshold': min_fps},
+            )
     
     # Check against configured minimum score if provided
     if config:
@@ -564,6 +670,11 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
             # Get score from stream_data if available
             score = stream_data.get('score', 0)
             if isinstance(score, (int, float)) and score < min_score:
-                return DeadStreamResult(True, 'low_quality')
+                return DeadStreamResult(
+                    True,
+                    'low_quality',
+                    'score_below_threshold',
+                    {'actual': score, 'threshold': min_score},
+                )
     
     return DeadStreamResult(False, 'none')

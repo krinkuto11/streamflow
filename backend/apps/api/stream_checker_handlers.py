@@ -31,8 +31,16 @@ def _sanitize_hardware_acceleration_status(status: Any) -> Dict[str, Any]:
         "nvidia_visible_devices_set",
         "nvidia_smi_available",
         "nvidia_smi_ok",
+        "dri_device_configured",
+        "dri_available",
     ):
         safe[key] = bool(status.get(key))
+
+    hardware_backend = status.get("hardware_backend")
+    if isinstance(hardware_backend, str) and hardware_backend.strip():
+        safe["hardware_backend"] = hardware_backend.strip()[:40]
+    else:
+        safe["hardware_backend"] = "unknown"
 
     ffmpeg_hwaccels = status.get("ffmpeg_hwaccels")
     if isinstance(ffmpeg_hwaccels, list):
@@ -43,6 +51,16 @@ def _sanitize_hardware_acceleration_status(status: Any) -> Dict[str, Any]:
         ]
     else:
         safe["ffmpeg_hwaccels"] = []
+
+    dri_hwaccels = status.get("dri_hwaccels")
+    if isinstance(dri_hwaccels, list):
+        safe["dri_hwaccels"] = [
+            str(method)
+            for method in dri_hwaccels
+            if isinstance(method, (str, int, float)) and str(method).strip()
+        ]
+    else:
+        safe["dri_hwaccels"] = []
 
     nvidia_gpus = status.get("nvidia_gpus")
     safe["nvidia_gpu_count"] = len(nvidia_gpus) if isinstance(nvidia_gpus, list) else 0
@@ -343,8 +361,13 @@ def check_single_channel_now_response(
         # via the ProfilePickerDialog (multi-period channel). When present it is
         # forwarded to the service so the correct profile governs the check.
         forced_profile_id = data.get("profile_id")
+        force_check = bool(data.get("force_check", False))
         service = get_stream_checker_service()
-        result = service.check_single_channel(channel_id, forced_profile_id=forced_profile_id)
+        result = service.check_single_channel(
+            channel_id,
+            forced_profile_id=forced_profile_id,
+            force_check=force_check,
+        )
 
         if result.get("success") or result.get("skipped"):
             return jsonify(result), 200

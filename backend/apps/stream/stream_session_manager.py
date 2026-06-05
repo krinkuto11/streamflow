@@ -299,6 +299,11 @@ class StreamSessionManager:
     def _load_settings(self): pass
     def save_settings(self): pass
 
+    def _ensure_runtime_state(self):
+        """Initialize volatile fields for reused or legacy singleton instances."""
+        if not hasattr(self, '_last_streams_refresh'):
+            self._last_streams_refresh = 0
+
     def get_review_duration(self) -> float: return self.review_duration
     def set_review_duration(self, duration: float):
         self.review_duration = float(duration)
@@ -498,6 +503,8 @@ class StreamSessionManager:
         Returns:
             Session ID
         """
+        self._ensure_runtime_state()
+
         # Check for existing active session for this channel
         if not allow_duplicate_channel and self.is_channel_in_active_session(channel_id):
             # Find the existing session and update its EPG info if a new EPG event is provided

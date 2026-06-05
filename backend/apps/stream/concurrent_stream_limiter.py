@@ -28,6 +28,19 @@ from apps.core.logging_config import setup_logging
 logger = setup_logging(__name__)
 
 
+def _get_stream_m3u_account_id(stream: Dict[str, Any]) -> Optional[Any]:
+    """Return a stream's M3U account id across legacy and SQL payloads."""
+    if not isinstance(stream, dict):
+        return None
+    account_id = stream.get('m3u_account_id')
+    if account_id in (None, ''):
+        account_id = stream.get('m3u_account')
+    try:
+        return int(account_id) if account_id not in (None, '') else None
+    except (TypeError, ValueError):
+        return account_id
+
+
 class AcquireResult(tuple):
     """Tuple-compatible acquire result that remains truthy/falsey by success."""
 
@@ -65,6 +78,7 @@ class AccountStreamLimiter:
         """
         self.account_limits: Dict[int, int] = {}
         self.account_checking_counts: Dict[int, int] = {}  # Track streams currently being checked
+        self.profile_checking_counts: Dict[int, int] = {}  # Track checker-owned profile slots
         self.lock = threading.Lock()
         self.udi_manager = udi_manager
         logger.info("AccountStreamLimiter initialized")
@@ -280,12 +294,236 @@ class AccountStreamLimiter:
                     f"Attempted to release slot for account {account_id} "
                     f"but checking count is already 0"
                 )
+
+    def reserve_profile_for_stream(self, stream: Dict[str, Any]) -> tuple[bool, str, Optional[Dict[str, Any]]]:
+        """
+        Reserve a concrete M3U account profile for a checker probe.
+
+        Account limits protect the provider as a whole. Profile reservations
+        protect individual credentials so concurrent checks do not all reuse the
+        first free profile while another profile is available.
+        """
+        account_id = _get_stream_m3u_account_id(stream)
+        if not account_id or not self.udi_manager:
+            return (True, 'acquired', None)
+
+        try:
+            account_getter = getattr(self.udi_manager, 'get_m3u_account_by_id', None)
+            account = account_getter(account_id) if callable(account_getter) else None
+        except Exception as e:
+            logger.warning(f"Could not get account {account_id} while reserving profile: {e}")
+            return (True, 'acquired', None)
+
+        profiles = account.get('profiles', []) if isinstance(account, dict) else []
+        if not profiles:
+            return (True, 'acquired', None)
+
+        try:
+            usage_getter = getattr(self.udi_manager, 'get_active_streams_count_per_profile', None)
+            active_usage = usage_getter(account_id) if callable(usage_getter) else {}
+            if not isinstance(active_usage, dict):
+                active_usage = {}
+        except Exception as e:
+            logger.warning(f"Could not get active profile usage for account {account_id}: {e}")
+            active_usage = {}
+
+        checker_blocked = False
+        external_blocked = False
+
+        with self.lock:
+            for profile in profiles:
+                if not isinstance(profile, dict):
+                    continue
+
+                profile_id = profile.get('id')
+                if profile_id is None or not profile.get('is_active', True):
+                    continue
+
+                max_streams = profile.get('max_streams', 0)
+                try:
+                    max_streams = int(max_streams or 0)
+                except (TypeError, ValueError):
+                    max_streams = 0
+
+                if max_streams == 0:
+                    logger.debug(
+                        f"Reserved unlimited profile {profile_id} for stream {stream.get('id')}"
+                    )
+                    return (True, 'acquired', profile)
+
+                try:
+                    active_count = int(active_usage.get(profile_id, 0) or 0)
+                except (TypeError, ValueError):
+                    active_count = 0
+                checking_count = self.profile_checking_counts.get(profile_id, 0)
+
+                if active_count + checking_count < max_streams:
+                    self.profile_checking_counts[profile_id] = checking_count + 1
+                    logger.debug(
+                        f"Reserved profile {profile_id} for stream {stream.get('id')} "
+                        f"({active_count} active + {checking_count + 1} checking = "
+                        f"{active_count + checking_count + 1}/{max_streams})"
+                    )
+                    return (True, 'acquired', profile)
+
+                if checking_count > 0:
+                    checker_blocked = True
+                if active_count >= max_streams:
+                    external_blocked = True
+
+        if checker_blocked:
+            return (False, 'checking_capacity', None)
+        if external_blocked:
+            return (False, 'active_viewers', None)
+        return (False, 'provider_capacity', None)
+
+    def release_profile(self, profile: Optional[Dict[str, Any]]):
+        """Release a checker-owned profile reservation."""
+        if not profile:
+            return
+
+        profile_id = profile.get('id') if isinstance(profile, dict) else None
+        if profile_id is None:
+            return
+
+        max_streams = profile.get('max_streams', 0) if isinstance(profile, dict) else 0
+        try:
+            max_streams = int(max_streams or 0)
+        except (TypeError, ValueError):
+            max_streams = 0
+        if max_streams == 0:
+            return
+
+        with self.lock:
+            checking_count = self.profile_checking_counts.get(profile_id, 0)
+            if checking_count > 0:
+                self.profile_checking_counts[profile_id] = checking_count - 1
+                logger.debug(
+                    f"Released profile slot {profile_id} "
+                    f"(now {self.profile_checking_counts[profile_id]} checking)"
+                )
+            else:
+                logger.warning(
+                    f"Attempted to release profile slot {profile_id} "
+                    f"but checking count is already 0"
+                )
+
+    def get_profile_slot_snapshot(self, account_id: Optional[int]) -> List[Dict[str, Any]]:
+        """Return a compact slot snapshot for active profiles on an account."""
+        if account_id is None or not self.udi_manager:
+            return []
+
+        try:
+            account_id = int(account_id)
+        except (TypeError, ValueError):
+            return []
+
+        try:
+            account_getter = getattr(self.udi_manager, 'get_m3u_account_by_id', None)
+            account = account_getter(account_id) if callable(account_getter) else None
+        except Exception as e:
+            logger.warning(f"Could not get account {account_id} while building profile slot snapshot: {e}")
+            return []
+
+        profiles = account.get('profiles', []) if isinstance(account, dict) else []
+        if not profiles:
+            return []
+
+        try:
+            usage_getter = getattr(self.udi_manager, 'get_active_streams_count_per_profile', None)
+            active_usage = usage_getter(account_id) if callable(usage_getter) else {}
+            if not isinstance(active_usage, dict):
+                active_usage = {}
+        except Exception as e:
+            logger.warning(f"Could not get active profile usage for account {account_id}: {e}")
+            active_usage = {}
+
+        with self.lock:
+            checking_counts = dict(self.profile_checking_counts)
+
+        def read_count(mapping: Dict[Any, Any], key: Any) -> int:
+            candidates = [key, str(key)]
+            try:
+                candidates.append(int(key))
+            except (TypeError, ValueError):
+                pass
+
+            for candidate in candidates:
+                if candidate in mapping:
+                    try:
+                        return int(mapping.get(candidate, 0) or 0)
+                    except (TypeError, ValueError):
+                        return 0
+            return 0
+
+        snapshots: List[Dict[str, Any]] = []
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+
+            profile_id = profile.get('id')
+            if profile_id is None or not profile.get('is_active', True):
+                continue
+
+            try:
+                max_streams = int(profile.get('max_streams', 0) or 0)
+            except (TypeError, ValueError):
+                max_streams = 0
+
+            active_count = read_count(active_usage, profile_id)
+            checking_count = read_count(checking_counts, profile_id)
+            used = active_count + checking_count
+            unlimited = max_streams == 0
+            available = None if unlimited else max(0, max_streams - used)
+
+            snapshots.append({
+                'id': profile_id,
+                'name': profile.get('name') or f'Profile {profile_id}',
+                'limit': max_streams,
+                'unlimited': unlimited,
+                'active_viewers': active_count,
+                'checking': checking_count,
+                'used': used,
+                'available': available,
+                'full': False if unlimited else used >= max_streams,
+            })
+
+        return sorted(snapshots, key=lambda item: str(item.get('name', '')).lower())
+
+    def should_preempt_profile_for_viewer(self, profile: Optional[Dict[str, Any]]) -> bool:
+        """Return True when a real viewer needs the reserved profile slot."""
+        if not profile or not self.udi_manager:
+            return False
+
+        profile_id = profile.get('id') if isinstance(profile, dict) else None
+        if profile_id is None:
+            return False
+
+        try:
+            max_streams = int(profile.get('max_streams', 0) or 0)
+        except (TypeError, ValueError):
+            max_streams = 0
+        if max_streams == 0:
+            return False
+
+        active_getter = getattr(self.udi_manager, 'get_active_streams_for_profile', None)
+        if not callable(active_getter):
+            return False
+
+        try:
+            active_count = int(active_getter(profile_id) or 0)
+        except Exception as e:
+            logger.warning(f"Could not check active viewers for profile {profile_id}: {e}")
+            return False
+
+        return active_count + 1 > max_streams
     
     def clear(self):
         """Clear all account limits and checking counts."""
         with self.lock:
             self.account_limits.clear()
             self.account_checking_counts.clear()
+            self.profile_checking_counts.clear()
         logger.info("Cleared all account limits")
 
 
@@ -369,7 +607,7 @@ class SmartStreamScheduler:
         # Group streams by account for better logging
         account_groups = defaultdict(list)
         for stream in streams:
-            account_id = stream.get('m3u_account')
+            account_id = _get_stream_m3u_account_id(stream)
             account_groups[account_id].append(stream)
         
         logger.info(f"Streams grouped by account: {dict((k, len(v)) for k, v in account_groups.items())}")
@@ -416,7 +654,7 @@ class SmartStreamScheduler:
             
             def submit_stream_check(stream: Dict[str, Any]):
                 """Submit a stream check with provider-aware limit enforcement."""
-                account_id = stream.get('m3u_account')
+                account_id = _get_stream_m3u_account_id(stream)
 
                 def provider_wait_result(reason_detail: str) -> Dict[str, Any]:
                     cached_stats = {}
@@ -428,11 +666,10 @@ class SmartStreamScheduler:
                         except Exception as e:
                             logger.error(f"Error retrieving cached stats for stream {stream['id']}: {e}")
 
-                    skipped_reason = (
-                        'quota_consumed_by_active_viewers'
-                        if reason_detail == 'active_viewers'
-                        else 'provider_capacity_unavailable'
-                    )
+                    skipped_reason = {
+                        'active_viewers': 'quota_consumed_by_active_viewers',
+                        'viewer_preempted': 'viewer_preempted',
+                    }.get(reason_detail, 'provider_capacity_unavailable')
                     return {
                         'stream_id': stream['id'],
                         'stream_name': stream.get('name', 'Unknown'),
@@ -468,6 +705,7 @@ class SmartStreamScheduler:
                     """Wrapper that waits for provider capacity without consuming probe slots."""
                     result = None
                     acquired_account = False
+                    acquired_profile = None
                     acquired_global = False
                     wait_started = time.time()
                     wait_reason = None
@@ -483,9 +721,42 @@ class SmartStreamScheduler:
                             if can_run:
                                 acquired_account, reason = self.account_limiter.acquire(account_id, timeout=0)
                                 if acquired_account:
+                                    profile_acquired, reason, acquired_profile = (
+                                        self.account_limiter.reserve_profile_for_stream(stream)
+                                    )
+                                    if not profile_acquired:
+                                        self.account_limiter.release(account_id)
+                                        acquired_account = False
+                                        acquired_profile = None
+                                        wait_reason = self._normalize_wait_reason(reason)
+                                        if defer_callback:
+                                            try:
+                                                with lock:
+                                                    defer_callback(stream, wait_reason)
+                                            except Exception as e:
+                                                logger.error(f"Error in defer_callback for stream {stream['id']}: {e}")
+
+                                        if (
+                                            provider_wait_timeout is not None
+                                            and not self._is_internal_capacity_wait(wait_reason)
+                                        ):
+                                            elapsed = time.time() - wait_started
+                                            if elapsed >= provider_wait_timeout:
+                                                logger.warning(
+                                                    f"Provider capacity wait timed out for stream {stream['id']} "
+                                                    f"after {elapsed:.1f}s: {wait_reason}"
+                                                )
+                                                result = provider_wait_result(wait_reason)
+                                                return result
+
+                                        time.sleep(0.5)
+                                        continue
+
                                     acquired_global = global_probe_slots.acquire(blocking=False)
                                     if acquired_global:
                                         break
+                                    self.account_limiter.release_profile(acquired_profile)
+                                    acquired_profile = None
                                     self.account_limiter.release(account_id)
                                     acquired_account = False
                                     reason = 'global_worker_limit'
@@ -516,7 +787,10 @@ class SmartStreamScheduler:
                         # Apply URL transformation if using M3U profile with search/replace patterns
                         stream_url = stream.get('url', '')
                         if self.account_limiter.udi_manager:
-                            transformed_url = self.account_limiter.udi_manager.apply_profile_url_transformation(stream)
+                            transformed_url = self.account_limiter.udi_manager.apply_profile_url_transformation(
+                                stream,
+                                profile=acquired_profile,
+                            )
                             if isinstance(transformed_url, str):
                                 stream_url = transformed_url
 
@@ -525,21 +799,42 @@ class SmartStreamScheduler:
                         if start_callback:
                             try:
                                 with lock:
-                                    start_callback(stream)
+                                    start_callback(stream, acquired_profile)
                             except Exception as e:
                                 logger.error(f"Error in start_callback for stream {stream['id']}: {e}")
+
+                        preempt_logged = False
+
+                        def preempt_check() -> bool:
+                            nonlocal preempt_logged
+                            should_preempt = self.account_limiter.should_preempt_profile_for_viewer(acquired_profile)
+                            if should_preempt and not preempt_logged:
+                                preempt_logged = True
+                                logger.info(
+                                    "Preempting stream check for stream %s because active viewer capacity is needed",
+                                    stream.get('id'),
+                                )
+                            return should_preempt
+
+                        runtime_params = dict(check_params)
+                        if acquired_profile:
+                            runtime_params['preempt_check'] = preempt_check
 
                         result = check_function(
                             stream_url=stream_url,
                             stream_id=stream['id'],
                             stream_name=stream.get('name', 'Unknown'),
-                            **check_params
+                            **runtime_params
                         )
+                        if isinstance(result, dict) and result.get('preempted'):
+                            result = provider_wait_result('viewer_preempted')
                         return result
                     finally:
                         # Release account slot immediately when stream finishes
                         if acquired_global:
                             global_probe_slots.release()
+                        if acquired_profile:
+                            self.account_limiter.release_profile(acquired_profile)
                         if acquired_account:
                             self.account_limiter.release(account_id)
 
@@ -560,7 +855,13 @@ class SmartStreamScheduler:
                                     'bitrate_kbps': 0,
                                     'fps': 0,
                                     'video_codec': 'N/A',
-                                    'audio_codec': 'N/A'
+                                    'audio_codec': 'N/A',
+                                    'quality_reason': 'offline',
+                                    'quality_reason_detail': 'error',
+                                    'quality_reason_context': {
+                                        'stage': 'stream analysis',
+                                        'message': 'Stream analysis worker returned no result',
+                                    },
                                 })
                             if result is not None or not (abort_event and abort_event.is_set()):
                                 nonlocal completed_count

@@ -258,6 +258,90 @@ class TestAnalyzeStream(unittest.TestCase):
         self.assertEqual(result['status'], 'OK')
         self.assertEqual(result['bitrate_kbps'], 5000.0)
 
+    @patch('stream_check_utils.get_stream_info_and_bitrate')
+    def test_timeout_analysis_carries_quality_reason_context(self, mock_get_info_and_bitrate):
+        """Timeouts should expose structured context for UI and persisted stats."""
+        mock_get_info_and_bitrate.return_value = {
+            'video_codec': 'N/A',
+            'audio_codec': 'N/A',
+            'resolution': '0x0',
+            'fps': 0,
+            'bitrate_kbps': None,
+            'hdr_format': None,
+            'pixel_format': None,
+            'audio_sample_rate': None,
+            'audio_channels': None,
+            'channel_layout': None,
+            'audio_bitrate': None,
+            'status': 'Timeout',
+            'elapsed_time': 65,
+            'timeout_seconds': 65,
+            'operation_timeout_seconds': 30,
+            'ffmpeg_duration_seconds': 30,
+            'startup_buffer_seconds': 5,
+        }
+
+        result = analyze_stream(
+            stream_url='http://test.stream',
+            stream_id=123,
+            stream_name='Test Stream',
+            ffmpeg_duration=30,
+            timeout=30,
+            retries=0,
+            stream_startup_buffer=5,
+        )
+
+        self.assertEqual(result['status'], 'Timeout')
+        self.assertEqual(result['quality_reason'], 'offline')
+        self.assertEqual(result['quality_reason_detail'], 'stream_timeout')
+        self.assertEqual(result['quality_reason_context'], {
+            'elapsed_seconds': 65,
+            'timeout_seconds': 65,
+            'operation_timeout_seconds': 30,
+            'ffmpeg_duration_seconds': 30,
+            'startup_buffer_seconds': 5,
+            'attempt': 1,
+            'attempts': 1,
+            'max_attempts': 1,
+            'stage': 'stream analysis',
+        })
+
+    @patch('stream_check_utils.get_stream_info_and_bitrate')
+    @patch('time.sleep')
+    def test_preempted_analysis_does_not_retry(self, mock_sleep, mock_get_info_and_bitrate):
+        """Viewer preemption should return a distinct non-retried status."""
+        mock_get_info_and_bitrate.return_value = {
+            'video_codec': 'N/A',
+            'audio_codec': 'N/A',
+            'resolution': '0x0',
+            'fps': 0,
+            'bitrate_kbps': None,
+            'hdr_format': None,
+            'pixel_format': None,
+            'audio_sample_rate': None,
+            'audio_channels': None,
+            'channel_layout': None,
+            'audio_bitrate': None,
+            'status': 'PREEMPTED',
+            'elapsed_time': 1.0,
+            'preempted': True,
+            'preempt_reason': 'viewer_preempted',
+        }
+
+        result = analyze_stream(
+            stream_url='http://test.stream',
+            stream_id=123,
+            stream_name='Test Stream',
+            retries=2,
+            retry_delay=5,
+        )
+
+        self.assertEqual(mock_get_info_and_bitrate.call_count, 1)
+        self.assertEqual(mock_sleep.call_count, 0)
+        self.assertEqual(result['status'], 'PREEMPTED')
+        self.assertTrue(result['preempted'])
+        self.assertEqual(result['preempt_reason'], 'viewer_preempted')
+
 
 if __name__ == '__main__':
     unittest.main()

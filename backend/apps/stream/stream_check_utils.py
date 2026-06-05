@@ -78,6 +78,7 @@ FFMPEG_HWACCEL_MODES = {
     'vdpau',
     'videotoolbox',
 }
+DRI_HWACCEL_METHODS = {'drm', 'qsv', 'vaapi'}
 FFMPEG_HWACCEL_FAILURE_PATTERNS = (
     'device creation failed',
     'failed to create',
@@ -106,6 +107,11 @@ FREEZE_START_RE = re.compile(r'freeze_start:\s*(?P<start>-?[0-9]+(?:\.[0-9]+)?)'
 FREEZE_END_RE = re.compile(r'freeze_end:\s*(?P<end>-?[0-9]+(?:\.[0-9]+)?)')
 FREEZE_DURATION_RE = re.compile(r'freeze_duration:\s*(?P<duration>-?[0-9]+(?:\.[0-9]+)?)')
 FFMPEG_TIME_RE = re.compile(r'time=(?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+(?:\.\d+)?)')
+
+
+class StreamProbePreempted(Exception):
+    """Raised when a real viewer needs the profile capacity used by a probe."""
+
 
 # FourCC to common codec name mapping
 FOURCC_TO_CODEC = {
@@ -180,6 +186,39 @@ def _parse_ffmpeg_hwaccels(output: str) -> List[str]:
     return sorted(set(methods))
 
 
+def _is_dri_device_path(device: str) -> bool:
+    """Return true when the configured ffmpeg device points at a Linux DRI device."""
+    normalized = str(device or '').strip().lower()
+    return normalized == '/dev/dri' or normalized.startswith('/dev/dri/')
+
+
+def _default_dri_render_device() -> str:
+    for minor in range(128, 136):
+        candidate = f"/dev/dri/renderD{minor}"
+        if os.path.exists(candidate):
+            return candidate
+    return "/dev/dri/renderD128"
+
+
+def _resolve_ffmpeg_hwaccel_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Resolve operator config to the concrete hwaccel flags ffmpeg should see."""
+    hwaccel = normalize_hardware_acceleration_config(config)
+    if not hwaccel['enabled']:
+        return hwaccel
+
+    resolved = dict(hwaccel)
+    device = resolved.get('device') or ''
+    normalized_device = device.rstrip('/')
+    if _is_dri_device_path(device):
+        if normalized_device == '/dev/dri':
+            resolved['device'] = _default_dri_render_device()
+        if resolved['mode'] == 'auto':
+            # With an explicit DRI device, make the VAAPI path observable instead
+            # of leaving ffmpeg to pick an opaque "auto" backend.
+            resolved['mode'] = 'vaapi'
+    return resolved
+
+
 def collect_hardware_acceleration_diagnostics(
     config: Optional[Dict[str, Any]],
     *,
@@ -199,6 +238,10 @@ def collect_hardware_acceleration_diagnostics(
         'nvidia_smi_ok': False,
         'nvidia_gpus': [],
         'nvidia_error': '',
+        'dri_device_configured': _is_dri_device_path(hwaccel.get('device')),
+        'dri_hwaccels': [],
+        'dri_available': False,
+        'hardware_backend': 'cpu' if not hwaccel['enabled'] else 'unknown',
     }
     def _run(command: List[str], timeout: float) -> subprocess.CompletedProcess:
         if command_runner:
@@ -217,6 +260,14 @@ def collect_hardware_acceleration_diagnostics(
         diagnostics['ffmpeg_hwaccels'] = _parse_ffmpeg_hwaccels(
             f"{ffmpeg_result.stdout or ''}\n{ffmpeg_result.stderr or ''}"
         )
+        diagnostics['dri_hwaccels'] = sorted(
+            method for method in diagnostics['ffmpeg_hwaccels']
+            if method in DRI_HWACCEL_METHODS
+        )
+        diagnostics['dri_available'] = bool(diagnostics['dri_hwaccels']) and (
+            diagnostics['dri_device_configured']
+            or hwaccel['mode'] in {'auto', 'qsv', 'vaapi'}
+        )
         if hwaccel['enabled']:
             mode = hwaccel['mode']
             diagnostics['mode_supported'] = (
@@ -232,7 +283,7 @@ def collect_hardware_acceleration_diagnostics(
         diagnostics['ffmpeg_error'] = str(exc)[:300]
 
     should_check_nvidia = (
-        (hwaccel['enabled'] and hwaccel['mode'] in {'auto', 'cuda'})
+        (hwaccel['enabled'] and hwaccel['mode'] == 'cuda')
         or diagnostics['nvidia_visible_devices_set']
     )
     if should_check_nvidia:
@@ -258,7 +309,43 @@ def collect_hardware_acceleration_diagnostics(
             diagnostics['nvidia_error'] = 'nvidia-smi timed out'
         except Exception as exc:
             diagnostics['nvidia_error'] = str(exc)[:300]
+    if hwaccel['enabled']:
+        if diagnostics['nvidia_smi_ok'] or hwaccel['mode'] == 'cuda' or diagnostics['nvidia_visible_devices_set']:
+            diagnostics['hardware_backend'] = 'nvidia'
+        elif diagnostics['dri_available']:
+            diagnostics['hardware_backend'] = 'dri'
+        elif diagnostics['mode_supported']:
+            diagnostics['hardware_backend'] = 'ffmpeg'
     return diagnostics
+
+
+def _log_nvidia_diagnostics(diagnostics: Dict[str, Any]) -> None:
+    if not diagnostics['nvidia_checked']:
+        return
+    if diagnostics['nvidia_smi_ok'] and diagnostics['nvidia_gpus']:
+        logger.info(
+            "NVIDIA runtime visible: NVIDIA_VISIBLE_DEVICES=%s; GPUs=%s",
+            'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+            ', '.join(diagnostics['nvidia_gpus']),
+        )
+    else:
+        logger.warning(
+            "NVIDIA runtime not ready: NVIDIA_VISIBLE_DEVICES=%s; nvidia-smi=%s",
+            'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+            diagnostics['nvidia_error'] or 'no GPU reported',
+        )
+
+
+def _log_dri_diagnostics(diagnostics: Dict[str, Any]) -> None:
+    if not diagnostics.get('dri_available'):
+        return
+    hwaccel = diagnostics['config']
+    logger.info(
+        "DRI/VAAPI/QSV hardware methods reported by ffmpeg: device=%s methods=%s; "
+        "reported methods still require a successful ffmpeg device init during probes",
+        hwaccel['device'] or 'default',
+        ', '.join(diagnostics.get('dri_hwaccels') or []),
+    )
 
 
 def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -267,19 +354,7 @@ def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any
     hwaccel = diagnostics['config']
     if not hwaccel['enabled']:
         logger.info("FFmpeg hardware acceleration disabled; CPU stream analysis path is active")
-        if diagnostics['nvidia_checked']:
-            if diagnostics['nvidia_smi_ok'] and diagnostics['nvidia_gpus']:
-                logger.info(
-                    "NVIDIA runtime visible: NVIDIA_VISIBLE_DEVICES=%s; GPUs=%s",
-                    'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
-                    ', '.join(diagnostics['nvidia_gpus']),
-                )
-            else:
-                logger.warning(
-                    "NVIDIA runtime not ready: NVIDIA_VISIBLE_DEVICES=%s; nvidia-smi=%s",
-                    'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
-                    diagnostics['nvidia_error'] or 'no GPU reported',
-                )
+        _log_nvidia_diagnostics(diagnostics)
         return diagnostics
 
     logger.info(
@@ -292,30 +367,22 @@ def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any
         methods = ', '.join(diagnostics['ffmpeg_hwaccels']) or 'none reported'
         logger.info("FFmpeg hardware acceleration methods available: %s", methods)
         if diagnostics['mode_supported']:
-            logger.info("FFmpeg hardware acceleration mode %s appears available", hwaccel['mode'])
+            logger.info(
+                "FFmpeg hardware acceleration mode %s is reported by ffmpeg; device init is verified during probes",
+                hwaccel['mode'],
+            )
         else:
             logger.warning("FFmpeg hardware acceleration mode %s is not reported by ffmpeg", hwaccel['mode'])
     else:
         logger.warning("FFmpeg hardware acceleration readiness unknown: %s", diagnostics['ffmpeg_error'])
 
-    if diagnostics['nvidia_checked']:
-        if diagnostics['nvidia_smi_ok'] and diagnostics['nvidia_gpus']:
-            logger.info(
-                "NVIDIA runtime visible: NVIDIA_VISIBLE_DEVICES=%s; GPUs=%s",
-                'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
-                ', '.join(diagnostics['nvidia_gpus']),
-            )
-        else:
-            logger.warning(
-                "NVIDIA runtime not ready: NVIDIA_VISIBLE_DEVICES=%s; nvidia-smi=%s",
-                'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
-                diagnostics['nvidia_error'] or 'no GPU reported',
-            )
+    _log_nvidia_diagnostics(diagnostics)
+    _log_dri_diagnostics(diagnostics)
     return diagnostics
 
 
 def _get_ffmpeg_hwaccel_args(config: Optional[Dict[str, Any]]) -> list:
-    hwaccel = normalize_hardware_acceleration_config(config)
+    hwaccel = _resolve_ffmpeg_hwaccel_config(config)
     if not hwaccel['enabled']:
         return []
 
@@ -328,6 +395,26 @@ def _get_ffmpeg_hwaccel_args(config: Optional[Dict[str, Any]]) -> list:
     if device and mode != 'vaapi':
         args += ['-hwaccel_device', device]
     return args
+
+
+def _log_ffmpeg_hwaccel_request(
+    context: str,
+    hwaccel_config: Dict[str, Any],
+    hwaccel_args: List[str],
+    *,
+    decode_filters: bool = False,
+) -> None:
+    if not hwaccel_args:
+        return
+    logger.info(
+        "FFmpeg %s hardware acceleration requested: mode=%s device=%s "
+        "cpu_fallback=%s decode_filters=%s",
+        context,
+        hwaccel_config.get('mode') or 'auto',
+        hwaccel_config.get('device') or 'default',
+        bool(hwaccel_config.get('allow_fallback', True)),
+        bool(decode_filters),
+    )
 
 
 def _looks_like_hwaccel_failure(output: str) -> bool:
@@ -344,14 +431,67 @@ def _run_ffmpeg_with_optional_fallback(
     stderr: Any,
     text: bool,
     context: str,
+    preempt_check: Optional[Callable[[], bool]] = None,
 ) -> subprocess.CompletedProcess:
-    result = subprocess.run(
-        command,
-        stdout=stdout,
-        stderr=stderr,
-        timeout=timeout,
-        text=text
-    )
+    def _run(command_to_run: List[str]) -> subprocess.CompletedProcess:
+        if preempt_check is None:
+            return subprocess.run(
+                command_to_run,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=timeout,
+                text=text
+            )
+
+        process = subprocess.Popen(
+            command_to_run,
+            stdout=stdout,
+            stderr=stderr,
+            text=text,
+        )
+        deadline = time.monotonic() + timeout
+        preempted = False
+        timed_out = False
+
+        try:
+            while process.poll() is None:
+                if preempt_check():
+                    preempted = True
+                    process.terminate()
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    process.kill()
+                    break
+                time.sleep(0.5)
+
+            try:
+                stdout_data, stderr_data = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                stdout_data, stderr_data = process.communicate()
+                timed_out = True
+
+            if preempted:
+                raise StreamProbePreempted()
+            if timed_out:
+                raise subprocess.TimeoutExpired(
+                    command_to_run,
+                    timeout,
+                    output=stdout_data,
+                    stderr=stderr_data,
+                )
+            return subprocess.CompletedProcess(
+                command_to_run,
+                process.returncode,
+                stdout=stdout_data,
+                stderr=stderr_data,
+            )
+        finally:
+            if process.poll() is None:
+                process.kill()
+
+    result = _run(command)
     if (
         fallback_command
         and result.returncode != 0
@@ -361,13 +501,7 @@ def _run_ffmpeg_with_optional_fallback(
             "FFmpeg hardware acceleration failed during %s; retrying on CPU",
             context,
         )
-        return subprocess.run(
-            fallback_command,
-            stdout=stdout,
-            stderr=stderr,
-            timeout=timeout,
-            text=text
-        )
+        return _run(fallback_command)
     return result
 
 
@@ -871,6 +1005,7 @@ def get_stream_info_and_bitrate(
     freeze_check_noise_threshold: float = 0.001,
     freeze_check_ratio_threshold: float = 0.80,
     hardware_acceleration: Optional[Dict[str, Any]] = None,
+    preempt_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Get complete stream information using ffmpeg in a single call.
@@ -898,6 +1033,7 @@ def get_stream_info_and_bitrate(
         freeze_check_noise_threshold: freezedetect noise threshold
         freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
         hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
+        preempt_check: Optional callback returning True when the probe should abort
 
     Returns:
         Dictionary containing:
@@ -948,7 +1084,7 @@ def get_stream_info_and_bitrate(
     logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url_ref(url)}")
 
     extra_args = _get_ffmpeg_extra_args()
-    hwaccel_config = normalize_hardware_acceleration_config(hardware_acceleration)
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
     hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
 
     # Flag rationale:
@@ -1012,22 +1148,34 @@ def get_stream_info_and_bitrate(
                 '-f', 'null', os.devnull,
             ]
 
+    _log_ffmpeg_hwaccel_request(
+        "stream analysis",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=bool(video_filters),
+    )
+
+    # Total subprocess timeout: analysis window + startup headroom.
+    actual_timeout = timeout + duration + stream_startup_buffer
+
     result_data = {
         'video_codec': 'N/A', 'audio_codec': 'N/A', 'resolution': '0x0',
         'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,
         'pixel_format': None, 'audio_sample_rate': None,
         'audio_channels': None, 'channel_layout': None,
         'audio_bitrate': None, 'status': 'OK', 'elapsed_time': 0,
+        'timeout_seconds': actual_timeout,
+        'operation_timeout_seconds': timeout,
+        'ffmpeg_duration_seconds': duration,
+        'startup_buffer_seconds': stream_startup_buffer,
         'blank_probe_ran': False, 'blank_detected': False,
         'blank_duration_secs': None, 'blank_ratio': None,
         'blank_segments': [],
         'freeze_probe_ran': False, 'freeze_detected': False,
         'freeze_duration_secs': None, 'freeze_ratio': None,
-        'freeze_segments': []
+        'freeze_segments': [],
+        'preempted': False, 'preempt_reason': None,
     }
-
-    # Total subprocess timeout: analysis window + startup headroom
-    actual_timeout = timeout + duration + stream_startup_buffer
 
     try:
         start = time.time()
@@ -1039,6 +1187,7 @@ def get_stream_info_and_bitrate(
             timeout=actual_timeout,
             text=True,
             context="stream analysis",
+            preempt_check=preempt_check,
         )
         elapsed = time.time() - start
         result_data['elapsed_time'] = elapsed
@@ -1278,6 +1427,12 @@ def get_stream_info_and_bitrate(
         logger.warning(f"Timeout ({actual_timeout}s) while analyzing stream")
         result_data['status'] = "Timeout"
         result_data['elapsed_time'] = actual_timeout
+    except StreamProbePreempted:
+        logger.info("Stream analysis preempted because viewer capacity is needed")
+        result_data['status'] = "PREEMPTED"
+        result_data['preempted'] = True
+        result_data['preempt_reason'] = 'viewer_preempted'
+        result_data['elapsed_time'] = time.time() - start if 'start' in locals() else 0
     except Exception as e:
         logger.error(f"Stream analysis failed: {e}")
         result_data['status'] = "Error"
@@ -1316,7 +1471,7 @@ def get_stream_bitrate(
     """
     logger.debug(f"Analyzing bitrate for {duration}s...")
     extra_args = _get_ffmpeg_extra_args()
-    hwaccel_config = normalize_hardware_acceleration_config(hardware_acceleration)
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
     hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
     command = [
         'ffmpeg', '-re', '-v', 'info', '-stats',
@@ -1334,6 +1489,13 @@ def get_stream_bitrate(
             '-i', url, '-t', str(duration),
             '-c', 'copy', '-f', 'mpegts', 'pipe:1'
         ]
+
+    _log_ffmpeg_hwaccel_request(
+        "bitrate analysis",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=False,
+    )
 
     bitrate = None
     status = "OK"
@@ -1478,8 +1640,14 @@ def _probe_stream_for_loops(
         f"sequence_length=3, duration_threshold=10.0s)"
     )
 
-    hwaccel_config = normalize_hardware_acceleration_config(hardware_acceleration)
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
     hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
+    _log_ffmpeg_hwaccel_request(
+        f"loop probe {stream_tag}",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=True,
+    )
 
     cmd = [
         'ffmpeg',
@@ -1646,6 +1814,36 @@ def _probe_stream_for_loops(
     return loop_detected, loop_duration, n
 
 
+def _analysis_failure_context(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value for key, value in {
+            'elapsed_seconds': result.get('elapsed_time'),
+            'timeout_seconds': result.get('timeout_seconds'),
+            'operation_timeout_seconds': result.get('operation_timeout_seconds'),
+            'ffmpeg_duration_seconds': result.get('ffmpeg_duration_seconds', result.get('ffmpeg_duration')),
+            'startup_buffer_seconds': result.get('startup_buffer_seconds', result.get('stream_startup_buffer')),
+            'attempt': result.get('attempt'),
+            'attempts': result.get('attempts'),
+            'max_attempts': result.get('max_attempts'),
+            'stage': result.get('stage') or 'stream analysis',
+            'message': result.get('error_message'),
+        }.items()
+        if value not in (None, '', [], {})
+    }
+
+
+def _stamp_analysis_failure_reason(result: Dict[str, Any]) -> None:
+    status = str(result.get('status') or '').strip().lower()
+    if status in {'timeout', 'stream_timeout', 'probe_timeout'}:
+        result['quality_reason'] = 'offline'
+        result['quality_reason_detail'] = 'stream_timeout'
+        result['quality_reason_context'] = _analysis_failure_context(result)
+    elif status in {'error', 'failed'}:
+        result['quality_reason'] = 'offline'
+        result['quality_reason_detail'] = 'error'
+        result['quality_reason_context'] = _analysis_failure_context(result)
+
+
 def analyze_stream(
     stream_url: str,
     stream_id: int,
@@ -1665,6 +1863,7 @@ def analyze_stream(
     freeze_check_noise_threshold: float = 0.001,
     freeze_check_ratio_threshold: float = 0.80,
     hardware_acceleration: Optional[Dict[str, Any]] = None,
+    preempt_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
     Perform complete stream analysis including codec, resolution, FPS, bitrate, and audio.
@@ -1693,6 +1892,7 @@ def analyze_stream(
         freeze_check_noise_threshold: freezedetect noise threshold
         freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
         hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
+        preempt_check: Optional callback returning True when a real viewer needs capacity
 
     Returns:
         Dictionary containing analysis results with keys:
@@ -1727,6 +1927,15 @@ def analyze_stream(
         'status': 'Error',
         'elapsed_time': 0,
         'ffmpeg_duration': ffmpeg_duration,
+        'ffmpeg_duration_seconds': ffmpeg_duration,
+        'timeout_seconds': timeout + ffmpeg_duration + stream_startup_buffer,
+        'operation_timeout_seconds': timeout,
+        'stream_startup_buffer': stream_startup_buffer,
+        'startup_buffer_seconds': stream_startup_buffer,
+        'attempt': 0,
+        'attempts': 0,
+        'max_attempts': retries + 1,
+        'stage': 'stream analysis',
         'blank_probe_ran': False,
         'blank_detected': False,
         'blank_duration_secs': None,
@@ -1737,6 +1946,11 @@ def analyze_stream(
         'freeze_duration_secs': None,
         'freeze_ratio': None,
         'freeze_segments': [],
+        'preempted': False,
+        'preempt_reason': None,
+        'quality_reason': 'offline',
+        'quality_reason_detail': 'error',
+        'quality_reason_context': {},
     }
 
     try:
@@ -1770,7 +1984,8 @@ def analyze_stream(
                     freeze_check_min_duration=freeze_check_min_duration,
                     freeze_check_noise_threshold=freeze_check_noise_threshold,
                     freeze_check_ratio_threshold=freeze_check_ratio_threshold,
-                    hardware_acceleration=hardware_acceleration
+                    hardware_acceleration=hardware_acceleration,
+                    preempt_check=preempt_check,
                 )
 
                 result = {
@@ -1792,6 +2007,18 @@ def analyze_stream(
                     'status': result_data['status'],
                     'elapsed_time': result_data.get('elapsed_time', 0),
                     'ffmpeg_duration': ffmpeg_duration,
+                    'ffmpeg_duration_seconds': result_data.get('ffmpeg_duration_seconds', ffmpeg_duration),
+                    'timeout_seconds': result_data.get(
+                        'timeout_seconds',
+                        timeout + ffmpeg_duration + stream_startup_buffer,
+                    ),
+                    'operation_timeout_seconds': result_data.get('operation_timeout_seconds', timeout),
+                    'stream_startup_buffer': stream_startup_buffer,
+                    'startup_buffer_seconds': result_data.get('startup_buffer_seconds', stream_startup_buffer),
+                    'attempt': attempt + 1,
+                    'attempts': attempt + 1,
+                    'max_attempts': total_attempts,
+                    'stage': 'stream analysis',
                     'blank_probe_ran': result_data.get('blank_probe_ran', False),
                     'blank_detected': result_data.get('blank_detected', False),
                     'blank_duration_secs': result_data.get('blank_duration_secs'),
@@ -1802,7 +2029,15 @@ def analyze_stream(
                     'freeze_duration_secs': result_data.get('freeze_duration_secs'),
                     'freeze_ratio': result_data.get('freeze_ratio'),
                     'freeze_segments': result_data.get('freeze_segments', []),
+                    'preempted': bool(result_data.get('preempted')),
+                    'preempt_reason': result_data.get('preempt_reason'),
                 }
+                if result['status'] == 'OK':
+                    result['quality_reason'] = 'none'
+                    result['quality_reason_detail'] = 'none'
+                    result['quality_reason_context'] = {}
+                else:
+                    _stamp_analysis_failure_reason(result)
 
                 if result.get('blank_probe_ran'):
                     blank_duration = float(result.get('blank_duration_secs') or 0.0)
@@ -1857,6 +2092,11 @@ def analyze_stream(
                     else:
                         logger.warning(f"  {stream_audit_ref}: Check failed - {result['status']} ({result_data['elapsed_time']:.2f}s)")
 
+                if result.get('preempted'):
+                    logger.info(
+                        f"  {stream_audit_ref}: Check preempted for active viewer capacity"
+                    )
+                    break
                 if result['status'] == "OK":
                     # Check whether FFmpeg ran for a meaningful portion of the
                     # probe window.  A stream that exits early produced partial
@@ -1895,6 +2135,22 @@ def analyze_stream(
                             )
 
             except Exception as inner_e:
+                result.update({
+                    'status': 'Error',
+                    'elapsed_time': 0,
+                    'ffmpeg_duration': ffmpeg_duration,
+                    'ffmpeg_duration_seconds': ffmpeg_duration,
+                    'timeout_seconds': timeout + ffmpeg_duration + stream_startup_buffer,
+                    'operation_timeout_seconds': timeout,
+                    'stream_startup_buffer': stream_startup_buffer,
+                    'startup_buffer_seconds': stream_startup_buffer,
+                    'attempt': attempt + 1,
+                    'attempts': attempt + 1,
+                    'max_attempts': total_attempts,
+                    'stage': 'stream analysis',
+                    'error_message': scrub_urls(str(inner_e))[:300],
+                })
+                _stamp_analysis_failure_reason(result)
                 logger.error(
                     f"  Exception during stream analysis "
                     f"(attempt {attempt + 1} of {total_attempts}) for {stream_audit_ref}: "
@@ -1904,6 +2160,12 @@ def analyze_stream(
                     logger.warning(f"  Retrying in {retry_delay} seconds...")
 
     except Exception as outer_e:
+        result.update({
+            'status': 'Error',
+            'error_message': scrub_urls(str(outer_e))[:300],
+            'stage': 'stream analysis',
+        })
+        _stamp_analysis_failure_reason(result)
         logger.error(f"Unexpected error in analyze_stream for {stream_audit_ref}: {scrub_urls(outer_e)}")
 
     return result

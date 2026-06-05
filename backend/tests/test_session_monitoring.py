@@ -35,6 +35,18 @@ class TestStreamMonitoring(unittest.TestCase):
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
 
+    def test_legacy_singleton_initializes_runtime_refresh_state(self):
+        """Test reused manager instances recover volatile refresh state."""
+        from apps.stream.stream_session_manager import StreamSessionManager
+
+        manager = StreamSessionManager()
+        if hasattr(manager, '_last_streams_refresh'):
+            delattr(manager, '_last_streams_refresh')
+
+        manager._ensure_runtime_state()
+
+        self.assertEqual(manager._last_streams_refresh, 0)
+
     @patch('stream_session_manager.get_udi_manager')
     @patch('stream_session_manager.get_dispatcharr_config')
     def test_session_creation_with_epg_event(self, mock_config, mock_udi):

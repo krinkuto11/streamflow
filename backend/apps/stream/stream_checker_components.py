@@ -398,36 +398,65 @@ class ChannelUpdateTracker:
                     if max_channels and len(channels) >= max_channels:
                         break
             
+            if not channels:
+                return []
+
             # Filter channels by checking_mode setting (channel-level overrides group-level)
-            # Filter channels by checking_mode setting (channel-level overrides group-level)
-            # Need to get full channel data to access channel_group_id
-            udi = get_udi_manager()
-            from apps.automation.automation_config_manager import get_automation_config_manager
-            automation_config = get_automation_config_manager()
+            # using only already-available cache/config state. This path can run during
+            # startup while UDI or automation storage is not ready yet.
+            channel_by_id: Dict[int, Dict[str, Any]] = {}
+            try:
+                udi = get_udi_manager()
+                if hasattr(udi, 'is_initialized') and not udi.is_initialized():
+                    udi = None
+            except Exception as exc:
+                logger.debug(f"Skipping channel metadata lookup while queueing updates: {exc}")
+                udi = None
+
+            if udi is not None:
+                try:
+                    channel_by_id = {
+                        ch.get('id'): ch
+                        for ch in udi.get_channels()
+                        if isinstance(ch, dict) and ch.get('id') is not None
+                    }
+                except Exception as exc:
+                    logger.debug(f"Unable to read channel metadata while queueing updates: {exc}")
+                    channel_by_id = {}
+
+            try:
+                from apps.automation.automation_config_manager import get_automation_config_manager
+                automation_config = get_automation_config_manager()
+            except Exception as exc:
+                logger.debug(f"Skipping checking-mode filtering while queueing updates: {exc}")
+                automation_config = None
             
             filtered_channels = []
             for cid in channels:
-                # Get channel data to access group_id
-                channel_data = None
-                for ch in udi.get_channels():
-                    if ch.get('id') == cid:
-                        channel_data = ch
-                        break
-                
+                channel_data = channel_by_id.get(cid)
                 group_id = channel_data.get('channel_group_id') if channel_data else None
-                
-                # Get effective profile
-                # Get effective profile via configuration
-                config = automation_config.get_effective_configuration(cid, group_id)
+
+                if automation_config is None:
+                    filtered_channels.append(cid)
+                    continue
+
+                try:
+                    config = automation_config.get_effective_configuration(cid, group_id)
+                except Exception as exc:
+                    logger.debug(f"Unable to resolve checking profile for channel {cid}: {exc}")
+                    filtered_channels.append(cid)
+                    continue
+
                 profile = config.get('profile') if config else None
                 
                 if profile and profile.get('stream_checking', {}).get('enabled', False):
                     filtered_channels.append(cid)
                 elif profile is None:
                     try:
-                        existing_profiles = automation_config.get_all_profiles(include_inactive=True)
-                    except TypeError:
-                        existing_profiles = automation_config.get_all_profiles()
+                        try:
+                            existing_profiles = automation_config.get_all_profiles(include_inactive=True)
+                        except TypeError:
+                            existing_profiles = automation_config.get_all_profiles()
                     except Exception:
                         existing_profiles = []
                     if not existing_profiles:
@@ -561,9 +590,12 @@ class StreamCheckQueue:
     """Queue manager for channel stream checking."""
     
     def __init__(self, max_size=1000):
-        self.queue = queue.Queue(maxsize=max_size)
+        self.queue = queue.PriorityQueue(maxsize=max_size)
+        self._queue_sequence = 0
         self.queued = {}  # Track channels already in queue dict(channel_id -> stream_count)
+        self.queued_metadata = {}  # Optional channel_id -> metadata for specialized queue entries
         self.in_progress = {} # dict(channel_id -> stream_count)
+        self.in_progress_metadata = {}
         self.completed = set()
         self.failed = {}
         self.lock = threading.Lock()
@@ -571,6 +603,7 @@ class StreamCheckQueue:
         # ETA Tracking variables
         import collections
         self.stream_processing_times = collections.deque(maxlen=100)
+        self.channel_processing_times = collections.deque(maxlen=100)
         self.channel_start_times = {}
         self.batch_started_at = None
         self.last_cleared_at = None
@@ -583,7 +616,7 @@ class StreamCheckQueue:
             'queue_size': 0
         }
     
-    def add_channel(self, channel_id: int, priority: int = 0, stream_count: int = 1):
+    def add_channel(self, channel_id: int, priority: int = 0, stream_count: int = 1, metadata: Optional[Dict[str, Any]] = None):
         """Add a channel to the checking queue."""
         with self.lock:
             # Check if channel is already queued, in progress, or completed.
@@ -598,15 +631,26 @@ class StreamCheckQueue:
                 self.stats['total_completed'] = 0
                 self.stats['total_failed'] = 0
                 self.queued.clear()
+                self.queued_metadata.clear()
                 self.failed.clear()
+                self.stream_processing_times.clear()
+                self.channel_processing_times.clear()
                 self.batch_started_at = datetime.now()
                 self.last_cleared_at = None
                 self.last_clear_reason = None
 
             try:
-                self.queue.put((priority, channel_id), block=False)
+                try:
+                    normalized_priority = int(priority)
+                except (TypeError, ValueError):
+                    normalized_priority = 0
+                sequence = self._queue_sequence
+                self._queue_sequence += 1
+                self.queue.put((-normalized_priority, sequence, channel_id), block=False)
                 # We default to 1 stream roughly if unknown, but add_channels will pass precise length
                 self.queued[channel_id] = stream_count
+                if metadata:
+                    self.queued_metadata[channel_id] = dict(metadata)
                 self.stats['total_queued'] += 1
                 self.stats['queue_size'] = self.queue.qsize()
                 logger.debug(f"Added channel {channel_id} to queue (priority: {priority})")
@@ -619,11 +663,34 @@ class StreamCheckQueue:
     def add_channels(self, channel_ids: List[int], priority: int = 0):
         """Add multiple channels to the queue."""
         added = 0
-        from apps.udi import get_udi_manager
-        udi = get_udi_manager()
+        udi = None
+        try:
+            from apps.udi import get_udi_manager
+            udi = get_udi_manager()
+        except Exception as exc:
+            logger.debug(
+                "Could not access UDI manager while estimating queued stream counts: %s",
+                exc,
+            )
         
         for channel_id in channel_ids:
-            channel = udi.get_channel_by_id(channel_id)
+            channel = None
+            if udi is not None:
+                try:
+                    is_initialized = getattr(udi, "is_initialized", None)
+                    if callable(is_initialized) and not is_initialized():
+                        channel = None
+                    else:
+                        try:
+                            channel = udi.get_channel_by_id(channel_id, fetch_if_missing=False)
+                        except TypeError:
+                            channel = udi.get_channel_by_id(channel_id)
+                except Exception as exc:
+                    logger.debug(
+                        "Could not read cached channel %s for queued stream count: %s",
+                        channel_id,
+                        exc,
+                    )
             stream_count = len(channel.get('streams', [])) if channel else 1
             if self.add_channel(channel_id, priority, stream_count=stream_count):
                 added += 1
@@ -643,10 +710,14 @@ class StreamCheckQueue:
                 return True
         return False
     
-    def get_next_channel(self, timeout: float = 1.0) -> Optional[int]:
-        """Get the next channel to check."""
+    def get_next_entry(self, timeout: float = 1.0) -> Optional[Dict[str, Any]]:
+        """Get the next queue entry to check."""
         try:
-            priority, channel_id = self.queue.get(timeout=timeout)
+            item = self.queue.get(timeout=timeout)
+            if len(item) == 3:
+                _, _, channel_id = item
+            else:
+                _, channel_id = item
             with self.lock:
                 if channel_id not in self.queued:
                     logger.debug(
@@ -656,13 +727,24 @@ class StreamCheckQueue:
                     return None
 
                 stream_count = self.queued.pop(channel_id)  # Remove from queued dict
+                metadata = self.queued_metadata.pop(channel_id, {})
                 self.in_progress[channel_id] = stream_count
+                if metadata:
+                    self.in_progress_metadata[channel_id] = metadata
                 self.channel_start_times[channel_id] = datetime.now()
                 self.stats['current_channel'] = channel_id
                 self.stats['queue_size'] = self.queue.qsize()
-            return channel_id
+            return {
+                'channel_id': channel_id,
+                'metadata': metadata,
+            }
         except queue.Empty:
             return None
+
+    def get_next_channel(self, timeout: float = 1.0) -> Optional[int]:
+        """Get the next channel to check."""
+        entry = self.get_next_entry(timeout=timeout)
+        return entry.get('channel_id') if entry else None
     
     def mark_completed(self, channel_id: int) -> bool:
         """Mark a channel check as completed.
@@ -682,6 +764,7 @@ class StreamCheckQueue:
             if channel_id in self.channel_start_times:
                 duration_sec = (datetime.now() - self.channel_start_times[channel_id]).total_seconds()
                 stream_count = self.in_progress.get(channel_id, 1)
+                self.channel_processing_times.append(duration_sec)
                 if stream_count > 0:
                     time_per_stream = duration_sec / stream_count
                     self.stream_processing_times.append(time_per_stream)
@@ -689,6 +772,7 @@ class StreamCheckQueue:
 
             if channel_id in self.in_progress:
                 del self.in_progress[channel_id]
+            self.in_progress_metadata.pop(channel_id, None)
             self.completed.add(channel_id)
             self.stats['total_completed'] += 1
             if self.stats['current_channel'] == channel_id:
@@ -709,10 +793,13 @@ class StreamCheckQueue:
                 return False
 
             if channel_id in self.channel_start_times:
+                duration_sec = (datetime.now() - self.channel_start_times[channel_id]).total_seconds()
+                self.channel_processing_times.append(duration_sec)
                 del self.channel_start_times[channel_id]
                 
             if channel_id in self.in_progress:
                 del self.in_progress[channel_id]
+            self.in_progress_metadata.pop(channel_id, None)
             self.failed[channel_id] = {
                 'error': error,
                 'timestamp': datetime.now().isoformat()
@@ -737,6 +824,7 @@ class StreamCheckQueue:
                 'queued_streams_count': sum(self.queued.values()),
                 'in_progress_streams_count': sum(self.in_progress.values()),
                 'avg_stream_process_time_sec': sum(self.stream_processing_times) / len(self.stream_processing_times) if self.stream_processing_times else 0,
+                'avg_channel_process_time_sec': sum(self.channel_processing_times) / len(self.channel_processing_times) if self.channel_processing_times else 0,
                 
                 'current_channel': self.stats['current_channel'],
                 'total_queued': self.stats['total_queued'],
@@ -776,10 +864,14 @@ class StreamCheckQueue:
                 except queue.Empty:
                     break
             self.queued.clear()
+            self.queued_metadata.clear()
             self.in_progress.clear()
+            self.in_progress_metadata.clear()
             self.completed.clear()
             self.failed.clear()
             self.channel_start_times.clear()
+            self.stream_processing_times.clear()
+            self.channel_processing_times.clear()
             self.batch_started_at = None
             self.stats = {
                 'total_queued': 0,
@@ -806,7 +898,10 @@ class StreamCheckerProgress:
         self.progress_file = progress_file
 
     @staticmethod
-    def _build_provider_progress(streams_detail: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    def _build_provider_progress(
+        streams_detail: Optional[List[Dict[str, Any]]],
+        provider_profile_slots: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    ) -> List[Dict[str, Any]]:
         """Build compact per-account progress counters from per-stream rows."""
         if not streams_detail:
             return []
@@ -816,28 +911,47 @@ class StreamCheckerProgress:
 
         for stream in streams_detail:
             account_name = stream.get('m3u_account') or 'Unknown'
+            account_id = stream.get('m3u_account_id')
+            account_key = str(account_id) if account_id not in (None, '') else account_name
             status = stream.get('status') or 'pending'
             provider = grouped.setdefault(
-                account_name,
+                account_key,
                 {
+                    'account_id': account_id,
                     'name': account_name,
                     'total': 0,
                     'status_counts': Counter(),
+                    'wait_reason_counts': Counter(),
                 },
             )
             provider['total'] += 1
             provider['status_counts'][status] += 1
+            if status in {'waiting_provider_limit', 'provider_limit_wait_timeout', 'viewer_preempted'}:
+                reason = (
+                    stream.get('reason_detail')
+                    or stream.get('quality_reason_detail')
+                    or stream.get('skipped_reason')
+                )
+                if reason and reason != 'none':
+                    provider['wait_reason_counts'][str(reason)] += 1
 
         provider_progress: List[Dict[str, Any]] = []
         for provider in grouped.values():
             counts = provider['status_counts']
+            wait_reason_counts = provider['wait_reason_counts']
             checking = counts.get('checking', 0) + counts.get('probing', 0)
             waiting = counts.get('waiting_provider_limit', 0)
             pending = counts.get('pending', 0)
             completed = counts.get('completed', 0)
-            skipped = counts.get('provider_limit_wait_timeout', 0)
+            skipped = counts.get('provider_limit_wait_timeout', 0) + counts.get('viewer_preempted', 0)
             failed = sum(counts.get(status, 0) for status in failed_statuses)
             finished = completed + skipped + failed
+            dominant_wait_reason = None
+            if wait_reason_counts:
+                dominant_wait_reason = sorted(
+                    wait_reason_counts.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[0][0]
 
             if waiting:
                 state = 'waiting_provider_limit'
@@ -853,6 +967,7 @@ class StreamCheckerProgress:
                 state = 'idle'
 
             provider_progress.append({
+                'account_id': provider.get('account_id'),
                 'name': provider['name'],
                 'total': provider['total'],
                 'checking': checking,
@@ -864,7 +979,16 @@ class StreamCheckerProgress:
                 'finished': finished,
                 'state': state,
                 'status_counts': dict(sorted(counts.items())),
+                'wait_reason_counts': dict(sorted(wait_reason_counts.items())),
+                'dominant_wait_reason': dominant_wait_reason,
             })
+            if provider_profile_slots:
+                account_id = provider.get('account_id')
+                profile_slots = provider_profile_slots.get(str(account_id)) if account_id not in (None, '') else None
+                if not profile_slots:
+                    profile_slots = provider_profile_slots.get(provider['name'])
+                if profile_slots:
+                    provider_progress[-1]['profile_slots'] = profile_slots
 
         return sorted(
             provider_progress,
@@ -894,7 +1018,8 @@ class StreamCheckerProgress:
     def update(self, channel_id: int, channel_name: str, current: int, total: int,
                current_stream: str = '', status: str = 'checking', step: str = '', step_detail: str = '',
                streams_detail: Optional[List[Dict[str, Any]]] = None, stream_duration: Optional[int] = None,
-               is_single_channel_check: bool = False):
+               is_single_channel_check: bool = False,
+               provider_profile_slots: Optional[Dict[str, List[Dict[str, Any]]]] = None):
         """Update progress information."""
         from apps.database.manager import get_db_manager
         with self.lock:
@@ -914,7 +1039,7 @@ class StreamCheckerProgress:
             }
             if streams_detail is not None:
                 progress_data['streams_detail'] = streams_detail
-                provider_progress = self._build_provider_progress(streams_detail)
+                provider_progress = self._build_provider_progress(streams_detail, provider_profile_slots)
                 if provider_progress:
                     progress_data['provider_progress'] = provider_progress
                     progress_data['provider_summary'] = self._build_provider_summary(provider_progress)

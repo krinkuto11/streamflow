@@ -83,6 +83,38 @@ class TestHardwareAccelerationConfig(unittest.TestCase):
         self.assertEqual(calls[0][0], "ffmpeg")
         self.assertEqual(calls[1][0], "nvidia-smi")
 
+    def test_auto_dri_diagnostics_do_not_probe_nvidia(self):
+        calls = []
+
+        def runner(command, timeout):
+            calls.append(command)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="Hardware acceleration methods:\ncuda\ndrm\nopencl\nqsv\nvaapi\nvdpau\nvulkan\n",
+                stderr="",
+            )
+
+        with patch.dict(os.environ, {"NVIDIA_VISIBLE_DEVICES": ""}):
+            diagnostics = collect_hardware_acceleration_diagnostics(
+                {
+                    "enabled": True,
+                    "mode": "auto",
+                    "device": "/dev/dri/",
+                    "allow_fallback": False,
+                },
+                command_runner=runner,
+            )
+
+        self.assertTrue(diagnostics["ffmpeg_available"])
+        self.assertTrue(diagnostics["mode_supported"])
+        self.assertTrue(diagnostics["dri_device_configured"])
+        self.assertTrue(diagnostics["dri_available"])
+        self.assertEqual(diagnostics["dri_hwaccels"], ["drm", "qsv", "vaapi"])
+        self.assertEqual(diagnostics["hardware_backend"], "dri")
+        self.assertFalse(diagnostics["nvidia_checked"])
+        self.assertEqual(calls, [["ffmpeg", "-hide_banner", "-hwaccels"]])
+
     def test_startup_diagnostics_checks_ffmpeg_but_not_nvidia_when_disabled(self):
         calls = []
 
@@ -152,12 +184,20 @@ class TestHardwareAccelerationConfig(unittest.TestCase):
             "nvidia_smi_ok": True,
             "nvidia_gpus": ["NVIDIA Test GPU"],
             "nvidia_error": "driver detail",
+            "dri_device_configured": True,
+            "dri_available": True,
+            "dri_hwaccels": ["drm", "qsv", "vaapi"],
+            "hardware_backend": "dri",
             "error": "raw exception detail",
         })
 
         self.assertEqual(status["config"]["mode"], "cuda")
         self.assertEqual(status["ffmpeg_hwaccels"], ["cuda"])
         self.assertEqual(status["nvidia_gpu_count"], 1)
+        self.assertEqual(status["dri_hwaccels"], ["drm", "qsv", "vaapi"])
+        self.assertEqual(status["hardware_backend"], "dri")
+        self.assertTrue(status["dri_available"])
+        self.assertTrue(status["dri_device_configured"])
         self.assertFalse(status["diagnostics_available"])
         self.assertFalse(status["ffmpeg_diagnostics_available"])
         self.assertFalse(status["nvidia_diagnostics_available"])
@@ -202,6 +242,82 @@ class TestHardwareAccelerationFfmpegCommand(unittest.TestCase):
         self.assertIn("-hwaccel", command)
         self.assertEqual(command[command.index("-hwaccel") + 1], "auto")
         self.assertLess(command.index("-hwaccel"), command.index("-i"))
+
+    @patch.object(stream_check_utils.os.path, "exists")
+    @patch.object(stream_check_utils.subprocess, "run")
+    def test_auto_dri_device_resolves_to_vaapi_render_node(self, mock_run, mock_exists):
+        mock_run.return_value = Mock(stderr=_ffmpeg_output(), returncode=0)
+        mock_exists.side_effect = lambda path: path == "/dev/dri/renderD129"
+
+        with self.assertLogs(stream_check_utils.logger.name, level="INFO") as captured:
+            get_stream_info_and_bitrate(
+                "http://example.com/test.m3u8",
+                duration=30,
+                timeout=30,
+                hardware_acceleration={
+                    "enabled": True,
+                    "mode": "auto",
+                    "device": "/dev/dri/",
+                    "allow_fallback": False,
+                },
+            )
+
+        command = mock_run.call_args.args[0]
+        self.assertIn("-vaapi_device", command)
+        self.assertEqual(command[command.index("-vaapi_device") + 1], "/dev/dri/renderD129")
+        self.assertIn("-hwaccel", command)
+        self.assertEqual(command[command.index("-hwaccel") + 1], "vaapi")
+        self.assertNotIn("-hwaccel_device", command)
+        self.assertIn(
+            "FFmpeg stream analysis hardware acceleration requested: mode=vaapi device=/dev/dri/renderD129 cpu_fallback=False decode_filters=False",
+            "\n".join(captured.output),
+        )
+
+    @patch.object(stream_check_utils.subprocess, "run")
+    def test_cuda_mode_is_not_rewritten_by_dri_resolution(self, mock_run):
+        mock_run.return_value = Mock(stderr=_ffmpeg_output(), returncode=0)
+
+        get_stream_info_and_bitrate(
+            "http://example.com/test.m3u8",
+            duration=30,
+            timeout=30,
+            hardware_acceleration={
+                "enabled": True,
+                "mode": "cuda",
+                "device": "0",
+                "allow_fallback": True,
+            },
+        )
+
+        command = mock_run.call_args.args[0]
+        self.assertIn("-hwaccel", command)
+        self.assertEqual(command[command.index("-hwaccel") + 1], "cuda")
+        self.assertIn("-hwaccel_device", command)
+        self.assertEqual(command[command.index("-hwaccel_device") + 1], "0")
+        self.assertNotIn("-vaapi_device", command)
+
+    @patch.object(stream_check_utils.subprocess, "run")
+    def test_explicit_vaapi_render_node_is_preserved_for_dri_gpus(self, mock_run):
+        mock_run.return_value = Mock(stderr=_ffmpeg_output(), returncode=0)
+
+        get_stream_info_and_bitrate(
+            "http://example.com/test.m3u8",
+            duration=30,
+            timeout=30,
+            hardware_acceleration={
+                "enabled": True,
+                "mode": "vaapi",
+                "device": "/dev/dri/renderD128",
+                "allow_fallback": True,
+            },
+        )
+
+        command = mock_run.call_args.args[0]
+        self.assertIn("-vaapi_device", command)
+        self.assertEqual(command[command.index("-vaapi_device") + 1], "/dev/dri/renderD128")
+        self.assertIn("-hwaccel", command)
+        self.assertEqual(command[command.index("-hwaccel") + 1], "vaapi")
+        self.assertNotIn("-hwaccel_device", command)
 
     @patch.object(stream_check_utils.subprocess, "run")
     def test_vaapi_device_is_placed_before_input(self, mock_run):
