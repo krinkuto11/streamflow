@@ -20,7 +20,7 @@ def test_create_auto_create_rule_matches_once_in_background(monkeypatch):
     class Service:
         def __init__(self):
             self.create_kwargs = None
-            self.match_calls = 0
+            self.match_calls = []
 
         def create_auto_create_rule(self, rule_data, **kwargs):
             self.create_kwargs = kwargs
@@ -31,8 +31,8 @@ def test_create_auto_create_rule_matches_once_in_background(monkeypatch):
                 "regex_pattern": rule_data["regex_pattern"],
             }
 
-        def match_programs_to_rules(self):
-            self.match_calls += 1
+        def match_programs_to_rules(self, **kwargs):
+            self.match_calls.append(kwargs)
             return {"created": 2, "updated": 0, "skipped": 0}
 
     service = Service()
@@ -53,7 +53,7 @@ def test_create_auto_create_rule_matches_once_in_background(monkeypatch):
     assert status == 201
     assert response.get_json()["id"] == "rule-1"
     assert service.create_kwargs == {"match_immediately": False}
-    assert service.match_calls == 1
+    assert service.match_calls == [{"force_refresh": True}]
     wake.set.assert_called_once_with()
 
 

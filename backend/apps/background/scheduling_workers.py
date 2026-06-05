@@ -139,7 +139,7 @@ def epg_refresh_processor_loop(
 
             if _is_schedule_due(epg_schedule, epg_last_run):
                 logger.info("Fetching EPG data and matching programs to auto-create rules...")
-                result = service.match_programs_to_rules()
+                result = service.match_programs_to_rules(force_refresh=True)
                 logger.info(f"EPG refresh complete. Created {result.get('created', 0)} events.")
                 epg_last_run = datetime.now()
 

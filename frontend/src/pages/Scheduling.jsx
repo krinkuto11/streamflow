@@ -339,6 +339,23 @@ export default function Scheduling() {
     }
   }
 
+  const handleRefresh = async () => {
+    try {
+      setLoading(true)
+      await schedulingAPI.getEPGGrid(true)
+      await loadData()
+    } catch (err) {
+      console.error('Failed to refresh scheduling data:', err)
+      toast({
+        title: "Error",
+        description: "Failed to refresh EPG matches",
+        variant: "destructive"
+      })
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const handleCreateRule = async () => {
     if (!ruleName || (ruleSelectedChannels.length === 0 && ruleSelectedChannelGroups.length === 0) || !ruleRegexPattern) {
       toast({
@@ -670,7 +687,7 @@ export default function Scheduling() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => loadData()}>
+          <Button variant="outline" size="sm" onClick={handleRefresh}>
             <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
             Refresh
           </Button>

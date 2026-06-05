@@ -932,7 +932,7 @@ class SchedulingService:
                             if e.get('auto_create_rule_id') != rule_id
                         ]
                         self._save_scheduled_events()
-                    self.fetch_epg_grid()
+                    self.fetch_epg_grid(force_refresh=True)
                 except Exception as e:
                     logger.error(f"Error matching programs to updated rule: {e}", exc_info=True)
 

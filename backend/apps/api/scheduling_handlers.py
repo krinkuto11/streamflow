@@ -167,7 +167,7 @@ def create_auto_create_rule_response(
 
         def _match_in_background():
             try:
-                service.match_programs_to_rules()
+                service.match_programs_to_rules(force_refresh=True)
                 logger.info("Background program matching complete after creating auto-create rule")
                 if scheduled_event_processor_wake is not None and hasattr(scheduled_event_processor_wake, "set"):
                     scheduled_event_processor_wake.set()
