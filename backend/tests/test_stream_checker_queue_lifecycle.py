@@ -66,6 +66,74 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
 
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 402)
 
+    def test_preflight_then_auto_create_then_normal_priority_order(self):
+        check_queue = StreamCheckQueue(max_size=10)
+
+        self.assertTrue(check_queue.add_channel(401, priority=10, stream_count=1))
+        self.assertTrue(check_queue.add_channel(402, priority=10, stream_count=1))
+
+        active_entry = check_queue.get_next_entry(timeout=0.1)
+        self.assertEqual(active_entry["channel_id"], 401)
+
+        self.assertTrue(check_queue.add_channel(
+            403,
+            priority=90,
+            stream_count=1,
+            metadata={
+                "source": "auto_create",
+                "program_name": "Live: MLB",
+                "is_epg_scheduled": True,
+            },
+        ))
+        self.assertTrue(check_queue.add_channel(
+            404,
+            priority=100,
+            stream_count=1,
+            metadata={
+                "source": "teamarr_preflight",
+                "program_name": "Home vs Away",
+                "is_epg_scheduled": True,
+            },
+        ))
+
+        preflight_entry = check_queue.get_next_entry(timeout=0.1)
+        self.assertEqual(preflight_entry["channel_id"], 404)
+        self.assertEqual(preflight_entry["metadata"]["source"], "teamarr_preflight")
+
+        auto_create_entry = check_queue.get_next_entry(timeout=0.1)
+        self.assertEqual(auto_create_entry["channel_id"], 403)
+        self.assertEqual(auto_create_entry["metadata"]["source"], "auto_create")
+
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 402)
+
+    def test_waiting_normal_channel_can_be_promoted_to_auto_create_priority(self):
+        check_queue = StreamCheckQueue(max_size=10)
+
+        self.assertTrue(check_queue.add_channel(501, priority=10, stream_count=1))
+        self.assertTrue(check_queue.add_channel(502, priority=10, stream_count=1))
+
+        promoted = check_queue.add_channel(
+            502,
+            priority=90,
+            stream_count=1,
+            metadata={
+                "source": "auto_create",
+                "program_name": "Live: MLB",
+                "is_epg_scheduled": True,
+            },
+        )
+
+        self.assertTrue(promoted)
+        status = check_queue.get_status()
+        self.assertEqual(status["queued"], 2)
+        self.assertEqual(status["queue_size"], 2)
+
+        auto_create_entry = check_queue.get_next_entry(timeout=0.1)
+        self.assertEqual(auto_create_entry["channel_id"], 502)
+        self.assertEqual(auto_create_entry["metadata"]["source"], "auto_create")
+
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 501)
+
     def test_queue_entries_preserve_metadata_with_priority_ordering(self):
         check_queue = StreamCheckQueue(max_size=10)
 
@@ -227,6 +295,65 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(queue_status['eta_basis'], 'stream')
         self.assertEqual(eta_seconds, 250)
 
+    def test_queue_eta_uses_configured_stream_duration_floor(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: (
+            True if key == 'concurrent_streams.enabled'
+            else 4 if key == 'concurrent_streams.global_limit'
+            else {'global_limit': 4} if key == 'concurrent_streams'
+            else {'ffmpeg_duration': 30} if key == 'stream_analysis'
+            else default
+        )
+        queue_status = {
+            'completed': 12,
+            'failed': 0,
+            'queued': 20,
+            'in_progress': 0,
+            'total_queued': 32,
+            'queued_streams_count': 100,
+            'in_progress_streams_count': 0,
+            'avg_stream_process_time_sec': 6,
+            'avg_channel_process_time_sec': 1,
+        }
+
+        eta_seconds = service._calculate_queue_eta_seconds(queue_status)
+
+        self.assertEqual(queue_status['eta_stream_seconds'], 750)
+        self.assertEqual(queue_status['eta_stream_observed_seconds'], 6)
+        self.assertEqual(queue_status['eta_stream_floor_seconds'], 30)
+        self.assertEqual(queue_status['eta_basis'], 'stream')
+        self.assertEqual(eta_seconds, 750)
+
+    def test_queue_eta_can_start_from_configured_stream_duration_before_samples(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: (
+            True if key == 'concurrent_streams.enabled'
+            else 5 if key == 'concurrent_streams.global_limit'
+            else {'global_limit': 5} if key == 'concurrent_streams'
+            else {'ffmpeg_duration': 30} if key == 'stream_analysis'
+            else default
+        )
+        queue_status = {
+            'completed': 0,
+            'failed': 0,
+            'queued': 10,
+            'in_progress': 0,
+            'total_queued': 10,
+            'queued_streams_count': 50,
+            'in_progress_streams_count': 0,
+            'avg_stream_process_time_sec': 0,
+            'avg_channel_process_time_sec': 0,
+        }
+
+        eta_seconds = service._calculate_queue_eta_seconds(queue_status)
+
+        self.assertEqual(queue_status['eta_stream_seconds'], 300)
+        self.assertEqual(queue_status['eta_stream_floor_seconds'], 30)
+        self.assertEqual(queue_status['eta_basis'], 'stream')
+        self.assertEqual(eta_seconds, 300)
+
     def test_queue_eta_uses_elapsed_channel_rate_when_channel_average_missing(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.config = Mock()
@@ -378,6 +505,45 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(queued_metadata['source'], 'teamarr_preflight')
         self.assertEqual(result, {'success': True})
         service.check_queue.mark_completed.assert_called_once_with(8441)
+        service.check_queue.mark_failed.assert_not_called()
+
+    def test_worker_uses_single_channel_path_for_auto_create_queue_metadata(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.running = True
+        service.batch_start_time = None
+        service.abort_current_check = threading.Event()
+        service.check_queue = Mock()
+        service._start_batch_changelog = Mock()
+        service._finalize_batch_changelog = Mock()
+        service._check_channel = Mock()
+        service.check_single_channel = Mock(return_value={'success': True})
+
+        def pull_entry(timeout):
+            service.running = False
+            return {
+                'channel_id': 9441,
+                'metadata': {
+                    'source': 'auto_create',
+                    'program_name': 'Live: MLB',
+                    'is_epg_scheduled': True,
+                },
+            }
+
+        service.check_queue.get_next_entry.side_effect = pull_entry
+        service.check_queue.mark_completed = Mock()
+        service.check_queue.mark_failed = Mock()
+
+        service._worker_loop()
+
+        service._start_batch_changelog.assert_not_called()
+        service._check_channel.assert_not_called()
+        service.check_single_channel.assert_called_once_with(
+            9441,
+            program_name='Live: MLB',
+            is_epg_scheduled=True,
+            forced_profile_id=None,
+        )
+        service.check_queue.mark_completed.assert_called_once_with(9441)
         service.check_queue.mark_failed.assert_not_called()
 
     def test_worker_passes_teamarr_provider_limit_override_when_requested(self):

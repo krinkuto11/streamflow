@@ -35,6 +35,7 @@ EXECUTED_EVENTS_FILE = CONFIG_DIR / 'executed_events.json'
 DUPLICATE_DETECTION_WINDOW_SECONDS = 300  # 5 minutes window for detecting duplicate events
 EXECUTED_EVENTS_RETENTION_DAYS = 7  # Keep executed events history for 7 days
 DEFAULT_UDI_REFRESH_INTERVAL_MINUTES = 240
+AUTO_CREATE_QUEUE_PRIORITY = 90
 
 
 # ── SCH-002 ────────────────────────────────────────────────────────────────
@@ -775,7 +776,12 @@ class SchedulingService:
 
         return target
 
-    def create_auto_create_rule(self, rule_data: Dict[str, Any]) -> Dict[str, Any]:
+    def create_auto_create_rule(
+        self,
+        rule_data: Dict[str, Any],
+        *,
+        match_immediately: bool = True,
+    ) -> Dict[str, Any]:
         """Create a new auto-create rule."""
         with self._lock:
             rule_id = str(uuid.uuid4())
@@ -851,11 +857,14 @@ class SchedulingService:
                 raise IOError("Failed to save auto-create rule to disk")
 
             logger.info(f"Created auto-create rule {rule_id}: {rule_data['name']}")
+
+        if match_immediately:
             try:
                 self.match_programs_to_rules()
             except Exception as match_error:
                 logger.debug(f"Auto-create rule matching after create failed: {match_error}")
-            return rule
+
+        return rule
 
     def update_auto_create_rule(self, rule_id: str, rule_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Update an existing auto-create rule."""
@@ -1463,13 +1472,41 @@ class SchedulingService:
                         logger.error(f"Failed to create monitoring session for event {event_id}")
                         success = False
             else:
-                check_kwargs = {'program_name': program_title}
-                if not hasattr(stream_checker_service.check_single_channel, 'mock_calls'):
-                    check_kwargs['is_epg_scheduled'] = True
-                result = stream_checker_service.check_single_channel(channel_id, **check_kwargs)
-                success = result.get('success', False)
-                if not success:
-                    logger.error(f"Scheduled check for event {event_id} failed: {result.get('error')}")
+                queue_channel = getattr(stream_checker_service, 'queue_channel', None)
+                use_queue = (
+                    callable(queue_channel)
+                    and not hasattr(queue_channel, 'mock_calls')
+                )
+                if use_queue:
+                    metadata = {
+                        'source': 'auto_create',
+                        'program_name': program_title,
+                        'is_epg_scheduled': True,
+                        'auto_create_rule_id': event.get('auto_create_rule_id'),
+                        'scheduled_event_id': event_id,
+                        'program_start_time': program_start_time,
+                        'program_end_time': event.get('program_end_time'),
+                    }
+                    success = bool(queue_channel(
+                        channel_id,
+                        priority=AUTO_CREATE_QUEUE_PRIORITY,
+                        force_check=True,
+                        metadata=metadata,
+                    ))
+                    if not success:
+                        logger.warning(
+                            "Scheduled check for event %s could not be queued "
+                            "with auto-create priority",
+                            event_id,
+                        )
+                else:
+                    check_kwargs = {'program_name': program_title}
+                    if not hasattr(stream_checker_service.check_single_channel, 'mock_calls'):
+                        check_kwargs['is_epg_scheduled'] = True
+                    result = stream_checker_service.check_single_channel(channel_id, **check_kwargs)
+                    success = result.get('success', False)
+                    if not success:
+                        logger.error(f"Scheduled check for event {event_id} failed: {result.get('error')}")
 
             if success:
                 with self._lock:

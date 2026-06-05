@@ -4174,13 +4174,18 @@ class StreamCheckerService:
 
     def _calculate_queue_eta_seconds(self, queue_status: Dict) -> int:
         avg_seconds = self._queue_number(queue_status.get('avg_stream_process_time_sec'))
+        analysis_config = self.config.get('stream_analysis', {}) or {}
+        configured_stream_seconds = 0.0
+        if isinstance(analysis_config, dict):
+            configured_stream_seconds = self._queue_number(analysis_config.get('ffmpeg_duration'))
+        effective_stream_seconds = max(avg_seconds, configured_stream_seconds)
         remaining_streams = (
             self._queue_number(queue_status.get('queued_streams_count'))
             + self._queue_number(queue_status.get('in_progress_streams_count'))
         )
 
         stream_eta_seconds = 0.0
-        if avg_seconds > 0 and remaining_streams > 0:
+        if effective_stream_seconds > 0 and remaining_streams > 0:
             if self.config.get('concurrent_streams.enabled', True):
                 concurrent_config = self.config.get('concurrent_streams', {}) or {}
                 max_workers = self.config.get('concurrent_streams.global_limit', None)
@@ -4195,9 +4200,9 @@ class StreamCheckerService:
                     max_workers = 1
                 if max_workers <= 0:
                     max_workers = max(1, int(remaining_streams or 1))
-                stream_eta_seconds = (avg_seconds * remaining_streams) / max_workers
+                stream_eta_seconds = (effective_stream_seconds * remaining_streams) / max_workers
             else:
-                stream_eta_seconds = avg_seconds * remaining_streams
+                stream_eta_seconds = effective_stream_seconds * remaining_streams
 
         completed_channels = (
             self._queue_number(queue_status.get('completed'))
@@ -4227,6 +4232,8 @@ class StreamCheckerService:
         eta_seconds = max(stream_eta_seconds, channel_eta_seconds)
         queue_status['eta_stream_seconds'] = int(stream_eta_seconds)
         queue_status['eta_channel_seconds'] = int(channel_eta_seconds)
+        queue_status['eta_stream_observed_seconds'] = int(avg_seconds)
+        queue_status['eta_stream_floor_seconds'] = int(configured_stream_seconds)
         queue_status['eta_basis'] = 'channel' if channel_eta_seconds >= stream_eta_seconds and channel_eta_seconds > 0 else 'stream'
         return int(eta_seconds)
 

@@ -3,7 +3,11 @@ from unittest.mock import Mock
 from datetime import datetime, timedelta, timezone
 
 from apps.automation import scheduling_service
-from apps.automation.scheduling_service import NoTvgIdError, SchedulingService
+from apps.automation.scheduling_service import (
+    AUTO_CREATE_QUEUE_PRIORITY,
+    NoTvgIdError,
+    SchedulingService,
+)
 
 
 def _make_service(tmp_path: Path, monkeypatch):
@@ -185,3 +189,48 @@ def test_auto_create_schedules_currently_airing_programs(tmp_path, monkeypatch):
     events = service.get_scheduled_events()
     assert len(events) == 3
     assert {event["channel_id"] for event in events} == {10, 11, 12}
+
+
+def test_auto_create_scheduled_check_queues_with_event_priority(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    event = {
+        "id": "event-1",
+        "channel_id": 10,
+        "channel_name": "Team A",
+        "program_title": "Live: MLB",
+        "program_start_time": (now + timedelta(minutes=5)).isoformat(),
+        "program_end_time": (now + timedelta(hours=2)).isoformat(),
+        "check_time": now.isoformat(),
+        "minutes_before": 5,
+        "schedule_type": "check",
+        "auto_created": True,
+        "auto_create_rule_id": "rule-1",
+    }
+    service._scheduled_events = [event]
+
+    class Checker:
+        def __init__(self):
+            self.queued = []
+
+        def queue_channel(self, *args, **kwargs):
+            self.queued.append((args, kwargs))
+            return True
+
+        def check_single_channel(self, *args, **kwargs):
+            raise AssertionError("auto-create checks should be queued")
+
+    checker = Checker()
+
+    assert service.execute_scheduled_check("event-1", checker) is True
+    assert service.get_scheduled_events() == []
+    assert len(checker.queued) == 1
+
+    args, kwargs = checker.queued[0]
+    assert args == (10,)
+    assert kwargs["priority"] == AUTO_CREATE_QUEUE_PRIORITY
+    assert kwargs["force_check"] is True
+    assert kwargs["metadata"]["source"] == "auto_create"
+    assert kwargs["metadata"]["program_name"] == "Live: MLB"
+    assert kwargs["metadata"]["is_epg_scheduled"] is True
+    assert kwargs["metadata"]["auto_create_rule_id"] == "rule-1"

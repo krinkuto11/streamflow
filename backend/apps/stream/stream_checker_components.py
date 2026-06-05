@@ -593,6 +593,7 @@ class StreamCheckQueue:
         self.queue = queue.PriorityQueue(maxsize=max_size)
         self._queue_sequence = 0
         self.queued = {}  # Track channels already in queue dict(channel_id -> stream_count)
+        self.queued_priorities = {}
         self.queued_metadata = {}  # Optional channel_id -> metadata for specialized queue entries
         self.in_progress = {} # dict(channel_id -> stream_count)
         self.in_progress_metadata = {}
@@ -619,10 +620,44 @@ class StreamCheckQueue:
     def add_channel(self, channel_id: int, priority: int = 0, stream_count: int = 1, metadata: Optional[Dict[str, Any]] = None):
         """Add a channel to the checking queue."""
         with self.lock:
-            # Check if channel is already queued, in progress, or completed.
-            # Completed channels stay blocked until an explicit re-queue path
-            # removes them from the completed set.
-            if channel_id in self.queued or channel_id in self.in_progress or channel_id in self.completed:
+            try:
+                normalized_priority = int(priority)
+            except (TypeError, ValueError):
+                normalized_priority = 0
+
+            # Queued channels can be promoted by a higher-priority entry.  The
+            # old heap item stays in PriorityQueue and is ignored as stale after
+            # the promoted item is consumed.  Active/completed channels stay
+            # protected until an explicit re-queue path removes them.
+            if channel_id in self.queued:
+                existing_priority = self.queued_priorities.get(channel_id, 0)
+                if normalized_priority <= existing_priority:
+                    return False
+
+                try:
+                    sequence = self._queue_sequence
+                    self._queue_sequence += 1
+                    self.queue.put((-normalized_priority, sequence, channel_id), block=False)
+                except queue.Full:
+                    logger.warning(
+                        f"Queue is full, cannot promote channel {channel_id} "
+                        f"to priority {normalized_priority}"
+                    )
+                    return False
+                self.queued[channel_id] = stream_count
+                self.queued_priorities[channel_id] = normalized_priority
+                if metadata:
+                    merged_metadata = dict(self.queued_metadata.get(channel_id, {}))
+                    merged_metadata.update(dict(metadata))
+                    self.queued_metadata[channel_id] = merged_metadata
+                self.stats['queue_size'] = len(self.queued)
+                logger.debug(
+                    f"Promoted queued channel {channel_id} "
+                    f"from priority {existing_priority} to {normalized_priority}"
+                )
+                return True
+
+            if channel_id in self.in_progress or channel_id in self.completed:
                 return False
 
             # Check if this is a new "batch" starting (queue is completely empty and no workers are active)
@@ -631,6 +666,7 @@ class StreamCheckQueue:
                 self.stats['total_completed'] = 0
                 self.stats['total_failed'] = 0
                 self.queued.clear()
+                self.queued_priorities.clear()
                 self.queued_metadata.clear()
                 self.failed.clear()
                 self.stream_processing_times.clear()
@@ -640,19 +676,16 @@ class StreamCheckQueue:
                 self.last_clear_reason = None
 
             try:
-                try:
-                    normalized_priority = int(priority)
-                except (TypeError, ValueError):
-                    normalized_priority = 0
                 sequence = self._queue_sequence
                 self._queue_sequence += 1
                 self.queue.put((-normalized_priority, sequence, channel_id), block=False)
                 # We default to 1 stream roughly if unknown, but add_channels will pass precise length
                 self.queued[channel_id] = stream_count
+                self.queued_priorities[channel_id] = normalized_priority
                 if metadata:
                     self.queued_metadata[channel_id] = dict(metadata)
                 self.stats['total_queued'] += 1
-                self.stats['queue_size'] = self.queue.qsize()
+                self.stats['queue_size'] = len(self.queued)
                 logger.debug(f"Added channel {channel_id} to queue (priority: {priority})")
                 return True
             except queue.Full:
@@ -723,17 +756,18 @@ class StreamCheckQueue:
                     logger.debug(
                         f"Ignoring stale queued channel {channel_id}; queue entry was cleared"
                     )
-                    self.stats['queue_size'] = self.queue.qsize()
+                    self.stats['queue_size'] = len(self.queued)
                     return None
 
                 stream_count = self.queued.pop(channel_id)  # Remove from queued dict
+                self.queued_priorities.pop(channel_id, None)
                 metadata = self.queued_metadata.pop(channel_id, {})
                 self.in_progress[channel_id] = stream_count
                 if metadata:
                     self.in_progress_metadata[channel_id] = metadata
                 self.channel_start_times[channel_id] = datetime.now()
                 self.stats['current_channel'] = channel_id
-                self.stats['queue_size'] = self.queue.qsize()
+                self.stats['queue_size'] = len(self.queued)
             return {
                 'channel_id': channel_id,
                 'metadata': metadata,
@@ -814,7 +848,7 @@ class StreamCheckQueue:
         """Get current queue status."""
         with self.lock:
             return {
-                'queue_size': self.queue.qsize(),
+                'queue_size': len(self.queued),
                 'queued': len(self.queued),
                 'in_progress': len(self.in_progress),
                 'completed': len(self.completed),
@@ -840,7 +874,7 @@ class StreamCheckQueue:
         """Return the queue lifecycle state while self.lock is held."""
         if self.in_progress:
             return 'checking'
-        if not self.queue.empty() or self.queued:
+        if self.queued:
             return 'queued'
         if self.completed or self.failed:
             return 'completed'
@@ -864,6 +898,7 @@ class StreamCheckQueue:
                 except queue.Empty:
                     break
             self.queued.clear()
+            self.queued_priorities.clear()
             self.queued_metadata.clear()
             self.in_progress.clear()
             self.in_progress_metadata.clear()
@@ -887,7 +922,8 @@ class StreamCheckQueue:
 
     def is_empty(self) -> bool:
         """Check if the queue is empty."""
-        return self.queue.empty()
+        with self.lock:
+            return not self.queued
 
 
 class StreamCheckerProgress:

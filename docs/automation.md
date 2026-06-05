@@ -71,9 +71,18 @@ Profiles live in `automation_config.json` under `profiles`. A profile has three 
 | `min_bitrate`       | Discard streams below this bitrate (kbps)                             |
 | `require_hdr`       | `"any"` / `"hdr"` / `"sdr"`                                           |
 | `blank_check_enabled` | Run blank-screen detection during the quality probe                 |
-| `m3u_priority`      | Ordered list of M3U account IDs — higher index = lower priority       |
-| `m3u_priority_mode` | `"absolute"` (strict ordering) or `"equal"` (quality score only)      |
+| `m3u_priority`      | Ordered list of M3U account IDs; earlier IDs have higher playlist rank |
+| `m3u_priority_mode` | Stream ordering mode: `"absolute"`, `"same_resolution"`, `"playlist_score"`, `"score_playlist"`, `"equal"`, or `"quality"` |
 | `grace_period`      | If `true`, skip recently-checked streams within the grace window      |
+
+Priority modes:
+
+- `absolute`: playlist rank first, then resolution, then score.
+- `same_resolution`: resolution first, then playlist rank, then score.
+- `playlist_score`: playlist rank first, then score within the same playlist.
+- `score_playlist`: score first; playlist rank only breaks equal-score ties.
+- `equal`: resolution and score only; playlist rank is ignored.
+- `quality`: score only; playlist rank and resolution tier are ignored.
 
 ### `scoring_weights`
 
