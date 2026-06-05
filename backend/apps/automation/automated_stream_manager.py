@@ -4790,13 +4790,20 @@ class AutomatedStreamManager:
                         ch_dead = c_result.get('dead_streams_count', 0)
                         ch_revived = c_result.get('revived_streams_count', 0)
                         ch_analyzed = len(c_result.get('checked_streams', []))
-                        ch_blank = sum(
-                            1 for stream in c_result.get('checked_streams', [])
-                            if stream.get('blank_detected') is True
+                        checked_streams = c_result.get('checked_streams', [])
+                        ch_blank = max(
+                            int(c_result.get('blank_streams_count', 0) or 0),
+                            sum(
+                                1 for stream in checked_streams
+                                if stream.get('blank_detected') is True or stream.get('status') == 'blank'
+                            ),
                         )
-                        ch_freeze = sum(
-                            1 for stream in c_result.get('checked_streams', [])
-                            if stream.get('freeze_detected') is True
+                        ch_freeze = max(
+                            int(c_result.get('freeze_streams_count', 0) or 0),
+                            sum(
+                                1 for stream in checked_streams
+                                if stream.get('freeze_detected') is True or stream.get('status') == 'freeze'
+                            ),
                         )
                         
                         dead_streams_count += ch_dead
@@ -4807,7 +4814,7 @@ class AutomatedStreamManager:
                         
                         # Collect metrics for global averages
                         from apps.core.stream_stats_utils import parse_bitrate_value, parse_fps_value
-                        for s in c_result.get('checked_streams', []):
+                        for s in checked_streams:
                             br = parse_bitrate_value(s.get('bitrate'))
                             if br: agg_bitrates.append(br)
                             

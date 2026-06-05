@@ -814,6 +814,26 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
 
         self.assertEqual(sync_counts, [(2, 1, 1)])
 
+    def test_result_count_uses_checked_streams_when_summary_count_is_stale_zero(self):
+        result = {
+            'blank_streams_count': 0,
+            'freeze_streams_count': 0,
+            'checked_streams': [
+                {'id': 1, 'status': 'completed', 'blank_detected': True},
+                {'id': 2, 'status': 'freeze', 'freeze_detected': False},
+                {'id': 3, 'status': 'completed', 'freeze_detected': True},
+            ],
+        }
+
+        self.assertEqual(
+            StreamCheckerService._result_count(result, 'blank_streams_count', fallback_status='blank'),
+            1,
+        )
+        self.assertEqual(
+            StreamCheckerService._result_count(result, 'freeze_streams_count', fallback_status='freeze'),
+            2,
+        )
+
 
 class TestStreamCheckerQueueHandlers(unittest.TestCase):
     def setUp(self):

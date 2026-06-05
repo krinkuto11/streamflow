@@ -1190,6 +1190,14 @@ class StreamCheckerService:
                 total_streams = sum(entry.get('total_streams', 0) for entry in self.batch_changelog_entries)
                 streams_analyzed = sum(entry.get('streams_analyzed', 0) for entry in self.batch_changelog_entries)
                 dead_streams = sum(entry.get('dead_streams_detected', 0) for entry in self.batch_changelog_entries)
+                blank_streams = sum(
+                    self._count_checked_stream_status({'checked_streams': entry.get('stream_stats', [])}, 'blank')
+                    for entry in self.batch_changelog_entries
+                )
+                freeze_streams = sum(
+                    self._count_checked_stream_status({'checked_streams': entry.get('stream_stats', [])}, 'freeze')
+                    for entry in self.batch_changelog_entries
+                )
                 streams_revived = sum(entry.get('streams_revived', 0) for entry in self.batch_changelog_entries)
                 successful_checks = sum(1 for entry in self.batch_changelog_entries if entry.get('success', False))
                 failed_checks = total_channels - successful_checks
@@ -1206,6 +1214,14 @@ class StreamCheckerService:
                                 "total_streams": entry.get('total_streams', 0),
                                 "streams_analyzed": entry.get('streams_analyzed', 0),
                                 "dead_streams": entry.get('dead_streams_detected', 0),
+                                "blank_streams": self._count_checked_stream_status(
+                                    {'checked_streams': entry.get('stream_stats', [])},
+                                    'blank',
+                                ),
+                                "freeze_streams": self._count_checked_stream_status(
+                                    {'checked_streams': entry.get('stream_stats', [])},
+                                    'freeze',
+                                ),
                                 "streams_revived": entry.get('streams_revived', 0),
                                 "avg_resolution": entry.get('avg_resolution', 'N/A'),
                                 "avg_bitrate": entry.get('avg_bitrate', 'N/A'),
@@ -1227,6 +1243,8 @@ class StreamCheckerService:
                         'total_streams': total_streams,
                         'streams_analyzed': streams_analyzed,
                         'dead_streams': dead_streams,
+                        'blank_streams': blank_streams,
+                        'freeze_streams': freeze_streams,
                         'streams_revived': streams_revived,
                         'duration': duration_str,
                         'duration_seconds': duration_seconds
@@ -4401,15 +4419,14 @@ class StreamCheckerService:
     def _result_count(cls, result: Dict, key: str, fallback_status: Optional[str] = None) -> int:
         if not isinstance(result, dict):
             return 0
+        fallback_count = cls._count_checked_stream_status(result, fallback_status) if fallback_status else 0
         try:
             raw = result.get(key)
             if raw is not None:
-                return max(0, int(raw or 0))
+                return max(0, int(raw or 0), fallback_count)
         except (TypeError, ValueError):
             pass
-        if fallback_status:
-            return cls._count_checked_stream_status(result, fallback_status)
-        return 0
+        return fallback_count
     
     def check_channels_synchronously(
         self,

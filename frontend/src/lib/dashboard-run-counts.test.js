@@ -77,6 +77,31 @@ describe('dashboard run counts', () => {
     expect(counts.freeze).toBe(2)
   })
 
+  it('does not let stale zero queue problem counts hide active stream details', () => {
+    const counts = getDashboardRunCounts({
+      streamQueueActive: true,
+      batchTotal: 1,
+      completed: 0,
+      streamCheckerStatus: {
+        queue: {
+          dead_streams_count: 0,
+          blank_streams_count: 0,
+          freeze_streams_count: 0,
+        },
+        progress: {
+          streams_detail: [
+            { status: 'completed', blank_detected: true },
+            { status: 'completed', freeze_detected: true },
+          ],
+        },
+      },
+    })
+
+    expect(counts.dead).toBe(0)
+    expect(counts.blank).toBe(1)
+    expect(counts.freeze).toBe(1)
+  })
+
   it('keeps last completed stream-checker batch problem counts visible after the queue goes idle', () => {
     const metrics = getDashboardRunMetrics({
       streamQueueHistory: true,
