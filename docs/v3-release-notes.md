@@ -84,15 +84,15 @@ template update path.
 ## Validation Snapshot
 
 - Backend focused tests, full backend tests, frontend Vitest, production build,
-  and the repository CI helper passed on final head `301905b`.
-- Final ETA/priority/metrics head `301905b` passed backend focus with 39 tests,
+  and the repository CI helper passed on the final code-validation head.
+- Final ETA/priority/metrics code head `301905b` passed backend focus with 39 tests,
   full backend pytest with 1112 passed / 2 skipped, repository CI helper with
   77 tests, frontend CI with 125 tests, production build, GitHub Tests, CodeQL,
   and multi-arch image build.
 - Current test image is
   `ghcr.io/bttfw/streamflow:dashboard-manual-quality-stage-state`; the PR body
   tracks the latest mutable build URL and manifest digest.
-- Current manifest digest for `301905b` is
+- Code-validation manifest digest for `301905b` is
   `sha256:8c5cb416529489354e1e55704ea1745ee032e6a8a8f292973cda2e06384fb917`.
 - The branch image was rebuilt for AMD64 and ARM64, then live-loaded through the
   existing template update path.
@@ -109,7 +109,7 @@ template update path.
   loads `/help/teamarr-preflight-timing-dark.jpg` with natural size `570x650`.
 - The 2026-06-04 22:00 full automation run completed normally, and the observer
   recorded the expected post-run restart/recovery path as stable.
-- Live `301905b` quality smoke confirmed the new ETA basis: the 5-channel run
+- Live quality smoke on the final code-validation image confirmed the new ETA basis: the 5-channel run
   used `eta_basis=channel`, with channel ETA overriding a much shorter
   stream-only ETA.
 - Live dark-mode screenshots from the final image cover Dashboard, Stream

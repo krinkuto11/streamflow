@@ -122,11 +122,11 @@ and deployed commit for external testing.
 - The latest DRI/Teamarr/catch-up/session head passed focused backend tests, full frontend Vitest, frontend production build, and the full backend suite with 1094 passed, 2 skipped.
 - Feature-change head `4b151df` passed `python -m pytest tests/test_teamarr_preflight_service.py -q`, `npm.cmd test -- teamarr-preflight-schedule.test.js --run`, `npm.cmd run build`, `python scripts/run_ci_checks.py`, and full `npm.cmd run test:ci` with 117 frontend tests.
 - Final Teamarr timing help/image refresh passed `npm.cmd test -- operator-help-content.test.js teamarr-preflight-schedule.test.js --run`, full `npm.cmd run test:ci` with 117 frontend tests, `npm.cmd run build`, and `python scripts/run_ci_checks.py` with 77 tests.
-- Final ETA/priority/metrics head `301905b` passed backend focus with 39 tests, full backend pytest with 1112 passed / 2 skipped, `python scripts/run_ci_checks.py` with 77 tests, full frontend CI with 125 tests, and production frontend build.
+- Final ETA/priority/metrics code head `301905b` passed backend focus with 39 tests, full backend pytest with 1112 passed / 2 skipped, `python scripts/run_ci_checks.py` with 77 tests, full frontend CI with 125 tests, and production frontend build.
 
 ### GitHub
 
-- PR checks passed on final head `301905b`:
+- PR checks passed on the final pushed branch head:
   - Backend smoke tests
   - Frontend build and tests
   - CodeQL Python analysis
@@ -136,17 +136,18 @@ and deployed commit for external testing.
 
 - Test image tag: `ghcr.io/bttfw/streamflow:dashboard-manual-quality-stage-state`
 - The PR body tracks the mutable current image build URL, manifest digest, and deployed commit for external testing.
-- Current head: `301905b`
-- Current image build: https://github.com/bttfw/streamflow/actions/runs/26981565737
-- Current manifest digest: `sha256:8c5cb416529489354e1e55704ea1745ee032e6a8a8f292973cda2e06384fb917`
+- The PR body tracks the latest pushed branch head, image build URL, manifest digest, and deployed commit.
+- Final code-validation head: `301905b`
+- Code-validation image build: https://github.com/bttfw/streamflow/actions/runs/26981565737
+- Code-validation manifest digest: `sha256:8c5cb416529489354e1e55704ea1745ee032e6a8a8f292973cda2e06384fb917`
 - Current V3 test images have been live-loaded and smoke-tested against API health, initialization, hardware status, Stream Checker status, Teamarr Preflight status, Shadow Monitor status, Auto-Create-Rules, browser DOM checks, and post-deploy log scans.
 - Recent live smoke completed with 217513 streams, 220 channels, and 6 accounts loaded.
 - Live Teamarr Preflight smoke on the final Teamarr timing/help image confirmed `Vegas Golden Knights at Carolina Hurricanes` shows the next automatic check `-20m` bucket and an enabled `Force Check` button in dark mode.
 - Read-only live smoke on the final Teamarr timing/help image confirmed `/scheduling`, the Auto-Create dialog opening path without saving, `/teamarr-preflight`, and the Teamarr Help screenshot accordion without interface text errors or console errors.
 - The final Teamarr timing Help crop is served from the live image as `/help/teamarr-preflight-timing-dark.jpg` with natural size `570x650`.
 - The 2026-06-04 22:00 full automation run completed normally; the observer recorded post-run restart/recovery as stable, and the external StreamFlow watcher triggered the expected restart script successfully.
-- Live `301905b` API and quality smokes passed after deployment, including one manual single-channel check and one 5-channel quality check.
-- Live `301905b` ETA proof: the 5-channel check reported `eta_basis=channel`, `eta_channel_seconds=146`, and `eta_stream_seconds=8`, so the channel-throughput floor overrode the unrealistic stream-only estimate.
+- Live API and quality smokes passed after deployment, including one manual single-channel check and one 5-channel quality check.
+- Live ETA proof: the 5-channel check reported `eta_basis=channel`, `eta_channel_seconds=146`, and `eta_stream_seconds=8`, so the channel-throughput floor overrode the unrealistic stream-only estimate.
 - Live dark-mode screenshots from the final image cover Dashboard, Stream Checker, Scheduling, Auto-Create dialog, Teamarr Preflight, Help screenshot accordion, and the Automation Profile priority-mode dropdown.
 - A 10-minute idle observation on a functionally identical code head passed with 20 API samples, `bad_count=0`, no Stream Checker/Teamarr/Shadow last errors, an empty 12-minute log scan, and the service still healthy.
 - Active-viewer Shadow Monitor observation passed on the live deployment: 12 samples, at least one real viewer client, at least one watcher client, one watched channel, `watching` state, max watcher uptime 135 seconds, `bad_count=0`, and no Shadow last error.
