@@ -82,5 +82,6 @@ def test_auto_create_regex_test_uses_rule_wide_preview_for_single_channel():
         channel_ids=[10],
         channel_group_ids=[],
         regex_pattern="^Live: MLB$",
+        force_refresh=True,
     )
     service.test_regex_against_epg.assert_not_called()

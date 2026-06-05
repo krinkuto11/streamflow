@@ -195,6 +195,69 @@ class TestRegexMatchingIntegration(unittest.TestCase):
             [event['program_title'] for event in self.service.get_scheduled_events()],
             ['Live: MLB', 'Live: MLB'],
         )
+
+    def test_match_programs_uses_effective_epg_tvg_id(self):
+        """Auto-create should follow Dispatcharr's effective EPG identity."""
+        now = datetime.now(timezone.utc)
+        self.mock_udi.return_value.get_channel_by_id.return_value = {
+            'id': 1,
+            'name': 'Washington Nationals',
+            'tvg_id': 'BossSports.MLB_Teams.washingtonnationals',
+            'effective_tvg_id': 'WashingtonNationals.mlb',
+            'logo_id': None,
+        }
+        programs = [{
+            'title': 'Live: MLB',
+            'start_time': (now + timedelta(hours=1)).isoformat(),
+            'end_time': (now + timedelta(hours=4)).isoformat(),
+            'tvg_id': 'WashingtonNationals.mlb',
+        }]
+
+        with self.service._lock:
+            self.service._auto_create_rules = [{
+                'id': 'mlb-rule',
+                'name': 'MLB Auto Create',
+                'channel_id': 1,
+                'regex_pattern': '^Live: MLB',
+                'minutes_before': 0,
+            }]
+
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs):
+            result = self.service.match_programs_to_rules(force_refresh=True)
+
+        events = self.service.get_scheduled_events()
+        self.assertEqual(result['created'], 1)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['program_title'], 'Live: MLB')
+        self.assertEqual(events[0]['tvg_id'], 'WashingtonNationals.mlb')
+
+    def test_regex_preview_uses_effective_epg_tvg_id(self):
+        """The test popup should use the same effective EPG identity as matching."""
+        now = datetime.now(timezone.utc)
+        self.mock_udi.return_value.get_channel_by_id.return_value = {
+            'id': 1,
+            'name': 'Washington Nationals',
+            'tvg_id': 'BossSports.MLB_Teams.washingtonnationals',
+            'effective_tvg_id': 'WashingtonNationals.mlb',
+            'logo_id': None,
+        }
+        programs = [{
+            'title': 'Live: MLB',
+            'start_time': (now + timedelta(hours=1)).isoformat(),
+            'end_time': (now + timedelta(hours=4)).isoformat(),
+            'tvg_id': 'WashingtonNationals.mlb',
+        }]
+
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs):
+            result = self.service.test_regex_against_epg_for_rule(
+                channel_ids=[1],
+                regex_pattern='^Live: MLB',
+            )
+
+        self.assertEqual(result['matches'], 1)
+        self.assertEqual(result['channels_with_matches'], 1)
+        self.assertEqual(result['channels_without_programs'], [])
+        self.assertEqual(result['channels_without_matches'], [])
     
     def test_match_programs_completes_without_deadlock(self):
         """Test that match_programs_to_rules completes without deadlock."""

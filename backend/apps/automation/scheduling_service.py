@@ -733,17 +733,62 @@ class SchedulingService:
             channel = udi.get_channel_by_id(channel_id)
             if not channel:
                 continue
-            logo_url = None
-            logo_id = channel.get('logo_id')
-            if logo_id:
-                logo_url = f"/api/logos/{logo_id}"
-            channels_info.append({
-                'id': channel_id,
-                'name': channel.get('name', ''),
-                'logo_url': logo_url,
-                'tvg_id': channel.get('tvg_id'),
-            })
+            channels_info.append(self._channel_info_from_channel(channel_id, channel))
         return channels_info
+
+    @staticmethod
+    def _append_unique_identifier(values: List[str], raw_value: Any) -> None:
+        if raw_value in (None, ""):
+            return
+        value = str(raw_value).strip()
+        if value and value not in values:
+            values.append(value)
+
+    def _channel_epg_identifiers(self, channel: Dict[str, Any]) -> List[str]:
+        """Return Dispatcharr EPG identifiers in effective-to-raw order.
+
+        Dispatcharr can expose a raw channel ``tvg_id`` and separate effective EPG
+        identity fields. The TV Guide uses the effective identity, so Auto-Create
+        must try those first or rules can miss channels whose raw tvg-id is stale.
+        """
+        identifiers: List[str] = []
+        for key in (
+            'effective_tvg_id',
+            'effective_tvc_guide_stationid',
+            'tvg_id',
+            'tvc_guide_stationid',
+            'effective_epg_data_id',
+            'epg_data_id',
+        ):
+            self._append_unique_identifier(identifiers, channel.get(key))
+
+        epg_data = channel.get('epg_data')
+        if isinstance(epg_data, dict):
+            for key in ('tvg_id', 'station_id', 'tvc_guide_stationid', 'id'):
+                self._append_unique_identifier(identifiers, epg_data.get(key))
+
+        return identifiers
+
+    def _channel_info_from_channel(self, channel_id: int, channel: Dict[str, Any]) -> Dict[str, Any]:
+        logo_url = None
+        logo_id = channel.get('logo_id')
+        if logo_id:
+            logo_url = f"/api/logos/{logo_id}"
+        epg_tvg_ids = self._channel_epg_identifiers(channel)
+        primary_tvg_id = epg_tvg_ids[0] if epg_tvg_ids else channel.get('tvg_id')
+        return {
+            'id': channel_id,
+            'name': channel.get('name', f'Channel {channel_id}'),
+            'logo_url': logo_url,
+            'tvg_id': primary_tvg_id,
+            'raw_tvg_id': channel.get('tvg_id'),
+            'effective_tvg_id': channel.get('effective_tvg_id'),
+            'tvc_guide_stationid': channel.get('tvc_guide_stationid'),
+            'effective_tvc_guide_stationid': channel.get('effective_tvc_guide_stationid'),
+            'epg_data_id': channel.get('epg_data_id'),
+            'effective_epg_data_id': channel.get('effective_epg_data_id'),
+            'epg_tvg_ids': epg_tvg_ids,
+        }
 
     def _normalize_auto_create_rule_selection(
         self,
@@ -1005,6 +1050,7 @@ class SchedulingService:
         channel_ids: Optional[List[Any]] = None,
         channel_group_ids: Optional[List[Any]] = None,
         regex_pattern: str,
+        force_refresh: bool = False,
     ) -> Dict[str, Any]:
         """Test an auto-create regex against every selected channel and group channel."""
         if not regex_pattern or not regex_pattern.strip():
@@ -1051,15 +1097,7 @@ class SchedulingService:
                 add_channel_id(channel.get('id'))
 
         channels_info: List[Dict[str, Any]] = []
-        for channel_id in resolved_channel_ids:
-            channel = udi.get_channel_by_id(channel_id)
-            if not channel:
-                continue
-            channels_info.append({
-                'id': channel_id,
-                'name': channel.get('name', f'Channel {channel_id}'),
-                'tvg_id': channel.get('tvg_id'),
-            })
+        channels_info = self._build_channels_info(resolved_channel_ids, udi)
 
         if not channels_info:
             raise ValueError("No valid channels found for this rule")
@@ -1069,6 +1107,7 @@ class SchedulingService:
         channels_without_programs: List[Dict[str, Any]] = []
         channels_without_matches: List[Dict[str, Any]] = []
         channels_with_matches = set()
+        all_programs = self._fetch_and_cache_all_programs(force_refresh=force_refresh)
 
         for channel_info in channels_info:
             channel_id = channel_info['id']
@@ -1083,7 +1122,9 @@ class SchedulingService:
                 raise ValueError(f"Invalid regex pattern: {e}")
 
             try:
-                channel_programs = self.get_programs_by_channel(channel_id)
+                if not channel_info.get('epg_tvg_ids'):
+                    raise NoTvgIdError(channel_id)
+                channel_programs = self._programs_for_channel_info(channel_info, all_programs)
             except NoTvgIdError:
                 channels_without_tvg.append(channel_info)
                 continue
@@ -1172,7 +1213,7 @@ class SchedulingService:
             skipped_count = 0
 
             udi = get_udi_manager()
-            programs_by_tvg_id: Dict[str, List] = {}
+            programs_by_epg_key: Dict[tuple, List] = {}
 
             # Build a lookup of existing auto-created events keyed by
             # (channel_id, rule_id, program_start_time) for O(1) deduplication.
@@ -1223,21 +1264,16 @@ class SchedulingService:
                 for cid in channel_ids:
                     channel = udi.get_channel_by_id(cid)
                     if channel:
-                        logo_id = channel.get('logo_id')
-                        channels_info.append({
-                            'id': cid,
-                            'name': channel.get('name', f'Channel {cid}'),
-                            'tvg_id': channel.get('tvg_id'),
-                            'logo_url': f"/api/logos/{logo_id}" if logo_id else None,
-                        })
+                        channels_info.append(self._channel_info_from_channel(cid, channel))
 
                 for channel_info in channels_info:
                     channel_id = channel_info['id']
                     channel_name = channel_info['name']
                     tvg_id = channel_info.get('tvg_id')
                     logo_url = channel_info.get('logo_url')
+                    epg_tvg_ids = channel_info.get('epg_tvg_ids') or ([tvg_id] if tvg_id else [])
 
-                    if not tvg_id:
+                    if not epg_tvg_ids:
                         logger.warning(
                             f"Rule '{rule_name}' ({rule_id}): channel {channel_id} "
                             "has no TVG-ID — skipping. Set a TVG-ID in Dispatcharr to enable matching."
@@ -1259,26 +1295,17 @@ class SchedulingService:
                         )
                         continue
 
-                    if tvg_id not in programs_by_tvg_id:
-                        end_time = datetime.now(timezone.utc) + timedelta(hours=24)
-                        raw = all_epg.get(tvg_id, [])
-                        fetched = []
-                        for p in raw:
-                            p_start = p.get('start_time')
-                            if p_start:
-                                try:
-                                    p_start_dt = _parse_dt(p_start)
-                                    if p_start_dt > end_time:
-                                        continue
-                                except (ValueError, AttributeError):
-                                    pass
-                            fetched.append(p)
-                        fetched.sort(key=lambda p: p.get('start_time', ''))
-                        programs_by_tvg_id[tvg_id] = fetched
+                    epg_key = tuple(epg_tvg_ids)
+                    if epg_key not in programs_by_epg_key:
+                        programs_by_epg_key[epg_key] = self._programs_for_channel_info(
+                            channel_info,
+                            all_epg,
+                            hours_ahead=24,
+                        )
 
                     now = datetime.now(timezone.utc)
 
-                    for program in programs_by_tvg_id.get(tvg_id, []):
+                    for program in programs_by_epg_key.get(epg_key, []):
                         title = program.get('title', '')
                         if not pattern.search(title):
                             continue
@@ -1315,7 +1342,7 @@ class SchedulingService:
                                 'program_end_time': program_end,
                                 'minutes_before': minutes_before,
                                 'check_time': check_time.isoformat(),
-                                'tvg_id': tvg_id,
+                                'tvg_id': program.get('tvg_id') or tvg_id,
                                 'schedule_type': rule.get('schedule_type', 'check'),
                                 'enable_looping_detection': rule.get('enable_looping_detection', True),
                                 'enable_logo_detection': rule.get('enable_logo_detection', True),
@@ -1353,7 +1380,7 @@ class SchedulingService:
                             'program_end_time': program_end,
                             'minutes_before': minutes_before,
                             'check_time': check_time.isoformat(),
-                            'tvg_id': tvg_id,
+                            'tvg_id': program.get('tvg_id') or tvg_id,
                             'schedule_type': rule.get('schedule_type', 'check'),
                             'enable_looping_detection': rule.get('enable_looping_detection', True),
                             'enable_logo_detection': rule.get('enable_logo_detection', True),
@@ -1550,7 +1577,69 @@ class SchedulingService:
         self.match_programs_to_rules(force_refresh=force_refresh)
         return []
 
-    def get_programs_by_channel(self, channel_id: int, tvg_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _programs_for_channel_info(
+        self,
+        channel_info: Dict[str, Any],
+        by_tvg_id: Dict[str, List[Dict[str, Any]]],
+        *,
+        hours_ahead: int = 24,
+    ) -> List[Dict[str, Any]]:
+        epg_tvg_ids = channel_info.get('epg_tvg_ids') or []
+        if not epg_tvg_ids and channel_info.get('tvg_id'):
+            epg_tvg_ids = [str(channel_info['tvg_id'])]
+
+        end_time = datetime.now(timezone.utc) + timedelta(hours=hours_ahead)
+        programs: List[Dict[str, Any]] = []
+        seen_programs = set()
+        hit_ids: List[str] = []
+
+        for epg_tvg_id in epg_tvg_ids:
+            raw_programs = by_tvg_id.get(str(epg_tvg_id), [])
+            if raw_programs:
+                hit_ids.append(str(epg_tvg_id))
+
+            for program in raw_programs:
+                if not isinstance(program, dict):
+                    continue
+                p_start = program.get('start_time')
+                if p_start:
+                    try:
+                        p_start_dt = _parse_dt(p_start)
+                        if p_start_dt > end_time:
+                            continue
+                    except (ValueError, AttributeError):
+                        pass
+
+                dedup_key = (
+                    program.get('id'),
+                    program.get('tvg_id'),
+                    program.get('start_time'),
+                    program.get('end_time'),
+                    program.get('title'),
+                )
+                if dedup_key in seen_programs:
+                    continue
+                seen_programs.add(dedup_key)
+                programs.append(program)
+
+        programs.sort(key=lambda p: p.get('start_time', ''))
+
+        primary_id = epg_tvg_ids[0] if epg_tvg_ids else None
+        if hit_ids and primary_id and hit_ids[0] != primary_id:
+            logger.debug(
+                "Channel %s EPG lookup used fallback id %s (primary %s)",
+                channel_info.get('id'),
+                hit_ids[0],
+                primary_id,
+            )
+        return programs
+
+    def get_programs_by_channel(
+        self,
+        channel_id: int,
+        tvg_id: Optional[str] = None,
+        force_refresh: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Get programs for a specific channel from Dispatcharr API.
 
         Args:
@@ -1563,19 +1652,34 @@ class SchedulingService:
         Raises:
             NoTvgIdError: When the channel has no TVG-ID configured (SCH-002).
         """
-        if not tvg_id:
-            udi = get_udi_manager()
-            channel = udi.get_channel_by_id(channel_id)
-            if channel:
-                tvg_id = channel.get('tvg_id')
+        udi = get_udi_manager()
+        channel = udi.get_channel_by_id(channel_id)
+        channel_info = self._channel_info_from_channel(channel_id, channel) if channel else {
+            'id': channel_id,
+            'name': f'Channel {channel_id}',
+            'tvg_id': tvg_id,
+            'epg_tvg_ids': [str(tvg_id)] if tvg_id else [],
+        }
+        if tvg_id:
+            epg_tvg_ids = [str(tvg_id)]
+            for epg_tvg_id in channel_info.get('epg_tvg_ids') or []:
+                self._append_unique_identifier(epg_tvg_ids, epg_tvg_id)
+            channel_info['epg_tvg_ids'] = epg_tvg_ids
+            channel_info['tvg_id'] = epg_tvg_ids[0]
 
-        if not tvg_id:
+        if not channel_info.get('epg_tvg_ids'):
             logger.warning(f"No TVG ID found for channel {channel_id}")
             raise NoTvgIdError(channel_id)
 
-        channel_programs = self.fetch_channel_programs_from_api(tvg_id)
+        all_programs = self._fetch_and_cache_all_programs(force_refresh=force_refresh)
+        channel_programs = self._programs_for_channel_info(channel_info, all_programs)
         channel_programs.sort(key=lambda p: p.get('start_time', ''))
-        logger.debug(f"Found {len(channel_programs)} programs for channel {channel_id} (tvg_id: {tvg_id})")
+        logger.debug(
+            "Found %s programs for channel %s (epg ids: %s)",
+            len(channel_programs),
+            channel_id,
+            ", ".join(channel_info.get('epg_tvg_ids') or []),
+        )
         return channel_programs
 
     def _get_base_url(self) -> Optional[str]:
