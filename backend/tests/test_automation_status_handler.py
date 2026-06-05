@@ -1,12 +1,15 @@
 from datetime import datetime, timedelta
 
 from apps.api.automation_handlers import get_recent_run_history_summary
-from apps.database.connection import get_session
 from apps.database.models import Run
 
 
-def test_recent_run_history_summary_uses_automation_runs_only():
-    session = get_session()
+def test_recent_run_history_summary_uses_automation_runs_only(monkeypatch):
+    from apps.database import connection
+    from apps.telemetry import telemetry_db
+
+    monkeypatch.setattr(telemetry_db, "get_session", connection.get_session)
+    session = connection.get_session()
     try:
         base = datetime(2026, 6, 4, 12, 0, 0)
         session.add_all(

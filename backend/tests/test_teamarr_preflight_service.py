@@ -726,6 +726,53 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(enriched[0]["last_preflight_event"]["type"], "preflight_completed")
         self.assertEqual(enriched[0]["last_preflight_event"]["identity"], "old-identity")
 
+    def test_status_attaches_checks_beyond_recent_event_display_limit(self):
+        event = make_event(
+            id=100,
+            event_date="2026-05-28T20:00:00+00:00",
+            dispatcharr_channel_id=77,
+        )
+        service, _, _ = self.make_service([event])
+        scan_result = service.run_once(force=True)
+        self.assertTrue(scan_result["success"])
+        upcoming = service.get_status()["upcoming_events"]
+        target = upcoming[0]
+
+        old_check = {
+            "timestamp": FIXED_NOW - 3600,
+            "type": "preflight_completed",
+            "identity": target["identity"],
+            "event_name": target["event_name"],
+            "event_date": target["event_date"],
+            "dispatcharr_channel_id": target["dispatcharr_channel_id"],
+            "details": {"bucket": "20m"},
+        }
+        with service._lock:
+            service._events.clear()
+            for index in range(30):
+                service._events.append({
+                    "timestamp": FIXED_NOW + index,
+                    "type": "preflight_completed",
+                    "identity": f"other-{index}",
+                    "event_name": f"Other {index}",
+                    "event_date": "2026-05-28T22:00:00+00:00",
+                    "dispatcharr_channel_id": 9000 + index,
+                    "details": {"bucket": "manual"},
+                })
+            service._events.append(old_check)
+
+        status = service.get_status()
+
+        self.assertEqual(len(status["recent_events"]), 25)
+        self.assertEqual(
+            status["upcoming_events"][0]["last_preflight_event"]["type"],
+            "preflight_completed",
+        )
+        self.assertEqual(
+            status["upcoming_events"][0]["last_preflight_event"]["details"]["bucket"],
+            "20m",
+        )
+
     def test_manual_force_launches_past_event_as_manual_check(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(

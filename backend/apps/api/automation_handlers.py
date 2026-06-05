@@ -25,6 +25,31 @@ from apps.core.logging_config import setup_logging
 logger = setup_logging(__name__)
 
 
+def _normalize_m3u_refresh_wait_settings(value: Any, defaults: Dict[str, Any]) -> Dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    merged = {**defaults, **raw}
+
+    def positive_int(key: str, minimum: int) -> int:
+        try:
+            parsed = int(merged.get(key, defaults.get(key)))
+        except (TypeError, ValueError):
+            parsed = defaults.get(key)
+        try:
+            parsed = int(parsed)
+        except (TypeError, ValueError):
+            parsed = minimum
+        return max(minimum, parsed)
+
+    return {
+        "enabled": bool(merged.get("enabled", True)),
+        "timeout_seconds": positive_int("timeout_seconds", 30),
+        "poll_interval_seconds": positive_int("poll_interval_seconds", 1),
+        "stable_polls_required": positive_int("stable_polls_required", 1),
+        "min_wait_seconds": positive_int("min_wait_seconds", 0),
+        "retry_failed_providers": bool(merged.get("retry_failed_providers", False)),
+    }
+
+
 def _attach_period_runtime_metadata(period: Dict[str, Any], get_automation_manager: Optional[Callable[[], Any]]) -> Dict[str, Any]:
     if not get_automation_manager or not period:
         return period
@@ -175,6 +200,10 @@ def handle_global_automation_settings_response(
             settings = config_manager.get_global_settings()
             manager = get_automation_manager()
             settings["enabled_m3u_accounts"] = manager.config.get("enabled_m3u_accounts", [])
+            settings["m3u_refresh_wait"] = _normalize_m3u_refresh_wait_settings(
+                manager.config.get("m3u_refresh_wait", {}),
+                getattr(manager, "M3U_REFRESH_WAIT_DEFAULTS", {}),
+            )
             return jsonify(settings), 200
         except Exception as exc:
             logger.error(f"Error getting global automation settings: {exc}")
@@ -210,6 +239,12 @@ def handle_global_automation_settings_response(
 
                 manager_updates["enabled_m3u_accounts"] = normalized_accounts
 
+            if "m3u_refresh_wait" in updates:
+                manager_updates["m3u_refresh_wait"] = _normalize_m3u_refresh_wait_settings(
+                    updates.get("m3u_refresh_wait"),
+                    getattr(manager, "M3U_REFRESH_WAIT_DEFAULTS", {}),
+                )
+
             if not global_updates and not manager_updates:
                 return jsonify({"error": "No valid settings provided"}), 400
 
@@ -223,6 +258,10 @@ def handle_global_automation_settings_response(
             if global_update_success:
                 new_settings = config_manager.get_global_settings()
                 new_settings["enabled_m3u_accounts"] = manager.config.get("enabled_m3u_accounts", [])
+                new_settings["m3u_refresh_wait"] = _normalize_m3u_refresh_wait_settings(
+                    manager.config.get("m3u_refresh_wait", {}),
+                    getattr(manager, "M3U_REFRESH_WAIT_DEFAULTS", {}),
+                )
                 new_regular_enabled = new_settings.get("regular_automation_enabled", False)
 
                 if old_regular_enabled != new_regular_enabled and check_wizard_complete():

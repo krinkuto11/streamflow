@@ -1295,6 +1295,7 @@ class AutomatedStreamManager:
         "poll_interval_seconds": 10,
         "stable_polls_required": 2,
         "min_wait_seconds": 0,
+        "retry_failed_providers": False,
     }
 
     RUN_STAGES = [
@@ -1447,6 +1448,7 @@ class AutomatedStreamManager:
                 "auto_stream_discovery": True,
                 "changelog_tracking": True
             },
+            "m3u_refresh_wait": dict(self.M3U_REFRESH_WAIT_DEFAULTS),
             "validate_existing_streams": False,
             "verify_stream_assignments": False
         }
@@ -1883,7 +1885,14 @@ class AutomatedStreamManager:
             "poll_interval_seconds": _positive_int("poll_interval_seconds", 1),
             "stable_polls_required": _positive_int("stable_polls_required", 1),
             "min_wait_seconds": _positive_int("min_wait_seconds", 0),
+            "retry_failed_providers": bool(merged.get("retry_failed_providers", False)),
         }
+
+    @staticmethod
+    def _account_id_key(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        return str(value).strip()
 
     @staticmethod
     def _safe_stream_count_from_udi(udi_manager: Any) -> Optional[int]:
@@ -1984,16 +1993,22 @@ class AutomatedStreamManager:
             if not isinstance(account, dict):
                 continue
             account_id = account.get("id")
-            if target_account_ids and account_id not in target_account_ids:
+            account_id_key = self._account_id_key(account_id)
+            if target_account_ids and account_id_key not in target_account_ids:
                 continue
-            if self._account_is_refresh_busy(account):
+            is_busy = self._account_is_refresh_busy(account)
+            is_failed = self._account_refresh_failed(account)
+            if is_busy:
                 busy_count += 1
-            if self._account_refresh_failed(account):
+            if is_failed:
                 failed_count += 1
             account_rows.append({
                 "id": account_id,
+                "name": account.get("name"),
                 "status": account.get("status") or account.get("state") or account.get("refresh_status"),
                 "last_refresh_status": account.get("last_refresh_status"),
+                "busy": is_busy,
+                "failed": is_failed,
                 "updated_at": (
                     account.get("updated_at")
                     or account.get("last_updated")
@@ -2020,8 +2035,68 @@ class AutomatedStreamManager:
             "busy_count": busy_count,
             "failed_count": failed_count,
             "stream_count": stream_count,
+            "accounts": account_rows,
+            "failed_accounts": [account for account in account_rows if account.get("failed")],
             "signature": signature,
         }
+
+    def _retry_failed_m3u_refresh_accounts(
+        self,
+        failed_accounts: List[Dict[str, Any]],
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> int:
+        retried = 0
+        total = len(failed_accounts)
+        for index, account in enumerate(failed_accounts, start=1):
+            account_id = account.get("id")
+            if account_id is None:
+                continue
+            account_name = account.get("name") or f"Account {account_id}"
+            if progress_callback:
+                progress_callback({
+                    "state": "retrying_failed",
+                    "current": index - 1,
+                    "total": total,
+                    "account_id": account_id,
+                    "account_name": account_name,
+                    "message": f"Retrying failed playlist {index}/{total}: {account_name}",
+                    "wait_retry_count": retried,
+                    "wait_failed_accounts": total,
+                })
+            try:
+                response = refresh_m3u_playlists(account_id=int(account_id))
+                if self._is_m3u_refresh_response_success(response):
+                    retried += 1
+                    if progress_callback:
+                        progress_callback({
+                            "state": "retrying_failed",
+                            "current": index,
+                            "total": total,
+                            "account_id": account_id,
+                            "account_name": account_name,
+                            "message": f"Retry accepted for failed playlist {index}/{total}: {account_name}",
+                            "wait_retry_count": retried,
+                            "wait_failed_accounts": total,
+                        })
+                else:
+                    logger.warning("Retry request for failed M3U account %s was not accepted", account_id)
+            except Exception as exc:
+                if self._is_m3u_refresh_already_running_error(exc):
+                    retried += 1
+                    if progress_callback:
+                        progress_callback({
+                            "state": "retrying_failed",
+                            "current": index,
+                            "total": total,
+                            "account_id": account_id,
+                            "account_name": account_name,
+                            "message": f"Playlist retry already running {index}/{total}: {account_name}",
+                            "wait_retry_count": retried,
+                            "wait_failed_accounts": total,
+                        })
+                    continue
+                logger.warning("Retry request for failed M3U account %s failed: %s", account_id, exc)
+        return retried
 
     def _wait_for_m3u_refresh_completion(
         self,
@@ -2033,9 +2108,9 @@ class AutomatedStreamManager:
             return {"ok": True, "state": "disabled", "message": "Playlist refresh wait disabled"}
 
         target_account_ids = {
-            account.get("id")
+            self._account_id_key(account.get("id"))
             for account in refreshed_accounts
-            if isinstance(account, dict) and account.get("id") is not None
+            if isinstance(account, dict) and self._account_id_key(account.get("id")) is not None
         }
         if not target_account_ids:
             target_account_ids = None
@@ -2058,6 +2133,8 @@ class AutomatedStreamManager:
         last_signature = None
         stable_polls = 0
         last_snapshot: Dict[str, Any] = {}
+        retried_failed_accounts = False
+        retry_accepted_count = 0
 
         while True:
             snapshot = self._build_m3u_refresh_monitor_snapshot(udi_manager, target_account_ids)
@@ -2073,11 +2150,19 @@ class AutomatedStreamManager:
 
             busy_count = int(snapshot.get("busy_count") or 0)
             failed_count = int(snapshot.get("failed_count") or 0)
+            account_count = int(snapshot.get("account_count") or 0)
+            failed_accounts = list(snapshot.get("failed_accounts") or [])
             stream_count = snapshot.get("stream_count")
             accounts_ok = bool(snapshot.get("accounts_ok"))
             streams_ok = bool(snapshot.get("streams_ok"))
             stable_enough = stable_polls >= stable_required and elapsed >= min_wait
             no_busy_accounts = busy_count == 0
+            all_monitored_accounts_failed = bool(
+                failed_count > 0
+                and account_count > 0
+                and failed_count >= account_count
+                and no_busy_accounts
+            )
 
             if progress_callback:
                 progress_callback({
@@ -2092,34 +2177,67 @@ class AutomatedStreamManager:
                     "wait_stable_polls": stable_polls,
                     "wait_busy_accounts": busy_count,
                     "wait_streams_seen": stream_count,
+                    "wait_failed_accounts": failed_count,
+                    "wait_retry_count": retry_accepted_count,
                 })
 
-            if failed_count > 0:
+            if (
+                failed_count > 0
+                and no_busy_accounts
+                and wait_config.get("retry_failed_providers")
+                and not retried_failed_accounts
+                and failed_accounts
+            ):
+                retried_failed_accounts = True
+                retry_accepted_count = self._retry_failed_m3u_refresh_accounts(
+                    failed_accounts,
+                    progress_callback=progress_callback,
+                )
+                stable_polls = 0
+                last_signature = None
+                sleep_for = min(poll_interval, max(0.0, deadline - time.time()))
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                continue
+
+            if all_monitored_accounts_failed:
                 return {
                     "ok": False,
                     "state": "failed",
-                    "message": "Dispatcharr reported a failed playlist refresh",
+                    "message": "All monitored playlist refreshes failed",
                     "snapshot": snapshot,
+                    "elapsed_seconds": elapsed,
+                    "retry_accepted_count": retry_accepted_count,
                 }
 
             if no_busy_accounts and stable_enough and (accounts_ok or streams_ok or stream_count is not None):
+                final_state = "partial" if failed_count > 0 else "settled"
+                final_message = (
+                    f"Playlist refresh settled with {failed_count} failed provider"
+                    f"{'' if failed_count == 1 else 's'}"
+                    if failed_count > 0
+                    else "Playlist refresh settled"
+                )
                 if progress_callback:
                     progress_callback({
-                        "state": "settled",
+                        "state": final_state,
                         "current": stable_required,
                         "total": stable_required,
-                        "message": "Playlist refresh settled",
+                        "message": final_message,
                         "wait_elapsed_seconds": elapsed,
                         "wait_stable_polls": stable_polls,
                         "wait_busy_accounts": busy_count,
                         "wait_streams_seen": stream_count,
+                        "wait_failed_accounts": failed_count,
+                        "wait_retry_count": retry_accepted_count,
                     })
                 return {
                     "ok": True,
-                    "state": "settled",
-                    "message": "Playlist refresh settled",
+                    "state": final_state,
+                    "message": final_message,
                     "snapshot": snapshot,
                     "elapsed_seconds": elapsed,
+                    "retry_accepted_count": retry_accepted_count,
                 }
 
             if time.time() >= deadline:
@@ -2133,6 +2251,8 @@ class AutomatedStreamManager:
                         "wait_stable_polls": stable_polls,
                         "wait_busy_accounts": busy_count,
                         "wait_streams_seen": stream_count,
+                        "wait_failed_accounts": failed_count,
+                        "wait_retry_count": retry_accepted_count,
                     })
                 return {
                     "ok": False,
@@ -2140,6 +2260,7 @@ class AutomatedStreamManager:
                     "message": "Timed out waiting for playlist refresh to settle",
                     "snapshot": last_snapshot,
                     "elapsed_seconds": elapsed,
+                    "retry_accepted_count": retry_accepted_count,
                 }
 
             sleep_for = min(poll_interval, max(0.0, deadline - time.time()))
@@ -2396,6 +2517,7 @@ class AutomatedStreamManager:
         """
         refreshed_accounts = []
         refresh_failed = False
+        failed_refresh_requests = []
 
         def emit_refresh_progress(payload: Dict[str, Any]) -> None:
             if not progress_callback:
@@ -2459,6 +2581,27 @@ class AutomatedStreamManager:
                     acc_id = account.get('id')
                     if acc_id is not None:
                         account_name = account.get('name', f"Account {acc_id}")
+                        if self._account_is_refresh_busy(account):
+                            logger.info(
+                                "M3U account %s (%s) is already refreshing; monitoring existing refresh",
+                                acc_id,
+                                account_name,
+                            )
+                            refreshed_accounts.append({
+                                "id": acc_id,
+                                "name": account_name,
+                                "already_running": True,
+                            })
+                            emit_refresh_progress({
+                                "state": "already_running",
+                                "current": index,
+                                "total": total_accounts,
+                                "account_id": acc_id,
+                                "account_name": account_name,
+                                "message": f"Playlist {index}/{total_accounts} already refreshing: {account_name}",
+                            })
+                            continue
+
                         logger.info(f"Refreshing M3U account {acc_id}: {account_name}")
                         emit_refresh_progress({
                             "state": "requesting",
@@ -2468,7 +2611,49 @@ class AutomatedStreamManager:
                             "account_name": account_name,
                             "message": f"Refreshing playlist {index}/{total_accounts}: {account_name}",
                         })
-                        response = refresh_m3u_playlists(account_id=acc_id)
+                        try:
+                            response = refresh_m3u_playlists(account_id=acc_id)
+                        except Exception as exc:
+                            if self._is_m3u_refresh_already_running_error(exc):
+                                logger.info(
+                                    "M3U account %s (%s) refresh is already running; monitoring existing refresh",
+                                    acc_id,
+                                    account_name,
+                                )
+                                refreshed_accounts.append({
+                                    "id": acc_id,
+                                    "name": account_name,
+                                    "already_running": True,
+                                })
+                                emit_refresh_progress({
+                                    "state": "already_running",
+                                    "current": index,
+                                    "total": total_accounts,
+                                    "account_id": acc_id,
+                                    "account_name": account_name,
+                                    "message": f"Playlist {index}/{total_accounts} already refreshing: {account_name}",
+                                })
+                                continue
+
+                            refresh_failed = True
+                            failed_refresh_requests.append({
+                                "id": acc_id,
+                                "name": account_name,
+                                "error": str(exc),
+                            })
+                            logger.error(
+                                f"M3U refresh failed for account {acc_id} ({account_name}): {exc}"
+                            )
+                            emit_refresh_progress({
+                                "state": "failed",
+                                "current": index,
+                                "total": total_accounts,
+                                "account_id": acc_id,
+                                "account_name": account_name,
+                                "message": f"Playlist {index}/{total_accounts} failed: {account_name}",
+                            })
+                            continue
+
                         if self._is_m3u_refresh_response_success(response):
                             refreshed_accounts.append({
                                 "id": acc_id,
@@ -2484,6 +2669,11 @@ class AutomatedStreamManager:
                             })
                         else:
                             refresh_failed = True
+                            failed_refresh_requests.append({
+                                "id": acc_id,
+                                "name": account_name,
+                                "status": getattr(response, 'status_code', None),
+                            })
                             status = getattr(response, 'status_code', None)
                             logger.error(
                                 f"M3U refresh failed for account {acc_id} ({account_name}), "
@@ -2515,9 +2705,37 @@ class AutomatedStreamManager:
                     "total": 1,
                     "message": "Refreshing all playlists through Dispatcharr",
                 })
-                response = refresh_m3u_playlists()
-                if not self._is_m3u_refresh_response_success(response):
+                try:
+                    response = refresh_m3u_playlists()
+                except Exception as exc:
+                    if self._is_m3u_refresh_already_running_error(exc):
+                        logger.info("Fallback M3U refresh is already running; monitoring existing refresh")
+                        refreshed_accounts.append({
+                            "id": None,
+                            "name": "All playlists",
+                            "already_running": True,
+                        })
+                        emit_refresh_progress({
+                            "state": "already_running",
+                            "current": 1,
+                            "total": 1,
+                            "message": "Fallback playlist refresh already running",
+                        })
+                        response = None
+                    else:
+                        refresh_failed = True
+                        failed_refresh_requests.append({"id": None, "name": "All playlists", "error": str(exc)})
+                        logger.error(f"Fallback M3U refresh failed: {exc}")
+                        emit_refresh_progress({
+                            "state": "failed",
+                            "current": 1,
+                            "total": 1,
+                            "message": "Fallback playlist refresh failed",
+                        })
+                        response = None
+                if response is not None and not self._is_m3u_refresh_response_success(response):
                     refresh_failed = True
+                    failed_refresh_requests.append({"id": None, "name": "All playlists"})
                     status = getattr(response, 'status_code', None)
                     logger.error(f"Fallback M3U refresh failed, status={status}")
                     emit_refresh_progress({
@@ -2533,10 +2751,32 @@ class AutomatedStreamManager:
                         "total": 1,
                         "message": "Fallback playlist refresh request accepted",
                     })
+                    refreshed_accounts.append({
+                        "id": None,
+                        "name": "All playlists",
+                    })
 
             if refresh_failed:
-                logger.error("Playlist refresh encountered one or more failed account refreshes")
-                return RefreshResult(False, refreshed_accounts)
+                failed_count = len(failed_refresh_requests)
+                if refreshed_accounts:
+                    logger.warning(
+                        "Playlist refresh accepted %s request(s) with %s provider request failure(s)",
+                        len(refreshed_accounts),
+                        failed_count,
+                    )
+                    emit_refresh_progress({
+                        "state": "partial",
+                        "current": len(refreshed_accounts),
+                        "total": (len(refreshed_accounts) + failed_count),
+                        "message": (
+                            f"Playlist refresh partially accepted: {len(refreshed_accounts)} accepted, "
+                            f"{failed_count} failed"
+                        ),
+                        "failed_refresh_requests": failed_count,
+                    })
+                else:
+                    logger.error("Playlist refresh encountered failed account refreshes and none were accepted")
+                    return RefreshResult(False, refreshed_accounts)
             
             # NOTE: UDI refresh, changelog write, and dead stream cleanup are
             # intentionally NOT performed here. run_automation_cycle() owns all
@@ -2598,6 +2838,27 @@ class AutomatedStreamManager:
             return False
 
         return 200 <= code < 300
+
+    @staticmethod
+    def _is_m3u_refresh_already_running_error(exc: Exception) -> bool:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        try:
+            code = int(status_code)
+        except (TypeError, ValueError):
+            code = None
+        if code in {409, 423}:
+            return True
+
+        text = " ".join(
+            str(value or "")
+            for value in (
+                exc,
+                getattr(response, "text", ""),
+                getattr(response, "reason", ""),
+            )
+        ).casefold()
+        return any(marker in text for marker in ("already running", "already refreshing", "refresh in progress"))
 
     def _should_abort_for_suspicious_stream_pool(self, before_count: int, after_count: int, playlists_refreshed: bool) -> bool:
         """Return True when the post-refresh stream pool looks unsafe.
@@ -4506,6 +4767,8 @@ class AutomatedStreamManager:
                     ("wait_stable_polls", "m3u_refresh_wait_stable_polls"),
                     ("wait_busy_accounts", "m3u_refresh_wait_busy_accounts"),
                     ("wait_streams_seen", "m3u_refresh_wait_streams_seen"),
+                    ("wait_failed_accounts", "m3u_refresh_wait_failed_accounts"),
+                    ("wait_retry_count", "m3u_refresh_wait_retry_count"),
                 ):
                     if source_key in payload:
                         counts[count_key] = payload.get(source_key)
@@ -4533,6 +4796,7 @@ class AutomatedStreamManager:
                 refresh_success = True
                 ordered_playlist_ids = list(playlists_to_update)
                 total_specific_playlists = len(ordered_playlist_ids)
+                specific_refresh_failures = 0
                 for refresh_index, acc_id in enumerate(ordered_playlist_ids, start=1):
                     def specific_refresh_progress(payload: Dict[str, Any], *, _index: int = refresh_index, _acc_id: Any = acc_id) -> None:
                         state = payload.get("state", "running")
@@ -4569,9 +4833,24 @@ class AutomatedStreamManager:
                         progress_callback=specific_refresh_progress,
                     )
                     if not success:
-                        refresh_success = False
+                        specific_refresh_failures += 1
                     if accs:
                         refreshed_accounts.extend(accs)
+                if specific_refresh_failures and refreshed_accounts:
+                    refresh_success = True
+                    update_m3u_refresh_progress(
+                        {
+                            "state": "partial",
+                            "current": len(refreshed_accounts),
+                            "total": len(refreshed_accounts) + specific_refresh_failures,
+                            "message": (
+                                f"Playlist refresh partially accepted: {len(refreshed_accounts)} accepted, "
+                                f"{specific_refresh_failures} failed"
+                            ),
+                        }
+                    )
+                elif specific_refresh_failures:
+                    refresh_success = False
             else:
                 logger.info(
                     "No playlists to update based on active profile settings. "

@@ -426,8 +426,9 @@ class TeamarrPreflightService:
 
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
-            recent_events = list(self._events)[:25]
-            upcoming_events = self._attach_recent_events_to_upcoming(self._upcoming, recent_events)
+            all_events = list(self._events)
+            recent_events = all_events[:25]
+            upcoming_events = self._attach_recent_events_to_upcoming(self._upcoming, all_events)
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),

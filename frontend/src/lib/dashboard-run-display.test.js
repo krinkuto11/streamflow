@@ -393,6 +393,29 @@ describe('dashboard stream checker run display', () => {
 
     expect(getM3uRefreshCardDetail({
       runCounts: {
+        m3u_refresh_state: 'partial',
+        m3u_refresh_wait_failed_accounts: 1,
+      },
+    })).toBe('Playlist refresh settled with 1 failed provider')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'already_running',
+        m3u_refresh_current: 1,
+        m3u_refresh_total: 2,
+      },
+    })).toBe('1/2 refresh requests already running')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'retrying_failed',
+        m3u_refresh_wait_failed_accounts: 2,
+        m3u_refresh_wait_retry_count: 1,
+      },
+    })).toBe('Retrying failed providers (1/2 accepted)')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
         m3u_refresh_state: 'timeout',
       },
     })).toBe('Playlist refresh wait timed out')

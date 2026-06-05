@@ -184,6 +184,19 @@ export const getM3uRefreshCardDetail = ({
     return `Refreshing playlist ${active}/${total}`
   }
 
+  if (state === 'already_running' && total !== null && total > 0) {
+    return `${current ?? total}/${total} refresh request${total === 1 ? '' : 's'} already running`
+  }
+
+  if (state === 'retrying_failed') {
+    const retryCount = finiteNumber(runCounts.m3u_refresh_wait_retry_count)
+    const failedCount = finiteNumber(runCounts.m3u_refresh_wait_failed_accounts)
+    if (failedCount !== null) {
+      return `Retrying failed providers${retryCount !== null ? ` (${retryCount}/${failedCount} accepted)` : ` (${failedCount})`}`
+    }
+    return 'Retrying failed providers'
+  }
+
   if (state === 'waiting') {
     const elapsed = finiteNumber(runCounts.m3u_refresh_wait_elapsed_seconds)
     const streamsSeen = finiteNumber(runCounts.m3u_refresh_wait_streams_seen)
@@ -198,6 +211,14 @@ export const getM3uRefreshCardDetail = ({
     return streamsSeen !== null
       ? `Playlist refresh settled (${streamsSeen} streams)`
       : 'Playlist refresh settled'
+  }
+
+  if (state === 'partial') {
+    const failedCount = finiteNumber(runCounts.m3u_refresh_wait_failed_accounts)
+    if (failedCount !== null && failedCount > 0) {
+      return `Playlist refresh settled with ${failedCount} failed provider${failedCount === 1 ? '' : 's'}`
+    }
+    return 'Playlist refresh partially accepted'
   }
 
   if (state === 'timeout') {

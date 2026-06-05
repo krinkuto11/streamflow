@@ -28,6 +28,15 @@ class DummyConfigManager:
 
 
 class DummyAutomationManager:
+    M3U_REFRESH_WAIT_DEFAULTS = {
+        "enabled": True,
+        "timeout_seconds": 600,
+        "poll_interval_seconds": 10,
+        "stable_polls_required": 2,
+        "min_wait_seconds": 0,
+        "retry_failed_providers": False,
+    }
+
     def __init__(self):
         self.config = {"enabled_m3u_accounts": []}
         self.automation_running = False
@@ -93,6 +102,7 @@ def test_get_automation_config_includes_enabled_m3u_accounts():
     assert status_code == 200
     data = response.get_json()
     assert data["enabled_m3u_accounts"] == [1, 4]
+    assert data["m3u_refresh_wait"]["retry_failed_providers"] is False
 
 
 def test_get_automation_periods_includes_runtime_skip_history():
@@ -167,6 +177,33 @@ def test_put_automation_config_updates_teamarr_event_window_policy():
         "teamarr_event_window_before_minutes": 45,
         "teamarr_event_window_after_minutes": 6,
     }]
+
+
+def test_put_automation_config_updates_m3u_refresh_wait_retry_policy():
+    app = Flask(__name__)
+    cfg = DummyConfigManager()
+    manager = DummyAutomationManager()
+
+    with app.app_context():
+        response, status_code = handle_global_automation_settings_response(
+            method="PUT",
+            updates={
+                "m3u_refresh_wait": {
+                    "retry_failed_providers": True,
+                    "timeout_seconds": 900,
+                },
+            },
+            get_automation_config_manager=lambda: cfg,
+            check_wizard_complete=lambda: True,
+            get_automation_manager=lambda: manager,
+        )
+
+    assert status_code == 200
+    data = response.get_json()
+    assert manager.config["m3u_refresh_wait"]["retry_failed_providers"] is True
+    assert manager.config["m3u_refresh_wait"]["timeout_seconds"] == 900
+    assert data["settings"]["m3u_refresh_wait"]["retry_failed_providers"] is True
+    assert cfg.update_calls == []
 
 
 def test_put_automation_config_updates_run_all_due_policy():

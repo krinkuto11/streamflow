@@ -229,6 +229,15 @@ export const operatorHelpDetailTopics = [
         risk: 'Unneeded refreshes can make runs slower and hide whether a quality issue is real.',
       },
       {
+        name: 'Retry failed M3U providers',
+        controlType: 'Visible UI setting',
+        defaultValue: 'Off',
+        location: 'Settings -> Scheduling tab -> Automation Run Policy -> Retry failed M3U providers',
+        effect: 'Retries only providers that Dispatcharr reports as failed after the first refresh request, then continues with a partial warning unless every monitored provider failed.',
+        useWhen: 'Enable when one provider occasionally reports a transient refresh failure but the rest of the run should keep moving.',
+        risk: 'A retry can add extra provider load and time to the M3U refresh stage.',
+      },
+      {
         name: 'Startup catch-up',
         controlType: 'Visible UI setting',
         defaultValue: 'Off',

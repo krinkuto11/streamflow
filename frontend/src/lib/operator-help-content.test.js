@@ -168,8 +168,10 @@ describe('operatorHelpSections', () => {
       'Run all due periods',
       'Maintenance window',
       'Teamarr event window',
+      'Retry failed M3U providers',
     ]))
     expect(automation.settings.find(setting => setting.name === 'Maintenance window').location).toBe('Settings -> Scheduling tab -> Automation Run Policy -> Maintenance window/start/end')
+    expect(automation.settings.find(setting => setting.name === 'Retry failed M3U providers').effect).toMatch(/only providers/i)
     const streamChecker = getOperatorHelpDetailTopic('stream-checker')
     expect(streamChecker.settings.find(setting => setting.name === 'Check on update').controlType).toBe('Status/API')
     expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Concurrent Checking tab -> Global Concurrent Limit')

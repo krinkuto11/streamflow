@@ -154,6 +154,16 @@ export default function AutomationSettings() {
     }))
   }
 
+  const handleM3uRefreshWaitChange = (field, value) => {
+    setConfig(prev => ({
+      ...prev,
+      m3u_refresh_wait: {
+        ...(prev?.m3u_refresh_wait || {}),
+        [field]: value,
+      },
+    }))
+  }
+
   const handleTestConnection = async () => {
     try {
       setTestingConnection(true)
@@ -381,6 +391,20 @@ export default function AutomationSettings() {
               <Separator />
 
               <div className="grid gap-6 md:grid-cols-2">
+                <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                  <div className="space-y-1">
+                    <Label htmlFor="m3u-refresh-retry-failed">Retry failed M3U providers</Label>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      If Dispatcharr reports failed providers after a refresh request, StreamFlow retries only those providers once before continuing with a partial warning.
+                    </p>
+                  </div>
+                  <Switch
+                    id="m3u-refresh-retry-failed"
+                    checked={Boolean(config?.m3u_refresh_wait?.retry_failed_providers)}
+                    onCheckedChange={(checked) => handleM3uRefreshWaitChange('retry_failed_providers', checked)}
+                  />
+                </div>
+
                 <div className="flex items-start justify-between gap-4 rounded-md border p-4">
                   <div className="space-y-1">
                     <Label htmlFor="teamarr-event-window-enabled">Teamarr event window</Label>
