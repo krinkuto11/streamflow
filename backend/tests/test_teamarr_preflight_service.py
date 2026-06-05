@@ -75,6 +75,44 @@ class BusyChecker(FakeChecker):
         return {"stream_checking_mode": True, "queue": {"queue_size": 0, "in_progress": 1}}
 
 
+class QueueBackedChecker(FakeChecker):
+    def __init__(self):
+        super().__init__()
+        self.check_queue = type("FakeQueue", (), {})()
+        self.check_queue.queued_priorities = {77: TEAMARR_PREFLIGHT_QUEUE_PRIORITY}
+        self.check_queue.queued_metadata = {
+            77: {
+                "source": "teamarr_preflight",
+                "program_name": "Queued Match",
+                "trigger_bucket": "pre",
+                "event": {
+                    "identity": "id:queued",
+                    "event_name": "Queued Match",
+                    "event_date": "2026-05-28T22:10:00+00:00",
+                    "channel_name": "Queued Channel",
+                    "dispatcharr_channel_id": 77,
+                    "sport": "soccer",
+                    "league": "fifa.friendly",
+                    "seconds_to_start": 600,
+                    "trigger_bucket": "pre",
+                },
+            }
+        }
+        self.check_queue.in_progress_metadata = {
+            78: {
+                "source": "teamarr_preflight",
+                "program_name": "Running Match",
+                "event": {
+                    "identity": "id:running",
+                    "event_name": "Running Match",
+                    "event_date": "2026-05-28T22:20:00+00:00",
+                    "channel_name": "Running Channel",
+                    "dispatcharr_channel_id": 78,
+                },
+            }
+        }
+
+
 class FakeUdi:
     def __init__(self, streams=None):
         self.streams = streams if streams is not None else [{"id": 1}, {"id": 2}]
@@ -537,6 +575,18 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["event_name"], "Home vs Away")
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 2)
         self.assertNotIn("priority", recent[0]["details"])
+
+    def test_status_exposes_teamarr_stream_checker_queue(self):
+        checker = QueueBackedChecker()
+        service, _, _ = self.make_service([], checker=checker)
+
+        status = service.get_status()
+
+        self.assertEqual(status["queued_checks_count"], 1)
+        self.assertEqual(status["queued_checks"][0]["event_name"], "Queued Match")
+        self.assertEqual(status["queued_checks"][0]["priority"], TEAMARR_PREFLIGHT_QUEUE_PRIORITY)
+        self.assertEqual(status["queue_active_checks_count"], 1)
+        self.assertEqual(status["queue_active_checks"][0]["event_name"], "Running Match")
 
     def test_provider_limit_override_is_queued_only_when_enabled(self):
         checker = BusyChecker()

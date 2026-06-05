@@ -25,6 +25,7 @@ import {
   CheckCircle2,
   Clock,
   Info,
+  ListChecks,
   Loader2,
   PlayCircle,
   RefreshCw,
@@ -322,6 +323,10 @@ export default function TeamarrPreflight() {
   const upcomingEvents = status?.upcoming_events || []
   const recentEvents = status?.recent_events || []
   const activeChecks = status?.active_checks || []
+  const queuedChecks = status?.queued_checks || []
+  const queueActiveChecks = status?.queue_active_checks || []
+  const queuedChecksCount = Number(status?.queued_checks_count ?? queuedChecks.length)
+  const queueActiveChecksCount = Number(status?.queue_active_checks_count ?? queueActiveChecks.length)
   const filteredUpcomingEvents = useMemo(
     () => filterTeamarrEventsBySearch(upcomingEvents, eventSearch),
     [upcomingEvents, eventSearch]
@@ -346,6 +351,9 @@ export default function TeamarrPreflight() {
   const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
   const connectorDisplay = connectorStatusDisplay(status?.teamarr_connector || {})
   const ConnectorIcon = connectorDisplay.icon
+  const queuedChecksDetail = queuedChecksCount > 0
+    ? (queueActiveChecksCount > 0 ? `${queueActiveChecksCount} running from queue` : 'Waiting for Stream Checker')
+    : (queueActiveChecksCount > 0 ? `${queueActiveChecksCount} running from queue` : 'No queued events')
   const previewConfig = useMemo(() => ({
     ...(editedConfig || {}),
     retry_offsets_minutes: parseCsv(retryOffsets).map(item => Number(item)).filter(Number.isFinite),
@@ -692,7 +700,7 @@ export default function TeamarrPreflight() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Service</CardTitle>
@@ -741,6 +749,17 @@ export default function TeamarrPreflight() {
           <CardContent>
             <div className="text-2xl font-bold">{activeChecks.length}</div>
             <p className="mt-2 text-xs text-muted-foreground">Limit {editedConfig.max_concurrent_checks}</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Queued Checks</CardTitle>
+            <ListChecks className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{queuedChecksCount}</div>
+            <p className="mt-2 text-xs text-muted-foreground">{queuedChecksDetail}</p>
           </CardContent>
         </Card>
 

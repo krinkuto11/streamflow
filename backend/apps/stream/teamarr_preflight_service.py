@@ -425,6 +425,7 @@ class TeamarrPreflightService:
         return True
 
     def get_status(self) -> Dict[str, Any]:
+        queue_snapshot = self._teamarr_queue_snapshot()
         with self._lock:
             all_events = list(self._events)
             recent_events = all_events[:25]
@@ -435,6 +436,10 @@ class TeamarrPreflightService:
                 "last_scan_at": self._last_scan_at,
                 "last_error": self._last_error,
                 "active_checks": list(self._active_checks.values()),
+                "queued_checks": queue_snapshot["queued_checks"],
+                "queued_checks_count": len(queue_snapshot["queued_checks"]),
+                "queue_active_checks": queue_snapshot["queue_active_checks"],
+                "queue_active_checks_count": len(queue_snapshot["queue_active_checks"]),
                 "upcoming_events": upcoming_events,
                 "managed_events_seen": self._last_events_seen,
                 "managed_candidates": self._last_candidates_count,
@@ -446,6 +451,66 @@ class TeamarrPreflightService:
                 "teamarr_connector": self._teamarr_connector_status(),
                 "config": public_config(self._config, self._default_profile_metadata()),
             }
+
+    def _teamarr_queue_snapshot(self) -> Dict[str, List[Dict[str, Any]]]:
+        snapshot: Dict[str, List[Dict[str, Any]]] = {
+            "queued_checks": [],
+            "queue_active_checks": [],
+        }
+        try:
+            checker = self.stream_checker_provider()
+        except Exception as exc:
+            logger.debug("Unable to read Stream Checker queue for Teamarr preflight status: %s", exc)
+            return snapshot
+
+        check_queue = getattr(checker, "check_queue", None)
+        if check_queue is None:
+            return snapshot
+
+        def collect(mapping_name: str) -> List[Dict[str, Any]]:
+            mapping = getattr(check_queue, mapping_name, {}) or {}
+            priorities = getattr(check_queue, "queued_priorities", {}) or {}
+            items: List[Dict[str, Any]] = []
+            for raw_channel_id, metadata in list(mapping.items()):
+                if not isinstance(metadata, dict) or metadata.get("source") != "teamarr_preflight":
+                    continue
+                event = metadata.get("event") or {}
+                if not isinstance(event, dict):
+                    event = {}
+                dispatcharr_channel_id = event.get("dispatcharr_channel_id") or raw_channel_id
+                item = {
+                    "identity": event.get("identity"),
+                    "teamarr_id": event.get("teamarr_id"),
+                    "event_id": event.get("event_id"),
+                    "event_name": event.get("event_name") or metadata.get("program_name"),
+                    "event_date": event.get("event_date"),
+                    "channel_name": event.get("channel_name"),
+                    "dispatcharr_channel_id": dispatcharr_channel_id,
+                    "sport": event.get("sport"),
+                    "league": event.get("league"),
+                    "seconds_to_start": event.get("seconds_to_start"),
+                    "bucket": event.get("trigger_bucket") or metadata.get("trigger_bucket"),
+                }
+                if mapping_name == "queued_metadata":
+                    item["priority"] = priorities.get(raw_channel_id)
+                items.append(item)
+            items.sort(key=lambda item: (
+                str(item.get("event_date") or ""),
+                str(item.get("channel_name") or ""),
+                str(item.get("event_name") or ""),
+            ))
+            return items
+
+        lock = getattr(check_queue, "lock", None)
+        if lock is None:
+            snapshot["queued_checks"] = collect("queued_metadata")
+            snapshot["queue_active_checks"] = collect("in_progress_metadata")
+            return snapshot
+
+        with lock:
+            snapshot["queued_checks"] = collect("queued_metadata")
+            snapshot["queue_active_checks"] = collect("in_progress_metadata")
+        return snapshot
 
     def _teamarr_connector_status(self) -> Dict[str, Any]:
         base_url = str(self._config.get("teamarr_base_url") or "").strip()
