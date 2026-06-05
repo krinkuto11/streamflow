@@ -149,7 +149,7 @@ def test_automation_cycle_monitors_and_syncs_udi_with_m3u_refresh(monkeypatch):
     manager.refresh_playlists.assert_called_once()
     _wait_for_mock_call(mock_udi.refresh_channel_profiles)
     assert mock_udi.refresh_m3u_accounts.call_count >= 2
-    assert mock_udi.refresh_streams.call_count >= 2
+    mock_udi.refresh_streams.assert_called_once()
     mock_udi.refresh_channels.assert_called_once()
     mock_udi.refresh_channel_groups.assert_called_once()
     mock_udi.refresh_channel_profiles.assert_called_once()

@@ -1961,7 +1961,6 @@ class AutomatedStreamManager:
         target_account_ids: Optional[set],
     ) -> Dict[str, Any]:
         accounts_ok = False
-        streams_ok = False
         accounts: List[Dict[str, Any]] = []
 
         try:
@@ -1977,12 +1976,6 @@ class AutomatedStreamManager:
         except Exception as exc:
             logger.debug("M3U refresh monitor account read failed: %s", exc)
             accounts = []
-
-        try:
-            refresh_streams = getattr(udi_manager, "refresh_streams", None)
-            streams_ok = bool(refresh_streams()) if callable(refresh_streams) else False
-        except Exception as exc:
-            logger.debug("M3U refresh monitor stream poll failed: %s", exc)
 
         stream_count = self._safe_stream_count_from_udi(udi_manager)
 
@@ -2030,7 +2023,7 @@ class AutomatedStreamManager:
 
         return {
             "accounts_ok": accounts_ok,
-            "streams_ok": streams_ok,
+            "streams_ok": False,
             "account_count": len(account_rows),
             "busy_count": busy_count,
             "failed_count": failed_count,
@@ -4777,6 +4770,7 @@ class AutomatedStreamManager:
                     stage_label="Refreshing M3U",
                     message=message,
                     counts=counts,
+                    durations={"m3u_refresh_seconds": time.time() - m3u_refresh_started},
                     progress={
                         "current": current,
                         "total": total,
@@ -4889,6 +4883,7 @@ class AutomatedStreamManager:
                         "m3u_refresh_wait_state": wait_result.get("state"),
                         "m3u_refresh_wait_ok": bool(wait_result.get("ok")),
                     },
+                    durations={"m3u_refresh_seconds": time.time() - m3u_refresh_started},
                     message=wait_result.get("message", "Playlist refresh wait completed"),
                 )
                 if not wait_result.get("ok"):

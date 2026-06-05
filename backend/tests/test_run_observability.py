@@ -387,7 +387,7 @@ class AutomationRunStatusTests(unittest.TestCase):
         udi = Mock()
         udi.refresh_m3u_accounts.return_value = True
         udi.get_m3u_accounts.return_value = [{"id": 1, "name": "One", "status": "idle"}]
-        udi.refresh_streams.return_value = True
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
         udi.get_streams.return_value = [{"id": 10}, {"id": 11}]
 
         with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
@@ -399,6 +399,7 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(result["state"], "settled")
         self.assertEqual(events[-1]["state"], "settled")
         self.assertEqual(events[-1]["wait_streams_seen"], 2)
+        udi.refresh_streams.assert_not_called()
         sleep_mock.assert_called_once_with(1)
 
     def test_m3u_refresh_wait_reports_failed_account_status(self):
@@ -408,7 +409,7 @@ class AutomationRunStatusTests(unittest.TestCase):
         udi = Mock()
         udi.refresh_m3u_accounts.return_value = True
         udi.get_m3u_accounts.return_value = [{"id": 1, "name": "One", "status": "failed"}]
-        udi.refresh_streams.return_value = True
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
         udi.get_streams.return_value = [{"id": 10}]
 
         with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi):
@@ -418,6 +419,7 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(result["state"], "failed")
         self.assertEqual(events[-1]["state"], "waiting")
         self.assertEqual(events[-1]["wait_streams_seen"], 1)
+        udi.refresh_streams.assert_not_called()
 
     def test_m3u_refresh_wait_continues_with_partial_failed_account_status(self):
         manager = self._manager()
@@ -435,7 +437,7 @@ class AutomationRunStatusTests(unittest.TestCase):
             {"id": 1, "name": "One", "status": "failed"},
             {"id": 2, "name": "Two", "status": "idle"},
         ]
-        udi.refresh_streams.return_value = True
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
         udi.get_streams.return_value = [{"id": 10}]
 
         with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi):
@@ -448,6 +450,7 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(result["state"], "partial")
         self.assertEqual(events[-1]["state"], "partial")
         self.assertEqual(events[-1]["wait_failed_accounts"], 1)
+        udi.refresh_streams.assert_not_called()
 
     def test_m3u_refresh_wait_retries_failed_accounts_only_once(self):
         manager = self._manager()
@@ -473,7 +476,7 @@ class AutomationRunStatusTests(unittest.TestCase):
                 {"id": 2, "name": "Two", "status": "idle"},
             ],
         ]
-        udi.refresh_streams.return_value = True
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
         udi.get_streams.return_value = [{"id": 10}]
         response = Mock(status_code=200)
 
@@ -492,6 +495,7 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(result["state"], "settled")
         refresh_mock.assert_called_once_with(account_id=1)
         self.assertIn("retrying_failed", [event["state"] for event in events])
+        udi.refresh_streams.assert_not_called()
 
 
 class FetcherTimingSummaryTests(unittest.TestCase):
