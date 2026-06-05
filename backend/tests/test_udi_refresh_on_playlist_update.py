@@ -130,7 +130,7 @@ def test_automation_cycle_refreshes_udi_without_m3u_refresh(monkeypatch):
     mock_udi.refresh_channel_profiles.assert_called_once()
 
 
-def test_automation_cycle_refreshes_udi_once_with_m3u_refresh(monkeypatch):
+def test_automation_cycle_monitors_and_syncs_udi_with_m3u_refresh(monkeypatch):
     import apps.automation.automated_stream_manager as asm
 
     manager = _build_manager_for_cycle(monkeypatch, m3u_enabled=True)
@@ -148,8 +148,8 @@ def test_automation_cycle_refreshes_udi_once_with_m3u_refresh(monkeypatch):
     mock_udi.clear_automation_busy.assert_called_once()
     manager.refresh_playlists.assert_called_once()
     _wait_for_mock_call(mock_udi.refresh_channel_profiles)
-    mock_udi.refresh_m3u_accounts.assert_called_once()
-    mock_udi.refresh_streams.assert_called_once()
+    assert mock_udi.refresh_m3u_accounts.call_count >= 2
+    assert mock_udi.refresh_streams.call_count >= 2
     mock_udi.refresh_channels.assert_called_once()
     mock_udi.refresh_channel_groups.assert_called_once()
     mock_udi.refresh_channel_profiles.assert_called_once()

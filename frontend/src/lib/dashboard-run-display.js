@@ -184,6 +184,26 @@ export const getM3uRefreshCardDetail = ({
     return `Refreshing playlist ${active}/${total}`
   }
 
+  if (state === 'waiting') {
+    const elapsed = finiteNumber(runCounts.m3u_refresh_wait_elapsed_seconds)
+    const streamsSeen = finiteNumber(runCounts.m3u_refresh_wait_streams_seen)
+    if (streamsSeen !== null) {
+      return `Waiting for Dispatcharr to settle (${streamsSeen} streams${elapsed !== null ? `, ${elapsed}s` : ''})`
+    }
+    return `Waiting for Dispatcharr to settle${elapsed !== null ? ` (${elapsed}s)` : ''}`
+  }
+
+  if (state === 'settled') {
+    const streamsSeen = finiteNumber(runCounts.m3u_refresh_wait_streams_seen)
+    return streamsSeen !== null
+      ? `Playlist refresh settled (${streamsSeen} streams)`
+      : 'Playlist refresh settled'
+  }
+
+  if (state === 'timeout') {
+    return 'Playlist refresh wait timed out'
+  }
+
   if (['accepted', 'completed'].includes(state) && current !== null && total !== null && total > 0) {
     return `${current}/${total} refresh request${total === 1 ? '' : 's'} accepted`
   }

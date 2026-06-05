@@ -375,6 +375,27 @@ describe('dashboard stream checker run display', () => {
         m3u_refresh_total: 3,
       },
     })).toBe('2/3 refresh requests failed')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'waiting',
+        m3u_refresh_wait_elapsed_seconds: 20,
+        m3u_refresh_wait_streams_seen: 1234,
+      },
+    })).toBe('Waiting for Dispatcharr to settle (1234 streams, 20s)')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'settled',
+        m3u_refresh_wait_streams_seen: 1234,
+      },
+    })).toBe('Playlist refresh settled (1234 streams)')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'timeout',
+      },
+    })).toBe('Playlist refresh wait timed out')
   })
 
   it('keeps skipped and manual-check M3U refresh card details explicit', () => {

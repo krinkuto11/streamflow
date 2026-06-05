@@ -305,6 +305,52 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(events[-1]["state"], "skipped")
         self.assertEqual(events[-1]["message"], "No active playlists matched the refresh request")
 
+    def test_m3u_refresh_wait_settles_after_stable_snapshot(self):
+        manager = self._manager()
+        manager.config = {
+            "m3u_refresh_wait": {
+                "timeout_seconds": 30,
+                "poll_interval_seconds": 1,
+                "stable_polls_required": 2,
+                "min_wait_seconds": 0,
+            },
+        }
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.return_value = [{"id": 1, "name": "One", "status": "idle"}]
+        udi.refresh_streams.return_value = True
+        udi.get_streams.return_value = [{"id": 10}, {"id": 11}]
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
+            "apps.automation.automated_stream_manager.time.sleep"
+        ) as sleep_mock:
+            result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "settled")
+        self.assertEqual(events[-1]["state"], "settled")
+        self.assertEqual(events[-1]["wait_streams_seen"], 2)
+        sleep_mock.assert_called_once_with(1)
+
+    def test_m3u_refresh_wait_reports_failed_account_status(self):
+        manager = self._manager()
+        manager.config = {"m3u_refresh_wait": {"stable_polls_required": 2, "min_wait_seconds": 0}}
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.return_value = [{"id": 1, "name": "One", "status": "failed"}]
+        udi.refresh_streams.return_value = True
+        udi.get_streams.return_value = [{"id": 10}]
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi):
+            result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(events[-1]["state"], "waiting")
+        self.assertEqual(events[-1]["wait_streams_seen"], 1)
+
 
 class FetcherTimingSummaryTests(unittest.TestCase):
     def test_api_timing_summary_is_sanitized_and_percentiled(self):
