@@ -597,6 +597,8 @@ class StreamCheckQueue:
         self.queued_metadata = {}  # Optional channel_id -> metadata for specialized queue entries
         self.in_progress = {} # dict(channel_id -> stream_count)
         self.in_progress_metadata = {}
+        self.deferred_metadata_sources = set()
+        self.paused = False
         self.completed = set()
         self.failed = {}
         self.lock = threading.Lock()
@@ -729,6 +731,79 @@ class StreamCheckQueue:
                 added += 1
         logger.info(f"Added {added}/{len(channel_ids)} channels to checking queue")
         return added
+
+    def defer_metadata_sources(self, sources: Optional[set]):
+        """Temporarily keep matching specialized entries queued.
+
+        Synchronous automation quality runs bypass the normal worker queue.  When
+        those runs are active, event-triggered queue items must remain available
+        for the synchronous runner to drain serially between normal channels
+        rather than being started in parallel by the background worker.
+        """
+        with self.lock:
+            self.deferred_metadata_sources = set(sources or set())
+
+    def set_paused(self, paused: bool):
+        """Pause or resume normal background-worker queue consumption."""
+        with self.lock:
+            self.paused = bool(paused)
+
+    def _entry_channel_id(self, item) -> Optional[int]:
+        if not item:
+            return None
+        if len(item) == 3:
+            return item[2]
+        return item[1]
+
+    def _activate_queued_entry_locked(self, channel_id: int) -> Dict[str, Any]:
+        stream_count = self.queued.pop(channel_id)
+        self.queued_priorities.pop(channel_id, None)
+        metadata = self.queued_metadata.pop(channel_id, {})
+        self.in_progress[channel_id] = stream_count
+        if metadata:
+            self.in_progress_metadata[channel_id] = metadata
+        self.channel_start_times[channel_id] = datetime.now()
+        self.stats['current_channel'] = channel_id
+        self.stats['queue_size'] = len(self.queued)
+        return {
+            'channel_id': channel_id,
+            'metadata': metadata,
+        }
+
+    def get_next_entry_for_metadata_sources(self, sources: set) -> Optional[Dict[str, Any]]:
+        """Pop the highest-priority queued entry whose metadata source matches."""
+        wanted_sources = set(sources or set())
+        if not wanted_sources:
+            return None
+
+        deferred_items = []
+        with self.lock:
+            try:
+                while True:
+                    try:
+                        item = self.queue.get_nowait()
+                    except queue.Empty:
+                        return None
+
+                    channel_id = self._entry_channel_id(item)
+                    if channel_id not in self.queued:
+                        logger.debug(
+                            f"Ignoring stale queued channel {channel_id}; queue entry was cleared"
+                        )
+                        self.stats['queue_size'] = len(self.queued)
+                        continue
+
+                    metadata = self.queued_metadata.get(channel_id, {}) or {}
+                    if metadata.get("source") in wanted_sources:
+                        return self._activate_queued_entry_locked(channel_id)
+
+                    deferred_items.append(item)
+            finally:
+                for item in deferred_items:
+                    try:
+                        self.queue.put_nowait(item)
+                    except queue.Full:
+                        logger.warning("Queue unexpectedly full while restoring deferred entry")
     
     def remove_from_completed(self, channel_id: int):
         """Remove a channel from the completed set to allow re-queueing.
@@ -752,6 +827,14 @@ class StreamCheckQueue:
             else:
                 _, channel_id = item
             with self.lock:
+                if self.paused:
+                    try:
+                        self.queue.put_nowait(item)
+                    except queue.Full:
+                        logger.warning("Queue unexpectedly full while paused entry was restored")
+                    self.stats['queue_size'] = len(self.queued)
+                    return None
+
                 if channel_id not in self.queued:
                     logger.debug(
                         f"Ignoring stale queued channel {channel_id}; queue entry was cleared"
@@ -759,19 +842,18 @@ class StreamCheckQueue:
                     self.stats['queue_size'] = len(self.queued)
                     return None
 
-                stream_count = self.queued.pop(channel_id)  # Remove from queued dict
-                self.queued_priorities.pop(channel_id, None)
-                metadata = self.queued_metadata.pop(channel_id, {})
-                self.in_progress[channel_id] = stream_count
-                if metadata:
-                    self.in_progress_metadata[channel_id] = metadata
-                self.channel_start_times[channel_id] = datetime.now()
-                self.stats['current_channel'] = channel_id
-                self.stats['queue_size'] = len(self.queued)
-            return {
-                'channel_id': channel_id,
-                'metadata': metadata,
-            }
+                metadata = self.queued_metadata.get(channel_id, {}) or {}
+                if metadata.get("source") in self.deferred_metadata_sources:
+                    try:
+                        self.queue.put_nowait(item)
+                    except queue.Full:
+                        logger.warning(
+                            f"Queue unexpectedly full while deferring channel {channel_id}"
+                        )
+                    self.stats['queue_size'] = len(self.queued)
+                    return None
+
+                return self._activate_queued_entry_locked(channel_id)
         except queue.Empty:
             return None
 
@@ -866,6 +948,7 @@ class StreamCheckQueue:
                 'total_failed': self.stats['total_failed'],
                 'started_at': self.batch_started_at.isoformat() if self.batch_started_at else None,
                 'state': self._state_locked(),
+                'paused': self.paused,
                 'last_cleared_at': self.last_cleared_at,
                 'last_clear_reason': self.last_clear_reason
             }
@@ -904,6 +987,7 @@ class StreamCheckQueue:
             self.in_progress_metadata.clear()
             self.completed.clear()
             self.failed.clear()
+            self.paused = False
             self.channel_start_times.clear()
             self.stream_processing_times.clear()
             self.channel_processing_times.clear()

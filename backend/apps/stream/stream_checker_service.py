@@ -80,6 +80,8 @@ try:
 except ImportError:
     CHANGELOG_AVAILABLE = False
 
+SPECIALIZED_QUEUE_SOURCES = {"teamarr_preflight", "auto_create"}
+
 # Import croniter for cron expression validation
 try:
     from croniter import croniter
@@ -295,6 +297,10 @@ class StreamCheckerService:
                 # not clear this after a channel is pulled: a manual queue clear
                 # can legitimately request abort in that narrow handoff window.
                 self.abort_current_check.clear()
+                if self._sync_batch_active():
+                    logger.debug("Worker paused while synchronous quality batch is active")
+                    time.sleep(1)
+                    continue
                 logger.debug("Worker waiting for next channel from queue...")
                 queue_entry = self.check_queue.get_next_entry(timeout=1.0)
                 if queue_entry is None:
@@ -307,10 +313,7 @@ class StreamCheckerService:
                 channel_id = queue_entry.get('channel_id')
                 queue_metadata = queue_entry.get('metadata') or {}
                 
-                single_check_metadata = bool(
-                    queue_metadata.get('is_epg_scheduled')
-                    or queue_metadata.get('source') == 'teamarr_preflight'
-                )
+                single_check_metadata = self._is_specialized_queue_metadata(queue_metadata)
 
                 # Start a new batch if not already started. Specialized single-channel
                 # queue entries keep their own changelog path and should not create an
@@ -322,38 +325,7 @@ class StreamCheckerService:
                 # Check this channel
                 forced_profile_id = queue_metadata.get('forced_profile_id')
                 if single_check_metadata:
-                    single_check_kwargs = {
-                        'program_name': queue_metadata.get('program_name'),
-                        'is_epg_scheduled': bool(queue_metadata.get('is_epg_scheduled')),
-                        'forced_profile_id': forced_profile_id,
-                    }
-                    if queue_metadata.get('provider_limit_override'):
-                        single_check_kwargs['provider_limit_override'] = True
-                    result = self.check_single_channel(
-                        channel_id,
-                        **single_check_kwargs,
-                    )
-                    if queue_metadata.get('source') == 'teamarr_preflight':
-                        try:
-                            from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
-
-                            get_teamarr_preflight_service().record_queued_check_result(
-                                queue_metadata,
-                                result,
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "Failed to record queued Teamarr preflight result for channel %s: %s",
-                                channel_id,
-                                exc,
-                            )
-                    if isinstance(result, dict) and result.get('success') is False:
-                        self.check_queue.mark_failed(
-                            channel_id,
-                            result.get('error') or result.get('reason') or 'single channel check failed',
-                        )
-                    else:
-                        self.check_queue.mark_completed(channel_id)
+                    self._run_specialized_queue_entry(queue_entry)
                 else:
                     check_kwargs = {}
                     if forced_profile_id:
@@ -399,6 +371,82 @@ class StreamCheckerService:
                 logger.error(f"Error in scheduler loop: {e}", exc_info=True)
         
         logger.info("Stream checker scheduler stopped")
+
+    def _is_specialized_queue_metadata(self, metadata: Dict[str, Any]) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        return bool(
+            metadata.get('is_epg_scheduled')
+            or metadata.get('source') in SPECIALIZED_QUEUE_SOURCES
+        )
+
+    def _sync_batch_active(self) -> bool:
+        try:
+            with self.lock:
+                return bool(
+                    self.sync_batch_state.get('active')
+                    and self.sync_batch_state.get('generation') == self._sync_batch_generation
+                )
+        except Exception:
+            return False
+
+    def _run_specialized_queue_entry(self, queue_entry: Dict[str, Any]) -> None:
+        channel_id = queue_entry.get('channel_id')
+        queue_metadata = queue_entry.get('metadata') or {}
+        forced_profile_id = queue_metadata.get('forced_profile_id')
+        single_check_kwargs = {
+            'program_name': queue_metadata.get('program_name'),
+            'is_epg_scheduled': bool(queue_metadata.get('is_epg_scheduled')),
+            'forced_profile_id': forced_profile_id,
+        }
+        if queue_metadata.get('provider_limit_override'):
+            single_check_kwargs['provider_limit_override'] = True
+
+        result = self.check_single_channel(
+            channel_id,
+            **single_check_kwargs,
+        )
+        if queue_metadata.get('source') == 'teamarr_preflight':
+            try:
+                from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+
+                get_teamarr_preflight_service().record_queued_check_result(
+                    queue_metadata,
+                    result,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to record queued Teamarr preflight result for channel %s: %s",
+                    channel_id,
+                    exc,
+                )
+        if isinstance(result, dict) and result.get('success') is False:
+            self.check_queue.mark_failed(
+                channel_id,
+                result.get('error') or result.get('reason') or 'single channel check failed',
+            )
+        else:
+            self.check_queue.mark_completed(channel_id)
+
+    def _drain_specialized_queue_entries(self, *, max_entries: int = 25) -> int:
+        drained = 0
+        for _ in range(max(0, int(max_entries))):
+            if self.abort_current_check.is_set():
+                break
+            queue_entry = self.check_queue.get_next_entry_for_metadata_sources(
+                SPECIALIZED_QUEUE_SOURCES
+            )
+            if queue_entry is None:
+                break
+            logger.info(
+                "Running specialized queued check serially during synchronous batch "
+                "channel_id=%s source=%s",
+                queue_entry.get('channel_id'),
+                (queue_entry.get('metadata') or {}).get('source'),
+            )
+            self._run_specialized_queue_entry(queue_entry)
+            drained += 1
+        return drained
     
     def _queue_updated_channels(self):
         """Queue channels that have received M3U updates.
@@ -4534,9 +4582,10 @@ class StreamCheckerService:
     ) -> Dict[int, Dict]:
         """Check multiple channels synchronously and return results.
         
-        Using this method Bypasses the queue and worker/scheduler entirely.
-        This is useful for automation cycles where we want to wait for results
-        and consolidate them into a single report.
+        Using this method bypasses the normal worker/scheduler for the batch
+        channels. Event-triggered queue entries are still drained serially
+        between batch channels so preflight/auto-create checks can run without
+        opening parallel provider streams next to the synchronous batch.
         
         Args:
             channel_ids: List of channel IDs to check
@@ -4602,12 +4651,21 @@ class StreamCheckerService:
                 'generation': sync_generation,
             }
             self.checking = True
+        if hasattr(self.check_queue, 'set_paused'):
+            self.check_queue.set_paused(True)
+        if hasattr(self.check_queue, 'defer_metadata_sources'):
+            self.check_queue.defer_metadata_sources(SPECIALIZED_QUEUE_SOURCES)
         
         try:
             # Process each channel
             for channel_id in channel_ids:
                 if self.abort_current_check.is_set():
                     logger.info("Synchronous channel batch aborted before next channel")
+                    break
+
+                self._drain_specialized_queue_entries()
+                if self.abort_current_check.is_set():
+                    logger.info("Synchronous channel batch aborted after specialized queue drain")
                     break
 
                 stream_count = channel_streams.get(channel_id, 1)
@@ -4688,6 +4746,8 @@ class StreamCheckerService:
                         if self.sync_batch_state.get('generation') == sync_generation and self.sync_batch_state.get('active'):
                             self.sync_batch_state['in_progress'] = 0
                             self.sync_batch_state['in_progress_streams_count'] = 0
+            if not self.abort_current_check.is_set():
+                self._drain_specialized_queue_entries()
         finally:
             with self.lock:
                 if self.sync_batch_state.get('generation') == sync_generation:
@@ -4695,6 +4755,10 @@ class StreamCheckerService:
                     queue_status = self.check_queue.get_status()
                     if queue_status.get('queue_size', 0) == 0 and queue_status.get('in_progress', 0) == 0:
                         self.checking = False
+            if hasattr(self.check_queue, 'defer_metadata_sources'):
+                self.check_queue.defer_metadata_sources(set())
+            if hasattr(self.check_queue, 'set_paused'):
+                self.check_queue.set_paused(False)
                 
         return results
 
