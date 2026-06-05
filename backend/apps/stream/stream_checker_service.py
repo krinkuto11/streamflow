@@ -2456,6 +2456,8 @@ class StreamCheckerService:
                 removed_count = len(analyzed_streams) - stream_limit
                 logger.info(f"Applying profile stream limit: Keeping top {stream_limit} streams, removing {removed_count}")
                 analyzed_streams = analyzed_streams[:stream_limit]
+
+            report_analyzed_streams = list(analyzed_streams)
             
             # Remove dead streams from the channel (if enabled in config)
             # Dead streams are checked during all channel checks (normal and global)
@@ -2555,11 +2557,12 @@ class StreamCheckerService:
                     logo_url = f"/api/logos/{logo_id}"
                 
                 # Calculate channel-level averages from analyzed streams
-                averages = self._calculate_channel_averages(analyzed_streams, dead_stream_ids)
+                averages = self._calculate_channel_averages(report_analyzed_streams, dead_stream_ids)
                 
                 stream_stats = []
-                # Use all analyzed streams for stats, not just first 10
-                for analyzed in analyzed_streams:
+                # Use all analyzed streams for stats, including dead streams
+                # removed from the channel so cause counters stay accurate.
+                for analyzed in report_analyzed_streams:
                     stream_id = analyzed.get('stream_id')
                     is_dead = stream_id in dead_stream_ids
                     is_revived = stream_id in revived_stream_ids
@@ -3420,6 +3423,8 @@ class StreamCheckerService:
                 removed_count = len(analyzed_streams) - stream_limit
                 logger.info(f"Applying profile stream limit: Keeping top {stream_limit} streams, removing {removed_count}")
                 analyzed_streams = analyzed_streams[:stream_limit]
+
+            report_analyzed_streams = list(analyzed_streams)
             
             # Remove dead streams from the channel (if enabled in config)
             # Dead streams are checked during all channel checks (normal and global)
@@ -3532,8 +3537,8 @@ class StreamCheckerService:
             # active — without this, sequential runs produce an empty Quality Check table.
             stream_stats = []
             try:
-                averages = self._calculate_channel_averages(analyzed_streams, dead_stream_ids)
-                for analyzed in analyzed_streams:
+                averages = self._calculate_channel_averages(report_analyzed_streams, dead_stream_ids)
+                for analyzed in report_analyzed_streams:
                     stream_id = analyzed.get('stream_id')
                     is_dead = stream_id in dead_stream_ids
                     is_revived = stream_id in revived_stream_ids

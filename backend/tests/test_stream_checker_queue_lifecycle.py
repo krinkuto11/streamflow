@@ -6,6 +6,7 @@ import sys
 import threading
 import unittest
 from datetime import datetime, timedelta
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from flask import Flask
@@ -904,6 +905,40 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(
             StreamCheckerService._result_count(result, 'freeze_streams_count', fallback_status='freeze'),
             2,
+        )
+
+    def test_channel_reporting_preserves_dead_stream_cause_details(self):
+        source_path = (
+            Path(__file__).resolve().parents[1]
+            / "apps"
+            / "stream"
+            / "stream_checker_service.py"
+        )
+        source = source_path.read_text(encoding="utf-8")
+
+        self.assertIn("report_analyzed_streams = list(analyzed_streams)", source)
+        self.assertIn("for analyzed in report_analyzed_streams:", source)
+
+        result = {
+            'dead_streams_count': 2,
+            'checked_streams': [
+                {
+                    'stream_id': 'stream-blank',
+                    'status': 'blank',
+                    'blank_detected': True,
+                    'freeze_detected': True,
+                },
+                {'stream_id': 'stream-unstable', 'status': 'dead'},
+            ],
+        }
+
+        self.assertEqual(
+            StreamCheckerService._result_count(result, 'blank_streams_count', fallback_status='blank'),
+            1,
+        )
+        self.assertEqual(
+            StreamCheckerService._result_count(result, 'freeze_streams_count', fallback_status='freeze'),
+            1,
         )
 
 
