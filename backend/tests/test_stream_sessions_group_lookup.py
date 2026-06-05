@@ -35,7 +35,6 @@ class TestCreateGroupStreamSessionsGroupLookup(unittest.TestCase):
             "pre_event_minutes": 30,
             "stagger_ms": 200,
             "timeout_ms": 30000,
-            "enable_loop_detection": False,
             "enable_looping_detection": True,
             "enable_logo_detection": True,
         }

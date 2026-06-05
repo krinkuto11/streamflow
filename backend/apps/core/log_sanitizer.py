@@ -6,7 +6,7 @@ import re
 from typing import Any, Optional
 
 
-_URL_RE = re.compile(r"(?i)\b(?:https?|rtmps?|rtsp|rtp|udp|tcp|acestream)://[^\s'\"<>]+")
+_URL_RE = re.compile(r"(?i)\b(?:https?|rtmps?|rtsp|rtp|udp|tcp)://[^\s'\"<>]+")
 _TRUE_VALUES = {"true", "1", "yes", "on"}
 
 

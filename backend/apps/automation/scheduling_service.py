@@ -598,11 +598,6 @@ class SchedulingService:
                 'check_time': check_time.isoformat(),
                 'tvg_id': channel.get('tvg_id'),
                 'schedule_type': schedule_type,
-                'session_type': event_data.get('session_type', 'standard'),
-                'interval_s': event_data.get('interval_s', 1.0),
-                'run_seconds': event_data.get('run_seconds', 0),
-                'per_sample_timeout_s': event_data.get('per_sample_timeout_s', 1.0),
-                'engine_container_id': event_data.get('engine_container_id'),
                 'enable_looping_detection': event_data.get('enable_looping_detection', True),
                 'enable_logo_detection': event_data.get('enable_logo_detection', True),
                 'created_at': datetime.now(timezone.utc).isoformat()
@@ -836,11 +831,6 @@ class SchedulingService:
                 'regex_pattern': rule_data['regex_pattern'],
                 'minutes_before': rule_data.get('minutes_before', 5),
                 'schedule_type': schedule_type,
-                'session_type': rule_data.get('session_type', 'standard'),
-                'interval_s': rule_data.get('interval_s', 1.0),
-                'run_seconds': rule_data.get('run_seconds', 0),
-                'per_sample_timeout_s': rule_data.get('per_sample_timeout_s', 1.0),
-                'engine_container_id': rule_data.get('engine_container_id', ''),
                 'enable_looping_detection': rule_data.get('enable_looping_detection', True),
                 'enable_logo_detection': rule_data.get('enable_logo_detection', True),
                 'created_at': datetime.now(timezone.utc).isoformat(),
@@ -916,9 +906,8 @@ class SchedulingService:
                 except re.error as e:
                     raise ValueError(f"Invalid regex pattern: {e}")
 
-            for field in ['name', 'minutes_before', 'schedule_type', 'session_type',
-                          'interval_s', 'run_seconds', 'per_sample_timeout_s',
-                          'engine_container_id', 'enable_looping_detection', 'enable_logo_detection']:
+            for field in ['name', 'minutes_before', 'schedule_type',
+                          'enable_looping_detection', 'enable_logo_detection']:
                 if field in rule_data:
                     rule[field] = rule_data[field]
 
@@ -1327,11 +1316,6 @@ class SchedulingService:
                                 'check_time': check_time.isoformat(),
                                 'tvg_id': tvg_id,
                                 'schedule_type': rule.get('schedule_type', 'check'),
-                                'session_type': rule.get('session_type', 'standard'),
-                                'interval_s': rule.get('interval_s', 1.0),
-                                'run_seconds': rule.get('run_seconds', 0),
-                                'per_sample_timeout_s': rule.get('per_sample_timeout_s', 1.0),
-                                'engine_container_id': rule.get('engine_container_id'),
                                 'enable_looping_detection': rule.get('enable_looping_detection', True),
                                 'enable_logo_detection': rule.get('enable_logo_detection', True),
                                 'program_date': program_date,
@@ -1370,11 +1354,6 @@ class SchedulingService:
                             'check_time': check_time.isoformat(),
                             'tvg_id': tvg_id,
                             'schedule_type': rule.get('schedule_type', 'check'),
-                            'session_type': rule.get('session_type', 'standard'),
-                            'interval_s': rule.get('interval_s', 1.0),
-                            'run_seconds': rule.get('run_seconds', 0),
-                            'per_sample_timeout_s': rule.get('per_sample_timeout_s', 1.0),
-                            'engine_container_id': rule.get('engine_container_id'),
                             'enable_looping_detection': rule.get('enable_looping_detection', True),
                             'enable_logo_detection': rule.get('enable_logo_detection', True),
                             'created_at': datetime.now(timezone.utc).isoformat(),
@@ -1426,51 +1405,26 @@ class SchedulingService:
         try:
             success = False
             if schedule_type == 'monitoring':
-                session_type = event.get('session_type', 'standard')
-                if session_type == 'acestream':
-                    from apps.api.web_api import create_acestream_channel_session_impl
-                    interval_s = float(event.get('interval_s', 1.0))
-                    run_seconds = int(event.get('run_seconds', 0))
-                    per_sample_timeout_s = float(event.get('per_sample_timeout_s', 1.0))
-                    engine_container_id = event.get('engine_container_id')
-
-                    result, status_code = create_acestream_channel_session_impl(
-                        channel_id=channel_id,
-                        interval_s=interval_s,
-                        run_seconds=run_seconds,
-                        per_sample_timeout_s=per_sample_timeout_s,
-                        engine_container_id=engine_container_id,
-                        epg_event_title=program_title,
-                        epg_event_start=program_start_time,
-                        epg_event_end=event.get('program_end_time'),
-                    )
-                    if status_code in (200, 201):
-                        logger.info(f"Started AceStream monitoring session {result.get('session_id')} for event {event_id}")
+                session_id = self.create_session_from_event(event_id)
+                if session_id:
+                    from apps.stream.stream_session_manager import get_session_manager
+                    session_manager = get_session_manager()
+                    existing = session_manager.sessions.get(session_id)
+                    if existing and existing.is_active:
+                        logger.info(
+                            f"Monitoring session {session_id} is already active for event "
+                            f"{event_id}; EPG info updated"
+                        )
+                        success = True
+                    elif session_manager.start_session(session_id):
+                        logger.info(f"Started monitoring session {session_id} for event {event_id}")
                         success = True
                     else:
-                        logger.error(f"Failed to start AceStream monitoring session for event {event_id}: {result}")
+                        logger.error(f"Failed to start monitoring session {session_id} for event {event_id}")
                         success = False
                 else:
-                    session_id = self.create_session_from_event(event_id)
-                    if session_id:
-                        from apps.stream.stream_session_manager import get_session_manager
-                        session_manager = get_session_manager()
-                        existing = session_manager.sessions.get(session_id)
-                        if existing and existing.is_active:
-                            logger.info(
-                                f"Monitoring session {session_id} is already active for event "
-                                f"{event_id}; EPG info updated"
-                            )
-                            success = True
-                        elif session_manager.start_session(session_id):
-                            logger.info(f"Started monitoring session {session_id} for event {event_id}")
-                            success = True
-                        else:
-                            logger.error(f"Failed to start monitoring session {session_id} for event {event_id}")
-                            success = False
-                    else:
-                        logger.error(f"Failed to create monitoring session for event {event_id}")
-                        success = False
+                    logger.error(f"Failed to create monitoring session for event {event_id}")
+                    success = False
             else:
                 queue_channel = getattr(stream_checker_service, 'queue_channel', None)
                 use_queue = (
