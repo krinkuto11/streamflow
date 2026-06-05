@@ -1435,7 +1435,7 @@ class UDIManager:
             logger.error(f"Error refreshing channel {channel_id}: {e}")
             return False
     
-    def refresh_streams(self) -> bool:
+    def refresh_streams(self, progress_callback=None) -> bool:
         """Refresh only streams data.
         
         Returns:
@@ -1443,7 +1443,7 @@ class UDIManager:
         """
         logger.info("Refreshing streams...")
         try:
-            result = self.fetcher.fetch_streams()
+            result = self.fetcher.fetch_streams(progress_callback=progress_callback)
             with self._lock:
                 self._streams_cache = result.items
                 self._streams_by_id = {

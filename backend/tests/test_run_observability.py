@@ -430,6 +430,9 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["state"], "settled")
         self.assertEqual(events[0]["wait_busy_accounts"], 1)
+        self.assertEqual(events[0]["current"], 0)
+        self.assertEqual(events[0]["total"], 1)
+        self.assertIn("playlist parsing", events[0]["message"])
         self.assertEqual(events[-1]["state"], "settled")
         udi.refresh_streams.assert_not_called()
         sleep_mock.assert_called_once_with(1)
@@ -540,20 +543,32 @@ class AutomationRunStatusTests(unittest.TestCase):
 
         udi = Mock()
 
-        def refresh_streams():
+        def refresh_streams(progress_callback=None):
             status = manager.get_run_status()
             self.assertEqual(status["current"], 1)
-            self.assertEqual(status["total"], 4)
-            self.assertEqual(status["percent"], 25)
+            self.assertEqual(status["total"], 100)
+            self.assertEqual(status["percent"], 1)
             stages = {stage["key"]: stage for stage in status["stages"]}
-            self.assertEqual(stages["cache_sync"]["percent"], 25)
+            self.assertEqual(stages["cache_sync"]["percent"], 1)
+            self.assertIsNotNone(progress_callback)
+            progress_callback({
+                "completed_pages": 2,
+                "total_pages": 4,
+                "items_fetched": 10000,
+                "expected_count": 20000,
+            })
+            status = manager.get_run_status()
+            self.assertEqual(status["current"], 40)
+            self.assertEqual(status["total"], 100)
+            self.assertEqual(status["percent"], 40)
+            self.assertIn("2/4 pages", status["message"])
             return True
 
         def refresh_channels():
             status = manager.get_run_status()
-            self.assertEqual(status["current"], 3)
-            self.assertEqual(status["total"], 4)
-            self.assertEqual(status["percent"], 75)
+            self.assertEqual(status["current"], 90)
+            self.assertEqual(status["total"], 100)
+            self.assertEqual(status["percent"], 90)
             return True
 
         udi.refresh_streams.side_effect = refresh_streams
@@ -561,7 +576,7 @@ class AutomationRunStatusTests(unittest.TestCase):
 
         self.assertTrue(manager._sync_udi_cache_after_playlist_refresh(udi))
         status = manager.get_run_status()
-        self.assertEqual(status["current"], 4)
+        self.assertEqual(status["current"], 100)
         self.assertEqual(status["percent"], 100)
         self.assertEqual(status["counts"]["cache_sync_successful_steps"], 2)
         self.assertEqual(status["counts"]["cache_sync_total_steps"], 2)

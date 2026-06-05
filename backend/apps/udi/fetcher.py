@@ -11,7 +11,7 @@ import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Set
+from typing import Callable, Dict, List, Optional, Any, Set
 import requests
 
 from apps.core.logging_config import setup_logging, log_api_request, log_api_response
@@ -418,7 +418,13 @@ class UDIFetcher:
             logger.error(f"Error POSTing to {url}: {e}")
             return None
 
-    def _fetch_paginated(self, base_url: str, page_size: int = 1000, max_workers: int = 10) -> FetchResult:
+    def _fetch_paginated(
+        self,
+        base_url: str,
+        page_size: int = 1000,
+        max_workers: int = 10,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> FetchResult:
         """Fetch paginated data from an API endpoint.
 
         Page 1 is fetched synchronously to capture the total ``count``.  All
@@ -460,6 +466,7 @@ class UDIFetcher:
             return FetchResult()
 
         all_items: List[Dict[str, Any]] = list(response.get('results', []))
+        items_fetched = len(all_items)
         expected_count: Optional[int] = None
 
         raw_count = response.get('count')
@@ -473,9 +480,23 @@ class UDIFetcher:
 
         # If we already have everything (or count is unknown), return early.
         if expected_count is None or expected_count <= page_size:
+            if progress_callback:
+                progress_callback({
+                    "completed_pages": 1,
+                    "total_pages": 1,
+                    "items_fetched": items_fetched,
+                    "expected_count": expected_count,
+                })
             return FetchResult(items=all_items, expected_count=expected_count)
 
         total_pages = math.ceil(expected_count / page_size)
+        if progress_callback:
+            progress_callback({
+                "completed_pages": 1,
+                "total_pages": total_pages,
+                "items_fetched": items_fetched,
+                "expected_count": expected_count,
+            })
         remaining = range(2, total_pages + 1)
         logger.debug(
             f"Fetching {total_pages - 1} remaining pages of {base_url} concurrently "
@@ -499,10 +520,20 @@ class UDIFetcher:
                     result = future.result()
                     if result and isinstance(result, dict) and 'results' in result:
                         page_results[page_num] = result['results']
+                        items_fetched += len(result['results'])
                     elif result and isinstance(result, list):
                         page_results[page_num] = result
+                        items_fetched += len(result)
                 except Exception as e:
                     logger.error(f"Error fetching page {page_num} of {base_url}: {e}")
+                if progress_callback:
+                    completed_pages = 1 + len(page_results)
+                    progress_callback({
+                        "completed_pages": completed_pages,
+                        "total_pages": total_pages,
+                        "items_fetched": items_fetched,
+                        "expected_count": expected_count,
+                    })
 
         # Merge pages in page-number order so item ordering is deterministic.
         for page_num in sorted(page_results):
@@ -559,7 +590,10 @@ class UDIFetcher:
         streams = self._fetch_url(url)
         return streams if isinstance(streams, list) else []
     
-    def fetch_streams(self) -> FetchResult:
+    def fetch_streams(
+        self,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> FetchResult:
         """Fetch all streams from Dispatcharr.
         
         Returns:
@@ -573,7 +607,10 @@ class UDIFetcher:
         config = get_dispatcharr_config()
         page_size = config.get_stream_fetch_page_size()
         max_workers = config.get_stream_fetch_max_workers()
-        result = self._fetch_paginated(url, page_size=page_size, max_workers=max_workers)
+        fetch_kwargs = {"page_size": page_size, "max_workers": max_workers}
+        if progress_callback is not None:
+            fetch_kwargs["progress_callback"] = progress_callback
+        result = self._fetch_paginated(url, **fetch_kwargs)
         logger.info(
             f"Fetched {len(result)} streams"
             + (f" (expected {result.expected_count})" if result.expected_count is not None else "")

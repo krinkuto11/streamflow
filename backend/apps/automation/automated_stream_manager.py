@@ -1823,41 +1823,80 @@ class AutomatedStreamManager:
 
     def _sync_udi_cache_after_playlist_refresh(self, udi_manager: Any) -> bool:
         """Refresh UDI streams/channels while surfacing coarse run progress."""
-        steps = [
-            ("streams", "Syncing stream cache", udi_manager.refresh_streams),
-            ("channels", "Syncing channel cache", udi_manager.refresh_channels),
-        ]
-        total = len(steps)
-        progress_total = max(1, total * 2)
+        progress_total = 100
         all_success = True
         successful_steps = 0
 
-        for index, (name, message, refresh_func) in enumerate(steps):
-            self._update_run_progress(
-                stage_key="cache_sync",
-                current=(index * 2) + 1,
-                total=progress_total,
-                message=message,
-            )
+        def update_stream_fetch_progress(payload: Dict[str, Any]) -> None:
+            completed_pages = payload.get("completed_pages")
+            total_pages = payload.get("total_pages")
+            items_fetched = payload.get("items_fetched")
+            expected_count = payload.get("expected_count")
             try:
-                success = bool(refresh_func())
-            except Exception as exc:
-                logger.warning("UDI %s cache sync failed: %s", name, exc)
-                success = False
-            if success:
-                successful_steps += 1
-            all_success = all_success and success
+                completed_pages_int = int(completed_pages)
+                total_pages_int = int(total_pages)
+                current = int((completed_pages_int / total_pages_int) * 80) if total_pages_int > 0 else 1
+                current = max(1, min(80, current))
+                page_detail = f" ({completed_pages_int}/{total_pages_int} pages"
+                if items_fetched is not None and expected_count is not None:
+                    page_detail += f", {items_fetched}/{expected_count} streams"
+                page_detail += ")"
+            except (TypeError, ValueError, ZeroDivisionError):
+                current = 1
+                page_detail = ""
             self._update_run_progress(
                 stage_key="cache_sync",
-                current=(index + 1) * 2,
+                current=current,
                 total=progress_total,
-                message=f"{message} {'completed' if success else 'reported warnings'}",
+                message=f"Syncing stream cache{page_detail}",
             )
+
+        self._update_run_progress(
+            stage_key="cache_sync",
+            current=1,
+            total=progress_total,
+            message="Syncing stream cache",
+        )
+        try:
+            streams_success = bool(udi_manager.refresh_streams(progress_callback=update_stream_fetch_progress))
+        except Exception as exc:
+            logger.warning("UDI streams cache sync failed: %s", exc)
+            streams_success = False
+        if streams_success:
+            successful_steps += 1
+        all_success = all_success and streams_success
+        self._update_run_progress(
+            stage_key="cache_sync",
+            current=80,
+            total=progress_total,
+            message=f"Syncing stream cache {'completed' if streams_success else 'reported warnings'}",
+        )
+
+        self._update_run_progress(
+            stage_key="cache_sync",
+            current=90,
+            total=progress_total,
+            message="Syncing channel cache",
+        )
+        try:
+            channels_success = bool(udi_manager.refresh_channels())
+        except Exception as exc:
+            logger.warning("UDI channels cache sync failed: %s", exc)
+            channels_success = False
+        if channels_success:
+            successful_steps += 1
+        all_success = all_success and channels_success
+        self._update_run_progress(
+            stage_key="cache_sync",
+            current=100,
+            total=progress_total,
+            message=f"Syncing channel cache {'completed' if channels_success else 'reported warnings'}",
+        )
 
         self._update_run_status(
             counts={
                 "cache_sync_successful_steps": successful_steps,
-                "cache_sync_total_steps": total,
+                "cache_sync_total_steps": 2,
                 "cache_sync_state": "completed" if all_success else "warning",
             },
         )
@@ -2165,16 +2204,27 @@ class AutomatedStreamManager:
                 and failed_count >= account_count
                 and no_busy_accounts
             )
+            if busy_count > 0 and account_count > 0:
+                progress_current = max(0, account_count - busy_count)
+                progress_total = account_count
+                progress_message = (
+                    f"Waiting for playlist parsing to finish "
+                    f"({progress_current}/{account_count} providers ready, {elapsed}s)"
+                )
+            else:
+                progress_current = min(stable_polls, stable_required)
+                progress_total = stable_required
+                progress_message = (
+                    f"Waiting for playlist refresh to settle "
+                    f"({progress_current}/{stable_required} stable polls, {elapsed}s)"
+                )
 
             if progress_callback:
                 progress_callback({
                     "state": "waiting",
-                    "current": min(stable_polls, stable_required),
-                    "total": stable_required,
-                    "message": (
-                        f"Waiting for playlist refresh to settle "
-                        f"({stable_polls}/{stable_required} stable polls, {elapsed}s)"
-                    ),
+                    "current": progress_current,
+                    "total": progress_total,
+                    "message": progress_message,
                     "wait_elapsed_seconds": elapsed,
                     "wait_stable_polls": stable_polls,
                     "wait_busy_accounts": busy_count,

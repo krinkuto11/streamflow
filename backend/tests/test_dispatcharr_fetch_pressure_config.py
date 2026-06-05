@@ -110,6 +110,40 @@ def test_fetch_streams_uses_configured_fetch_pressure(monkeypatch):
     }
 
 
+def test_fetch_streams_forwards_progress_callback(monkeypatch):
+    from apps.udi import fetcher as fetcher_module
+
+    fetcher = fetcher_module.UDIFetcher.__new__(fetcher_module.UDIFetcher)
+    fetcher.base_url = "http://dispatcharr.test"
+
+    config = Mock()
+    config.get_stream_fetch_page_size.return_value = 5000
+    config.get_stream_fetch_max_workers.return_value = 2
+    monkeypatch.setattr(fetcher_module, "get_dispatcharr_config", lambda: config)
+
+    callback = Mock()
+    calls = {}
+
+    def fake_fetch_paginated(url, page_size=1000, max_workers=10, progress_callback=None):
+        calls["url"] = url
+        calls["page_size"] = page_size
+        calls["max_workers"] = max_workers
+        calls["progress_callback"] = progress_callback
+        progress_callback({"completed_pages": 1, "total_pages": 2})
+        return fetcher_module.FetchResult(items=[{"id": 1}], expected_count=1)
+
+    monkeypatch.setattr(fetcher, "_fetch_paginated", fake_fetch_paginated)
+
+    result = fetcher.fetch_streams(progress_callback=callback)
+
+    assert len(result) == 1
+    assert calls["url"] == "http://dispatcharr.test/api/channels/streams/"
+    assert calls["page_size"] == 5000
+    assert calls["max_workers"] == 2
+    assert calls["progress_callback"] is callback
+    callback.assert_called_once_with({"completed_pages": 1, "total_pages": 2})
+
+
 def test_fetch_url_retries_transient_timeout(monkeypatch):
     from apps.udi import fetcher as fetcher_module
 
