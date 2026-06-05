@@ -1,6 +1,7 @@
 import io
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 from apps.stream import shadow_blank_monitor_service as shadow_module
 from apps.stream.shadow_blank_monitor_service import (
@@ -791,6 +792,50 @@ def test_watched_status_includes_sanitized_watcher_identity(tmp_path):
     assert watched["watcher_connected_at"] == 970.0
     assert watched["watcher_uptime_seconds"] == 30
     assert "raw-watcher-client-id" not in repr(status)
+
+
+def test_watched_status_includes_current_epg_program(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    scheduling_calls = []
+
+    class FakeSchedulingService:
+        def get_programs_by_channel(self, channel_id, tvg_id=None):
+            scheduling_calls.append((channel_id, tvg_id))
+            return [
+                {
+                    "title": "Live: MLB",
+                    "start_time": (now - timedelta(minutes=5)).isoformat(),
+                    "end_time": (now + timedelta(minutes=55)).isoformat(),
+                },
+                {
+                    "title": "SportsCenter",
+                    "start_time": (now + timedelta(hours=1)).isoformat(),
+                    "end_time": (now + timedelta(hours=2)).isoformat(),
+                },
+            ]
+
+    monkeypatch.setattr(
+        "apps.automation.scheduling_service.get_scheduling_service",
+        lambda: FakeSchedulingService(),
+    )
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "tvg_id": "mlb.tvg", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service.update_config({"enabled": False, "dry_run": False})
+
+    status = service.run_once(force=True)
+    watched = status["watched_channels"][0]
+
+    assert watched["current_program"] == {
+        "title": "Live: MLB",
+        "state": "current",
+        "start_time": (now - timedelta(minutes=5)).isoformat(),
+        "end_time": (now + timedelta(minutes=55)).isoformat(),
+    }
+    assert scheduling_calls == [(1, "mlb.tvg")]
+    assert "mlb.tvg" not in repr(status)
 
 
 def test_continuous_watcher_reconnects_are_visible_without_raw_client_ids(tmp_path):

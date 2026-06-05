@@ -11,6 +11,7 @@ import { shadowBlankMonitorAPI } from '@/services/api.js'
 import {
   formatViewerClientCount,
   formatWatcherClientCount,
+  getProgramDisplayLabel,
 } from '@/lib/viewer-activity-display.js'
 import {
   shadowMonitorNumberFields,
@@ -487,40 +488,51 @@ export default function ShadowBlankMonitor() {
                 <p className="text-sm text-muted-foreground">No watched channels</p>
               ) : (
                 <div className="space-y-3">
-                  {watchedChannels.map(channel => (
-                    <div key={channel.channel_ref} className="rounded-md border p-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <span className="font-mono text-xs">{channel.channel_ref}</span>
-                        <div className="flex shrink-0 flex-wrap justify-end gap-2">
-                          <Badge variant="outline">{formatViewerClientCount(channel.real_client_count)}</Badge>
-                          {(channel.watcher_client_count || 0) > 0 && (
-                            <Badge variant="secondary">{formatWatcherClientCount(channel.watcher_client_count)}</Badge>
+                  {watchedChannels.map(channel => {
+                    const programLabel = getProgramDisplayLabel(channel.current_program)
+                    return (
+                      <div key={channel.channel_ref} className="rounded-md border p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="font-mono text-xs">{channel.channel_ref}</span>
+                          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                            <Badge variant="outline">{formatViewerClientCount(channel.real_client_count)}</Badge>
+                            {(channel.watcher_client_count || 0) > 0 && (
+                              <Badge variant="secondary">{formatWatcherClientCount(channel.watcher_client_count)}</Badge>
+                            )}
+                          </div>
+                        </div>
+                        {programLabel && (
+                          <div className="mt-2 min-w-0 text-sm font-medium">
+                            {programLabel}
+                          </div>
+                        )}
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <span>{channel.stream_ref}</span>
+                          {!programLabel && channel.watcher_state === 'waiting' && (
+                            <span>Waiting for shadow watcher</span>
                           )}
+                          {channel.watcher_client_ref && <span>{channel.watcher_client_ref}</span>}
+                          {formatDuration(channel.watcher_uptime_seconds) && (
+                            <span>watching for {formatDuration(channel.watcher_uptime_seconds)}</span>
+                          )}
+                          {channel.watcher_state === 'reconnecting' && (
+                            <Badge variant="outline">Watcher reconnecting</Badge>
+                          )}
+                          {channel.watcher_state === 'reconnecting' && formatDuration(channel.watcher_absent_seconds) && (
+                            <span>missing for {formatDuration(channel.watcher_absent_seconds)}</span>
+                          )}
+                          {channel.last_event?.type === 'watcher_recovered' && (
+                            <Badge variant="secondary">Watcher recovered</Badge>
+                          )}
+                          {channel.last_event && !['watcher_reconnecting', 'watcher_recovered'].includes(channel.last_event.type) && (
+                            <Badge variant="secondary">{formatEvent(channel.last_event)}</Badge>
+                          )}
+                          {channel.last_probe?.freeze_detected && <Badge variant="outline">Frozen</Badge>}
+                          {channel.last_probe?.blank_detected && <Badge variant="outline">Blank</Badge>}
                         </div>
                       </div>
-                      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                        <span>{channel.stream_ref}</span>
-                        {channel.watcher_client_ref && <span>{channel.watcher_client_ref}</span>}
-                        {formatDuration(channel.watcher_uptime_seconds) && (
-                          <span>watching for {formatDuration(channel.watcher_uptime_seconds)}</span>
-                        )}
-                        {channel.watcher_state === 'reconnecting' && (
-                          <Badge variant="outline">Watcher reconnecting</Badge>
-                        )}
-                        {channel.watcher_state === 'reconnecting' && formatDuration(channel.watcher_absent_seconds) && (
-                          <span>missing for {formatDuration(channel.watcher_absent_seconds)}</span>
-                        )}
-                        {channel.last_event?.type === 'watcher_recovered' && (
-                          <Badge variant="secondary">Watcher recovered</Badge>
-                        )}
-                        {channel.last_event && !['watcher_reconnecting', 'watcher_recovered'].includes(channel.last_event.type) && (
-                          <Badge variant="secondary">{formatEvent(channel.last_event)}</Badge>
-                        )}
-                        {channel.last_probe?.freeze_detected && <Badge variant="outline">Frozen</Badge>}
-                        {channel.last_probe?.blank_detected && <Badge variant="outline">Blank</Badge>}
-                      </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </CardContent>

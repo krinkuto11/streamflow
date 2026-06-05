@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -411,6 +412,7 @@ class ShadowBlankMonitorService:
             watcher_clients = int(watcher_details.get("watcher_client_count") or 0)
 
             stream_id = self._extract_stream_id(raw_status)
+            current_program = self._current_epg_program(channel, raw_status, numeric_id)
             target = {
                 "channel_uuid": channel_uuid,
                 "channel_id": numeric_id,
@@ -422,6 +424,8 @@ class ShadowBlankMonitorService:
                 "state": raw_status.get("state") or "active",
                 "cooldown_seconds": self._cooldown_remaining(channel_uuid),
             }
+            if current_program:
+                target["current_program"] = current_program
             target.update(watcher_details)
             if continuous_mode:
                 previous_target = previous_watched.get(channel_uuid) or {}
@@ -1309,6 +1313,99 @@ class ShadowBlankMonitorService:
         return False
 
     @staticmethod
+    def _parse_program_time(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _normalize_program_payload(cls, program: Dict[str, Any], *, state: str) -> Optional[Dict[str, Any]]:
+        title = (
+            program.get("title")
+            or program.get("program_title")
+            or program.get("name")
+        )
+        if not title:
+            return None
+        start = program.get("start_time") or program.get("start") or program.get("starts_at")
+        end = program.get("end_time") or program.get("end") or program.get("ends_at")
+        payload = {
+            "title": str(title),
+            "state": state,
+        }
+        if start:
+            payload["start_time"] = str(start)
+        if end:
+            payload["end_time"] = str(end)
+        return payload
+
+    def _current_epg_program(
+        self,
+        channel: Optional[Dict[str, Any]],
+        raw_status: Dict[str, Any],
+        numeric_channel_id: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        for key in ("current_program", "epg_program", "program"):
+            program = raw_status.get(key)
+            if isinstance(program, dict):
+                normalized = self._normalize_program_payload(program, state="current")
+                if normalized:
+                    return normalized
+
+        status_title = (
+            raw_status.get("program_title")
+            or raw_status.get("epg_title")
+            or raw_status.get("current_program_title")
+        )
+        if status_title:
+            return {"title": str(status_title), "state": "current"}
+
+        tvg_id = (channel or {}).get("tvg_id") or raw_status.get("tvg_id")
+        if numeric_channel_id is None and not tvg_id:
+            return None
+
+        try:
+            from apps.automation.scheduling_service import get_scheduling_service
+
+            service = get_scheduling_service()
+            programs = service.get_programs_by_channel(numeric_channel_id, tvg_id=tvg_id)
+        except Exception as exc:
+            logger.debug("Shadow monitor could not read EPG program: %s", exc)
+            return None
+
+        if not isinstance(programs, list) or not programs:
+            return None
+
+        now = datetime.now(timezone.utc)
+        upcoming: List[tuple[datetime, Dict[str, Any]]] = []
+        for program in programs:
+            if not isinstance(program, dict):
+                continue
+            start = self._parse_program_time(program.get("start_time") or program.get("start"))
+            end = self._parse_program_time(program.get("end_time") or program.get("end"))
+            if start and end and start <= now <= end:
+                return self._normalize_program_payload(program, state="current")
+            if start and start > now:
+                upcoming.append((start, program))
+
+        if upcoming:
+            upcoming.sort(key=lambda item: item[0])
+            return self._normalize_program_payload(upcoming[0][1], state="upcoming")
+        return None
+
+    @staticmethod
     def _public_target(target: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {
             "channel_ref",
@@ -1324,6 +1421,7 @@ class ShadowBlankMonitorService:
             "watcher_recovered_after_seconds",
             "last_watcher_client_ref",
             "state",
+            "current_program",
             "cooldown_seconds",
             "last_probe",
             "last_event",

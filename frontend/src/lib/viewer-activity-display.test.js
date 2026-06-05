@@ -6,6 +6,8 @@ import {
   formatWatcherClientCount,
   formatWatcherOnlyChannelCount,
   getPlaybackBadgeLabel,
+  getProgramDisplayLabel,
+  getViewerActivityDetailLabel,
 } from './viewer-activity-display.js'
 
 describe('viewer activity display helpers', () => {
@@ -28,5 +30,25 @@ describe('viewer activity display helpers', () => {
     expect(getPlaybackBadgeLabel({ has_real_clients: false })).toBe('Watcher only')
     expect(formatStreamRef(91)).toBe(' - Stream 91')
     expect(formatStreamRef(null)).toBe('')
+  })
+
+  it('uses EPG program context before raw proxy state', () => {
+    expect(getProgramDisplayLabel({ title: 'Live: MLB', state: 'current' })).toBe('Now: Live: MLB')
+    expect(getProgramDisplayLabel({ title: 'Later Game', state: 'upcoming' })).toBe('Next: Later Game')
+    expect(getViewerActivityDetailLabel({
+      state: 'waiting_for_clients',
+      current_program: { title: 'Live: MLB', state: 'current' },
+      has_real_clients: true,
+      watcher_client_count: 0,
+    })).toBe('Now: Live: MLB')
+  })
+
+  it('hides waiting_for_clients behind an operator fallback when no EPG is known', () => {
+    expect(getViewerActivityDetailLabel({
+      state: 'waiting_for_clients',
+      has_real_clients: true,
+      watcher_client_count: 0,
+    })).toBe('Waiting for shadow watcher')
+    expect(getViewerActivityDetailLabel({ state: 'active' })).toBe('Active playback')
   })
 })

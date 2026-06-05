@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from flask import jsonify
@@ -9,6 +10,13 @@ from flask import jsonify
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
+
+
+def _ref(kind: str, value: Any) -> str:
+    if value is None:
+        return f"{kind}-unknown"
+    digest = hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()[:12]
+    return f"{kind}-{digest}"
 
 
 def _client_text(client: Any) -> str:
@@ -133,6 +141,7 @@ def build_viewer_activity_status(
                 channel_uuid = str(channel["uuid"])
 
         numeric_id = _extract_channel_id(channel, raw_status)
+        stream_id = _extract_stream_id(raw_status)
         real_clients, watcher_clients, total_clients = _count_clients(raw_status, watcher_user_agent)
         if total_clients <= 0:
             continue
@@ -140,8 +149,10 @@ def build_viewer_activity_status(
         active_channels.append({
             "channel_id": numeric_id,
             "channel_uuid": channel_uuid,
+            "channel_ref": _ref("channel", numeric_id or channel_uuid),
             "channel_name": (channel or {}).get("name") or raw_status.get("channel_name") or f"Channel {numeric_id or channel_uuid}",
-            "stream_id": _extract_stream_id(raw_status),
+            "stream_id": stream_id,
+            "stream_ref": _ref("stream", stream_id),
             "state": raw_status.get("state") or ("active" if _is_status_active(raw_status) else "idle"),
             "real_client_count": real_clients,
             "watcher_client_count": watcher_clients,
@@ -173,6 +184,39 @@ def build_viewer_activity_status(
     }
 
 
+def apply_shadow_monitor_context(
+    status: Dict[str, Any],
+    shadow_status: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Attach safe shadow monitor context to viewer activity channels."""
+    if not isinstance(status, dict) or not isinstance(shadow_status, dict):
+        return status
+
+    programs_by_ref: Dict[str, Dict[str, Any]] = {}
+    for target in shadow_status.get("watched_channels") or []:
+        if not isinstance(target, dict):
+            continue
+        program = target.get("current_program")
+        channel_ref = target.get("channel_ref")
+        if isinstance(program, dict) and channel_ref:
+            programs_by_ref[str(channel_ref)] = {
+                key: value
+                for key, value in program.items()
+                if key in {"title", "state", "start_time", "end_time"}
+            }
+
+    if not programs_by_ref:
+        return status
+
+    for channel in status.get("channels") or []:
+        if not isinstance(channel, dict):
+            continue
+        program = programs_by_ref.get(str(channel.get("channel_ref") or ""))
+        if program:
+            channel["current_program"] = program
+    return status
+
+
 def get_viewer_activity_status_response(
     *,
     get_udi_manager: Callable[[], Any],
@@ -195,6 +239,7 @@ def get_viewer_activity_status_response(
                 watcher_user_agent=watcher_user_agent,
             )
             shadow_status = shadow_monitor.get_status() if hasattr(shadow_monitor, "get_status") else {}
+            status = apply_shadow_monitor_context(status, shadow_status)
             status["shadow_monitor_running"] = bool(shadow_status.get("running"))
             status["shadow_monitor_enabled"] = bool(shadow_status.get("enabled"))
             status["initializing"] = True
@@ -206,6 +251,7 @@ def get_viewer_activity_status_response(
             watcher_user_agent=watcher_user_agent,
         )
         shadow_status = shadow_monitor.get_status() if hasattr(shadow_monitor, "get_status") else {}
+        status = apply_shadow_monitor_context(status, shadow_status)
         status["shadow_monitor_running"] = bool(shadow_status.get("running"))
         status["shadow_monitor_enabled"] = bool(shadow_status.get("enabled"))
         return jsonify(status), 200

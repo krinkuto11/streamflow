@@ -1,4 +1,7 @@
-from apps.api.viewer_activity_handlers import build_viewer_activity_status
+from apps.api.viewer_activity_handlers import (
+    apply_shadow_monitor_context,
+    build_viewer_activity_status,
+)
 
 
 def test_viewer_activity_splits_real_and_watcher_clients():
@@ -34,6 +37,8 @@ def test_viewer_activity_splits_real_and_watcher_clients():
     assert status["total_watcher_clients"] == 2
     assert status["channels"][0]["channel_name"] == "Channel One"
     assert status["channels"][0]["has_real_clients"] is True
+    assert status["channels"][0]["channel_ref"].startswith("channel-")
+    assert status["channels"][0]["stream_ref"].startswith("stream-")
     assert status["channels"][1]["watcher_only"] is True
 
 
@@ -70,3 +75,45 @@ def test_viewer_activity_ignores_idle_or_empty_statuses():
 
     assert status["active_channel_count"] == 0
     assert status["channels"] == []
+
+
+def test_viewer_activity_can_attach_safe_shadow_epg_context():
+    status = build_viewer_activity_status(
+        proxy_status={
+            "uuid-1": {
+                "state": "waiting_for_clients",
+                "channel_id": "uuid-1",
+                "stream_id": 10,
+                "clients": [{"user_agent": "VLC"}],
+            },
+        },
+        channels=[{"id": 1, "uuid": "uuid-1", "name": "Channel One"}],
+        watcher_user_agent="StreamFlow-Shadow-Blank-Monitor/1.0",
+    )
+    channel_ref = status["channels"][0]["channel_ref"]
+
+    enriched = apply_shadow_monitor_context(
+        status,
+        {
+            "watched_channels": [
+                {
+                    "channel_ref": channel_ref,
+                    "current_program": {
+                        "title": "Live: MLB",
+                        "state": "current",
+                        "start_time": "2026-06-05T18:00:00+00:00",
+                        "end_time": "2026-06-05T21:00:00+00:00",
+                        "private_provider": "should-not-leak",
+                    },
+                }
+            ]
+        },
+    )
+
+    assert enriched["channels"][0]["current_program"] == {
+        "title": "Live: MLB",
+        "state": "current",
+        "start_time": "2026-06-05T18:00:00+00:00",
+        "end_time": "2026-06-05T21:00:00+00:00",
+    }
+    assert "should-not-leak" not in repr(enriched)

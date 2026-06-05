@@ -31,6 +31,29 @@ export const getPlaybackBadgeLabel = (channel = {}) => (
   channel.has_real_clients ? 'Real viewer active' : 'Watcher only'
 )
 
+export const getProgramDisplayLabel = (program = {}) => {
+  const title = String(program?.title || '').trim()
+  if (!title) return null
+  const prefix = program?.state === 'upcoming' ? 'Next' : 'Now'
+  return `${prefix}: ${title}`
+}
+
+const stateLabels = {
+  active: 'Active playback',
+  waiting_for_clients: 'Waiting for clients',
+  idle: 'Idle',
+}
+
+export const getViewerActivityDetailLabel = (channel = {}) => {
+  const programLabel = getProgramDisplayLabel(channel.current_program)
+  if (programLabel) return programLabel
+  if (channel.has_real_clients && Number(channel.watcher_client_count || 0) <= 0) {
+    return 'Waiting for shadow watcher'
+  }
+  const state = String(channel.state || 'active').trim()
+  return stateLabels[state] || state.replace(/_/g, ' ')
+}
+
 export const formatStreamRef = (streamId) => (
   streamId ? ` - Stream ${streamId}` : ''
 )
