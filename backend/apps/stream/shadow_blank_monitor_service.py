@@ -42,6 +42,8 @@ CONFIG_FILE = CONFIG_DIR / "shadow_blank_monitor_config.json"
 MAX_EVENTS = 100
 WATCHER_API_KEY_REQUIRED_CODE = "watcher_api_key_required"
 WATCHER_API_KEY_REQUIRED_MESSAGE = "Watcher API Key is required before Shadow Monitor can start."
+SHADOW_MONITOR_LOOP_ERROR_MESSAGE = "Shadow monitor loop failed; see server logs."
+SHADOW_MONITOR_SCAN_ERROR_MESSAGE = "Shadow monitor scan failed; see server logs."
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -333,7 +335,7 @@ class ShadowBlankMonitorService:
                     self.run_once()
                 self._stop_event.wait(interval)
             except Exception as exc:
-                self._last_error = str(exc)
+                self._last_error = SHADOW_MONITOR_LOOP_ERROR_MESSAGE
                 logger.error(f"Shadow blank monitor loop failed: {exc}", exc_info=True)
                 self._stop_event.wait(30)
         logger.info("Shadow blank monitor stopped")
@@ -362,7 +364,7 @@ class ShadowBlankMonitorService:
             self._probe_targets(udi, targets[: config["max_concurrent_watchers"]], config)
             self._last_error = None
         except Exception as exc:
-            self._last_error = str(exc)
+            self._last_error = SHADOW_MONITOR_SCAN_ERROR_MESSAGE
             logger.error(f"Shadow blank monitor scan failed: {exc}", exc_info=True)
         return self.get_status()
 

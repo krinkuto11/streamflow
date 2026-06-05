@@ -10,6 +10,19 @@ from apps.core.logging_config import setup_logging
 logger = setup_logging(__name__)
 
 
+def _configuration_status_details(status: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only safe configuration fields for client-facing error details."""
+    allowed_keys = {
+        "enabled",
+        "running",
+        "configuration_required",
+        "configuration_issue",
+        "configuration_message",
+        "watched_count",
+    }
+    return {key: status.get(key) for key in allowed_keys if key in status}
+
+
 def get_shadow_blank_monitor_config_response(*, get_service: Callable[[], Any]):
     try:
         return jsonify(get_service().get_config()), 200
@@ -48,7 +61,7 @@ def start_shadow_blank_monitor_response(*, get_service: Callable[[], Any]):
                 status.get("configuration_message") or "Shadow monitor could not start",
                 status_code=400,
                 code=status.get("configuration_issue") or "shadow_monitor_not_started",
-                details={"status": status},
+                details={"status": _configuration_status_details(status)},
             )
         return jsonify({"success": True, "status": status}), 200
     except Exception as exc:
@@ -73,7 +86,7 @@ def run_shadow_blank_monitor_once_response(*, get_service: Callable[[], Any]):
                 status.get("configuration_message") or "Shadow monitor scan could not start",
                 status_code=400,
                 code=status.get("configuration_issue") or "shadow_monitor_scan_not_started",
-                details={"status": status},
+                details={"status": _configuration_status_details(status)},
             )
         return jsonify(status), 200
     except Exception as exc:

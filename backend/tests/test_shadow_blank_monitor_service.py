@@ -3,8 +3,15 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+from flask import Flask
+
+from apps.api.shadow_blank_monitor_handlers import (
+    run_shadow_blank_monitor_once_response,
+    start_shadow_blank_monitor_response,
+)
 from apps.stream import shadow_blank_monitor_service as shadow_module
 from apps.stream.shadow_blank_monitor_service import (
+    SHADOW_MONITOR_SCAN_ERROR_MESSAGE,
     ShadowBlankMonitorService,
     normalize_config,
 )
@@ -160,6 +167,65 @@ def test_forced_scan_requires_watcher_api_key(tmp_path):
     assert status["watched_count"] == 0
     assert status["last_scan_at"] is None
     assert udi.status_calls == 0
+
+
+def test_scan_error_status_does_not_expose_raw_exception(tmp_path):
+    def broken_udi():
+        raise RuntimeError("secret dispatcharr stack trace path")
+
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=broken_udi,
+        switch_stream=lambda *_args, **_kwargs: True,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        blank_probe=lambda url, config: {"blank_detected": False},
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+    with service._lock:
+        service._config["watcher_api_key"] = "test-watcher-key"
+        service._save_config()
+
+    status = service.run_once(force=True)
+
+    assert status["last_error"] == SHADOW_MONITOR_SCAN_ERROR_MESSAGE
+    assert "secret" not in str(status)
+
+
+def test_shadow_monitor_handler_configuration_details_are_sanitized():
+    class FakeService:
+        def run_once(self, force=False):
+            return {
+                "configuration_required": True,
+                "configuration_issue": "watcher_api_key_required",
+                "configuration_message": "Watcher API Key is required before Shadow Monitor can start.",
+                "last_error": "secret stack trace path",
+                "recent_events": [{"error": "secret stack trace path"}],
+            }
+
+        def start(self):
+            return False
+
+        def get_status(self):
+            return self.run_once(force=True)
+
+    app = Flask(__name__)
+    with app.app_context():
+        response, status_code = run_shadow_blank_monitor_once_response(get_service=lambda: FakeService())
+
+    payload = response.get_json()
+    assert status_code == 400
+    assert payload["code"] == "watcher_api_key_required"
+    assert "last_error" not in payload["details"]["status"]
+    assert "recent_events" not in payload["details"]["status"]
+    assert "secret" not in str(payload)
+
+    with app.app_context():
+        start_response, start_status_code = start_shadow_blank_monitor_response(get_service=lambda: FakeService())
+
+    start_payload = start_response.get_json()
+    assert start_status_code == 400
+    assert "secret" not in str(start_payload)
 
 
 def test_freeze_detection_config_and_probe_command():
