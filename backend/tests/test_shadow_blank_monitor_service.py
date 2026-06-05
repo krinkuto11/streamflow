@@ -38,14 +38,23 @@ class FakeStreamChecker:
         return self.status
 
 
-def make_service(tmp_path, *, udi, blank_probe=None, switch_calls=None, clock=None, checker=None):
+def make_service(
+    tmp_path,
+    *,
+    udi,
+    blank_probe=None,
+    switch_calls=None,
+    clock=None,
+    checker=None,
+    watcher_api_key="test-watcher-key",
+):
     switch_calls = switch_calls if switch_calls is not None else []
 
     def switch_stream(channel_id, stream_id=None, url=None):
         switch_calls.append((channel_id, stream_id, url))
         return True
 
-    return ShadowBlankMonitorService(
+    service = ShadowBlankMonitorService(
         config_file=tmp_path / "shadow.json",
         udi_provider=lambda: udi,
         switch_stream=switch_stream,
@@ -54,6 +63,11 @@ def make_service(tmp_path, *, udi, blank_probe=None, switch_calls=None, clock=No
         stream_checker_provider=lambda: checker or FakeStreamChecker(),
         clock=clock or (lambda: 1000.0),
     )
+    if watcher_api_key is not None:
+        with service._lock:
+            service._config["watcher_api_key"] = watcher_api_key
+            service._save_config()
+    return service
 
 
 def active_status(stream_id=10, clients=None):
@@ -96,6 +110,55 @@ def test_watch_mode_controls_scan_delay():
     invalid = normalize_config({"watch_mode": "always-on", "watch_gap_seconds": 0})
     assert invalid["watch_mode"] == "continuous"
     assert invalid["watch_gap_seconds"] == 1
+
+
+def test_start_requires_watcher_api_key(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, watcher_api_key=None)
+
+    assert service.start() is False
+
+    status = service.get_status()
+    config = service.get_config()
+    assert status["configuration_required"] is True
+    assert status["configuration_issue"] == "watcher_api_key_required"
+    assert status["running"] is False
+    assert config["enabled"] is False
+
+
+def test_enabled_config_without_watcher_api_key_stays_off(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, watcher_api_key=None)
+
+    config = service.update_config({"enabled": True})
+    status = service.get_status()
+
+    assert config["enabled"] is False
+    assert status["enabled"] is False
+    assert status["running"] is False
+    assert status["configuration_required"] is True
+    assert status["last_error"] == "Watcher API Key is required before Shadow Monitor can start."
+
+
+def test_forced_scan_requires_watcher_api_key(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, watcher_api_key=None)
+
+    status = service.run_once(force=True)
+
+    assert status["configuration_required"] is True
+    assert status["watched_count"] == 0
+    assert status["last_scan_at"] is None
+    assert udi.status_calls == 0
 
 
 def test_freeze_detection_config_and_probe_command():
@@ -913,6 +976,7 @@ def test_continuous_default_probe_does_not_block_new_scans(tmp_path):
         "enabled": False,
         "dry_run": False,
         "watch_mode": "continuous",
+        "watcher_api_key": "test-watcher-key",
     })
 
     status = service.run_once(force=True)

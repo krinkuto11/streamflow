@@ -192,6 +192,9 @@ export default function ShadowBlankMonitor() {
   const dryRun = Boolean(editedConfig?.dry_run)
   const watchMode = editedConfig?.watch_mode || 'continuous'
   const hasKey = Boolean(config?.has_watcher_api_key)
+  const configurationRequired = Boolean(status?.configuration_required) || !hasKey
+  const configurationMessage = status?.configuration_message || 'Save a Watcher API Key before starting the monitor.'
+  const canUseWatcher = actionLoading === '' && !configurationRequired
   const continuousWatcherActive = running && watchMode === 'continuous'
 
   return (
@@ -222,7 +225,7 @@ export default function ShadowBlankMonitor() {
             <Button
               variant="outline"
               onClick={() => runAction('start', shadowBlankMonitorAPI.start, 'Shadow monitor started')}
-              disabled={actionLoading !== ''}
+              disabled={!canUseWatcher}
             >
               {actionLoading === 'start' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlayCircle className="mr-2 h-4 w-4" />}
               Start
@@ -232,7 +235,7 @@ export default function ShadowBlankMonitor() {
             <Button
               variant="outline"
               onClick={() => runAction('scan', shadowBlankMonitorAPI.runOnce, 'Shadow monitor scan completed')}
-              disabled={actionLoading !== ''}
+              disabled={!canUseWatcher}
             >
               {actionLoading === 'scan' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
               Scan Now
@@ -241,6 +244,16 @@ export default function ShadowBlankMonitor() {
         </div>
       </div>
 
+      {configurationRequired ? (
+        <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-100">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">Watcher setup required</p>
+            <p className="mt-1">{configurationMessage}</p>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -248,11 +261,16 @@ export default function ShadowBlankMonitor() {
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <Badge variant={running ? 'default' : 'secondary'} className={running ? 'bg-green-500' : ''}>
-              {running ? <CheckCircle2 className="mr-1 h-3 w-3" /> : null}
-              {running ? 'Running' : 'Stopped'}
+            <Badge
+              variant={configurationRequired ? 'outline' : running ? 'default' : 'secondary'}
+              className={running ? 'bg-green-500' : configurationRequired ? 'border-amber-500/50 text-amber-700 dark:text-amber-200' : ''}
+            >
+              {configurationRequired ? <AlertCircle className="mr-1 h-3 w-3" /> : running ? <CheckCircle2 className="mr-1 h-3 w-3" /> : null}
+              {configurationRequired ? 'Setup required' : running ? 'Running' : 'Stopped'}
             </Badge>
-            <p className="mt-2 text-xs text-muted-foreground">{enabled ? 'Enabled' : 'Disabled'}</p>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {configurationRequired ? configurationMessage : enabled ? 'Enabled' : 'Disabled'}
+            </p>
           </CardContent>
         </Card>
 
@@ -420,6 +438,11 @@ export default function ShadowBlankMonitor() {
                 <p className="text-xs text-muted-foreground">
                   Use a dedicated watcher or playback user key here, not an admin or primary account key.
                 </p>
+                {!hasKey ? (
+                  <p className="text-xs font-medium text-destructive">
+                    Required before Start or Scan Now can run.
+                  </p>
+                ) : null}
               </div>
               <Button
                 variant="outline"

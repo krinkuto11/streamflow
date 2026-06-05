@@ -39,6 +39,8 @@ logger = setup_logging(__name__)
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/data"))
 CONFIG_FILE = CONFIG_DIR / "shadow_blank_monitor_config.json"
 MAX_EVENTS = 100
+WATCHER_API_KEY_REQUIRED_CODE = "watcher_api_key_required"
+WATCHER_API_KEY_REQUIRED_MESSAGE = "Watcher API Key is required before Shadow Monitor can start."
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -161,6 +163,15 @@ def public_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return visible
 
 
+def _watcher_configuration_issue(config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    if not str(config.get("watcher_api_key") or "").strip():
+        return {
+            "code": WATCHER_API_KEY_REQUIRED_CODE,
+            "message": WATCHER_API_KEY_REQUIRED_MESSAGE,
+        }
+    return None
+
+
 class ShadowBlankMonitorService:
     def __init__(
         self,
@@ -227,6 +238,12 @@ class ShadowBlankMonitorService:
                 payload["watcher_api_key"] = current.get("watcher_api_key", "")
 
             self._config = normalize_config(payload, current)
+            issue = _watcher_configuration_issue(self._config)
+            if issue and self._config["enabled"]:
+                self._config["enabled"] = False
+                self._last_error = issue["message"]
+            elif not issue and self._last_error == WATCHER_API_KEY_REQUIRED_MESSAGE:
+                self._last_error = None
             self._save_config()
             enabled = self._config["enabled"]
 
@@ -238,9 +255,18 @@ class ShadowBlankMonitorService:
 
     def start(self, *, persist: bool = True) -> bool:
         with self._lock:
+            issue = _watcher_configuration_issue(self._config)
+            if issue:
+                if persist:
+                    self._config["enabled"] = False
+                    self._save_config()
+                self._last_error = issue["message"]
+                return False
             if persist:
                 self._config["enabled"] = True
                 self._save_config()
+            if self._last_error == WATCHER_API_KEY_REQUIRED_MESSAGE:
+                self._last_error = None
             if self._thread and self._thread.is_alive():
                 return True
             self._stop_event.clear()
@@ -268,6 +294,7 @@ class ShadowBlankMonitorService:
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
             now = self.clock()
+            issue = _watcher_configuration_issue(self._config)
             watched_channels = [self._public_target(target) for target in self._watched.values()]
             cooldowns = []
             for channel_uuid, until in self._cooldowns.items():
@@ -282,6 +309,9 @@ class ShadowBlankMonitorService:
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
                 "dry_run": bool(self._config.get("dry_run")),
+                "configuration_required": bool(issue),
+                "configuration_issue": issue["code"] if issue else None,
+                "configuration_message": issue["message"] if issue else None,
                 "last_scan_at": self._last_scan_at,
                 "last_error": self._last_error,
                 "watched_count": len(watched_channels),
@@ -316,6 +346,11 @@ class ShadowBlankMonitorService:
     def run_once(self, *, force: bool = False) -> Dict[str, Any]:
         with self._lock:
             config = dict(self._config)
+        issue = _watcher_configuration_issue(config)
+        if issue:
+            with self._lock:
+                self._last_error = issue["message"]
+            return self.get_status()
         if not config.get("enabled") and not force:
             return self.get_status()
 

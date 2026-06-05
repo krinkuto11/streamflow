@@ -37,7 +37,7 @@ const getJpegDimensions = (assetPath) => {
 }
 
 describe('operatorHelpSections', () => {
-  it('covers the non-Teamarr V3 operator areas', () => {
+  it('covers the operator areas outside dedicated Teamarr details', () => {
     expect(operatorHelpSections.map(section => section.id)).toEqual([
       'startup-cache',
       'profiles-periods',
