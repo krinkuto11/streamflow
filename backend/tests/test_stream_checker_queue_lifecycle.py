@@ -133,6 +133,8 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(auto_create_entry["metadata"]["source"], "auto_create")
 
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 501)
+        self.assertIsNone(check_queue.get_next_channel(timeout=0.1))
+        self.assertEqual(check_queue.get_status()["queued"], 0)
 
     def test_queue_entries_preserve_metadata_with_priority_ordering(self):
         check_queue = StreamCheckQueue(max_size=10)
