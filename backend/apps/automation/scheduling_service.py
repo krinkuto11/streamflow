@@ -15,6 +15,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+from urllib.parse import urljoin
 
 from apps.core.logging_config import setup_logging
 from apps.udi import get_udi_manager
@@ -1639,18 +1640,42 @@ class SchedulingService:
             url = f"{base_url}/api/epg/programs/"
             logger.debug("Fetching all EPG programs (shared cache)")
 
-            data = fetch_data_from_url(url)
-            if data is None:
-                logger.error("Failed to fetch EPG programs from Dispatcharr")
-                return stale_cache['by_tvg_id'] if stale_cache else {}
-
             raw: List[Dict[str, Any]] = []
-            if isinstance(data, list):
-                raw = data
-            elif isinstance(data, dict):
-                raw = data.get('results', data.get('data', data.get('programs', [])))
-                if not isinstance(raw, list):
-                    raw = []
+            next_url: Optional[str] = url
+            seen_urls = set()
+            page_count = 0
+
+            while next_url and next_url not in seen_urls:
+                seen_urls.add(next_url)
+                data = fetch_data_from_url(next_url)
+                if data is None:
+                    logger.error("Failed to fetch EPG programs from Dispatcharr")
+                    if raw:
+                        logger.warning(
+                            "Using partial EPG program page set after fetch failure: "
+                            f"{len(raw)} programs from {page_count} page(s)"
+                        )
+                        break
+                    return stale_cache['by_tvg_id'] if stale_cache else {}
+
+                if isinstance(data, list):
+                    raw.extend(program for program in data if isinstance(program, dict))
+                    next_url = None
+                elif isinstance(data, dict):
+                    page_items = data.get('results', data.get('data', data.get('programs', [])))
+                    if isinstance(page_items, list):
+                        raw.extend(program for program in page_items if isinstance(program, dict))
+
+                    next_value = data.get('next')
+                    next_url = urljoin(next_url, str(next_value)) if next_value else None
+                else:
+                    logger.warning("Unexpected EPG programs response type: %s", type(data).__name__)
+                    next_url = None
+
+                page_count += 1
+                if page_count >= 500:
+                    logger.warning("Stopping EPG pagination after 500 pages")
+                    break
 
             by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             skipped = 0
@@ -1667,7 +1692,8 @@ class SchedulingService:
                 logger.debug(f"Skipped {skipped} EPG programs with no tvg_id field")
 
             logger.debug(
-                f"Fetched {len(raw)} EPG programs across {len(by_tvg_id)} tvg_ids"
+                f"Fetched {len(raw)} EPG programs across {len(by_tvg_id)} tvg_ids "
+                f"from {page_count} page(s)"
             )
 
             result = dict(by_tvg_id)

@@ -145,6 +145,56 @@ class TestRegexMatchingIntegration(unittest.TestCase):
         self.assertEqual(result['created'], 2)
         self.assertIn('Breaking News', events[0]['program_title'])
         self.assertIn('Breaking News', events[1]['program_title'])
+
+    def test_match_programs_fetches_all_paginated_epg_pages(self):
+        """Auto-create must inspect every EPG page, not only page one."""
+        now = datetime.now(timezone.utc)
+        first_page = {
+            'results': [{
+                'title': 'Coming up Tonight',
+                'start_time': (now + timedelta(hours=1)).isoformat(),
+                'end_time': (now + timedelta(hours=2)).isoformat(),
+                'tvg_id': 'test-channel-1',
+            }],
+            'next': 'http://test.local/api/epg/programs/?page=2',
+        }
+        second_page = {
+            'results': [
+                {
+                    'title': 'Live: MLB',
+                    'start_time': (now + timedelta(hours=2)).isoformat(),
+                    'end_time': (now + timedelta(hours=5)).isoformat(),
+                    'tvg_id': 'test-channel-1',
+                },
+                {
+                    'title': 'Live: MLB',
+                    'start_time': (now + timedelta(hours=6)).isoformat(),
+                    'end_time': (now + timedelta(hours=9)).isoformat(),
+                    'tvg_id': 'test-channel-1',
+                },
+            ],
+            'next': None,
+        }
+
+        with self.service._lock:
+            self.service._auto_create_rules = [{
+                'id': 'mlb-rule',
+                'name': 'MLB Auto Create',
+                'channel_id': 1,
+                'regex_pattern': '^Live: MLB',
+                'minutes_before': 0,
+            }]
+
+        with patch('apps.automation.scheduling_service.fetch_data_from_url') as mock_fetch:
+            mock_fetch.side_effect = [first_page, second_page]
+            result = self.service.match_programs_to_rules(force_refresh=True)
+
+        self.assertEqual(result['created'], 2)
+        self.assertEqual(mock_fetch.call_count, 2)
+        self.assertEqual(
+            [event['program_title'] for event in self.service.get_scheduled_events()],
+            ['Live: MLB', 'Live: MLB'],
+        )
     
     def test_match_programs_completes_without_deadlock(self):
         """Test that match_programs_to_rules completes without deadlock."""
