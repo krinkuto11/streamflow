@@ -545,6 +545,45 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         upcoming = service.get_status()["upcoming_events"]
         self.assertEqual(upcoming[0]["state"], "due")
 
+    def test_wrapped_public_automation_status_defers_preflight(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event()],
+            checker=checker,
+            automation_status={
+                "running": True,
+                "thread_alive": True,
+                "run_status": {"active": True, "state": "running", "stage": "quality_checking"},
+            },
+        )
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(checker.calls, [])
+        self.assertEqual(checker.queued, [])
+        self.assertEqual(service.get_status()["recent_events"][0]["type"], "deferred_automation_active")
+
+    def test_scheduler_running_without_active_run_does_not_defer_preflight(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event()],
+            checker=checker,
+            automation_status={
+                "running": True,
+                "thread_alive": True,
+                "run_status": {"active": False, "state": "idle"},
+            },
+        )
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(result["skipped"], 0)
+
     def test_active_stream_checker_queues_teamarr_event_with_preflight_context(self):
         checker = BusyChecker()
         service, _, _ = self.make_service([make_event()], checker=checker)
@@ -719,6 +758,33 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
 
         self.assertTrue(status["active"])
         self.assertEqual(status["stage"], "stream_matching")
+
+    def test_default_automation_status_provider_uses_web_api_manager_factory(self):
+        class FakeAutomationManager:
+            def get_run_status(self):
+                return {"active": True, "stage": "quality_checking"}
+
+        class FakeWebApiModule:
+            automation_manager = None
+
+            @staticmethod
+            def get_automation_manager():
+                return FakeAutomationManager()
+
+        sentinel = object()
+        previous_api_module = sys.modules.get("apps.api.web_api", sentinel)
+
+        try:
+            sys.modules["apps.api.web_api"] = FakeWebApiModule()
+            status = TeamarrPreflightService._default_automation_status_provider()
+        finally:
+            if previous_api_module is sentinel:
+                sys.modules.pop("apps.api.web_api", None)
+            else:
+                sys.modules["apps.api.web_api"] = previous_api_module
+
+        self.assertTrue(status["active"])
+        self.assertEqual(status["stage"], "quality_checking")
 
     def test_include_filters_keep_non_matching_sports_out_of_due_set(self):
         service, _, _ = self.make_service([make_event(sport="basketball")])

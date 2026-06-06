@@ -1359,8 +1359,24 @@ class TeamarrPreflightService:
             logger.warning(f"Teamarr preflight could not read automation status: {exc}")
             return True
 
-        if automation_status.get("active") or automation_status.get("state") == "running":
+        return self._automation_status_indicates_active_run(automation_status)
+
+    @classmethod
+    def _automation_status_indicates_active_run(cls, automation_status: Any) -> bool:
+        if not isinstance(automation_status, dict):
+            return False
+
+        if automation_status.get("active") is True:
             return True
+
+        state = str(automation_status.get("state") or automation_status.get("status") or "").lower()
+        if state == "running":
+            return True
+
+        for key in ("run_status", "run_progress"):
+            if cls._automation_status_indicates_active_run(automation_status.get(key)):
+                return True
+
         return False
 
     def _stream_checker_active(self) -> bool:
@@ -1484,6 +1500,10 @@ class TeamarrPreflightService:
     @staticmethod
     def _automation_status_from_module(module: Any) -> Optional[Dict[str, Any]]:
         manager = getattr(module, "automation_manager", None) if module is not None else None
+        if manager is None and module is not None:
+            manager_factory = getattr(module, "get_automation_manager", None)
+            if callable(manager_factory):
+                manager = manager_factory()
         getter = getattr(manager, "get_run_status", None)
         if callable(getter):
             return getter() or {}
