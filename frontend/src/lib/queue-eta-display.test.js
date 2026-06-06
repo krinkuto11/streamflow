@@ -28,7 +28,8 @@ describe('getQueueEtaDisplay', () => {
       eta_effective_workers: 10,
     })).toMatchObject({
       state: 'ready',
-      label: 'Conservative ETA: ~7h 21m remaining',
+      label: 'Rough ETA: ~7h 21m remaining',
+      title: 'Provider limits and long channel waits can make this estimate swing between channels.',
       pulse: false,
     })
   })
@@ -42,7 +43,8 @@ describe('getQueueEtaDisplay', () => {
       eta_effective_workers: 3,
     })).toMatchObject({
       state: 'ready',
-      label: 'Conservative ETA: ~50m remaining',
+      label: 'Rough ETA: ~50m remaining',
+      title: 'Provider limits and long channel waits can make this estimate swing between channels.',
       pulse: false,
     })
   })

@@ -23,16 +23,20 @@ export function getQueueEtaDisplay(queue) {
     const conservative = CONSERVATIVE_BASIS.has(basis)
       || (effectiveWorkers > 0 && configuredWorkers > 0 && effectiveWorkers < configuredWorkers)
     const prefix = processedCount < EARLY_ETA_SAMPLE_FLOOR
-      ? (conservative ? 'Early conservative ETA' : 'Early ETA')
-      : (conservative ? 'Conservative ETA' : null)
+      ? (conservative ? 'Early rough ETA' : 'Early ETA')
+      : (conservative ? 'Rough ETA' : null)
     const label = prefix
       ? `${prefix}: ~${formatDuration(etaSeconds)} remaining`
       : `~${formatDuration(etaSeconds)} remaining`
+    const title = conservative
+      ? 'Provider limits and long channel waits can make this estimate swing between channels.'
+      : 'Estimated time remaining.'
 
     if (processedCount < EARLY_ETA_SAMPLE_FLOOR) {
       return {
         state: 'early',
         label,
+        title,
         pulse: false,
       }
     }
@@ -40,6 +44,7 @@ export function getQueueEtaDisplay(queue) {
     return {
       state: 'ready',
       label,
+      title,
       pulse: false,
     }
   }
@@ -57,6 +62,7 @@ export function getQueueEtaDisplay(queue) {
     return {
       state: 'learning',
       label: 'Learning ETA',
+      title: 'Waiting for enough completed work to estimate remaining time.',
       pulse: true,
     }
   }
@@ -65,6 +71,7 @@ export function getQueueEtaDisplay(queue) {
     return {
       state: 'pending',
       label: 'ETA pending',
+      title: 'Waiting for queue timing data.',
       pulse: true,
     }
   }

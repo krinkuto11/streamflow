@@ -9,6 +9,7 @@ describe('dashboard run counts', () => {
         refreshed_playlists: 2,
         assigned_channels: 3,
         quality_checked: 4,
+        good_streams: 8,
         dead_streams: 1,
         blank_streams: 2,
         freeze_streams: 3,
@@ -20,6 +21,7 @@ describe('dashboard run counts', () => {
       playlists: 2,
       matched: 3,
       checked: 4,
+      good: 8,
       dead: 1,
       blank: 2,
       freeze: 3,
@@ -50,6 +52,7 @@ describe('dashboard run counts', () => {
     })
 
     expect(counts.dead).toBe(1)
+    expect(counts.good).toBe(1)
     expect(counts.blank).toBe(1)
     expect(counts.freeze).toBe(2)
   })
@@ -62,6 +65,7 @@ describe('dashboard run counts', () => {
       streamCheckerStatus: {
         queue: {
           dead_streams_count: 3,
+          good_streams_count: 5,
           blank_streams_count: 1,
           freeze_streams_count: 2,
         },
@@ -72,6 +76,7 @@ describe('dashboard run counts', () => {
     })
 
     expect(counts.checked).toBe(2)
+    expect(counts.good).toBe(5)
     expect(counts.dead).toBe(3)
     expect(counts.blank).toBe(1)
     expect(counts.freeze).toBe(2)
@@ -85,6 +90,7 @@ describe('dashboard run counts', () => {
       streamCheckerStatus: {
         queue: {
           dead_streams_count: 0,
+          good_streams_count: 0,
           blank_streams_count: 0,
           freeze_streams_count: 0,
         },
@@ -98,6 +104,7 @@ describe('dashboard run counts', () => {
     })
 
     expect(counts.dead).toBe(0)
+    expect(counts.good).toBe(0)
     expect(counts.blank).toBe(1)
     expect(counts.freeze).toBe(1)
   })
@@ -120,6 +127,7 @@ describe('dashboard run counts', () => {
         queue: {
           state: 'completed',
           completed: 2,
+          good_streams_count: 7,
           dead_streams_count: 1,
           blank_streams_count: 1,
           freeze_streams_count: 0,
@@ -132,6 +140,7 @@ describe('dashboard run counts', () => {
       ['playlists', 'Refresh Requests', null],
       ['matched', 'Stream Matching', null],
       ['checked', 'Channels Checked', 2],
+      ['good', 'Good Streams', 7],
       ['dead', 'Dead Streams', 1],
       ['blank', 'Blank Streams', 1],
       ['freeze', 'Frozen Streams', 0],
@@ -166,6 +175,7 @@ describe('dashboard run counts', () => {
       ['playlists', 'Refresh Requests', null],
       ['matched', 'Stream Matching', null],
       ['checked', 'Channels Checked', 2],
+      ['good', 'Good Streams', 1],
       ['dead', 'Dead Streams', 1],
       ['blank', 'Blank Streams', 1],
       ['freeze', 'Frozen Streams', 1],
@@ -224,6 +234,7 @@ describe('dashboard run counts', () => {
       ['playlists', 'Refresh Requests', null],
       ['matched', 'Stream Matching', null],
       ['checked', 'Channels Checked', 0],
+      ['good', 'Good Streams', 1],
       ['dead', 'Dead Streams', 1],
       ['blank', 'Blank Streams', 0],
       ['freeze', 'Frozen Streams', 1],

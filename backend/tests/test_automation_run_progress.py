@@ -218,3 +218,18 @@ def test_automation_run_status_tracks_freeze_stream_counts():
     assert "freeze_streams_count += ch_freeze" in source
     assert "'freeze_streams_count': ch_freeze" in source
     assert '"freeze_streams": freeze_streams_count' in source
+
+
+def test_automation_run_status_tracks_good_stream_counts():
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "apps"
+        / "automation"
+        / "automated_stream_manager.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "'good_streams': 0" in source
+    assert "good_streams_count += ch_good" in source
+    assert "'good_streams_count': ch_good" in source
+    assert '"good_streams": good_streams_count' in source

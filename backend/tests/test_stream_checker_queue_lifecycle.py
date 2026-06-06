@@ -764,6 +764,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             'in_progress': 1,
             'queued_streams_count': 10,
             'in_progress_streams_count': 2,
+            'good_streams_count': 4,
             'dead_streams_count': 3,
             'blank_streams_count': 1,
             'freeze_streams_count': 2,
@@ -781,6 +782,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(service.sync_batch_state['total_channels'], 0)
         self.assertEqual(service.sync_batch_state['in_progress'], 0)
         self.assertEqual(service.sync_batch_state['queued_streams_count'], 0)
+        self.assertEqual(service.sync_batch_state['good_streams_count'], 0)
         self.assertEqual(service.sync_batch_state['dead_streams_count'], 0)
         self.assertEqual(service.sync_batch_state['blank_streams_count'], 0)
         self.assertEqual(service.sync_batch_state['freeze_streams_count'], 0)
@@ -800,6 +802,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             'in_progress': 1,
             'queued_streams_count': 6,
             'in_progress_streams_count': 2,
+            'good_streams_count': 4,
             'dead_streams_count': 3,
             'blank_streams_count': 1,
             'freeze_streams_count': 2,
@@ -821,6 +824,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['queue']['state'], 'checking')
         self.assertEqual(status['queue']['queued'], 2)
         self.assertEqual(status['queue']['in_progress'], 1)
+        self.assertEqual(status['queue']['good_streams_count'], 4)
         self.assertEqual(status['queue']['dead_streams_count'], 3)
         self.assertEqual(status['queue']['blank_streams_count'], 1)
         self.assertEqual(status['queue']['freeze_streams_count'], 2)
@@ -868,6 +872,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             {
                 'success': True,
                 'channel_name': 'One',
+                'good_streams_count': 4,
                 'dead_streams_count': 2,
                 'blank_streams_count': 1,
                 'freeze_streams_count': 0,
@@ -875,6 +880,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             {
                 'success': True,
                 'channel_name': 'Two',
+                'good_streams_count': 3,
                 'dead_streams_count': 1,
                 'blank_streams_count': 0,
                 'freeze_streams_count': 2,
@@ -895,12 +901,13 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
                     service.sync_batch_state.get('dead_streams_count'),
                     service.sync_batch_state.get('blank_streams_count'),
                     service.sync_batch_state.get('freeze_streams_count'),
+                    service.sync_batch_state.get('good_streams_count'),
                 )),
             )
 
         self.assertEqual(list(result.keys()), [101, 102])
         self.assertEqual(progress_events, [(1, 2, 'One'), (2, 2, 'Two')])
-        self.assertEqual(sync_counts, [(2, 1, 0), (3, 1, 2)])
+        self.assertEqual(sync_counts, [(2, 1, 0, 4), (3, 1, 2, 7)])
         self.assertFalse(service.sync_batch_state['active'])
 
     def test_sync_batch_counts_blank_and_freeze_from_checked_streams_fallback(self):
@@ -939,10 +946,11 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
                     service.sync_batch_state.get('dead_streams_count'),
                     service.sync_batch_state.get('blank_streams_count'),
                     service.sync_batch_state.get('freeze_streams_count'),
+                    service.sync_batch_state.get('good_streams_count'),
                 )),
             )
 
-        self.assertEqual(sync_counts, [(2, 1, 1)])
+        self.assertEqual(sync_counts, [(2, 1, 1, 1)])
 
     def test_sync_batch_drains_preflight_and_auto_create_serially(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
@@ -1006,6 +1014,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
 
     def test_result_count_uses_checked_streams_when_summary_count_is_stale_zero(self):
         result = {
+            'good_streams_count': 0,
             'blank_streams_count': 0,
             'freeze_streams_count': 0,
             'checked_streams': [
@@ -1023,6 +1032,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             StreamCheckerService._result_count(result, 'freeze_streams_count', fallback_status='freeze'),
             2,
         )
+        self.assertEqual(StreamCheckerService._result_good_streams_count(result), 0)
 
     def test_channel_reporting_preserves_dead_stream_cause_details(self):
         source_path = (

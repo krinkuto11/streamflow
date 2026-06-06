@@ -223,6 +223,7 @@ class StreamCheckerService:
             'completed': 0,
             'failed': 0,
             'in_progress': 0,
+            'good_streams_count': 0,
             'dead_streams_count': 0,
             'blank_streams_count': 0,
             'freeze_streams_count': 0,
@@ -2772,9 +2773,11 @@ class StreamCheckerService:
                 {'checked_streams': stream_stats},
                 'freeze',
             )
+            good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
 
             # Return statistics for callers that need them
             return {
+                'good_streams_count': good_streams_count,
                 'dead_streams_count': len(dead_stream_ids),
                 'blank_streams_count': blank_streams_count,
                 'freeze_streams_count': freeze_streams_count,
@@ -3742,9 +3745,11 @@ class StreamCheckerService:
                 {'checked_streams': stream_stats},
                 'freeze',
             )
+            good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
 
             # Return statistics for callers that need them
             return {
+                'good_streams_count': good_streams_count,
                 'dead_streams_count': len(dead_stream_ids),
                 'blank_streams_count': blank_streams_count,
                 'freeze_streams_count': freeze_streams_count,
@@ -4477,6 +4482,7 @@ class StreamCheckerService:
             # Map tracking stream properties back over queue_status for calculations
             queue_status['queued_streams_count'] = sync_state.get('queued_streams_count', 0)
             queue_status['in_progress_streams_count'] = sync_state.get('in_progress_streams_count', 0)
+            queue_status['good_streams_count'] = sync_state.get('good_streams_count', 0)
             queue_status['dead_streams_count'] = sync_state.get('dead_streams_count', 0)
             queue_status['blank_streams_count'] = sync_state.get('blank_streams_count', 0)
             queue_status['freeze_streams_count'] = sync_state.get('freeze_streams_count', 0)
@@ -4598,6 +4604,36 @@ class StreamCheckerService:
             )
         )
 
+    @staticmethod
+    def _count_good_checked_streams(result: Dict) -> int:
+        checked_streams = result.get('checked_streams', []) if isinstance(result, dict) else []
+        if not isinstance(checked_streams, list):
+            return 0
+        bad_reasons = {'blank', 'freeze', 'low_quality', 'offline', 'unstable'}
+        return sum(
+            1
+            for stream in checked_streams
+            if isinstance(stream, dict)
+            and stream.get('status') == 'completed'
+            and stream.get('blank_detected') is not True
+            and stream.get('freeze_detected') is not True
+            and stream.get('dead_reason') not in bad_reasons
+            and stream.get('quality_reason_detail') in {None, '', 'none'}
+        )
+
+    @classmethod
+    def _result_good_streams_count(cls, result: Dict) -> int:
+        if not isinstance(result, dict):
+            return 0
+        fallback_count = cls._count_good_checked_streams(result)
+        try:
+            raw = result.get('good_streams_count')
+            if raw is not None:
+                return max(0, int(raw or 0), fallback_count)
+        except (TypeError, ValueError):
+            pass
+        return fallback_count
+
     @classmethod
     def _result_count(cls, result: Dict, key: str, fallback_status: Optional[str] = None) -> int:
         if not isinstance(result, dict):
@@ -4682,6 +4718,7 @@ class StreamCheckerService:
                 'in_progress': 0,
                 'queued_streams_count': total_streams,
                 'in_progress_streams_count': 0,
+                'good_streams_count': 0,
                 'dead_streams_count': 0,
                 'blank_streams_count': 0,
                 'freeze_streams_count': 0,
@@ -4739,6 +4776,7 @@ class StreamCheckerService:
                             else:
                                 self.sync_batch_state['completed'] += 1
                             if isinstance(channel_result, dict):
+                                self.sync_batch_state['good_streams_count'] += self._result_good_streams_count(channel_result)
                                 self.sync_batch_state['dead_streams_count'] += self._result_count(channel_result, 'dead_streams_count')
                                 self.sync_batch_state['blank_streams_count'] += self._result_count(
                                     channel_result,
@@ -5590,6 +5628,7 @@ class StreamCheckerService:
                     'in_progress': 0,
                     'queued_streams_count': 0,
                     'in_progress_streams_count': 0,
+                    'good_streams_count': 0,
                     'dead_streams_count': 0,
                     'blank_streams_count': 0,
                     'freeze_streams_count': 0,

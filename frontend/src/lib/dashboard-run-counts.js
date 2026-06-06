@@ -6,6 +6,16 @@ const countProgressStatus = (streams = [], status) => (
   )).length
 )
 
+const countGoodProgressStreams = (streams = []) => (
+  streams.filter(stream => (
+    stream?.status === 'completed' &&
+    stream?.blank_detected !== true &&
+    stream?.freeze_detected !== true &&
+    !['blank', 'freeze', 'low_quality', 'offline', 'unstable'].includes(stream?.dead_reason) &&
+    [undefined, null, '', 'none'].includes(stream?.quality_reason_detail)
+  )).length
+)
+
 const numericOrNull = (value) => {
   const number = Number(value)
   return Number.isFinite(number) ? number : null
@@ -22,9 +32,11 @@ export const getDashboardRunCounts = ({
 } = {}) => {
   const progressStreams = streamCheckerStatus?.progress?.streams_detail || []
   const queueCounts = streamCheckerStatus?.queue || {}
+  const queueGood = numericOrNull(queueCounts.good_streams_count)
   const queueDead = numericOrNull(queueCounts.dead_streams_count)
   const queueBlank = numericOrNull(queueCounts.blank_streams_count)
   const queueFreeze = numericOrNull(queueCounts.freeze_streams_count)
+  const progressGood = countGoodProgressStreams(progressStreams)
   const progressDead = countProgressStatus(progressStreams, 'dead')
   const progressBlank = countProgressStatus(progressStreams, 'blank')
   const progressFreeze = countProgressStatus(progressStreams, 'freeze')
@@ -42,6 +54,9 @@ export const getDashboardRunCounts = ({
     playlists: qualityOnlyRun ? null : (runCounts.refreshed_playlists ?? 0),
     matched: qualityOnlyRun ? null : (runCounts.assigned_channels ?? 0),
     checked: queueCountsVisible ? completed : (singleQualityOnlyRun ? 0 : (runCounts.quality_checked ?? 0)),
+    good: queueCountsVisible
+      ? Math.max(queueGood ?? 0, progressGood)
+      : (singleQualityOnlyRun ? progressGood : (runCounts.good_streams ?? null)),
     dead: queueCountsVisible
       ? Math.max(queueDead ?? 0, progressDead)
       : (singleQualityOnlyRun ? progressDead : (runCounts.dead_streams ?? 0)),
@@ -114,6 +129,14 @@ export const getDashboardRunMetrics = ({
       description: activeStreamCheckerRun
         ? (streamQueueHistory ? 'Channels completed by the last Stream Checker batch.' : 'Channels completed by the active Stream Checker batch.')
         : 'Channels completed by the automation quality stage.',
+    },
+    {
+      key: 'good',
+      label: 'Good Streams',
+      value: counts.good,
+      description: activeStreamCheckerRun
+        ? (streamQueueHistory ? 'Clean streams from the last completed Stream Checker batch.' : 'Clean streams seen by the active Stream Checker batch.')
+        : 'Streams that completed the automation quality stage without problem flags.',
     },
     {
       key: 'dead',

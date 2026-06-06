@@ -5355,6 +5355,7 @@ class AutomatedStreamManager:
                 'periods': [],
                 'total_streams': 0,
                 'streams_analyzed': 0,
+                'good_streams': 0,
                 'dead_streams': 0,
                 'blank_streams': 0,
                 'freeze_streams': 0,
@@ -5372,6 +5373,7 @@ class AutomatedStreamManager:
             agg_resolutions = []
             total_streams_count = 0
             streams_analyzed_count = 0
+            good_streams_count = 0
             dead_streams_count = 0
             blank_streams_count = 0
             freeze_streams_count = 0
@@ -5448,6 +5450,17 @@ class AutomatedStreamManager:
                         ch_revived = c_result.get('revived_streams_count', 0)
                         ch_analyzed = len(c_result.get('checked_streams', []))
                         checked_streams = c_result.get('checked_streams', [])
+                        ch_good = max(
+                            int(c_result.get('good_streams_count', 0) or 0),
+                            sum(
+                                1 for stream in checked_streams
+                                if stream.get('status') == 'completed'
+                                and stream.get('blank_detected') is not True
+                                and stream.get('freeze_detected') is not True
+                                and stream.get('dead_reason') not in {'blank', 'freeze', 'low_quality', 'offline', 'unstable'}
+                                and stream.get('quality_reason_detail') in {None, '', 'none'}
+                            ),
+                        )
                         ch_blank = max(
                             int(c_result.get('blank_streams_count', 0) or 0),
                             sum(
@@ -5463,6 +5476,7 @@ class AutomatedStreamManager:
                             ),
                         )
                         
+                        good_streams_count += ch_good
                         dead_streams_count += ch_dead
                         blank_streams_count += ch_blank
                         freeze_streams_count += ch_freeze
@@ -5485,6 +5499,7 @@ class AutomatedStreamManager:
                             'step': 'Quality Check',
                             'status': 'success' if c_result.get('error') is None else 'failed',
                             'details': {
+                                'good_streams_count': ch_good,
                                 'dead_streams_count': ch_dead,
                                 'blank_streams_count': ch_blank,
                                 'freeze_streams_count': ch_freeze,
@@ -5542,6 +5557,7 @@ class AutomatedStreamManager:
             # Finalize aggregate stats
             run_results['total_streams'] = total_streams_count
             run_results['streams_analyzed'] = streams_analyzed_count
+            run_results['good_streams'] = good_streams_count
             run_results['dead_streams'] = dead_streams_count
             run_results['blank_streams'] = blank_streams_count
             run_results['freeze_streams'] = freeze_streams_count
@@ -5578,6 +5594,7 @@ class AutomatedStreamManager:
             self._update_run_status(
                 counts={
                     "streams_analyzed": streams_analyzed_count,
+                    "good_streams": good_streams_count,
                     "dead_streams": dead_streams_count,
                     "blank_streams": blank_streams_count,
                     "freeze_streams": freeze_streams_count,

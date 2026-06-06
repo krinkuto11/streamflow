@@ -706,6 +706,9 @@ export default function Dashboard() {
     completed,
     runCounts,
   })
+  const currentCheckingChannelName = isProcessing && streamProgress?.channel_name
+    ? String(streamProgress.channel_name)
+    : ''
   const syncStatus = udiStats?.syncStatus
   const udiInitProgress = status?.udi_status?.init_progress || {}
   const udiCacheHasCompleted = Boolean(
@@ -859,6 +862,16 @@ export default function Dashboard() {
                 <span className="text-muted-foreground">{Math.round(runProgressPercent)}%</span>
               </div>
               <Progress value={runProgressPercent} className="h-2" />
+              {currentCheckingChannelName && (
+                <div
+                  className="mt-2 flex min-w-0 items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+                  title={currentCheckingChannelName}
+                >
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+                  <span className="shrink-0 font-medium text-foreground/80">Checking now</span>
+                  <span className="min-w-0 truncate">{currentCheckingChannelName}</span>
+                </div>
+              )}
             </div>
 
             <div className="grid gap-2 md:grid-cols-4 lg:grid-cols-8">
@@ -892,7 +905,7 @@ export default function Dashboard() {
               })}
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
               {displayRunMetrics.map((metric) => (
                 <div key={metric.key} className="rounded-md border p-3" title={metric.description}>
                   <div className="text-xs text-muted-foreground">{metric.label}</div>
@@ -1265,7 +1278,10 @@ export default function Dashboard() {
                   <div className="flex justify-between items-center mb-2">
                     <Label className="text-xs text-muted-foreground block">Processing Progress</Label>
                     {streamCheckerEtaDisplay.label ? (
-                      <span className={`text-xs text-muted-foreground ${streamCheckerEtaDisplay.pulse ? 'animate-pulse text-primary/70' : ''}`}>
+                      <span
+                        className={`text-xs text-muted-foreground ${streamCheckerEtaDisplay.pulse ? 'animate-pulse text-primary/70' : ''}`}
+                        title={streamCheckerEtaDisplay.title}
+                      >
                         {streamCheckerEtaDisplay.label}
                       </span>
                     ) : (
