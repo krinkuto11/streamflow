@@ -56,7 +56,7 @@ export const getDashboardRunCounts = ({
     checked: queueCountsVisible ? completed : (singleQualityOnlyRun ? 0 : (runCounts.quality_checked ?? 0)),
     good: queueCountsVisible
       ? Math.max(queueGood ?? 0, progressGood)
-      : (singleQualityOnlyRun ? progressGood : (runCounts.good_streams ?? null)),
+      : (singleQualityOnlyRun ? progressGood : (runCounts.good_streams ?? 0)),
     dead: queueCountsVisible
       ? Math.max(queueDead ?? 0, progressDead)
       : (singleQualityOnlyRun ? progressDead : (runCounts.dead_streams ?? 0)),

@@ -28,6 +28,28 @@ describe('dashboard run counts', () => {
     })
   })
 
+  it('starts automation quality stream counters at zero before quality runs', () => {
+    const counts = getDashboardRunCounts({
+      runCounts: {
+        channels_with_periods: 212,
+        refreshed_playlists: 5,
+        assigned_channels: 0,
+        quality_checked: 0,
+      },
+    })
+
+    expect(counts).toMatchObject({
+      channels: 212,
+      playlists: 5,
+      matched: 0,
+      checked: 0,
+      good: 0,
+      dead: 0,
+      blank: 0,
+      freeze: 0,
+    })
+  })
+
   it('derives manual queue dead blank and freeze counts from stream progress details', () => {
     const counts = getDashboardRunCounts({
       streamQueueActive: true,
