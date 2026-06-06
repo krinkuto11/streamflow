@@ -215,6 +215,7 @@ class StreamCheckerService:
         self.lock = threading.Lock()
         self._cancel_queueing = False
         self._sync_batch_generation = 0
+        self._specialized_queue_gates = set()
         
         self.sync_batch_state = {
             'active': False,
@@ -301,6 +302,7 @@ class StreamCheckerService:
                     logger.debug("Worker paused while synchronous quality batch is active")
                     time.sleep(1)
                     continue
+                self._apply_specialized_queue_deferral()
                 logger.debug("Worker waiting for next channel from queue...")
                 queue_entry = self.check_queue.get_next_entry(timeout=1.0)
                 if queue_entry is None:
@@ -389,6 +391,42 @@ class StreamCheckerService:
                 )
         except Exception:
             return False
+
+    def _specialized_queue_gate_active_locked(self) -> bool:
+        sync_batch_state = getattr(self, 'sync_batch_state', {}) or {}
+        return bool(
+            getattr(self, '_specialized_queue_gates', set())
+            or (
+                sync_batch_state.get('active')
+                and sync_batch_state.get('generation') == getattr(self, '_sync_batch_generation', None)
+            )
+        )
+
+    def _apply_specialized_queue_deferral(self) -> None:
+        defer_metadata_sources = getattr(self.check_queue, 'defer_metadata_sources', None)
+        if not callable(defer_metadata_sources):
+            return
+        lock = getattr(self, 'lock', None)
+        if lock is None:
+            should_defer = self._specialized_queue_gate_active_locked()
+        else:
+            with lock:
+                should_defer = self._specialized_queue_gate_active_locked()
+        defer_metadata_sources(SPECIALIZED_QUEUE_SOURCES if should_defer else set())
+
+    def set_specialized_queue_gate(self, gate_name: str, active: bool) -> None:
+        """Pause event-style queue entries while an external event check runs."""
+        gate = str(gate_name or '').strip()
+        if not gate:
+            return
+        with self.lock:
+            if not hasattr(self, '_specialized_queue_gates'):
+                self._specialized_queue_gates = set()
+            if active:
+                self._specialized_queue_gates.add(gate)
+            else:
+                self._specialized_queue_gates.discard(gate)
+        self._apply_specialized_queue_deferral()
 
     def _run_specialized_queue_entry(self, queue_entry: Dict[str, Any]) -> None:
         channel_id = queue_entry.get('channel_id')
@@ -4653,8 +4691,7 @@ class StreamCheckerService:
             self.checking = True
         if hasattr(self.check_queue, 'set_paused'):
             self.check_queue.set_paused(True)
-        if hasattr(self.check_queue, 'defer_metadata_sources'):
-            self.check_queue.defer_metadata_sources(SPECIALIZED_QUEUE_SOURCES)
+        self._apply_specialized_queue_deferral()
         
         try:
             # Process each channel
@@ -4755,8 +4792,7 @@ class StreamCheckerService:
                     queue_status = self.check_queue.get_status()
                     if queue_status.get('queue_size', 0) == 0 and queue_status.get('in_progress', 0) == 0:
                         self.checking = False
-            if hasattr(self.check_queue, 'defer_metadata_sources'):
-                self.check_queue.defer_metadata_sources(set())
+            self._apply_specialized_queue_deferral()
             if hasattr(self.check_queue, 'set_paused'):
                 self.check_queue.set_paused(False)
                 

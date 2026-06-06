@@ -1145,6 +1145,7 @@ class TeamarrPreflightService:
                     "bucket": event.get("trigger_bucket"),
                     "started_at": self.clock(),
                 }
+                self._set_stream_checker_event_gate(True)
 
         if queue_due_to_capacity:
             if self._queue_check(event, config):
@@ -1316,7 +1317,19 @@ class TeamarrPreflightService:
     def _finish_active_check(self, key: str) -> None:
         with self._lock:
             self._active_checks.pop(key, None)
-            self._purge_old_attempts()
+            has_active_checks = bool(self._active_checks)
+        if not has_active_checks:
+            self._set_stream_checker_event_gate(False)
+        self._purge_old_attempts()
+
+    def _set_stream_checker_event_gate(self, active: bool) -> None:
+        try:
+            checker = self.stream_checker_provider()
+            setter = getattr(checker, "set_specialized_queue_gate", None)
+            if callable(setter):
+                setter("teamarr_preflight_direct", bool(active))
+        except Exception as exc:
+            logger.debug("Unable to update Stream Checker event queue gate: %s", exc)
 
     def _resolve_profile_id(self, profile_id: Any) -> Optional[str]:
         requested = str(profile_id or "").strip()

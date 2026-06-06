@@ -20,7 +20,7 @@ from urllib.parse import urljoin
 from apps.core.logging_config import setup_logging
 from apps.udi import get_udi_manager
 from apps.config.dispatcharr_config import get_dispatcharr_config
-from apps.core.api_utils import fetch_data_from_url
+from apps.core.api_utils import fetch_data_from_url, post_request
 from apps.automation.regex_validation import is_dangerous_regex
 
 logger = setup_logging(__name__)
@@ -751,8 +751,38 @@ class SchedulingService:
         return f"dispatcharr_channel:{channel_id}"
 
     @staticmethod
-    def _program_title(program: Dict[str, Any]) -> str:
-        for key in (
+    def _channel_uuid_lookup_id(channel_uuid: Any) -> Optional[str]:
+        if channel_uuid in (None, ""):
+            return None
+        value = str(channel_uuid).strip()
+        return f"dispatcharr_channel_uuid:{value}" if value else None
+
+    @staticmethod
+    def _append_unique_text_candidate(
+        candidates: List[Dict[str, str]],
+        seen: set,
+        field: str,
+        raw_value: Any,
+    ) -> None:
+        if not isinstance(raw_value, str):
+            return
+        value = " ".join(raw_value.split())
+        if value and value not in seen:
+            candidates.append({'field': field, 'text': value})
+            seen.add(value)
+
+    @classmethod
+    def _program_text_candidates(cls, program: Dict[str, Any]) -> List[Dict[str, str]]:
+        """Return visible EPG text fields that can represent the guide title.
+
+        Dispatcharr's TV Guide can expose provider/series-rule text in fields
+        other than ``title``. Auto-Create rules should match the same text an
+        operator sees in the guide, so regexes are evaluated against each
+        candidate field independently instead of against one concatenated string.
+        """
+        candidates: List[Dict[str, str]] = []
+        seen = set()
+        primary_fields = (
             'title',
             'program_title',
             'programTitle',
@@ -761,21 +791,78 @@ class SchedulingService:
             'name',
             'event_title',
             'eventTitle',
-        ):
-            value = program.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        )
+        secondary_fields = (
+            'display_title',
+            'displayTitle',
+            'full_title',
+            'fullTitle',
+            'label',
+            'sub_title',
+            'subtitle',
+            'subTitle',
+            'episode_title',
+            'episodeTitle',
+            'short_description',
+            'shortDescription',
+            'description',
+            'summary',
+        )
 
-        for nested_key in ('program', 'epg_program', 'epgProgram'):
+        for key in primary_fields + secondary_fields:
+            cls._append_unique_text_candidate(candidates, seen, key, program.get(key))
+
+        for nested_key in ('program', 'epg_program', 'epgProgram', 'event', 'current_program', 'currentProgram'):
             nested = program.get(nested_key)
             if not isinstance(nested, dict):
                 continue
-            for key in ('title', 'name', 'program_title', 'programTitle'):
-                value = nested.get(key)
-                if isinstance(value, str) and value.strip():
-                    return value.strip()
+            for key in primary_fields + secondary_fields:
+                cls._append_unique_text_candidate(candidates, seen, f"{nested_key}.{key}", nested.get(key))
 
+        return candidates
+
+    @classmethod
+    def _program_title(cls, program: Dict[str, Any]) -> str:
+        for candidate in cls._program_text_candidates(program):
+            if candidate['field'] in {
+                'title',
+                'program_title',
+                'programTitle',
+                'program_name',
+                'programName',
+                'name',
+                'event_title',
+                'eventTitle',
+                'program.title',
+                'program.name',
+                'program.program_title',
+                'program.programTitle',
+                'epg_program.title',
+                'epg_program.name',
+                'epg_program.program_title',
+                'epg_program.programTitle',
+                'epgProgram.title',
+                'epgProgram.name',
+                'epgProgram.program_title',
+                'epgProgram.programTitle',
+            }:
+                return candidate['text']
         return ''
+
+    def _program_regex_match(self, program: Dict[str, Any], pattern: re.Pattern) -> Optional[Dict[str, str]]:
+        for candidate in self._program_text_candidates(program):
+            if pattern.search(candidate['text']):
+                return candidate
+        return None
+
+    def _program_event_title(self, program: Dict[str, Any], match: Optional[Dict[str, str]] = None) -> str:
+        title = self._program_title(program)
+        if title:
+            return title
+        if match:
+            return match.get('text', '')
+        candidates = self._program_text_candidates(program)
+        return candidates[0]['text'] if candidates else ''
 
     def _program_epg_identifiers(self, program: Dict[str, Any]) -> List[str]:
         identifiers: List[str] = []
@@ -804,6 +891,14 @@ class SchedulingService:
             channel_lookup_id = self._channel_program_lookup_id(program.get(key))
             self._append_unique_identifier(identifiers, channel_lookup_id)
 
+        for key in (
+            'channel_uuid',
+            'channelUuid',
+            'dispatcharr_channel_uuid',
+            'dispatcharrChannelUuid',
+        ):
+            self._append_unique_identifier(identifiers, self._channel_uuid_lookup_id(program.get(key)))
+
         channel = program.get('channel')
         if isinstance(channel, dict):
             for key in ('tvg_id', 'tvgId', 'effective_tvg_id', 'station_id', 'stationId'):
@@ -811,6 +906,8 @@ class SchedulingService:
             for key in ('id', 'channel_id', 'channelId', 'dispatcharr_channel_id'):
                 channel_lookup_id = self._channel_program_lookup_id(channel.get(key))
                 self._append_unique_identifier(identifiers, channel_lookup_id)
+            for key in ('uuid', 'channel_uuid', 'channelUuid', 'dispatcharr_channel_uuid'):
+                self._append_unique_identifier(identifiers, self._channel_uuid_lookup_id(channel.get(key)))
 
         return identifiers
 
@@ -838,6 +935,7 @@ class SchedulingService:
                 self._append_unique_identifier(identifiers, epg_data.get(key))
 
         self._append_unique_identifier(identifiers, self._channel_program_lookup_id(channel.get('id')))
+        self._append_unique_identifier(identifiers, self._channel_uuid_lookup_id(channel.get('uuid')))
 
         return identifiers
 
@@ -859,6 +957,7 @@ class SchedulingService:
             'effective_tvc_guide_stationid': channel.get('effective_tvc_guide_stationid'),
             'epg_data_id': channel.get('epg_data_id'),
             'effective_epg_data_id': channel.get('effective_epg_data_id'),
+            'uuid': channel.get('uuid'),
             'epg_tvg_ids': epg_tvg_ids,
         }
 
@@ -1108,8 +1207,7 @@ class SchedulingService:
 
         matching_programs = []
         for program in programs:
-            title = self._program_title(program)
-            if not pattern.search(title):
+            if not self._program_regex_match(program, pattern):
                 continue
             matching_programs.append(program)
 
@@ -1207,12 +1305,22 @@ class SchedulingService:
 
             channel_matches = []
             sample_titles = []
+            sample_fields = []
             for program in channel_programs:
-                title = self._program_title(program)
-                if len(sample_titles) < 3 and title:
-                    sample_titles.append(title)
-                if pattern.search(title):
-                    channel_matches.append(program)
+                candidates = self._program_text_candidates(program)
+                if len(sample_titles) < 3 and candidates:
+                    sample_titles.append(candidates[0]['text'])
+                if len(sample_fields) < 3 and candidates:
+                    sample_fields.append({
+                        'fields': [candidate['field'] for candidate in candidates[:5]],
+                        'texts': [candidate['text'] for candidate in candidates[:5]],
+                    })
+                match = self._program_regex_match(program, pattern)
+                if match:
+                    enriched_match = dict(program)
+                    enriched_match['_auto_create_matched_field'] = match['field']
+                    enriched_match['_auto_create_matched_text'] = match['text']
+                    channel_matches.append(enriched_match)
 
             if channel_matches:
                 channels_with_matches.add(channel_id)
@@ -1221,11 +1329,18 @@ class SchedulingService:
                     **channel_info,
                     'program_count': len(channel_programs),
                     'sample_titles': sample_titles,
+                    'sample_fields': sample_fields,
                 })
 
             for program in channel_matches:
                 enriched_program = dict(program)
-                enriched_program['title'] = self._program_title(program)
+                match = {
+                    'field': enriched_program.pop('_auto_create_matched_field', ''),
+                    'text': enriched_program.pop('_auto_create_matched_text', ''),
+                }
+                enriched_program['title'] = self._program_event_title(program, match)
+                enriched_program['matched_field'] = match['field']
+                enriched_program['matched_text'] = match['text']
                 enriched_program['channel_id'] = channel_id
                 enriched_program['channel_name'] = channel_name
                 enriched_program['tvg_id'] = channel_info.get('tvg_id')
@@ -1379,9 +1494,10 @@ class SchedulingService:
                     now = datetime.now(timezone.utc)
 
                     for program in programs_by_epg_key.get(epg_key, []):
-                        title = self._program_title(program)
-                        if not pattern.search(title):
+                        match = self._program_regex_match(program, pattern)
+                        if not match:
                             continue
+                        title = self._program_event_title(program, match)
 
                         program_start = program.get('start_time')
                         program_end = program.get('end_time')
@@ -1819,42 +1935,12 @@ class SchedulingService:
             url = f"{base_url}/api/epg/programs/"
             logger.debug("Fetching all EPG programs (shared cache)")
 
-            raw: List[Dict[str, Any]] = []
-            next_url: Optional[str] = url
-            seen_urls = set()
-            page_count = 0
-
-            while next_url and next_url not in seen_urls:
-                seen_urls.add(next_url)
-                data = fetch_data_from_url(next_url)
-                if data is None:
-                    logger.error("Failed to fetch EPG programs from Dispatcharr")
-                    if raw:
-                        logger.warning(
-                            "Using partial EPG program page set after fetch failure: "
-                            f"{len(raw)} programs from {page_count} page(s)"
-                        )
-                        break
-                    return stale_cache['by_tvg_id'] if stale_cache else {}
-
-                if isinstance(data, list):
-                    raw.extend(program for program in data if isinstance(program, dict))
-                    next_url = None
-                elif isinstance(data, dict):
-                    page_items = data.get('results', data.get('data', data.get('programs', [])))
-                    if isinstance(page_items, list):
-                        raw.extend(program for program in page_items if isinstance(program, dict))
-
-                    next_value = data.get('next')
-                    next_url = urljoin(next_url, str(next_value)) if next_value else None
-                else:
-                    logger.warning("Unexpected EPG programs response type: %s", type(data).__name__)
-                    next_url = None
-
-                page_count += 1
-                if page_count >= 500:
-                    logger.warning("Stopping EPG pagination after 500 pages")
-                    break
+            raw, page_count, partial, grid_count, current_count = self._fetch_epg_program_snapshot(
+                base_url,
+                url,
+            )
+            if partial and not raw:
+                return stale_cache['by_tvg_id'] if stale_cache else {}
 
             by_tvg_id: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
             skipped = 0
@@ -1873,7 +1959,8 @@ class SchedulingService:
 
             logger.debug(
                 f"Fetched {len(raw)} EPG programs across {len(by_tvg_id)} EPG identifiers "
-                f"from {page_count} page(s)"
+                f"from {page_count} page(s); added {grid_count} grid and "
+                f"{current_count} current-program entries"
             )
 
             result = dict(by_tvg_id)
@@ -1888,6 +1975,91 @@ class SchedulingService:
         except Exception as e:
             logger.error(f"Error fetching all EPG programs: {e}")
             return stale_cache['by_tvg_id'] if stale_cache else {}
+
+    def _merge_program_sources(
+        self,
+        target: List[Dict[str, Any]],
+        seen_programs: set,
+        items: Any,
+        *,
+        source: str,
+    ) -> int:
+        if isinstance(items, dict):
+            items = items.get('results', items.get('data', items.get('programs', [])))
+        if not isinstance(items, list):
+            return 0
+
+        added = 0
+        for program in items:
+            if not isinstance(program, dict):
+                continue
+            dedup_key = (
+                program.get('id'),
+                program.get('tvg_id'),
+                program.get('channel_uuid') or program.get('channelUuid'),
+                program.get('start_time'),
+                program.get('end_time'),
+                self._program_event_title(program),
+            )
+            if dedup_key in seen_programs:
+                continue
+            seen_programs.add(dedup_key)
+            enriched = dict(program)
+            enriched.setdefault('_streamflow_epg_source', source)
+            target.append(enriched)
+            added += 1
+        return added
+
+    def _fetch_epg_program_snapshot(self, base_url: str, programs_url: str) -> tuple:
+        raw: List[Dict[str, Any]] = []
+        seen_programs = set()
+        next_url: Optional[str] = programs_url
+        seen_urls = set()
+        page_count = 0
+        partial = False
+
+        while next_url and next_url not in seen_urls:
+            seen_urls.add(next_url)
+            data = fetch_data_from_url(next_url)
+            if data is None:
+                logger.error("Failed to fetch EPG programs from Dispatcharr")
+                partial = True
+                break
+
+            if isinstance(data, list):
+                self._merge_program_sources(raw, seen_programs, data, source='programs')
+                next_url = None
+            elif isinstance(data, dict):
+                self._merge_program_sources(raw, seen_programs, data, source='programs')
+                next_value = data.get('next')
+                next_url = urljoin(next_url, str(next_value)) if next_value else None
+            else:
+                logger.warning("Unexpected EPG programs response type: %s", type(data).__name__)
+                next_url = None
+
+            page_count += 1
+            if page_count >= 500:
+                logger.warning("Stopping EPG pagination after 500 pages")
+                break
+
+        grid_url = f"{base_url}/api/epg/grid/"
+        grid_data = fetch_data_from_url(grid_url)
+        grid_count = self._merge_program_sources(raw, seen_programs, grid_data, source='grid')
+
+        current_count = 0
+        current_url = f"{base_url}/api/epg/current-programs/"
+        try:
+            response = post_request(current_url, {})
+            current_count = self._merge_program_sources(
+                raw,
+                seen_programs,
+                response.json(),
+                source='current-programs',
+            )
+        except Exception as exc:
+            logger.debug("Unable to fetch current EPG programs for Auto-Create: %s", exc)
+
+        return raw, page_count, partial, grid_count, current_count
 
     def fetch_channel_programs_from_api(self, tvg_id: str, hours_ahead: int = 24, force_refresh: bool = False) -> List[Dict[str, Any]]:
         """Return EPG programs for tvg_id from the shared all-programs cache.

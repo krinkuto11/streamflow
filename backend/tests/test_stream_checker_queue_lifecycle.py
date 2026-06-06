@@ -619,6 +619,36 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.check_queue.mark_completed.assert_called_once_with(9441)
         service.check_queue.mark_failed.assert_not_called()
 
+    def test_worker_defers_specialized_queue_entries_while_direct_event_gate_is_active(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.running = True
+        service.batch_start_time = None
+        service.abort_current_check = threading.Event()
+        service.check_queue = Mock()
+        service._start_batch_changelog = Mock()
+        service._finalize_batch_changelog = Mock()
+        service._check_channel = Mock()
+        service.check_single_channel = Mock()
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service.sync_batch_state = {"active": False}
+        service._specialized_queue_gates = set()
+
+        def stop_wait(timeout=None):
+            service.running = False
+            return None
+
+        service.check_queue.get_next_entry.side_effect = stop_wait
+        service.check_queue.defer_metadata_sources = Mock()
+
+        service.set_specialized_queue_gate("teamarr_preflight_direct", True)
+        service._worker_loop()
+
+        service.check_queue.defer_metadata_sources.assert_any_call(
+            {"teamarr_preflight", "auto_create"}
+        )
+        service.check_single_channel.assert_not_called()
+
     def test_worker_pauses_during_synchronous_batch(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.running = True

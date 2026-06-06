@@ -185,12 +185,14 @@ class TestRegexMatchingIntegration(unittest.TestCase):
                 'minutes_before': 0,
             }]
 
-        with patch('apps.automation.scheduling_service.fetch_data_from_url') as mock_fetch:
-            mock_fetch.side_effect = [first_page, second_page]
+        with patch('apps.automation.scheduling_service.fetch_data_from_url') as mock_fetch, \
+                patch('apps.automation.scheduling_service.post_request') as mock_post:
+            mock_fetch.side_effect = [first_page, second_page, {'data': []}]
+            mock_post.return_value.json.return_value = []
             result = self.service.match_programs_to_rules(force_refresh=True)
 
         self.assertEqual(result['created'], 2)
-        self.assertEqual(mock_fetch.call_count, 2)
+        self.assertEqual(mock_fetch.call_count, 3)
         self.assertEqual(
             [event['program_title'] for event in self.service.get_scheduled_events()],
             ['Live: MLB', 'Live: MLB'],
@@ -222,7 +224,9 @@ class TestRegexMatchingIntegration(unittest.TestCase):
                 'minutes_before': 0,
             }]
 
-        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs):
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs), \
+                patch('apps.automation.scheduling_service.post_request') as mock_post:
+            mock_post.return_value.json.return_value = []
             result = self.service.match_programs_to_rules(force_refresh=True)
 
         events = self.service.get_scheduled_events()
@@ -256,7 +260,9 @@ class TestRegexMatchingIntegration(unittest.TestCase):
                 'minutes_before': 0,
             }]
 
-        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs):
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs), \
+                patch('apps.automation.scheduling_service.post_request') as mock_post:
+            mock_post.return_value.json.return_value = []
             result = self.service.match_programs_to_rules(force_refresh=True)
 
         events = self.service.get_scheduled_events()
@@ -264,6 +270,88 @@ class TestRegexMatchingIntegration(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]['program_title'], 'Live: NBA')
         self.assertEqual(events[0]['tvg_id'], 'BossSports.NBA_Teams.bostonceltics')
+
+    def test_match_programs_matches_visible_subtitle_and_channel_uuid(self):
+        """Auto-create should follow TV Guide channel UUIDs and visible EPG text fields."""
+        now = datetime.now(timezone.utc)
+        self.mock_udi.return_value.get_channel_by_id.return_value = {
+            'id': 1,
+            'name': 'San Francisco Giants',
+            'tvg_id': 'BossSports.MLB_Teams.sanfranciscogiants',
+            'uuid': 'channel-uuid-1',
+            'logo_id': None,
+        }
+        programs = [{
+            'title': 'San Francisco Giants at Los Angeles Dodgers',
+            'sub_title': 'Live: MLB',
+            'start_time': (now + timedelta(hours=1)).isoformat(),
+            'end_time': (now + timedelta(hours=4)).isoformat(),
+            'channel_uuid': 'channel-uuid-1',
+        }]
+
+        with self.service._lock:
+            self.service._auto_create_rules = [{
+                'id': 'mlb-rule',
+                'name': 'MLB Auto Create',
+                'channel_id': 1,
+                'regex_pattern': '^Live: MLB',
+                'minutes_before': 0,
+            }]
+
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs), \
+                patch('apps.automation.scheduling_service.post_request') as mock_post:
+            mock_post.return_value.json.return_value = []
+            result = self.service.match_programs_to_rules(force_refresh=True)
+
+        events = self.service.get_scheduled_events()
+        self.assertEqual(result['created'], 1)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['program_title'], 'San Francisco Giants at Los Angeles Dodgers')
+        self.assertEqual(events[0]['tvg_id'], 'BossSports.MLB_Teams.sanfranciscogiants')
+
+    def test_match_programs_merges_epg_grid_when_programs_endpoint_lacks_channel_match(self):
+        """Auto-create should use Dispatcharr TV Guide grid data, not only raw programs."""
+        now = datetime.now(timezone.utc)
+        self.mock_udi.return_value.get_channel_by_id.return_value = {
+            'id': 1,
+            'name': 'Chicago White Sox',
+            'tvg_id': 'BossSports.MLB_Teams.whitesox',
+            'effective_tvg_id': 'whitesox-effective',
+            'logo_id': None,
+        }
+
+        programs_payload = [{
+            'title': 'Pregame',
+            'start_time': (now + timedelta(minutes=10)).isoformat(),
+            'end_time': (now + timedelta(hours=1)).isoformat(),
+            'tvg_id': 'unrelated',
+        }]
+        grid_payload = {'data': [{
+            'title': 'Live: MLB',
+            'start_time': (now + timedelta(hours=1)).isoformat(),
+            'end_time': (now + timedelta(hours=4)).isoformat(),
+            'tvg_id': 'whitesox-effective',
+        }]}
+
+        with self.service._lock:
+            self.service._auto_create_rules = [{
+                'id': 'mlb-rule',
+                'name': 'MLB Auto Create',
+                'channel_id': 1,
+                'regex_pattern': '^Live: MLB',
+                'minutes_before': 0,
+            }]
+
+        with patch('apps.automation.scheduling_service.fetch_data_from_url') as mock_fetch, \
+                patch('apps.automation.scheduling_service.post_request') as mock_post:
+            mock_fetch.side_effect = [programs_payload, grid_payload]
+            mock_post.return_value.json.return_value = []
+            result = self.service.match_programs_to_rules(force_refresh=True)
+
+        events = self.service.get_scheduled_events()
+        self.assertEqual(result['created'], 1)
+        self.assertEqual(mock_fetch.call_count, 2)
+        self.assertEqual(events[0]['program_title'], 'Live: MLB')
 
     def test_regex_preview_uses_effective_epg_tvg_id(self):
         """The test popup should use the same effective EPG identity as matching."""
@@ -282,7 +370,9 @@ class TestRegexMatchingIntegration(unittest.TestCase):
             'tvg_id': 'WashingtonNationals.mlb',
         }]
 
-        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs):
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs), \
+                patch('apps.automation.scheduling_service.post_request') as mock_post:
+            mock_post.return_value.json.return_value = []
             result = self.service.test_regex_against_epg_for_rule(
                 channel_ids=[1],
                 regex_pattern='^Live: MLB',
@@ -309,7 +399,9 @@ class TestRegexMatchingIntegration(unittest.TestCase):
             'channel_id': 1,
         }]
 
-        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs):
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs), \
+                patch('apps.automation.scheduling_service.post_request') as mock_post:
+            mock_post.return_value.json.return_value = []
             result = self.service.test_regex_against_epg_for_rule(
                 channel_ids=[1],
                 regex_pattern='^Live: NBA',
@@ -321,6 +413,43 @@ class TestRegexMatchingIntegration(unittest.TestCase):
         self.assertEqual(result['channels_without_programs'], [])
         self.assertEqual(result['channels_without_matches'], [])
         self.assertEqual(result['programs'][0]['title'], 'Live: NBA')
+
+    def test_regex_preview_reports_visible_fields_for_unmatched_channels(self):
+        """The popup should expose which EPG fields were tested when a channel misses."""
+        now = datetime.now(timezone.utc)
+        self.mock_udi.return_value.get_channel_by_id.return_value = {
+            'id': 1,
+            'name': 'Boston Red Sox',
+            'tvg_id': 'redsox',
+            'uuid': 'redsox-uuid',
+            'logo_id': None,
+        }
+        programs = [{
+            'title': 'Boston Red Sox at New York Yankees',
+            'sub_title': 'Pregame Baseball',
+            'description': 'Coming up Tonight',
+            'start_time': (now + timedelta(hours=1)).isoformat(),
+            'end_time': (now + timedelta(hours=4)).isoformat(),
+            'channel_uuid': 'redsox-uuid',
+        }]
+
+        with patch('apps.automation.scheduling_service.fetch_data_from_url', return_value=programs), \
+                patch('apps.automation.scheduling_service.post_request') as mock_post:
+            mock_post.return_value.json.return_value = []
+            result = self.service.test_regex_against_epg_for_rule(
+                channel_ids=[1],
+                regex_pattern='^Live: MLB',
+                force_refresh=True,
+            )
+
+        self.assertEqual(result['matches'], 0)
+        self.assertEqual(result['channels_without_matches'][0]['sample_titles'], [
+            'Boston Red Sox at New York Yankees',
+        ])
+        self.assertEqual(
+            result['channels_without_matches'][0]['sample_fields'][0]['fields'][:3],
+            ['title', 'sub_title', 'description'],
+        )
     
     def test_match_programs_completes_without_deadlock(self):
         """Test that match_programs_to_rules completes without deadlock."""

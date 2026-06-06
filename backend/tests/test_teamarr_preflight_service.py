@@ -36,6 +36,7 @@ class FakeChecker:
     def __init__(self):
         self.calls = []
         self.queued = []
+        self.gates = []
 
     def get_status(self):
         return {"stream_checking_mode": False, "queue": {"queue_size": 0, "in_progress": 0}}
@@ -56,6 +57,9 @@ class FakeChecker:
                 ],
             },
         }
+
+    def set_specialized_queue_gate(self, gate_name, active):
+        self.gates.append((gate_name, active))
 
 
 class SequencedChecker(FakeChecker):
@@ -616,6 +620,20 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         _, kwargs = checker.calls[0]
         self.assertTrue(kwargs["provider_limit_override"])
         self.assertTrue(kwargs["force_check"])
+
+    def test_direct_check_gates_specialized_queue_until_finished(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service([make_event()], checker=checker)
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+
+        deadline = time.time() + 2
+        while time.time() < deadline and len(checker.gates) < 2:
+            time.sleep(0.01)
+
+        self.assertEqual(checker.gates[0], ("teamarr_preflight_direct", True))
+        self.assertEqual(checker.gates[-1], ("teamarr_preflight_direct", False))
 
     def test_direct_capacity_limit_queues_due_teamarr_events_instead_of_hiding_them(self):
         checker = FakeChecker()

@@ -33,16 +33,10 @@ def test_auto_create_rule_preview_expands_group_channels(tmp_path, monkeypatch):
     udi.get_channel_by_id.side_effect = lambda channel_id: channels.get(int(channel_id))
     monkeypatch.setattr(scheduling_service, "get_udi_manager", lambda: udi)
 
-    programs_by_channel = {
-        1: [{"title": "Regular Show", "start_time": "2026-06-03T18:00:00Z"}],
-        2: [{"title": "World Cup Friendly", "start_time": "2026-06-03T19:00:00Z"}],
-    }
-    def get_programs_by_channel(channel_id):
-        if int(channel_id) == 1:
-            raise NoTvgIdError(channel_id)
-        return programs_by_channel[int(channel_id)]
-
-    monkeypatch.setattr(service, "get_programs_by_channel", get_programs_by_channel)
+    service._epg_cache = [
+        {"title": "Regular Show", "start_time": "2026-06-03T18:00:00Z", "tvg_id": "no-match"},
+        {"title": "World Cup Friendly", "start_time": "2026-06-03T19:00:00Z", "tvg_id": "match"},
+    ]
 
     result = service.test_regex_against_epg_for_rule(
         channel_group_ids=[50],
@@ -71,17 +65,10 @@ def test_auto_create_rule_preview_reports_why_group_channels_do_not_match(tmp_pa
     udi.get_channel_by_id.side_effect = lambda channel_id: channels.get(int(channel_id))
     monkeypatch.setattr(scheduling_service, "get_udi_manager", lambda: udi)
 
-    programs_by_channel = {
-        2: [],
-        3: [{"title": "Pregame Baseball", "start_time": "2026-06-03T18:00:00Z"}],
-        4: [{"title": "Live: Baseball", "start_time": "2026-06-03T19:00:00Z"}],
-    }
-    def get_programs_by_channel(channel_id):
-        if int(channel_id) == 1:
-            raise NoTvgIdError(channel_id)
-        return programs_by_channel[int(channel_id)]
-
-    monkeypatch.setattr(service, "get_programs_by_channel", get_programs_by_channel)
+    service._epg_cache = [
+        {"title": "Pregame Baseball", "start_time": "2026-06-03T18:00:00Z", "tvg_id": "wrong-title"},
+        {"title": "Live: Baseball", "start_time": "2026-06-03T19:00:00Z", "tvg_id": "match"},
+    ]
 
     result = service.test_regex_against_epg_for_rule(
         channel_group_ids=[50],
@@ -91,8 +78,8 @@ def test_auto_create_rule_preview_reports_why_group_channels_do_not_match(tmp_pa
     assert result["matches"] == 1
     assert result["channels_tested"] == 4
     assert result["channels_with_matches"] == 1
-    assert [channel["id"] for channel in result["channels_without_tvg"]] == [1]
-    assert [channel["id"] for channel in result["channels_without_programs"]] == [2]
+    assert [channel["id"] for channel in result["channels_without_tvg"]] == []
+    assert [channel["id"] for channel in result["channels_without_programs"]] == [1, 2]
     assert result["channels_without_matches"][0]["id"] == 3
     assert result["channels_without_matches"][0]["sample_titles"] == ["Pregame Baseball"]
 
