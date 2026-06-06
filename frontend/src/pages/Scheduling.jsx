@@ -680,21 +680,21 @@ export default function Scheduling() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h1 className="text-3xl font-bold">Scheduling</h1>
           <p className="text-muted-foreground mt-1">
             Schedule channel checks before EPG events
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={handleRefresh}>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-end">
+          <Button variant="outline" size="sm" onClick={handleRefresh} className="w-full sm:w-auto">
             <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
             Refresh
           </Button>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
-              <Button>
+              <Button className="w-full sm:w-auto">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Event Check
               </Button>
@@ -1184,20 +1184,21 @@ export default function Scheduling() {
       {/* Auto-Create Rules Card */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
               <CardTitle>Auto-Create Rules</CardTitle>
               <CardDescription>
                 Automatically create scheduled events based on regex patterns matching EPG program names
               </CardDescription>
             </div>
-            <div className="flex gap-2">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-end">
               {/* Export Button */}
               <Button
                 variant="outline"
                 size="sm"
                 onClick={handleExportRules}
                 disabled={autoCreateRules.length === 0}
+                className="w-full sm:w-auto"
               >
                 <Download className="h-4 w-4 mr-2" />
                 Export
@@ -1208,6 +1209,7 @@ export default function Scheduling() {
                 variant="outline"
                 size="sm"
                 onClick={() => fileInputRef.current?.click()}
+                className="w-full sm:w-auto"
               >
                 <Upload className="h-4 w-4 mr-2" />
                 Import
@@ -1230,7 +1232,7 @@ export default function Scheduling() {
                 <DialogTrigger asChild>
                   <Button size="sm" onClick={() => {
                     resetRuleForm()
-                  }}>
+                  }} className="w-full sm:w-auto">
                     <Plus className="h-4 w-4 mr-2" />
                     Add Rule
                   </Button>
@@ -1238,13 +1240,14 @@ export default function Scheduling() {
                 <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col">
                   <DialogHeader>
                     <DialogTitle>
-                      <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <span>{editingRuleId ? 'Edit Auto-Create Rule' : 'Create Auto-Create Rule'}</span>
                         {!editingRuleId && (
                           <Button
                             variant="outline"
                             size="sm"
                             onClick={() => wizardFileInputRef.current?.click()}
+                            className="w-full sm:w-auto"
                           >
                             <FileJson className="h-4 w-4 mr-2" />
                             Import JSON
