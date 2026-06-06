@@ -443,6 +443,35 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             "timestamp": "2026-05-28T22:25:00+00:00",
         })
 
+    def test_due_bucket_is_limited_to_poll_window(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2026-05-28T22:09:00+00:00")],
+            checker=checker,
+        )
+        service.update_config({"poll_interval_seconds": 30})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "scheduled")
+
+    def test_pre_start_bucket_fires_inside_poll_window(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2026-05-28T22:09:50+00:00")],
+            checker=checker,
+        )
+        service.update_config({"poll_interval_seconds": 30})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+
     def test_managed_events_sort_current_and_upcoming_before_past(self):
         checker = FakeChecker()
         events = [

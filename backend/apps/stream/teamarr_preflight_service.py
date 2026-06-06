@@ -1099,6 +1099,7 @@ class TeamarrPreflightService:
         *,
         direction: str,
     ) -> tuple[str, Optional[str]]:
+        poll_window_seconds = max(1, int(self._config.get("poll_interval_seconds", 60)))
         normalized = sorted(
             {int(offset) for offset in offsets if int(offset) > 0},
             reverse=(direction == "pre"),
@@ -1107,9 +1108,9 @@ class TeamarrPreflightService:
         for offset in normalized:
             threshold_seconds = offset * 60
             if direction == "pre":
-                is_due = seconds <= threshold_seconds
+                is_due = threshold_seconds - poll_window_seconds <= seconds <= threshold_seconds
             else:
-                is_due = seconds >= threshold_seconds
+                is_due = threshold_seconds <= seconds <= threshold_seconds + poll_window_seconds
             if not is_due:
                 continue
 

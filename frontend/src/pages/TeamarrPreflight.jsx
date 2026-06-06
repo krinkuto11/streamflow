@@ -806,26 +806,70 @@ export default function TeamarrPreflight() {
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
-        <Card>
+        <div className="space-y-6">
+          <Card>
+            <CardHeader>
+              <CardTitle>Active Event Checks</CardTitle>
+              <CardDescription>
+                {eventSearch.trim()
+                  ? `${filteredActiveChecks.length} of ${activeChecks.length} running checks`
+                  : `${activeChecks.length} running checks`}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {activeChecks.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No active event checks</p>
+              ) : filteredActiveChecks.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No active checks match this search</p>
+              ) : (
+                <div className="space-y-3">
+                  {displayedActiveChecks.map((check, index) => (
+                    <div key={`${check.identity || check.dispatcharr_channel_id || index}-${check.bucket || 'active'}`} className="rounded-md border border-border p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{check.event_name || 'Managed Event'}</p>
+                          <p className="text-sm text-muted-foreground">{check.channel_name || `Channel ${check.dispatcharr_channel_id || 'N/A'}`}</p>
+                        </div>
+                        <Badge variant="secondary">{check.bucket || 'manual'}</Badge>
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        Started {formatTimestamp(check.started_at)} - running {formatElapsedSince(check.started_at)}
+                      </p>
+                    </div>
+                  ))}
+                  {filteredActiveChecks.length > displayedActiveChecks.length ? (
+                    <p className="text-xs text-muted-foreground">
+                      Showing {displayedActiveChecks.length} of {filteredActiveChecks.length} matching active checks
+                    </p>
+                  ) : null}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
           <CardHeader>
             <CardTitle>Configuration</CardTitle>
             <CardDescription>Connector, timing, profile, and filters</CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-              <div className="flex items-center justify-between rounded-md border border-border p-4">
-                <div>
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
+                <div className="min-w-0 space-y-1">
                   <Label className="text-base">Enabled</Label>
-                  <p className="text-sm text-muted-foreground">Auto-starts with the backend</p>
+                  <p className="max-w-[22rem] text-sm leading-snug text-muted-foreground">Auto-starts with the backend</p>
                 </div>
-                <Switch checked={enabled} onCheckedChange={(value) => updateConfigValue('enabled', value)} />
+                <Switch className="mt-1 shrink-0" checked={enabled} onCheckedChange={(value) => updateConfigValue('enabled', value)} />
               </div>
-              <div className="flex items-center justify-between rounded-md border border-border p-4">
-                <div>
+              <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
+                <div className="min-w-0 space-y-1">
                   <Label className="text-base">Queue Events During Active Checks</Label>
-                  <p className="text-sm text-muted-foreground">On queues due Teamarr event checks during Automation or Stream Checker runs; off waits and does not queue new event checks until active work is done</p>
+                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">
+                    On queues due Teamarr event checks during Automation or Stream Checker runs; off waits and does not queue new event checks until active work is done
+                  </p>
                 </div>
                 <Switch
+                  className="mt-1 shrink-0"
                   checked={Boolean(editedConfig.queue_during_active_checks ?? !(editedConfig.defer_during_active_checks ?? editedConfig.skip_during_quality_check))}
                   onCheckedChange={(value) => updateConfigValue('queue_during_active_checks', value)}
                 />
@@ -1023,7 +1067,8 @@ export default function TeamarrPreflight() {
               </AccordionItem>
             </Accordion>
           </CardContent>
-        </Card>
+          </Card>
+        </div>
 
         <div className="space-y-6">
           <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_12rem]">
@@ -1049,46 +1094,6 @@ export default function TeamarrPreflight() {
               </SelectContent>
             </Select>
           </div>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Active Event Checks</CardTitle>
-              <CardDescription>
-                {eventSearch.trim()
-                  ? `${filteredActiveChecks.length} of ${activeChecks.length} running checks`
-                  : `${activeChecks.length} running checks`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {activeChecks.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No active event checks</p>
-              ) : filteredActiveChecks.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No active checks match this search</p>
-              ) : (
-                <div className="space-y-3">
-                  {displayedActiveChecks.map((check, index) => (
-                    <div key={`${check.identity || check.dispatcharr_channel_id || index}-${check.bucket || 'active'}`} className="rounded-md border border-border p-3">
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate font-medium">{check.event_name || 'Managed Event'}</p>
-                          <p className="text-sm text-muted-foreground">{check.channel_name || `Channel ${check.dispatcharr_channel_id || 'N/A'}`}</p>
-                        </div>
-                        <Badge variant="secondary">{check.bucket || 'manual'}</Badge>
-                      </div>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        Started {formatTimestamp(check.started_at)} - running {formatElapsedSince(check.started_at)}
-                      </p>
-                    </div>
-                  ))}
-                  {filteredActiveChecks.length > displayedActiveChecks.length ? (
-                    <p className="text-xs text-muted-foreground">
-                      Showing {displayedActiveChecks.length} of {filteredActiveChecks.length} matching active checks
-                    </p>
-                  ) : null}
-                </div>
-              )}
-            </CardContent>
-          </Card>
 
           <Card>
             <CardHeader>
