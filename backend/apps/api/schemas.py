@@ -621,6 +621,7 @@ class AutoCreateRuleTestSchema:
     channel_ids: List[Any]
     channel_group_ids: List[Any]
     regex_pattern: str
+    minutes_before: int
 
     @classmethod
     def from_payload(cls, payload: Any) -> "AutoCreateRuleTestSchema":
@@ -652,11 +653,19 @@ class AutoCreateRuleTestSchema:
         if not channel_ids and not channel_group_ids:
             raise ValidationError("Missing required field: channel_id, channel_ids, or channel_group_ids")
 
+        try:
+            minutes_before = int(data.get("minutes_before", 0))
+        except (TypeError, ValueError):
+            raise ValidationError("minutes_before must be an integer") from None
+        if minutes_before < 0:
+            raise ValidationError("minutes_before must be 0 or greater")
+
         return cls(
             channel_id=channel_id,
             channel_ids=channel_ids,
             channel_group_ids=channel_group_ids,
             regex_pattern=str(data["regex_pattern"]),
+            minutes_before=minutes_before,
         )
 
 

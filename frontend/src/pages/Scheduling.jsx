@@ -314,7 +314,8 @@ export default function Scheduling() {
       const response = await schedulingAPI.testAutoCreateRule({
         channel_ids: selectedChannelIds,
         channel_group_ids: selectedGroupIds,
-        regex_pattern: ruleRegexPattern
+        regex_pattern: ruleRegexPattern,
+        minutes_before: parseInt(ruleMinutesBefore) || 0,
       })
 
       setRegexMatches(response.data.programs || [])
@@ -1473,6 +1474,13 @@ export default function Scheduling() {
                                   <div className="text-muted-foreground text-xs mt-1">
                                     {formatTime(program.start_time)} - {formatTime(program.end_time)}
                                   </div>
+                                  {program.schedule_state && (
+                                    <div className="mt-1">
+                                      <Badge variant="outline" className="text-[10px]">
+                                        {program.schedule_state === 'due_now' ? 'Due now' : 'Future event'}
+                                      </Badge>
+                                    </div>
+                                  )}
                                 </div>
                               ))}
                             </div>

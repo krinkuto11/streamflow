@@ -7,12 +7,51 @@ const finiteNumber = (value, fallback = 0) => {
   return Number.isFinite(number) ? number : fallback
 }
 
+const compactReasonList = (parts) => parts.filter(Boolean).join(', ')
+
+const getSchedulingBreakdown = (data = {}) => {
+  const matches = finiteNumber(data.matches)
+  const totalEpgMatches = data.total_epg_matches == null
+    ? matches
+    : finiteNumber(data.total_epg_matches)
+  const futureMatches = finiteNumber(data.future_matches)
+  const dueNowMatches = finiteNumber(data.due_now_matches)
+  const endedMatches = finiteNumber(data.ended_matches)
+  const alreadyCheckedMatches = finiteNumber(data.already_checked_matches)
+  const missingTimeMatches = finiteNumber(data.missing_time_matches)
+  const invalidTimeMatches = finiteNumber(data.invalid_time_matches)
+  const unscheduledMatches = endedMatches + alreadyCheckedMatches + missingTimeMatches + invalidTimeMatches
+
+  return {
+    matches,
+    totalEpgMatches,
+    futureMatches,
+    dueNowMatches,
+    endedMatches,
+    alreadyCheckedMatches,
+    missingTimeMatches,
+    invalidTimeMatches,
+    unscheduledMatches,
+    hasSchedulingSplit: totalEpgMatches !== matches || dueNowMatches > 0,
+  }
+}
+
 export const getAutoCreateRuleTestToast = ({
   responseData = {},
   selectedChannelCount = 0,
 } = {}) => {
   const data = responseData || {}
-  const matches = finiteNumber(data.matches)
+  const {
+    matches,
+    totalEpgMatches,
+    futureMatches,
+    dueNowMatches,
+    endedMatches,
+    alreadyCheckedMatches,
+    missingTimeMatches,
+    invalidTimeMatches,
+    hasSchedulingSplit,
+  } = getSchedulingBreakdown(data)
   const channelsTested = finiteNumber(data.channels_tested, selectedChannelCount)
   const channelsWithoutTvg = data.channels_without_tvg || []
   const channelsWithoutPrograms = data.channels_without_programs || []
@@ -31,6 +70,20 @@ export const getAutoCreateRuleTestToast = ({
     }
   }
 
+  if (totalEpgMatches > 0 && matches === 0) {
+    const reasonSuffix = compactReasonList([
+      endedMatches > 0 ? `${endedMatches} already ended` : '',
+      alreadyCheckedMatches > 0 ? `${alreadyCheckedMatches} already checked` : '',
+      missingTimeMatches > 0 ? `${missingTimeMatches} missing start/end time` : '',
+      invalidTimeMatches > 0 ? `${invalidTimeMatches} with invalid start/end time` : '',
+    ])
+    return {
+      title: 'No Schedulable Matches',
+      description: `${totalEpgMatches} EPG title ${plural(totalEpgMatches, 'match', 'matches')} found, but none can create a scheduled event${reasonSuffix ? ` (${reasonSuffix})` : ''}.`,
+      variant: 'default',
+    }
+  }
+
   if (matches === 0) {
     return {
       title: 'No Matches',
@@ -43,6 +96,22 @@ export const getAutoCreateRuleTestToast = ({
     return {
       title: 'Partial TVG-ID Coverage',
       description: `${channelsWithoutTvg.length} selected ${plural(channelsWithoutTvg.length, 'channel')} had no TVG-ID and could not be tested.`,
+      variant: 'default',
+    }
+  }
+
+  if (hasSchedulingSplit) {
+    const reasonSuffix = compactReasonList([
+      `${futureMatches} future ${plural(futureMatches, 'event')}`,
+      dueNowMatches > 0 ? `${dueNowMatches} due now and will move to the queue` : '',
+      endedMatches > 0 ? `${endedMatches} already ended` : '',
+      alreadyCheckedMatches > 0 ? `${alreadyCheckedMatches} already checked` : '',
+      missingTimeMatches > 0 ? `${missingTimeMatches} missing start/end time` : '',
+      invalidTimeMatches > 0 ? `${invalidTimeMatches} with invalid start/end time` : '',
+    ])
+    return {
+      title: 'Scheduling Breakdown',
+      description: `${totalEpgMatches} EPG title ${plural(totalEpgMatches, 'match', 'matches')}: ${reasonSuffix}.`,
       variant: 'default',
     }
   }
@@ -72,7 +141,39 @@ export const getAutoCreateRuleTestDiagnostics = (responseData = {}) => {
   const channelsWithoutTvg = data.channels_without_tvg || []
   const channelsWithoutPrograms = data.channels_without_programs || []
   const channelsWithoutMatches = data.channels_without_matches || []
+  const channelsWithUnscheduledMatches = data.channels_with_unscheduled_matches || []
+  const {
+    dueNowMatches,
+    endedMatches,
+    alreadyCheckedMatches,
+    missingTimeMatches,
+    invalidTimeMatches,
+  } = getSchedulingBreakdown(data)
   const diagnostics = []
+
+  if (dueNowMatches > 0) {
+    diagnostics.push({
+      key: 'due_now',
+      label: 'Due now',
+      count: dueNowMatches,
+      detail: 'These matched programs are at or past their check time and will move to the Stream Checker queue when the rule refreshes.',
+    })
+  }
+
+  if (endedMatches > 0 || alreadyCheckedMatches > 0 || missingTimeMatches > 0 || invalidTimeMatches > 0) {
+    diagnostics.push({
+      key: 'not_schedulable',
+      label: 'Matched but not scheduled',
+      count: endedMatches + alreadyCheckedMatches + missingTimeMatches + invalidTimeMatches,
+      detail: compactReasonList([
+        endedMatches > 0 ? `${endedMatches} already ended` : '',
+        alreadyCheckedMatches > 0 ? `${alreadyCheckedMatches} already checked` : '',
+        missingTimeMatches > 0 ? `${missingTimeMatches} missing start/end time` : '',
+        invalidTimeMatches > 0 ? `${invalidTimeMatches} with invalid start/end time` : '',
+      ]),
+      channels: channelsWithUnscheduledMatches,
+    })
+  }
 
   if (channelsWithoutTvg.length > 0) {
     diagnostics.push({

@@ -138,6 +138,7 @@ def test_auto_create_rule_test_schema_accepts_channel_group_binding():
 
     assert parsed.channel_ids == []
     assert parsed.channel_group_ids == [10]
+    assert parsed.minutes_before == 0
 
 
 def test_automation_profile_schema_normalizes_remove_dead_streams_flag():

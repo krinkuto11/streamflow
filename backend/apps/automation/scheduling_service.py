@@ -864,6 +864,111 @@ class SchedulingService:
         candidates = self._program_text_candidates(program)
         return candidates[0]['text'] if candidates else ''
 
+    @staticmethod
+    def _first_program_value(program: Dict[str, Any], keys: tuple) -> Any:
+        for key in keys:
+            value = program.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    @staticmethod
+    def _normalize_program_time_value(value: Any) -> Any:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if value in (None, ""):
+            return None
+        return value
+
+    @classmethod
+    def _program_start_time(cls, program: Dict[str, Any]) -> Any:
+        """Return the canonical or aliased EPG program start time."""
+        return cls._normalize_program_time_value(cls._first_program_value(program, (
+            'start_time',
+            'startTime',
+            'program_start_time',
+            'programStartTime',
+            'airing_start_time',
+            'airingStartTime',
+            'scheduled_start_time',
+            'scheduledStartTime',
+            'start',
+            'starts_at',
+            'startsAt',
+            'start_at',
+            'startAt',
+            'begin',
+            'begin_time',
+            'beginTime',
+        )))
+
+    @classmethod
+    def _program_end_time(cls, program: Dict[str, Any]) -> Any:
+        """Return the canonical or aliased EPG program end time."""
+        return cls._normalize_program_time_value(cls._first_program_value(program, (
+            'end_time',
+            'endTime',
+            'program_end_time',
+            'programEndTime',
+            'airing_end_time',
+            'airingEndTime',
+            'scheduled_end_time',
+            'scheduledEndTime',
+            'end',
+            'ends_at',
+            'endsAt',
+            'end_at',
+            'endAt',
+            'stop',
+            'stop_time',
+            'stopTime',
+            'finish',
+            'finish_time',
+            'finishTime',
+        )))
+
+    def _program_schedule_timing(
+        self,
+        program: Dict[str, Any],
+        minutes_before: int,
+        now: datetime,
+    ) -> Dict[str, Any]:
+        program_start = self._program_start_time(program)
+        program_end = self._program_end_time(program)
+
+        if not program_start or not program_end:
+            return {
+                'state': 'missing_time',
+                'program_start_time': program_start,
+                'program_end_time': program_end,
+            }
+
+        try:
+            start_dt = _parse_dt(program_start)
+            end_dt = _parse_dt(program_end)
+        except (TypeError, ValueError, AttributeError) as exc:
+            return {
+                'state': 'invalid_time',
+                'program_start_time': program_start,
+                'program_end_time': program_end,
+                'error': str(exc),
+            }
+
+        if end_dt <= now:
+            state = 'ended'
+        else:
+            check_time = start_dt - timedelta(minutes=minutes_before)
+            state = 'due_now' if check_time <= now else 'future'
+
+        return {
+            'state': state,
+            'program_start_time': program_start,
+            'program_end_time': program_end,
+            'start_dt': start_dt,
+            'end_dt': end_dt,
+            'check_time': start_dt - timedelta(minutes=minutes_before),
+        }
+
     def _program_epg_identifiers(self, program: Dict[str, Any]) -> List[str]:
         identifiers: List[str] = []
         for key in (
@@ -1220,6 +1325,7 @@ class SchedulingService:
         channel_ids: Optional[List[Any]] = None,
         channel_group_ids: Optional[List[Any]] = None,
         regex_pattern: str,
+        minutes_before: int = 0,
         force_refresh: bool = False,
     ) -> Dict[str, Any]:
         """Test an auto-create regex against every selected channel and group channel."""
@@ -1276,8 +1382,18 @@ class SchedulingService:
         channels_without_tvg: List[Dict[str, Any]] = []
         channels_without_programs: List[Dict[str, Any]] = []
         channels_without_matches: List[Dict[str, Any]] = []
+        channels_with_unscheduled_matches: List[Dict[str, Any]] = []
         channels_with_matches = set()
+        channels_with_text_matches = set()
+        total_epg_matches = 0
+        future_matches = 0
+        due_now_matches = 0
+        ended_matches = 0
+        already_checked_matches = 0
+        missing_time_matches = 0
+        invalid_time_matches = 0
         all_programs = self._fetch_and_cache_all_programs(force_refresh=force_refresh)
+        now = datetime.now(timezone.utc)
 
         for channel_info in channels_info:
             channel_id = channel_info['id']
@@ -1304,6 +1420,7 @@ class SchedulingService:
                 continue
 
             channel_matches = []
+            unscheduled_reasons = defaultdict(int)
             sample_titles = []
             sample_fields = []
             for program in channel_programs:
@@ -1317,13 +1434,49 @@ class SchedulingService:
                     })
                 match = self._program_regex_match(program, pattern)
                 if match:
+                    channels_with_text_matches.add(channel_id)
+                    total_epg_matches += 1
+                    title = self._program_event_title(program, match)
+                    timing = self._program_schedule_timing(program, minutes_before, now)
+                    timing_state = timing['state']
+                    if timing_state == 'missing_time':
+                        missing_time_matches += 1
+                        unscheduled_reasons['missing_time'] += 1
+                        continue
+                    if timing_state == 'invalid_time':
+                        invalid_time_matches += 1
+                        unscheduled_reasons['invalid_time'] += 1
+                        continue
+                    if timing_state == 'ended':
+                        ended_matches += 1
+                        unscheduled_reasons['ended'] += 1
+                        continue
+                    if self._is_event_executed(channel_id, timing.get('program_start_time')):
+                        already_checked_matches += 1
+                        unscheduled_reasons['already_checked'] += 1
+                        continue
+                    if timing_state == 'due_now':
+                        due_now_matches += 1
+                    else:
+                        future_matches += 1
                     enriched_match = dict(program)
                     enriched_match['_auto_create_matched_field'] = match['field']
                     enriched_match['_auto_create_matched_text'] = match['text']
+                    enriched_match['title'] = title
+                    enriched_match['start_time'] = timing.get('program_start_time')
+                    enriched_match['end_time'] = timing.get('program_end_time')
+                    enriched_match['schedule_state'] = timing_state
                     channel_matches.append(enriched_match)
 
             if channel_matches:
                 channels_with_matches.add(channel_id)
+            elif channel_id in channels_with_text_matches:
+                channels_with_unscheduled_matches.append({
+                    **channel_info,
+                    'program_count': len(channel_programs),
+                    'sample_titles': sample_titles,
+                    'unscheduled_reasons': dict(unscheduled_reasons),
+                })
             else:
                 channels_without_matches.append({
                     **channel_info,
@@ -1353,14 +1506,25 @@ class SchedulingService:
             len(channels_info),
         )
 
+        schedulable_matches = len(matching_programs)
         return {
-            'matches': len(matching_programs),
+            'matches': schedulable_matches,
+            'total_epg_matches': total_epg_matches,
+            'schedulable_matches': schedulable_matches,
+            'future_matches': future_matches,
+            'due_now_matches': due_now_matches,
+            'ended_matches': ended_matches,
+            'already_checked_matches': already_checked_matches,
+            'missing_time_matches': missing_time_matches,
+            'invalid_time_matches': invalid_time_matches,
             'programs': matching_programs,
             'channels_tested': len(channels_info),
             'channels_with_matches': len(channels_with_matches),
+            'channels_with_text_matches': len(channels_with_text_matches),
             'channels_without_tvg': channels_without_tvg,
             'channels_without_programs': channels_without_programs,
             'channels_without_matches': channels_without_matches,
+            'channels_with_unscheduled_matches': channels_with_unscheduled_matches,
             'channel_groups_info': channel_groups_info,
             'no_tvg_id': len(channels_without_tvg) == len(channels_info),
         }
@@ -1399,6 +1563,13 @@ class SchedulingService:
             created_count = 0
             updated_count = 0
             skipped_count = 0
+            matched_count = 0
+            future_match_count = 0
+            due_now_match_count = 0
+            ended_match_count = 0
+            already_checked_count = 0
+            missing_time_count = 0
+            invalid_time_count = 0
 
             udi = get_udi_manager()
             programs_by_epg_key: Dict[tuple, List] = {}
@@ -1498,27 +1669,38 @@ class SchedulingService:
                         if not match:
                             continue
                         title = self._program_event_title(program, match)
+                        matched_count += 1
 
-                        program_start = program.get('start_time')
-                        program_end = program.get('end_time')
-                        if not program_start or not program_end:
+                        timing = self._program_schedule_timing(program, minutes_before, now)
+                        timing_state = timing['state']
+                        if timing_state == 'missing_time':
+                            missing_time_count += 1
+                            continue
+                        if timing_state == 'invalid_time':
+                            invalid_time_count += 1
+                            logger.warning(
+                                "Invalid program times for '%s': %s",
+                                title,
+                                timing.get('error', 'unknown parse error'),
+                            )
+                            continue
+                        if timing_state == 'ended':
+                            ended_match_count += 1
                             continue
 
-                        try:
-                            start_dt = _parse_dt(program_start)
-                            end_dt = _parse_dt(program_end)
-                        except (ValueError, AttributeError) as e:
-                            logger.warning(f"Invalid program times for '{title}': {e}")
-                            continue
-
-                        if end_dt <= now:
-                            continue
-
+                        program_start = timing['program_start_time']
+                        program_end = timing['program_end_time']
                         if self._is_event_executed(channel_id, program_start):
+                            already_checked_count += 1
                             continue
 
-                        check_time = start_dt - timedelta(minutes=minutes_before)
-                        program_date = start_dt.date().isoformat()
+                        if timing_state == 'due_now':
+                            due_now_match_count += 1
+                        else:
+                            future_match_count += 1
+
+                        check_time = timing['check_time']
+                        program_date = timing['start_dt'].date().isoformat()
 
                         # Bug 5: deduplicate on (channel, rule, exact start time)
                         dedup_key = (channel_id, rule_id, program_start)
@@ -1589,9 +1771,24 @@ class SchedulingService:
 
         logger.info(
             f"Rule matching complete: {created_count} created, "
-            f"{updated_count} updated, {skipped_count} skipped"
+            f"{updated_count} updated, {skipped_count} skipped "
+            f"({matched_count} matched; {future_match_count} future, "
+            f"{due_now_match_count} due now, {ended_match_count} ended, "
+            f"{already_checked_count} already checked, "
+            f"{missing_time_count} missing time, {invalid_time_count} invalid time)"
         )
-        return {'created': created_count, 'updated': updated_count, 'skipped': skipped_count}
+        return {
+            'created': created_count,
+            'updated': updated_count,
+            'skipped': skipped_count,
+            'matched': matched_count,
+            'future_matches': future_match_count,
+            'due_now_matches': due_now_match_count,
+            'ended_matches': ended_match_count,
+            'already_checked_matches': already_checked_count,
+            'missing_time_matches': missing_time_count,
+            'invalid_time_matches': invalid_time_count,
+        }
 
     def execute_scheduled_check(self, event_id: str, stream_checker_service) -> bool:
         """Execute a scheduled channel check or create monitoring session and remove the event."""
@@ -1790,20 +1987,20 @@ class SchedulingService:
             for program in raw_programs:
                 if not isinstance(program, dict):
                     continue
-                p_start = program.get('start_time')
+                p_start = self._program_start_time(program)
                 if p_start:
                     try:
                         p_start_dt = _parse_dt(p_start)
                         if p_start_dt > end_time:
                             continue
-                    except (ValueError, AttributeError):
+                    except (TypeError, ValueError, AttributeError):
                         pass
 
                 dedup_key = (
                     program.get('id'),
                     program.get('tvg_id'),
-                    program.get('start_time'),
-                    program.get('end_time'),
+                    self._program_start_time(program),
+                    self._program_end_time(program),
                     self._program_title(program),
                 )
                 if dedup_key in seen_programs:
@@ -1811,7 +2008,7 @@ class SchedulingService:
                 seen_programs.add(dedup_key)
                 programs.append(program)
 
-        programs.sort(key=lambda p: p.get('start_time', ''))
+        programs.sort(key=lambda p: self._program_start_time(p) or '')
 
         primary_id = epg_tvg_ids[0] if epg_tvg_ids else None
         if hit_ids and primary_id and hit_ids[0] != primary_id:
@@ -1997,14 +2194,20 @@ class SchedulingService:
                 program.get('id'),
                 program.get('tvg_id'),
                 program.get('channel_uuid') or program.get('channelUuid'),
-                program.get('start_time'),
-                program.get('end_time'),
+                self._program_start_time(program),
+                self._program_end_time(program),
                 self._program_event_title(program),
             )
             if dedup_key in seen_programs:
                 continue
             seen_programs.add(dedup_key)
             enriched = dict(program)
+            start_time = self._program_start_time(enriched)
+            end_time = self._program_end_time(enriched)
+            if start_time and not enriched.get('start_time'):
+                enriched['start_time'] = start_time
+            if end_time and not enriched.get('end_time'):
+                enriched['end_time'] = end_time
             enriched.setdefault('_streamflow_epg_source', source)
             target.append(enriched)
             added += 1
@@ -2077,7 +2280,7 @@ class SchedulingService:
         end_time = datetime.now(timezone.utc) + timedelta(hours=hours_ahead)
         valid_programs = []
         for p in programs:
-            p_start = p.get('start_time')
+            p_start = self._program_start_time(p)
             if p_start:
                 try:
                     p_start_dt = datetime.fromisoformat(p_start.replace('Z', '+00:00'))
@@ -2085,7 +2288,7 @@ class SchedulingService:
                         p_start_dt = p_start_dt.replace(tzinfo=timezone.utc)
                     if p_start_dt > end_time:
                         continue
-                except (ValueError, AttributeError):
+                except (TypeError, ValueError, AttributeError):
                     pass
             valid_programs.append(p)
 

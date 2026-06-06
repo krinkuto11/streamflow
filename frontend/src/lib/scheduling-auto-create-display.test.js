@@ -58,11 +58,49 @@ describe('getAutoCreateRuleTestToast', () => {
     expect(getAutoCreateRuleTestToast({
       responseData: {
         matches: 2,
+        total_epg_matches: 2,
         channels_tested: 2,
         channels_with_matches: 2,
+        future_matches: 2,
       },
       selectedChannelCount: 2,
     })).toBeNull()
+  })
+
+  it('explains why EPG title matches do not all remain visible as scheduled events', () => {
+    expect(getAutoCreateRuleTestToast({
+      responseData: {
+        matches: 8,
+        total_epg_matches: 25,
+        channels_tested: 25,
+        channels_with_matches: 8,
+        future_matches: 6,
+        due_now_matches: 2,
+        ended_matches: 15,
+        already_checked_matches: 2,
+      },
+      selectedChannelCount: 0,
+    })).toEqual({
+      title: 'Scheduling Breakdown',
+      description: '25 EPG title matches: 6 future events, 2 due now and will move to the queue, 15 already ended, 2 already checked.',
+      variant: 'default',
+    })
+  })
+
+  it('reports title matches that cannot create scheduled events', () => {
+    expect(getAutoCreateRuleTestToast({
+      responseData: {
+        matches: 0,
+        total_epg_matches: 3,
+        ended_matches: 2,
+        missing_time_matches: 1,
+      },
+      selectedChannelCount: 3,
+    })).toEqual({
+      title: 'No Schedulable Matches',
+      description: '3 EPG title matches found, but none can create a scheduled event (2 already ended, 1 missing start/end time).',
+      variant: 'default',
+    })
   })
 
   it('treats null test data as an empty diagnostic snapshot', () => {
@@ -112,6 +150,29 @@ describe('getAutoCreateRuleTestToast', () => {
           name: 'Wrong Title',
           sample_titles: ['Pregame Baseball', 'Postgame Baseball'],
         }],
+      },
+    ])
+  })
+
+  it('builds scheduling diagnostics for due and unscheduled title matches', () => {
+    expect(getAutoCreateRuleTestDiagnostics({
+      due_now_matches: 2,
+      ended_matches: 3,
+      missing_time_matches: 1,
+      channels_with_unscheduled_matches: [{ id: 9, name: 'No Time' }],
+    })).toEqual([
+      {
+        key: 'due_now',
+        label: 'Due now',
+        count: 2,
+        detail: 'These matched programs are at or past their check time and will move to the Stream Checker queue when the rule refreshes.',
+      },
+      {
+        key: 'not_schedulable',
+        label: 'Matched but not scheduled',
+        count: 4,
+        detail: '3 already ended, 1 missing start/end time',
+        channels: [{ id: 9, name: 'No Time' }],
       },
     ])
   })
