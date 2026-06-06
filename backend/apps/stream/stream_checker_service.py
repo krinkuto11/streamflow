@@ -2715,6 +2715,7 @@ class StreamCheckerService:
                     elif analyzed.get('reason_detail') == 'viewer_preempted':
                         stream_stat['status'] = 'viewer_preempted'
                     else:
+                        stream_stat['status'] = 'completed'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
 
                     if analyzed.get('quality_reason') and analyzed.get('quality_reason') != 'none':
@@ -3687,6 +3688,7 @@ class StreamCheckerService:
                         stream_stat['status'] = 'revived'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                     else:
+                        stream_stat['status'] = 'completed'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                         if 'status' in analyzed:
                             stream_stat['analysis_status'] = analyzed.get('status')
@@ -4643,11 +4645,12 @@ class StreamCheckerService:
         if not isinstance(checked_streams, list):
             return 0
         bad_reasons = {'blank', 'freeze', 'low_quality', 'offline', 'unstable'}
+        good_statuses = {None, '', 'completed', 'revived'}
         return sum(
             1
             for stream in checked_streams
             if isinstance(stream, dict)
-            and stream.get('status') == 'completed'
+            and stream.get('status') in good_statuses
             and stream.get('blank_detected') is not True
             and stream.get('freeze_detected') is not True
             and stream.get('dead_reason') not in bad_reasons

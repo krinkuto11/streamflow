@@ -1093,6 +1093,22 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         )
         self.assertEqual(StreamCheckerService._result_good_streams_count(result), 0)
 
+    def test_result_good_count_accepts_legacy_clean_stream_stats_without_status(self):
+        result = {
+            'good_streams_count': 0,
+            'checked_streams': [
+                {'id': 1, 'resolution': '1920x1080', 'score': 95.0},
+                {'id': 2, 'status': 'completed', 'score': 90.0},
+                {'id': 3, 'status': 'revived', 'score': 88.0},
+                {'id': 4, 'status': 'blank', 'blank_detected': True},
+                {'id': 5, 'status': 'viewer_preempted'},
+                {'id': 6, 'quality_reason_detail': 'error'},
+                {'id': 7, 'status': 'completed', 'freeze_detected': True},
+            ],
+        }
+
+        self.assertEqual(StreamCheckerService._result_good_streams_count(result), 3)
+
     def test_channel_reporting_preserves_dead_stream_cause_details(self):
         source_path = (
             Path(__file__).resolve().parents[1]

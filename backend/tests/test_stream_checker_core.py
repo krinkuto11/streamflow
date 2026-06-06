@@ -154,6 +154,30 @@ class TestStreamStatsHandling(unittest.TestCase):
 
         self.assertGreaterEqual(score, 0.0)
 
+    def test_score_uses_bitrate_kbps_from_analysis_result(self):
+        """A bitrate estimated during analysis should participate in quality scoring."""
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service._is_stream_dead = Mock(return_value=(False, 'none'))
+        service.config = Mock()
+        service.config.get = Mock(side_effect=lambda key, default=None: default)
+
+        base_stream = {
+            'resolution': '1920x1080',
+            'fps': 30,
+            'video_codec': 'h264',
+        }
+
+        score_without_bitrate = service._calculate_stream_score({
+            **base_stream,
+            'bitrate_kbps': None,
+        })
+        score_with_fallback_bitrate = service._calculate_stream_score({
+            **base_stream,
+            'bitrate_kbps': 5000.0,
+        })
+
+        self.assertGreater(score_with_fallback_bitrate, score_without_bitrate)
+
 
 class TestProgressTracking(unittest.TestCase):
     """Test progress tracking and variable initialization."""
