@@ -314,7 +314,18 @@ export const getStreamCheckerRunDisplay = ({
   completed = 0,
   now = Date.now(),
 } = {}) => {
-  const isProcessing = Boolean(streamCheckerStatus?.stream_checking_mode)
+  const queue = streamCheckerStatus?.queue || {}
+  const progress = streamCheckerStatus?.progress || {}
+  const queueActive = Number(queue?.queue_size || 0) > 0
+    || Number(queue?.in_progress || 0) > 0
+    || (queue?.current_channel !== null && queue?.current_channel !== undefined)
+  const singleChannelProgressActive = Boolean(progress?.is_single_channel_check)
+  const isProcessing = Boolean(
+    streamCheckerStatus?.stream_checking_mode
+    || streamCheckerStatus?.checking
+    || queueActive
+    || singleChannelProgressActive
+  )
   const activeBatchTotal = isProcessing ? batchTotal : 0
   const qualityStageActive = runStage === 'quality_checking' && activeBatchTotal > 0
   const streamCheckerOnlyActive = isProcessing && runState !== 'running'

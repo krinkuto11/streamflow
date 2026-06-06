@@ -146,6 +146,36 @@ describe('dashboard stream checker run display', () => {
     expect(display.streamCheckerElapsedSeconds).toBe(60)
   })
 
+  it('keeps single-channel checks visible when the legacy mode flag lags behind progress', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'skipped',
+      runStage: 'skipped',
+      batchTotal: 0,
+      completed: 0,
+      now: Date.parse('2026-05-29T18:05:41Z'),
+      streamCheckerStatus: {
+        checking: false,
+        stream_checking_mode: false,
+        queue: {
+          queue_size: 0,
+          in_progress: 0,
+          current_channel: null,
+        },
+        progress: {
+          is_single_channel_check: true,
+          timestamp: '2026-05-29T18:04:41Z',
+          channel_name: 'Single Channel',
+          step: 'Starting single channel check',
+        },
+      },
+    })
+
+    expect(display.isProcessing).toBe(true)
+    expect(display.streamCheckerOnlyActive).toBe(true)
+    expect(display.streamQueueActive).toBe(false)
+    expect(display.streamCheckerElapsedSeconds).toBe(60)
+  })
+
   it('ignores completed queue history when the stream checker is idle', () => {
     const display = getStreamCheckerRunDisplay({
       runState: 'skipped',

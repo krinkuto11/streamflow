@@ -4494,13 +4494,17 @@ class StreamCheckerService:
             
         queue_status['eta_seconds'] = self._calculate_queue_eta_seconds(queue_status)
         
+        single_channel_progress_active = bool(progress and progress.get('is_single_channel_check'))
+
         # Stream checking mode is active when:
-        # - An individual channel is being checked, OR
+        # - An individual channel is being checked or preparing to be checked, OR
         # - There are channels in the queue waiting to be checked
         stream_checking_mode = (
             self.checking or 
             queue_status.get('queue_size', 0) > 0 or
             queue_status.get('in_progress', 0) > 0 or
+            queue_status.get('current_channel') is not None or
+            single_channel_progress_active or
             sync_state.get('active', False)
         )
 
@@ -5061,6 +5065,7 @@ class StreamCheckerService:
                     # as the dashboard and managed-event preflight from treating
                     # viewer/provider protection as an internal error.
                     skip_reason = limit_check_result.get('skip_reason', 'limits reached')
+                    self.progress.clear()
                     return {
                         'success': True,
                         'skipped': True,
@@ -5243,6 +5248,7 @@ class StreamCheckerService:
                         channel_name=channel_name,
                     )
                     if failed_connectivity is not None:
+                        self.progress.clear()
                         return self._connectivity_abort_payload(
                             failed_connectivity,
                             channel_id=channel_id,
@@ -5288,6 +5294,7 @@ class StreamCheckerService:
                         channel_name=channel_name,
                     )
                     if failed_connectivity is not None:
+                        self.progress.clear()
                         return self._connectivity_abort_payload(
                             failed_connectivity,
                             channel_id=channel_id,

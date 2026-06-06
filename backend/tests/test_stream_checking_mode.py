@@ -60,6 +60,28 @@ class TestStreamCheckingMode(unittest.TestCase):
             # stream_checking_mode should be False again
             status = service.get_status()
             self.assertFalse(status['stream_checking_mode'])
+
+    def test_single_channel_progress_keeps_stream_checking_mode_active(self):
+        """Single-channel preparation progress must remain visible before stream probing starts."""
+        with patch('stream_checker_service.CONFIG_DIR', Path(self.temp_dir)):
+            service = StreamCheckerService()
+
+            service.progress.update(
+                channel_id=123,
+                channel_name='Single Channel',
+                current=0,
+                total=1,
+                status='starting',
+                step='Starting single channel check',
+                is_single_channel_check=True,
+            )
+
+            status = service.get_status()
+
+            self.assertFalse(service.checking)
+            self.assertTrue(status['stream_checking_mode'])
+            self.assertEqual(status['progress']['channel_id'], 123)
+            self.assertTrue(status['progress']['is_single_channel_check'])
     
     def test_stream_checking_mode_with_queue(self):
         """Test that stream_checking_mode is True when queue has channels."""
