@@ -792,12 +792,12 @@ export default function TeamarrPreflight() {
               </div>
               <div className="flex items-center justify-between rounded-md border border-border p-4">
                 <div>
-                  <Label className="text-base">Busy Handling</Label>
-                  <p className="text-sm text-muted-foreground">Defers during automation; queues Stream Checker conflicts so events still get checked</p>
+                  <Label className="text-base">Wait For Active Checks</Label>
+                  <p className="text-sm text-muted-foreground">On waits for automation or Stream Checker work to finish; off queues due events between checks</p>
                 </div>
                 <Switch
-                  checked={Boolean(editedConfig.skip_during_quality_check)}
-                  onCheckedChange={(value) => updateConfigValue('skip_during_quality_check', value)}
+                  checked={Boolean(editedConfig.defer_during_active_checks ?? editedConfig.skip_during_quality_check)}
+                  onCheckedChange={(value) => updateConfigValue('defer_during_active_checks', value)}
                 />
               </div>
               <div className="flex items-center justify-between gap-4 rounded-md border border-border p-4">
@@ -968,8 +968,8 @@ export default function TeamarrPreflight() {
                 <AccordionContent>
                   <div className="grid gap-3 pb-3 text-sm text-muted-foreground md:grid-cols-2 xl:grid-cols-4">
                     <div>
-                      <p className="font-medium text-foreground">Busy Handling</p>
-                      <p>Automation phases defer event checks; Stream Checker conflicts enter the server-side priority queue and continue after the current channel.</p>
+                      <p className="font-medium text-foreground">Wait For Active Checks</p>
+                      <p>When on, event checks wait until automation or Stream Checker work is idle. When off, due events enter the server-side priority queue between channels.</p>
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Timing Fields</p>

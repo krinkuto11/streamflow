@@ -383,6 +383,23 @@ class StreamCheckerService:
             or metadata.get('source') in SPECIALIZED_QUEUE_SOURCES
         )
 
+    @staticmethod
+    def _should_isolate_teamarr_connectivity_abort(
+        queue_metadata: Dict[str, Any],
+        result: Any,
+        abort_was_set: bool,
+    ) -> bool:
+        if abort_was_set:
+            return False
+        if not isinstance(queue_metadata, dict) or queue_metadata.get('source') != 'teamarr_preflight':
+            return False
+        if not isinstance(result, dict) or not result.get('aborted'):
+            return False
+        for key in ('skip_reason', 'error', 'reason', 'quality_reason_detail'):
+            if str(result.get(key) or '').lower() == 'connectivity_guard':
+                return True
+        return False
+
     def _sync_batch_active(self) -> bool:
         try:
             with self.lock:
@@ -441,6 +458,7 @@ class StreamCheckerService:
         if queue_metadata.get('provider_limit_override'):
             single_check_kwargs['provider_limit_override'] = True
 
+        abort_was_set = self.abort_current_check.is_set()
         result = self.check_single_channel(
             channel_id,
             **single_check_kwargs,
@@ -459,6 +477,15 @@ class StreamCheckerService:
                     channel_id,
                     exc,
                 )
+        if self._should_isolate_teamarr_connectivity_abort(queue_metadata, result, abort_was_set):
+            logger.info(
+                "Isolating Teamarr queued connectivity abort from synchronous batch "
+                "channel_id=%s source=%s",
+                channel_id,
+                queue_metadata.get('source'),
+            )
+            self.abort_current_check.clear()
+            self._cancel_queueing = False
         if isinstance(result, dict) and result.get('success') is False:
             self.check_queue.mark_failed(
                 channel_id,
@@ -1049,6 +1076,7 @@ class StreamCheckerService:
             "channel_layout": stream_data.get("channel_layout"),
             "audio_bitrate": stream_data.get("audio_bitrate"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
+            "bitrate_source": stream_data.get("bitrate_source"),
             "quality_score": stream_data.get("score"),
             "quality_reason": stream_data.get("quality_reason"),
             "quality_reason_detail": stream_data.get("quality_reason_detail"),
@@ -1166,6 +1194,7 @@ class StreamCheckerService:
             "channel_layout": stream_data.get("channel_layout"),
             "audio_bitrate": stream_data.get("audio_bitrate"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
+            "bitrate_source": stream_data.get("bitrate_source"),
             "quality_score": stream_data.get("score"),
             "quality_reason": stream_data.get("quality_reason"),
             "quality_reason_detail": stream_data.get("quality_reason_detail"),

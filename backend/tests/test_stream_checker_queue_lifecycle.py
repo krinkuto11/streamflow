@@ -1012,6 +1012,65 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(service.check_queue.get_status()["queue_size"], 0)
         self.assertFalse(service.check_queue.get_status()["paused"])
 
+    def test_sync_batch_isolates_teamarr_connectivity_abort_from_main_batch(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service._cancel_queueing = False
+        service.update_tracker = Mock()
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: True if key == 'concurrent_streams.enabled' else default
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel_concurrent = Mock(side_effect=lambda channel_id, **_kwargs: {
+            "success": True,
+            "channel_name": f"Batch {channel_id}",
+        })
+
+        def teamarr_connectivity_abort(channel_id, **_kwargs):
+            service.abort_current_check.set()
+            service._cancel_queueing = True
+            return {
+                "success": False,
+                "aborted": True,
+                "error": "connectivity_guard",
+                "skip_reason": "connectivity_guard",
+                "channel_id": channel_id,
+            }
+
+        service.check_single_channel = Mock(side_effect=teamarr_connectivity_abort)
+        self.assertTrue(service.check_queue.add_channel(
+            501,
+            priority=100,
+            stream_count=1,
+            metadata={
+                "source": "teamarr_preflight",
+                "program_name": "Teamarr Event",
+                "is_epg_scheduled": True,
+                "forced_profile_id": "42",
+            },
+        ))
+
+        udi = Mock()
+        udi.get_channel_by_id.side_effect = lambda channel_id: {'streams': [{'id': f'{channel_id}-a'}]}
+        teamarr_service = Mock()
+
+        with patch('apps.udi.get_udi_manager', return_value=udi), patch(
+            'apps.stream.teamarr_preflight_service.get_teamarr_preflight_service',
+            return_value=teamarr_service,
+        ):
+            result = service.check_channels_synchronously([101, 102])
+
+        self.assertEqual(list(result.keys()), [101, 102])
+        self.assertEqual(service._check_channel_concurrent.call_count, 2)
+        teamarr_service.record_queued_check_result.assert_called_once()
+        self.assertEqual(service.check_queue.get_status()["queue_size"], 0)
+        self.assertFalse(service.abort_current_check.is_set())
+        self.assertFalse(service._cancel_queueing)
+
     def test_result_count_uses_checked_streams_when_summary_count_is_stale_zero(self):
         result = {
             'good_streams_count': 0,

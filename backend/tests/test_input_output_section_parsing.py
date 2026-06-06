@@ -57,6 +57,8 @@ Statistics: 18750000 bytes read
                         "Should extract 'h264' from Input section, NOT 'wrapped_avframe' from Output section")
         self.assertEqual(result['resolution'], '1920x1080', "Should extract resolution from Input section")
         self.assertEqual(result['fps'], 25.0, "Should extract FPS from Input section")
+        self.assertAlmostEqual(result['bitrate_kbps'], 5000.0, places=1)
+        self.assertEqual(result['bitrate_source'], 'ffmpeg_bytes_read_fallback')
     
     @patch('stream_check_utils.subprocess.run')
     def test_ac3_audio_codec_not_pcm(self, mock_run):

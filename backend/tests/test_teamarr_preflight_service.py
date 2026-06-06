@@ -216,11 +216,16 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(normalize_config({"post_start_offsets_minutes": 2})["post_start_offsets_minutes"], [2])
         self.assertFalse(normalize_config({})["provider_limit_override"])
         self.assertTrue(normalize_config({"provider_limit_override": True})["provider_limit_override"])
+        self.assertFalse(normalize_config({})["defer_during_active_checks"])
+        self.assertFalse(normalize_config({"skip_during_quality_check": True})["defer_during_active_checks"])
+        self.assertTrue(normalize_config({"defer_during_active_checks": True})["defer_during_active_checks"])
 
         service, _, _ = self.make_service([])
         public_config = service.get_config()
         self.assertTrue(public_config["has_api_key"])
         self.assertEqual(public_config["api_key"], "")
+        self.assertFalse(public_config["defer_during_active_checks"])
+        self.assertFalse(public_config["skip_during_quality_check"])
 
     def test_default_profile_is_created_and_selected_for_preflight(self):
         automation_config = FakeAutomationConfig()
@@ -533,6 +538,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             checker=checker,
             automation_status={"active": True, "stage": "stream_matching"},
         )
+        service.update_config({"defer_during_active_checks": True})
 
         result = service.run_once(force=True)
         self.assertTrue(result["success"])
@@ -556,6 +562,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
                 "run_status": {"active": True, "state": "running", "stage": "quality_checking"},
             },
         )
+        service.update_config({"defer_during_active_checks": True})
 
         result = service.run_once(force=True)
 

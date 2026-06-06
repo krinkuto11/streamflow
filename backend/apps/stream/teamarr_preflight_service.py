@@ -120,7 +120,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "post_start_grace_minutes": 5,
     "max_concurrent_checks": 1,
     "event_cooldown_minutes": 720,
-    "skip_during_quality_check": True,
+    "defer_during_active_checks": False,
     "provider_limit_override": False,
     "forced_profile_id": "",
     "include_sports": [],
@@ -128,6 +128,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "include_leagues": [],
     "exclude_leagues": [],
 }
+LEGACY_CONFIG_KEYS = {"skip_during_quality_check"}
 CONFIG_KEYS = set(DEFAULT_CONFIG)
 
 INT_BOUNDS = {
@@ -179,7 +180,7 @@ def _normalize_minute_offsets(value: Any, *, min_value: int = 1, max_value: int 
 def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
     if current:
-        config.update({key: value for key, value in current.items() if key in CONFIG_KEYS})
+        config.update({key: value for key, value in current.items() if key in DEFAULT_CONFIG})
     if payload:
         config.update({key: value for key, value in payload.items() if key in CONFIG_KEYS})
 
@@ -187,7 +188,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
         config[key] = _coerce_int(config.get(key), DEFAULT_CONFIG[key], bounds)
 
     config["enabled"] = bool(config.get("enabled"))
-    config["skip_during_quality_check"] = bool(config.get("skip_during_quality_check"))
+    config["defer_during_active_checks"] = bool(config.get("defer_during_active_checks"))
     config["provider_limit_override"] = bool(config.get("provider_limit_override"))
     config["teamarr_base_url"] = str(config.get("teamarr_base_url") or "").strip().rstrip("/")
     config["api_key"] = str(config.get("api_key") or "").strip()
@@ -208,6 +209,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
 
 def public_config(config: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     visible = dict(config)
+    visible["skip_during_quality_check"] = bool(visible.get("defer_during_active_checks"))
     visible["has_api_key"] = bool(visible.get("api_key"))
     visible["api_key"] = ""
     if metadata:
@@ -308,7 +310,14 @@ class TeamarrPreflightService:
         try:
             if self.config_file.exists():
                 with open(self.config_file, "r", encoding="utf-8") as handle:
-                    return normalize_config(json.load(handle))
+                    raw_config = json.load(handle)
+                config = normalize_config(raw_config)
+                if any(key in raw_config for key in LEGACY_CONFIG_KEYS):
+                    self.config_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(self.config_file, "w", encoding="utf-8") as handle:
+                        json.dump(config, handle, indent=2, sort_keys=True)
+                        handle.write("\n")
+                return config
         except Exception as exc:
             logger.warning(f"Failed to load Teamarr preflight config: {exc}")
         return normalize_config({})
@@ -378,6 +387,8 @@ class TeamarrPreflightService:
     def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
             payload = dict(payload or {})
+            if "defer_during_active_checks" not in payload and "skip_during_quality_check" in payload:
+                payload["defer_during_active_checks"] = payload.get("skip_during_quality_check")
             current = dict(self._config)
             if payload.get("clear_api_key"):
                 current["api_key"] = ""
@@ -1118,8 +1129,13 @@ class TeamarrPreflightService:
         if not channel_id:
             self._record_event("no_dispatcharr_channel", event, {})
             return False
-        if self._automation_active(config):
-            self._record_event("deferred_automation_active", event, {"bucket": event.get("trigger_bucket")})
+        defer_reason = self._active_work_defer_reason(config)
+        if defer_reason:
+            self._record_event(
+                "deferred_automation_active" if defer_reason == "automation_active" else "deferred_stream_checker_active",
+                event,
+                {"bucket": event.get("trigger_bucket"), "reason": defer_reason},
+            )
             return False
         if not self._channel_has_streams(channel_id):
             self._mark_attempted(event)
@@ -1350,9 +1366,16 @@ class TeamarrPreflightService:
         with self._lock:
             return self._default_profile_id or None
 
-    def _automation_active(self, config: Dict[str, Any]) -> bool:
-        if not config.get("skip_during_quality_check", True):
-            return False
+    def _active_work_defer_reason(self, config: Dict[str, Any]) -> Optional[str]:
+        if not config.get("defer_during_active_checks", False):
+            return None
+        if self._automation_active():
+            return "automation_active"
+        if self._stream_checker_active():
+            return "stream_checker_active"
+        return None
+
+    def _automation_active(self) -> bool:
         try:
             automation_status = self.automation_status_provider() or {}
         except Exception as exc:

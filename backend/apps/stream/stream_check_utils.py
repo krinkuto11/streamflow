@@ -15,13 +15,15 @@ system and provides a clean, maintainable API for stream quality analysis.
 
 Bitrate detection
 -----------------
-Bitrate is read exclusively from ffmpeg's built-in progress/stats line:
+Bitrate is read first from ffmpeg's built-in progress/stats line:
 
     frame= 1234 fps= 30 q=28.0 size=2048kB time=00:00:41.33 bitrate= 406.1kbits/s speed=1.02x
 
 This mirrors Dispatcharr's stream_manager._parse_ffmpeg_stats() exactly.
 The stats line is the most accurate source available — ffmpeg derives it from
 decoded frame timing, not raw byte counts.
+If that progress bitrate is N/A for a full-length probe, final ffmpeg
+bytes-read statistics are used as a conservative fallback.
 
 ffmpeg flags used
 -----------------
@@ -107,6 +109,7 @@ FREEZE_START_RE = re.compile(r'freeze_start:\s*(?P<start>-?[0-9]+(?:\.[0-9]+)?)'
 FREEZE_END_RE = re.compile(r'freeze_end:\s*(?P<end>-?[0-9]+(?:\.[0-9]+)?)')
 FREEZE_DURATION_RE = re.compile(r'freeze_duration:\s*(?P<duration>-?[0-9]+(?:\.[0-9]+)?)')
 FFMPEG_TIME_RE = re.compile(r'time=(?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+(?:\.\d+)?)')
+FFMPEG_BYTES_READ_RE = re.compile(r'Statistics:\s*(?P<bytes>\d+)\s+bytes\s+read', re.IGNORECASE)
 
 
 class StreamProbePreempted(Exception):
@@ -551,6 +554,38 @@ def _parse_ffmpeg_progress_time(line: str) -> Optional[float]:
         )
     except (TypeError, ValueError):
         return None
+
+
+def _estimate_bitrate_from_ffmpeg_bytes_read(
+    output: str,
+    *,
+    duration: int,
+    elapsed: float,
+    media_time: float = 0.0,
+) -> Optional[float]:
+    """Estimate kbps from ffmpeg byte statistics when progress bitrate is unavailable."""
+    bytes_read = 0
+    for match in FFMPEG_BYTES_READ_RE.finditer(output or ''):
+        try:
+            bytes_read += int(match.group('bytes'))
+        except (TypeError, ValueError):
+            continue
+
+    if bytes_read <= 0:
+        return None
+
+    expected_min_time = max(0.0, float(duration or 0) * EARLY_EXIT_THRESHOLD)
+    usable_seconds = max(float(media_time or 0.0), float(elapsed or 0.0))
+    if usable_seconds < expected_min_time:
+        return None
+
+    if usable_seconds <= 0:
+        return None
+
+    bitrate_kbps = (bytes_read * 8.0) / usable_seconds / 1000.0
+    if bitrate_kbps <= MIN_VALID_PROGRESS_BITRATE:
+        return None
+    return bitrate_kbps
 
 
 def _parse_blank_detection(
@@ -1057,7 +1092,8 @@ def get_stream_info_and_bitrate(
             'blank_segments': [],
             'freeze_probe_ran': False, 'freeze_detected': False,
             'freeze_duration_secs': None, 'freeze_ratio': None,
-            'freeze_segments': []
+            'freeze_segments': [],
+            'bitrate_source': None,
         }
 
     url_lower = url.lower()
@@ -1078,7 +1114,8 @@ def get_stream_info_and_bitrate(
             'blank_segments': [],
             'freeze_probe_ran': False, 'freeze_detected': False,
             'freeze_duration_secs': None, 'freeze_ratio': None,
-            'freeze_segments': []
+            'freeze_segments': [],
+            'bitrate_source': None,
         }
 
     logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url_ref(url)}")
@@ -1175,6 +1212,7 @@ def get_stream_info_and_bitrate(
         'freeze_duration_secs': None, 'freeze_ratio': None,
         'freeze_segments': [],
         'preempted': False, 'preempt_reason': None,
+        'bitrate_source': None,
     }
 
     try:
@@ -1219,12 +1257,16 @@ def get_stream_info_and_bitrate(
                 )
         progress_bitrate = None
         last_stats_line = None  # keeps updating; final line is the most stable average
+        last_media_time = 0.0
 
         # Track Input vs Output sections so we only parse input stream codecs,
         # not decoded output formats (e.g. pcm_s16le instead of aac)
         in_input_section = False
 
         for line in output.splitlines():
+            progress_time = _parse_ffmpeg_progress_time(line)
+            if progress_time is not None:
+                last_media_time = max(last_media_time, progress_time)
 
             # ── Section tracking ─────────────────────────────────────────────
             if 'Input #' in line:
@@ -1390,6 +1432,7 @@ def get_stream_info_and_bitrate(
         # ── Post-loop: commit final (most stable) bitrate reading ─────────────
         if progress_bitrate is not None:
             result_data['bitrate_kbps'] = progress_bitrate
+            result_data['bitrate_source'] = 'ffmpeg_progress'
             if last_stats_line:
                 logger.debug(
                     f"  [ffmpeg final] {last_stats_line} "
@@ -1399,6 +1442,20 @@ def get_stream_info_and_bitrate(
         # ── Warn clearly when no stats line was produced ──────────────────────
         expected_min_time = duration * EARLY_EXIT_THRESHOLD
         exited_early = elapsed < expected_min_time
+        if result_data['bitrate_kbps'] is None:
+            bytes_fallback_bitrate = _estimate_bitrate_from_ffmpeg_bytes_read(
+                output,
+                duration=duration,
+                elapsed=elapsed,
+                media_time=last_media_time,
+            )
+            if bytes_fallback_bitrate is not None and result.returncode == 0:
+                result_data['bitrate_kbps'] = bytes_fallback_bitrate
+                result_data['bitrate_source'] = 'ffmpeg_bytes_read_fallback'
+                logger.info(
+                    "  [ffmpeg fallback] Estimated bitrate from bytes read: "
+                    f"{bytes_fallback_bitrate:.2f} kbps"
+                )
 
         if result_data['bitrate_kbps'] is None:
             logger.warning(
@@ -1516,8 +1573,12 @@ def get_stream_bitrate(
         output = result.stderr
         progress_bitrate = None
         last_stats_line = None
+        last_media_time = 0.0
 
         for line in output.splitlines():
+            progress_time = _parse_ffmpeg_progress_time(line)
+            if progress_time is not None:
+                last_media_time = max(last_media_time, progress_time)
             if 'bitrate=' in line and 'bits/s' in line:
                 logger.debug(f"  [ffmpeg stats] {line.strip()}")
                 last_stats_line = line.strip()
@@ -1550,6 +1611,19 @@ def get_stream_bitrate(
 
         expected_min_time = duration * EARLY_EXIT_THRESHOLD
         exited_early = elapsed < expected_min_time
+        if bitrate is None:
+            bytes_fallback_bitrate = _estimate_bitrate_from_ffmpeg_bytes_read(
+                output,
+                duration=duration,
+                elapsed=elapsed,
+                media_time=last_media_time,
+            )
+            if bytes_fallback_bitrate is not None and result.returncode == 0:
+                bitrate = bytes_fallback_bitrate
+                logger.info(
+                    "  [ffmpeg fallback] Estimated bitrate from bytes read: "
+                    f"{bytes_fallback_bitrate:.2f} kbps"
+                )
 
         if bitrate is None:
             logger.warning(
@@ -1998,6 +2072,7 @@ def analyze_stream(
                     'resolution': result_data['resolution'],
                     'fps': result_data['fps'],
                     'bitrate_kbps': result_data['bitrate_kbps'],
+                    'bitrate_source': result_data.get('bitrate_source'),
                     'hdr_format': result_data['hdr_format'],
                     'pixel_format': result_data['pixel_format'],
                     'audio_sample_rate': result_data['audio_sample_rate'],
