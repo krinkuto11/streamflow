@@ -120,7 +120,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "post_start_grace_minutes": 5,
     "max_concurrent_checks": 1,
     "event_cooldown_minutes": 720,
-    "defer_during_active_checks": False,
+    "queue_during_active_checks": True,
     "provider_limit_override": False,
     "forced_profile_id": "",
     "include_sports": [],
@@ -128,7 +128,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "include_leagues": [],
     "exclude_leagues": [],
 }
-LEGACY_CONFIG_KEYS = {"skip_during_quality_check"}
+LEGACY_CONFIG_KEYS = {"defer_during_active_checks", "skip_during_quality_check"}
 CONFIG_KEYS = set(DEFAULT_CONFIG)
 
 INT_BOUNDS = {
@@ -177,18 +177,36 @@ def _normalize_minute_offsets(value: Any, *, min_value: int = 1, max_value: int 
     return sorted(set(offsets), reverse=reverse)
 
 
+def _legacy_queue_during_active_checks(payload: Optional[Dict[str, Any]]) -> Optional[bool]:
+    if not isinstance(payload, dict):
+        return None
+    if "queue_during_active_checks" in payload:
+        return bool(payload.get("queue_during_active_checks"))
+    if "defer_during_active_checks" in payload:
+        return not bool(payload.get("defer_during_active_checks"))
+    if "skip_during_quality_check" in payload:
+        return not bool(payload.get("skip_during_quality_check"))
+    return None
+
+
 def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
     if current:
         config.update({key: value for key, value in current.items() if key in DEFAULT_CONFIG})
+        legacy_queue_setting = _legacy_queue_during_active_checks(current)
+        if legacy_queue_setting is not None:
+            config["queue_during_active_checks"] = legacy_queue_setting
     if payload:
         config.update({key: value for key, value in payload.items() if key in CONFIG_KEYS})
+        legacy_queue_setting = _legacy_queue_during_active_checks(payload)
+        if legacy_queue_setting is not None:
+            config["queue_during_active_checks"] = legacy_queue_setting
 
     for key, bounds in INT_BOUNDS.items():
         config[key] = _coerce_int(config.get(key), DEFAULT_CONFIG[key], bounds)
 
     config["enabled"] = bool(config.get("enabled"))
-    config["defer_during_active_checks"] = bool(config.get("defer_during_active_checks"))
+    config["queue_during_active_checks"] = bool(config.get("queue_during_active_checks"))
     config["provider_limit_override"] = bool(config.get("provider_limit_override"))
     config["teamarr_base_url"] = str(config.get("teamarr_base_url") or "").strip().rstrip("/")
     config["api_key"] = str(config.get("api_key") or "").strip()
@@ -209,7 +227,8 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
 
 def public_config(config: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     visible = dict(config)
-    visible["skip_during_quality_check"] = bool(visible.get("defer_during_active_checks"))
+    visible["defer_during_active_checks"] = not bool(visible.get("queue_during_active_checks", True))
+    visible["skip_during_quality_check"] = not bool(visible.get("queue_during_active_checks", True))
     visible["has_api_key"] = bool(visible.get("api_key"))
     visible["api_key"] = ""
     if metadata:
@@ -387,8 +406,10 @@ class TeamarrPreflightService:
     def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
             payload = dict(payload or {})
-            if "defer_during_active_checks" not in payload and "skip_during_quality_check" in payload:
-                payload["defer_during_active_checks"] = payload.get("skip_during_quality_check")
+            if "queue_during_active_checks" not in payload:
+                legacy_queue_setting = _legacy_queue_during_active_checks(payload)
+                if legacy_queue_setting is not None:
+                    payload["queue_during_active_checks"] = legacy_queue_setting
             current = dict(self._config)
             if payload.get("clear_api_key"):
                 current["api_key"] = ""
@@ -1367,7 +1388,7 @@ class TeamarrPreflightService:
             return self._default_profile_id or None
 
     def _active_work_defer_reason(self, config: Dict[str, Any]) -> Optional[str]:
-        if not config.get("defer_during_active_checks", False):
+        if config.get("queue_during_active_checks", True):
             return None
         if self._automation_active():
             return "automation_active"

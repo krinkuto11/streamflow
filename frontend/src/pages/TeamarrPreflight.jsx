@@ -792,12 +792,12 @@ export default function TeamarrPreflight() {
               </div>
               <div className="flex items-center justify-between rounded-md border border-border p-4">
                 <div>
-                  <Label className="text-base">Wait For Active Checks</Label>
-                  <p className="text-sm text-muted-foreground">On waits for automation or Stream Checker work to finish; off queues due events between checks</p>
+                  <Label className="text-base">Queue Events During Active Checks</Label>
+                  <p className="text-sm text-muted-foreground">On queues due Teamarr event checks during Automation or Stream Checker runs; off waits and does not queue new event checks until active work is done</p>
                 </div>
                 <Switch
-                  checked={Boolean(editedConfig.defer_during_active_checks ?? editedConfig.skip_during_quality_check)}
-                  onCheckedChange={(value) => updateConfigValue('defer_during_active_checks', value)}
+                  checked={Boolean(editedConfig.queue_during_active_checks ?? !(editedConfig.defer_during_active_checks ?? editedConfig.skip_during_quality_check))}
+                  onCheckedChange={(value) => updateConfigValue('queue_during_active_checks', value)}
                 />
               </div>
               <div className="flex items-center justify-between gap-4 rounded-md border border-border p-4">
@@ -968,8 +968,8 @@ export default function TeamarrPreflight() {
                 <AccordionContent>
                   <div className="grid gap-3 pb-3 text-sm text-muted-foreground md:grid-cols-2 xl:grid-cols-4">
                     <div>
-                      <p className="font-medium text-foreground">Wait For Active Checks</p>
-                      <p>When on, event checks wait until automation or Stream Checker work is idle. When off, due events enter the server-side priority queue between channels.</p>
+                      <p className="font-medium text-foreground">Queue Events During Active Checks</p>
+                      <p>When on, due Teamarr event checks enter the server-side priority queue during Automation or Stream Checker runs. When off, new event checks are not queued until active work is done.</p>
                     </div>
                     <div>
                       <p className="font-medium text-foreground">Timing Fields</p>
