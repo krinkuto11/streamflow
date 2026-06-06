@@ -156,7 +156,9 @@ class UDIManager:
         self._automation_busy_since: Optional[datetime] = None
         # If busy flag is not cleared within this window (e.g. due to a crash),
         # is_automation_busy() auto-clears it to prevent permanent deadlock.
-        self._automation_busy_timeout_seconds: int = 3600
+        # Full quality runs can legitimately take several hours on large
+        # channel sets, so this must be longer than a normal overnight run.
+        self._automation_busy_timeout_seconds: int = 24 * 60 * 60
 
         # Last run timestamp for the scheduled UDI refresh worker.
         # In-memory only — resets on restart, which is correct behaviour.
