@@ -214,8 +214,6 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(normalize_config({})["post_start_offsets_minutes"], [2, 4])
         self.assertEqual(normalize_config({"retry_offsets_minutes": "3"})["retry_offsets_minutes"], [3])
         self.assertEqual(normalize_config({"post_start_offsets_minutes": 2})["post_start_offsets_minutes"], [2])
-        self.assertFalse(normalize_config({})["provider_limit_override"])
-        self.assertTrue(normalize_config({"provider_limit_override": True})["provider_limit_override"])
         self.assertTrue(normalize_config({})["queue_during_active_checks"])
         self.assertFalse(normalize_config({"skip_during_quality_check": True})["queue_during_active_checks"])
         self.assertFalse(normalize_config({"defer_during_active_checks": True})["queue_during_active_checks"])
@@ -445,6 +443,25 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             "timestamp": "2026-05-28T22:25:00+00:00",
         })
 
+    def test_managed_events_sort_current_and_upcoming_before_past(self):
+        checker = FakeChecker()
+        events = [
+            make_event(id=1, event_id="past", event_name="Past Match", event_date="2026-05-28T19:00:00+00:00"),
+            make_event(id=2, event_id="future", event_name="Future Match", event_date="2026-05-28T22:45:00+00:00"),
+            make_event(id=3, event_id="due", event_name="Due Match", event_date="2026-05-28T22:10:00+00:00"),
+        ]
+        service, _, _ = self.make_service(events, checker=checker)
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual([event["event_name"] for event in upcoming], [
+            "Due Match",
+            "Future Match",
+            "Past Match",
+        ])
+
     def test_post_start_offset_launches_after_game_start(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(
@@ -640,35 +657,6 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(status["queued_checks"][0]["priority"], TEAMARR_PREFLIGHT_QUEUE_PRIORITY)
         self.assertEqual(status["queue_active_checks_count"], 1)
         self.assertEqual(status["queue_active_checks"][0]["event_name"], "Running Match")
-
-    def test_provider_limit_override_is_queued_only_when_enabled(self):
-        checker = BusyChecker()
-        service, _, _ = self.make_service([make_event()], checker=checker)
-        service.update_config({"provider_limit_override": True})
-
-        result = service.run_once(force=True)
-
-        self.assertTrue(result["success"])
-        self.assertEqual(len(checker.queued), 1)
-        _, kwargs = checker.queued[0]
-        self.assertTrue(kwargs["metadata"]["provider_limit_override"])
-
-    def test_provider_limit_override_is_passed_to_direct_check(self):
-        checker = FakeChecker()
-        service, _, _ = self.make_service([make_event()], checker=checker)
-        service.update_config({"provider_limit_override": True})
-
-        result = service.run_once(force=True)
-        self.assertTrue(result["success"])
-
-        deadline = time.time() + 2
-        while time.time() < deadline and not checker.calls:
-            time.sleep(0.01)
-
-        self.assertEqual(len(checker.calls), 1)
-        _, kwargs = checker.calls[0]
-        self.assertTrue(kwargs["provider_limit_override"])
-        self.assertTrue(kwargs["force_check"])
 
     def test_direct_check_gates_specialized_queue_until_finished(self):
         checker = FakeChecker()

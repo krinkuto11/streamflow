@@ -13,7 +13,12 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { useToast } from '@/hooks/use-toast.js'
 import { teamarrPreflightAPI, automationAPI } from '@/services/api.js'
 import { collectTeamarrFilterOptions, parseFilterCsv, toggleFilterCsvTerm } from '@/lib/teamarr-preflight-filters.js'
-import { filterTeamarrEventsBySearch } from '@/lib/teamarr-preflight-event-search.js'
+import {
+  filterTeamarrEventsBySearch,
+  filterTeamarrEventsByView,
+  paginateTeamarrEvents,
+  sortTeamarrManagedEvents,
+} from '@/lib/teamarr-preflight-event-search.js'
 import { getTeamarrEventHealthAlert } from '@/lib/teamarr-preflight-event-health.js'
 import { getTeamarrAutomaticCheck, getTeamarrSchedulePreview } from '@/lib/teamarr-preflight-schedule.js'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
@@ -74,8 +79,8 @@ const stateLabels = {
 }
 
 const DEFAULT_PROFILE_SELECT_VALUE = '__teamarr_default_profile__'
-const MANAGED_EVENT_DISPLAY_LIMIT = 100
-const RECENT_EVENT_DISPLAY_LIMIT = 50
+const MANAGED_EVENT_PAGE_SIZE = 10
+const RECENT_EVENT_PAGE_SIZE = 10
 const ACTIVE_CHECK_DISPLAY_LIMIT = 20
 const DEFAULT_PREFLIGHT_STREAM_CHECKING = {
   enabled: true,
@@ -311,7 +316,9 @@ export default function TeamarrPreflight() {
   const [actionLoading, setActionLoading] = useState('')
   const [forceEvent, setForceEvent] = useState(null)
   const [eventSearch, setEventSearch] = useState('')
-  const [showAllManagedEvents, setShowAllManagedEvents] = useState(false)
+  const [managedEventView, setManagedEventView] = useState('upcoming')
+  const [managedEventPage, setManagedEventPage] = useState(1)
+  const [recentEventPage, setRecentEventPage] = useState(1)
   const { toast } = useToast()
 
   useEffect(() => {
@@ -320,6 +327,11 @@ export default function TeamarrPreflight() {
     return () => clearInterval(interval)
   }, [])
 
+  useEffect(() => {
+    setManagedEventPage(1)
+    setRecentEventPage(1)
+  }, [eventSearch, managedEventView])
+
   const upcomingEvents = status?.upcoming_events || []
   const recentEvents = status?.recent_events || []
   const activeChecks = status?.active_checks || []
@@ -327,9 +339,17 @@ export default function TeamarrPreflight() {
   const queueActiveChecks = status?.queue_active_checks || []
   const queuedChecksCount = Number(status?.queued_checks_count ?? queuedChecks.length)
   const queueActiveChecksCount = Number(status?.queue_active_checks_count ?? queueActiveChecks.length)
+  const sortedUpcomingEvents = useMemo(
+    () => sortTeamarrManagedEvents(upcomingEvents),
+    [upcomingEvents]
+  )
+  const viewFilteredUpcomingEvents = useMemo(
+    () => filterTeamarrEventsByView(sortedUpcomingEvents, managedEventView),
+    [sortedUpcomingEvents, managedEventView]
+  )
   const filteredUpcomingEvents = useMemo(
-    () => filterTeamarrEventsBySearch(upcomingEvents, eventSearch),
-    [upcomingEvents, eventSearch]
+    () => filterTeamarrEventsBySearch(viewFilteredUpcomingEvents, eventSearch),
+    [viewFilteredUpcomingEvents, eventSearch]
   )
   const filteredRecentEvents = useMemo(
     () => filterTeamarrEventsBySearch(recentEvents, eventSearch),
@@ -339,10 +359,20 @@ export default function TeamarrPreflight() {
     () => filterTeamarrEventsBySearch(activeChecks, eventSearch),
     [activeChecks, eventSearch]
   )
-  const displayedUpcomingEvents = showAllManagedEvents
-    ? filteredUpcomingEvents
-    : filteredUpcomingEvents.slice(0, MANAGED_EVENT_DISPLAY_LIMIT)
-  const displayedRecentEvents = filteredRecentEvents.slice(0, RECENT_EVENT_DISPLAY_LIMIT)
+  const managedEventPageCount = Math.max(1, Math.ceil(filteredUpcomingEvents.length / MANAGED_EVENT_PAGE_SIZE))
+  const safeManagedEventPage = Math.min(managedEventPage, managedEventPageCount)
+  const displayedUpcomingEvents = paginateTeamarrEvents(
+    filteredUpcomingEvents,
+    safeManagedEventPage,
+    MANAGED_EVENT_PAGE_SIZE,
+  )
+  const recentEventPageCount = Math.max(1, Math.ceil(filteredRecentEvents.length / RECENT_EVENT_PAGE_SIZE))
+  const safeRecentEventPage = Math.min(recentEventPage, recentEventPageCount)
+  const displayedRecentEvents = paginateTeamarrEvents(
+    filteredRecentEvents,
+    safeRecentEventPage,
+    RECENT_EVENT_PAGE_SIZE,
+  )
   const displayedActiveChecks = filteredActiveChecks.slice(0, ACTIVE_CHECK_DISPLAY_LIMIT)
   const managedCandidates = Number(status?.managed_candidates ?? upcomingEvents.length)
   const managedEventsSeen = Number(status?.managed_events_seen ?? managedCandidates)
@@ -800,16 +830,6 @@ export default function TeamarrPreflight() {
                   onCheckedChange={(value) => updateConfigValue('queue_during_active_checks', value)}
                 />
               </div>
-              <div className="flex items-center justify-between gap-4 rounded-md border border-border p-4">
-                <div>
-                  <Label className="text-base">Provider Limit Override</Label>
-                  <p className="text-sm text-muted-foreground">Advanced event checks can bypass full provider slots; active viewers still stop the check</p>
-                </div>
-                <Switch
-                  checked={Boolean(editedConfig.provider_limit_override)}
-                  onCheckedChange={(value) => updateConfigValue('provider_limit_override', value)}
-                />
-              </div>
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">
@@ -987,10 +1007,6 @@ export default function TeamarrPreflight() {
                       <p className="font-medium text-foreground">Manual Checks</p>
                       <p>Past events can still be checked manually. The selected profile controls the check rules used for that run.</p>
                     </div>
-                    <div>
-                      <p className="font-medium text-foreground">Provider Override</p>
-                      <p>Only use it for event windows where queued checks must run despite full provider slots. Active viewers are never bypassed.</p>
-                    </div>
                   </div>
                 </AccordionContent>
               </AccordionItem>
@@ -1010,15 +1026,69 @@ export default function TeamarrPreflight() {
         </Card>
 
         <div className="space-y-6">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={eventSearch}
-              onChange={(event) => setEventSearch(event.target.value)}
-              className="pl-9"
-              placeholder="Search events"
-            />
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_12rem]">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                value={eventSearch}
+                onChange={(event) => setEventSearch(event.target.value)}
+                className="pl-9"
+                placeholder="Search events"
+              />
+            </div>
+            <Select value={managedEventView} onValueChange={setManagedEventView}>
+              <SelectTrigger>
+                <SelectValue placeholder="Event view" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="upcoming">Upcoming</SelectItem>
+                <SelectItem value="due">Due</SelectItem>
+                <SelectItem value="no_check">No Check</SelectItem>
+                <SelectItem value="past">Past</SelectItem>
+                <SelectItem value="all">All</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Active Event Checks</CardTitle>
+              <CardDescription>
+                {eventSearch.trim()
+                  ? `${filteredActiveChecks.length} of ${activeChecks.length} running checks`
+                  : `${activeChecks.length} running checks`}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {activeChecks.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No active event checks</p>
+              ) : filteredActiveChecks.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No active checks match this search</p>
+              ) : (
+                <div className="space-y-3">
+                  {displayedActiveChecks.map((check, index) => (
+                    <div key={`${check.identity || check.dispatcharr_channel_id || index}-${check.bucket || 'active'}`} className="rounded-md border border-border p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <p className="truncate font-medium">{check.event_name || 'Managed Event'}</p>
+                          <p className="text-sm text-muted-foreground">{check.channel_name || `Channel ${check.dispatcharr_channel_id || 'N/A'}`}</p>
+                        </div>
+                        <Badge variant="secondary">{check.bucket || 'manual'}</Badge>
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        Started {formatTimestamp(check.started_at)} - running {formatElapsedSince(check.started_at)}
+                      </p>
+                    </div>
+                  ))}
+                  {filteredActiveChecks.length > displayedActiveChecks.length ? (
+                    <p className="text-xs text-muted-foreground">
+                      Showing {displayedActiveChecks.length} of {filteredActiveChecks.length} matching active checks
+                    </p>
+                  ) : null}
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
           <Card>
             <CardHeader>
@@ -1145,33 +1215,33 @@ export default function TeamarrPreflight() {
                       </div>
                     )
                   })}
-                  {filteredUpcomingEvents.length > displayedUpcomingEvents.length ? (
+                  {filteredUpcomingEvents.length > MANAGED_EVENT_PAGE_SIZE ? (
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
                       <span>
-                        Showing {displayedUpcomingEvents.length} of {filteredUpcomingEvents.length} matching managed events
+                        Page {safeManagedEventPage} of {managedEventPageCount} - showing {displayedUpcomingEvents.length} of {filteredUpcomingEvents.length} matching managed events
                       </span>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-8"
-                        onClick={() => setShowAllManagedEvents(true)}
-                      >
-                        Show all
-                      </Button>
-                    </div>
-                  ) : showAllManagedEvents && filteredUpcomingEvents.length > MANAGED_EVENT_DISPLAY_LIMIT ? (
-                    <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <span>Showing all {filteredUpcomingEvents.length} matching managed events</span>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        className="h-8"
-                        onClick={() => setShowAllManagedEvents(false)}
-                      >
-                        Collapse
-                      </Button>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8"
+                          disabled={safeManagedEventPage <= 1}
+                          onClick={() => setManagedEventPage(page => Math.max(1, page - 1))}
+                        >
+                          Previous
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="h-8"
+                          disabled={safeManagedEventPage >= managedEventPageCount}
+                          onClick={() => setManagedEventPage(page => Math.min(managedEventPageCount, page + 1))}
+                        >
+                          Next
+                        </Button>
+                      </div>
                     </div>
                   ) : null}
                   {managedEventsTruncated ? (
@@ -1185,102 +1255,87 @@ export default function TeamarrPreflight() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Active Event Checks</CardTitle>
-              <CardDescription>
-                {eventSearch.trim()
-                  ? `${filteredActiveChecks.length} of ${activeChecks.length} running checks`
-                  : `${activeChecks.length} running checks`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {activeChecks.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No active event checks</p>
-              ) : filteredActiveChecks.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No active checks match this search</p>
-              ) : (
-                <div className="space-y-3">
-                  {displayedActiveChecks.map((check, index) => (
-                    <div key={`${check.identity || check.dispatcharr_channel_id || index}-${check.bucket || 'active'}`} className="rounded-md border border-border p-3">
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <p className="truncate font-medium">{check.event_name || 'Managed Event'}</p>
-                          <p className="text-sm text-muted-foreground">{check.channel_name || `Channel ${check.dispatcharr_channel_id || 'N/A'}`}</p>
-                        </div>
-                        <Badge variant="secondary">{check.bucket || 'manual'}</Badge>
-                      </div>
-                      <p className="mt-2 text-xs text-muted-foreground">
-                        Started {formatTimestamp(check.started_at)} - running {formatElapsedSince(check.started_at)}
-                      </p>
-                    </div>
-                  ))}
-                  {filteredActiveChecks.length > displayedActiveChecks.length ? (
-                    <p className="text-xs text-muted-foreground">
-                      Showing {displayedActiveChecks.length} of {filteredActiveChecks.length} matching active checks
-                    </p>
-                  ) : null}
-                </div>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>Recent Events</CardTitle>
-              <CardDescription>
-                {eventSearch.trim()
-                  ? `${filteredRecentEvents.length} of ${recentEvents.length} latest connector decisions`
-                  : `${recentEvents.length} latest connector decisions`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              {recentEvents.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No events recorded</p>
-              ) : filteredRecentEvents.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No recent events match this search</p>
-              ) : (
-                <div className="space-y-3">
-                  {displayedRecentEvents.map((event, index) => {
-                    const detailParts = recentEventDetailParts(event)
-                    return (
-                      <div key={`${event.timestamp}-${index}`} className="grid gap-3 border-b border-border pb-3 last:border-b-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_4.75rem]">
-                        <div className="min-w-0 space-y-2">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Badge variant={recentEventBadgeVariant(event.type)} className="shrink-0">
-                              {eventLabel(event.type)}
-                            </Badge>
-                            <p className="min-w-0 truncate font-medium">{event.event_name || event.channel_name || 'Managed Event'}</p>
-                          </div>
-                          <div className="grid gap-1 text-sm text-muted-foreground sm:grid-cols-2">
-                            <span className="truncate">{event.channel_name || `Channel ${event.dispatcharr_channel_id || 'N/A'}`}</span>
-                            <span className="truncate">{[event.sport, event.league].filter(Boolean).join(' / ') || 'Event metadata N/A'}</span>
-                          </div>
-                          {detailParts.length > 0 ? (
-                            <div className="flex flex-wrap gap-1.5">
-                              {detailParts.map(part => (
-                                <Badge key={part} variant="outline" className="text-[10px] font-medium text-muted-foreground">
-                                  {part}
-                                </Badge>
-                              ))}
-                            </div>
-                          ) : null}
-                        </div>
-                        <span className="shrink-0 justify-self-start text-sm text-muted-foreground sm:justify-self-end">{formatTimestamp(event.timestamp)}</span>
-                      </div>
-                    )
-                  })}
-                  {filteredRecentEvents.length > displayedRecentEvents.length ? (
-                    <p className="text-xs text-muted-foreground">
-                      Showing {displayedRecentEvents.length} of {filteredRecentEvents.length} matching recent events
-                    </p>
-                  ) : null}
-                </div>
-              )}
-            </CardContent>
-          </Card>
         </div>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Recent Events</CardTitle>
+          <CardDescription>
+            {eventSearch.trim()
+              ? `${filteredRecentEvents.length} of ${recentEvents.length} latest connector decisions`
+              : `${recentEvents.length} latest connector decisions`}
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {recentEvents.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No events recorded</p>
+          ) : filteredRecentEvents.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No recent events match this search</p>
+          ) : (
+            <div className="space-y-3">
+              {displayedRecentEvents.map((event, index) => {
+                const detailParts = recentEventDetailParts(event)
+                return (
+                  <div key={`${event.timestamp}-${index}`} className="grid gap-3 border-b border-border pb-3 last:border-b-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_4.75rem]">
+                    <div className="min-w-0 space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant={recentEventBadgeVariant(event.type)} className="shrink-0">
+                          {eventLabel(event.type)}
+                        </Badge>
+                        <p className="min-w-0 truncate font-medium">{event.event_name || event.channel_name || 'Managed Event'}</p>
+                      </div>
+                      <div className="grid gap-1 text-sm text-muted-foreground sm:grid-cols-2">
+                        <span className="truncate">{event.channel_name || `Channel ${event.dispatcharr_channel_id || 'N/A'}`}</span>
+                        <span className="truncate">{[event.sport, event.league].filter(Boolean).join(' / ') || 'Event metadata N/A'}</span>
+                      </div>
+                      {detailParts.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {detailParts.map(part => (
+                            <Badge key={part} variant="outline" className="text-[10px] font-medium text-muted-foreground">
+                              {part}
+                            </Badge>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                    <span className="shrink-0 justify-self-start text-sm text-muted-foreground sm:justify-self-end">{formatTimestamp(event.timestamp)}</span>
+                  </div>
+                )
+              })}
+              {filteredRecentEvents.length > RECENT_EVENT_PAGE_SIZE ? (
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>
+                    Page {safeRecentEventPage} of {recentEventPageCount} - showing {displayedRecentEvents.length} of {filteredRecentEvents.length} matching recent events
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8"
+                      disabled={safeRecentEventPage <= 1}
+                      onClick={() => setRecentEventPage(page => Math.max(1, page - 1))}
+                    >
+                      Previous
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-8"
+                      disabled={safeRecentEventPage >= recentEventPageCount}
+                      onClick={() => setRecentEventPage(page => Math.min(recentEventPageCount, page + 1))}
+                    >
+                      Next
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <AlertDialog open={Boolean(forceEvent)} onOpenChange={(open) => {
         if (!open) setForceEvent(null)

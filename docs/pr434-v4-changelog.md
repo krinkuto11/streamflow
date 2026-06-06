@@ -143,7 +143,7 @@ digest, deployed commit, screenshots, and remaining release gates.
   `40c1d18e18732052c8865ea7d802ccf8cdc2dca2`
 - Current live digest:
   `ghcr.io/bttfw/streamflow@sha256:bf353a09c8ac6abf4c361a3f6d8b252edd970d78cf4364563c522edfea8d5c09`
-- The live container was updated through the normal Unraid template/update
+- The live container was updated through the normal managed-container update
   path with repository `ghcr.io/bttfw/streamflow:release-hardening`.
 - Live image smoke passed after deploy: health healthy, version
   `release-hardening-20260606`, automation idle, Stream Checker idle, Teamarr
@@ -188,7 +188,7 @@ digest, deployed commit, screenshots, and remaining release gates.
 - Mobile Scheduling wrapping was rechecked after the responsive fix with
   `docScrollWidth=390` and no page-level horizontal overflow outside the
   intentionally off-canvas mobile sidebar.
-- Local dark-mode UI smoke for the post-full-run polish showed `Good Streams`,
+- Dark-mode UI smoke for the post-full-run polish showed `Good Streams`,
   `Checking now`, `Rough ETA`, and low-quality reason text without horizontal
   overflow at `1920px`. Evidence:
   `outputs/streamflow-v4-ui-smoke/dashboard-good-checking-now-local-20260606-1325.png`
@@ -200,7 +200,7 @@ digest, deployed commit, screenshots, and remaining release gates.
 This PR must remain draft until:
 
 - The post-full-run UI/metrics follow-up is pushed, CI/GHCR succeeds, and the
-  resulting image is deployed through the normal Unraid template/update path.
+  resulting image is deployed through the normal managed-container update path.
 - Final live image smoke confirms health/version, Stream Checker/Preflight
   idle state, dashboard run metrics, low-quality reason display, and dark-mode
   screenshots on the final image.

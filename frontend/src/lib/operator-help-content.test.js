@@ -159,10 +159,8 @@ describe('operatorHelpSections', () => {
     expect(teamarr.steps.join(' ')).toMatch(/priority queue during Automation or Stream Checker runs/i)
     expect(teamarr.settings.find(setting => setting.name === 'Queue Events During Active Checks').defaultValue).toBe('On')
     expect(teamarr.settings.find(setting => setting.name === 'Queue Events During Active Checks').effect).toMatch(/does not queue new event checks/i)
-    expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override').defaultValue).toBe('Off')
-    expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override').risk).toMatch(/active-viewer protection/i)
+    expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override')).toBeUndefined()
     expect(teamarr.smokeChecks.join(' ')).toMatch(/queued or deferred event-check context/i)
-    expect(teamarr.smokeChecks.join(' ')).toMatch(/active-viewer events/i)
     const automation = getOperatorHelpDetailTopic('automation-periods')
     expect(automation.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Catch-up cap',
