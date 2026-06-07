@@ -649,6 +649,24 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         )
         service.check_single_channel.assert_not_called()
 
+    def test_deferred_specialized_queue_entry_waits_before_retry(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        self.assertTrue(check_queue.add_channel(
+            8441,
+            priority=100,
+            stream_count=2,
+            metadata={"source": "teamarr_preflight"},
+        ))
+        check_queue.defer_metadata_sources({"teamarr_preflight"})
+
+        with patch("apps.stream.stream_checker_components.time.sleep") as sleep_mock:
+            self.assertIsNone(check_queue.get_next_entry(timeout=0.2))
+
+        sleep_mock.assert_called_once_with(0.2)
+        status = check_queue.get_status()
+        self.assertEqual(status["queued"], 1)
+        self.assertEqual(status["in_progress"], 0)
+
     def test_worker_pauses_during_synchronous_batch(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.running = True

@@ -4,6 +4,7 @@ import copy
 import json
 import queue
 import threading
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -748,6 +749,14 @@ class StreamCheckQueue:
         with self.lock:
             self.paused = bool(paused)
 
+    @staticmethod
+    def _wait_after_deferred_entry(timeout: float) -> None:
+        try:
+            delay = float(timeout or 0)
+        except (TypeError, ValueError):
+            delay = 0.1
+        time.sleep(min(max(delay, 0.05), 1.0))
+
     def _entry_channel_id(self, item) -> Optional[int]:
         if not item:
             return None
@@ -833,6 +842,7 @@ class StreamCheckQueue:
                     except queue.Full:
                         logger.warning("Queue unexpectedly full while paused entry was restored")
                     self.stats['queue_size'] = len(self.queued)
+                    self._wait_after_deferred_entry(timeout)
                     return None
 
                 if channel_id not in self.queued:
@@ -851,6 +861,7 @@ class StreamCheckQueue:
                             f"Queue unexpectedly full while deferring channel {channel_id}"
                         )
                     self.stats['queue_size'] = len(self.queued)
+                    self._wait_after_deferred_entry(timeout)
                     return None
 
                 return self._activate_queued_entry_locked(channel_id)
