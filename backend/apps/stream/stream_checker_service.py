@@ -1616,6 +1616,68 @@ class StreamCheckerService:
         if result.ok:
             return None
 
+        recoverable_phases = {
+            'mark_dead_stream',
+            'keep_dead_stream_marked',
+            'channel_stream_update',
+            'single_channel_validation_removal',
+            'single_channel_matching_update',
+        }
+        config = self.config.get('connectivity_guard', {}) or {}
+        recovery_wait_seconds = self._bounded_float(
+            config.get('recovery_wait_seconds', 120),
+            default=120.0,
+            minimum=0.0,
+            maximum=600.0,
+        )
+        recovery_poll_seconds = self._bounded_float(
+            config.get('recovery_poll_seconds', 10),
+            default=10.0,
+            minimum=1.0,
+            maximum=120.0,
+        )
+        if phase in recoverable_phases and recovery_wait_seconds > 0:
+            safe_channel_name = channel_name or (
+                f"Channel {channel_id}" if channel_id is not None else "Quality check"
+            )
+            deadline = time.time() + recovery_wait_seconds
+            logger.warning(
+                "Connectivity guard failed at %s for %s: %s; waiting up to %.0fs for recovery",
+                phase,
+                safe_channel_name,
+                result.message,
+                recovery_wait_seconds,
+            )
+            while time.time() < deadline and not self.abort_current_check.is_set():
+                remaining = max(0.0, deadline - time.time())
+                sleep_for = min(recovery_poll_seconds, remaining)
+                if update_progress and channel_id is not None:
+                    try:
+                        self.progress.update(
+                            channel_id=channel_id,
+                            channel_name=safe_channel_name,
+                            current=0,
+                            total=0,
+                            status='waiting_connectivity',
+                            step='Waiting for Dispatcharr API',
+                            step_detail=(
+                                f"{result.message}; retrying for up to {int(remaining)}s"
+                            ),
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed to publish connectivity recovery progress: %s", exc)
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                recovery_result = self._run_connectivity_guard(f"{phase}_recovery")
+                if recovery_result.ok:
+                    logger.info(
+                        "Connectivity guard recovered at %s for %s; continuing quality work",
+                        phase,
+                        safe_channel_name,
+                    )
+                    return None
+                result = recovery_result
+
         self.abort_current_check.set()
         self._cancel_queueing = True
         safe_channel_name = channel_name or (f"Channel {channel_id}" if channel_id is not None else "Quality check")

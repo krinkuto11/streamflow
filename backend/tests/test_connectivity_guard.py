@@ -239,6 +239,7 @@ def test_quality_check_startup_offline_aborts_before_channel_check():
     assert result["aborted"] is True
     assert result["skip_reason"] == "connectivity_guard"
     assert service.connectivity_guard_status["ok"] is False
+    service.connectivity_guard.check.assert_called_once()
 
 
 def test_idle_status_marks_previous_connectivity_failure_as_stale():
@@ -320,9 +321,81 @@ def test_active_status_marks_current_connectivity_failure_as_active():
     assert status["connectivity_guard"]["stale_failure"] is False
 
 
+def test_mid_run_transient_outage_waits_for_recovery_before_marking_dead():
+    service = StreamCheckerService()
+    service.config.config["concurrent_streams"]["enabled"] = False
+    service.config.config["connectivity_guard"]["recovery_wait_seconds"] = 0.01
+    service.config.config["connectivity_guard"]["recovery_poll_seconds"] = 1
+    service._check_channel_limits = Mock(return_value=None)
+    service._get_m3u_account_name = Mock(return_value="Provider")
+    service._update_stream_stats = Mock(return_value=True)
+    service.dead_streams_tracker.is_dead = Mock(return_value=False)
+    service.dead_streams_tracker.mark_as_dead = Mock(return_value=True)
+
+    ok = ConnectivityCheckResult(ok=True, reason="ok", message="Connectivity verified")
+    failed = ConnectivityCheckResult(
+        ok=False,
+        reason="network_unreachable",
+        message="internet connectivity probe could not reach its endpoint",
+    )
+    service.connectivity_guard.check = Mock(side_effect=[ok, failed, ok])
+
+    mock_udi = Mock()
+    mock_udi.get_channel_by_id.return_value = {
+        "id": 42,
+        "name": "Test Channel",
+        "streams": [1001],
+    }
+    mock_udi.apply_profile_url_transformation.side_effect = lambda stream: stream["url"]
+    mock_udi.get_stream_by_id.return_value = None
+
+    mock_profile = {
+        "id": "profile-1",
+        "name": "Default",
+        "stream_checking": {
+            "enabled": True,
+            "remove_dead_streams": True,
+            "allow_revive": True,
+            "grace_period": False,
+        },
+    }
+    mock_automation_config = Mock()
+    mock_automation_config.get_effective_configuration.return_value = {"profile": mock_profile}
+
+    streams = [{"id": 1001, "name": "Dead Candidate", "url": "http://stream.example/live"}]
+    dead_analysis = {
+        "stream_id": 1001,
+        "stream_name": "Dead Candidate",
+        "stream_url": "http://stream.example/live",
+        "resolution": "0x0",
+        "fps": 0,
+        "video_codec": "N/A",
+        "audio_codec": "N/A",
+        "bitrate_kbps": 0,
+        "status": "ERROR",
+    }
+
+    with patch("apps.stream.stream_checker_service.get_udi_manager", return_value=mock_udi), \
+         patch("apps.stream.stream_checker_service.fetch_channel_streams", return_value=streams), \
+         patch("apps.stream.stream_checker_service.get_automation_config_manager", return_value=mock_automation_config), \
+         patch("apps.stream.stream_checker_service.analyze_stream", return_value=dead_analysis), \
+         patch("apps.stream.stream_checker_service.update_channel_streams") as update_channel_streams, \
+         patch("apps.stream.stream_checker_service.time.sleep"):
+        result = service._check_channel(42)
+
+    assert "error" not in result
+    assert result["dead_streams_count"] == 1
+    service.dead_streams_tracker.mark_as_dead.assert_called_once()
+    update_channel_streams.assert_called_once()
+    assert service.connectivity_guard.check.call_count == 3
+    assert service.connectivity_guard_status["ok"] is True
+    assert service.connectivity_guard_status["phase"] == "mark_dead_stream_recovery"
+
+
 def test_mid_run_outage_does_not_mark_dead_or_update_channel():
     service = StreamCheckerService()
     service.config.config["concurrent_streams"]["enabled"] = False
+    service.config.config["connectivity_guard"]["recovery_wait_seconds"] = 0
     service._check_channel_limits = Mock(return_value=None)
     service._get_m3u_account_name = Mock(return_value="Provider")
     service._update_stream_stats = Mock(return_value=True)
@@ -374,8 +447,8 @@ def test_mid_run_outage_does_not_mark_dead_or_update_channel():
 
     with patch("apps.stream.stream_checker_service.get_udi_manager", return_value=mock_udi), \
          patch("apps.stream.stream_checker_service.fetch_channel_streams", return_value=streams), \
-         patch("apps.automation.automation_config_manager.get_automation_config_manager", return_value=mock_automation_config), \
-         patch("apps.stream.stream_check_utils.analyze_stream", return_value=dead_analysis), \
+         patch("apps.stream.stream_checker_service.get_automation_config_manager", return_value=mock_automation_config), \
+         patch("apps.stream.stream_checker_service.analyze_stream", return_value=dead_analysis), \
          patch("apps.stream.stream_checker_service.update_channel_streams") as update_channel_streams:
         result = service._check_channel(42)
 

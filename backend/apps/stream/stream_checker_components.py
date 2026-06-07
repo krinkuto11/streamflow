@@ -102,6 +102,8 @@ class StreamCheckConfig:
             'timeout_seconds': 3.0,
             'retry_attempts': 2,
             'retry_backoff_seconds': 1.0,
+            'recovery_wait_seconds': 120,
+            'recovery_poll_seconds': 10,
             'stale_recheck_interval_seconds': 60,
             'internet_probe_urls': [
                 'https://www.google.com/generate_204',
