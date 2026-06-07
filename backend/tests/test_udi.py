@@ -615,6 +615,47 @@ class TestUDIManager(unittest.TestCase):
         self.assertEqual(self.manager._streams_cache, [{'id': 10, 'name': 'Existing Stream'}])
         self.assertTrue(self.manager.is_network_ready())
 
+    def test_refresh_streams_preserves_existing_cache_on_partial_fetch(self):
+        """A page timeout during refresh_streams must not replace a good cache."""
+        existing_stream = {'id': 10, 'name': 'Existing Stream', 'url': 'http://x/old'}
+        self.manager._initialized = True
+        self.manager._streams_cache = [existing_stream]
+        self.manager._build_indexes()
+
+        partial_streams = [
+            {'id': idx, 'name': f'Partial {idx}', 'url': f'http://x/{idx}'}
+            for idx in range(1, 11)
+        ]
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.fetch_streams.return_value = FetchResult(
+            items=partial_streams,
+            expected_count=20,
+        )
+
+        result = self.manager.refresh_streams()
+
+        self.assertFalse(result)
+        self.assertEqual(self.manager._streams_cache, [existing_stream])
+        self.assertEqual(self.manager._streams_by_id, {10: existing_stream})
+
+    def test_refresh_streams_allows_confirmed_empty_dispatcharr(self):
+        """A real zero-count stream response may replace the stream cache."""
+        self.manager._initialized = True
+        self.manager._streams_cache = [{'id': 10, 'name': 'Existing Stream'}]
+        self.manager._build_indexes()
+
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.fetch_streams.return_value = FetchResult(
+            items=[],
+            expected_count=0,
+        )
+
+        result = self.manager.refresh_streams()
+
+        self.assertTrue(result)
+        self.assertEqual(self.manager._streams_cache, [])
+        self.assertEqual(self.manager._streams_by_id, {})
+
     def test_refresh_all_allows_confirmed_empty_dispatcharr(self):
         """A real zero-count Dispatcharr response remains valid."""
         self.manager.fetcher = Mock()

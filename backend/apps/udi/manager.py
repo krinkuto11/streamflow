@@ -1446,6 +1446,19 @@ class UDIManager:
         logger.info("Refreshing streams...")
         try:
             result = self.fetcher.fetch_streams(progress_callback=progress_callback)
+            existing_stream_count = len(self._streams_cache)
+            if not (
+                _check_fetch_integrity('streams', result)
+                and _check_nonempty_live_fetch('streams', result, existing_stream_count)
+            ):
+                logger.warning(
+                    "Preserving existing stream cache with %s records after "
+                    "incomplete refresh_streams() result (%s/%s)",
+                    existing_stream_count,
+                    len(result),
+                    result.expected_count,
+                )
+                return False
             with self._lock:
                 self._streams_cache = result.items
                 self._streams_by_id = {
