@@ -18,6 +18,9 @@ logger = setup_logging(__name__)
 
 class StreamCheckConfig:
     """Configuration for stream checking service."""
+
+    LEGACY_RECOVERY_WAIT_SECONDS = 120
+    DEFAULT_RECOVERY_WAIT_SECONDS = 240
     
     DEFAULT_CONFIG = {
         'enabled': True,
@@ -102,7 +105,7 @@ class StreamCheckConfig:
             'timeout_seconds': 3.0,
             'retry_attempts': 2,
             'retry_backoff_seconds': 1.0,
-            'recovery_wait_seconds': 240,
+            'recovery_wait_seconds': DEFAULT_RECOVERY_WAIT_SECONDS,
             'recovery_poll_seconds': 10,
             'stale_recheck_interval_seconds': 60,
             'internet_probe_urls': [
@@ -145,12 +148,37 @@ class StreamCheckConfig:
                     defaults[key] = value
             return defaults
 
+        def migrate_loaded_config(
+            config: Dict[str, Any],
+            loaded_config: Dict[str, Any],
+        ) -> bool:
+            loaded_guard = loaded_config.get('connectivity_guard')
+            if not isinstance(loaded_guard, dict):
+                return False
+
+            loaded_wait = loaded_guard.get('recovery_wait_seconds')
+            try:
+                loaded_wait_seconds = float(loaded_wait)
+            except (TypeError, ValueError):
+                return False
+
+            if loaded_wait_seconds != self.LEGACY_RECOVERY_WAIT_SECONDS:
+                return False
+
+            config.setdefault('connectivity_guard', {})['recovery_wait_seconds'] = (
+                self.DEFAULT_RECOVERY_WAIT_SECONDS
+            )
+            return True
+
         if self.config_file is not None and self.config_file.exists():
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as fh:
                     loaded_file = json.load(fh) or {}
                 config = copy.deepcopy(self.DEFAULT_CONFIG)
-                return deep_merge(config, loaded_file)
+                config = deep_merge(config, loaded_file)
+                if migrate_loaded_config(config, loaded_file):
+                    self._save_config(config)
+                return config
             except Exception as exc:
                 logger.warning(f"Could not load stream checker config file {self.config_file}: {exc}")
 
@@ -160,6 +188,13 @@ class StreamCheckConfig:
             # Deep copy defaults to avoid mutating DEFAULT_CONFIG
             config = copy.deepcopy(self.DEFAULT_CONFIG)
             config = deep_merge(config, loaded)
+            if migrate_loaded_config(config, loaded):
+                logger.info(
+                    "Migrated connectivity recovery wait from %.0fs to %.0fs",
+                    self.LEGACY_RECOVERY_WAIT_SECONDS,
+                    self.DEFAULT_RECOVERY_WAIT_SECONDS,
+                )
+                self._save_config(config)
             return config
         
         logger.debug("No config in DB, creating default")

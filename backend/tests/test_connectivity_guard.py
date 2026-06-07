@@ -9,6 +9,7 @@ import requests
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
+from apps.stream.stream_checker_components import StreamCheckConfig
 from apps.stream.stream_checker_service import StreamCheckerService
 
 
@@ -325,6 +326,22 @@ def test_connectivity_recovery_wait_default_is_four_minutes():
     service = StreamCheckerService()
 
     assert service.config.config["connectivity_guard"]["recovery_wait_seconds"] == 240
+
+
+def test_stream_checker_config_migrates_legacy_recovery_wait_from_db():
+    from apps.database.manager import get_db_manager
+
+    db = get_db_manager()
+    db.set_system_setting(
+        "stream_checker_config",
+        {"connectivity_guard": {"recovery_wait_seconds": 120}},
+    )
+
+    config = StreamCheckConfig()
+    saved_config = db.get_system_setting("stream_checker_config", {})
+
+    assert config.config["connectivity_guard"]["recovery_wait_seconds"] == 240
+    assert saved_config["connectivity_guard"]["recovery_wait_seconds"] == 240
 
 
 def test_mid_run_transient_outage_waits_for_recovery_before_marking_dead():
