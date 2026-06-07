@@ -96,7 +96,7 @@ digest, deployed commit, screenshots, and remaining release gates.
   Monitoring, Stream Checker, Shadow Monitor, and Teamarr Preflight intact.
 - Clarifies Teamarr event-window setting labels and help copy.
 - Fixes narrow/mobile Scheduling toolbar wrapping in dark mode.
-- Keeps PR #434 in Draft/do-not-merge state until explicit operator approval.
+- Keeps PR #434 in Draft/do-not-merge state until explicit release approval.
 
 ## Validation
 
@@ -143,8 +143,8 @@ digest, deployed commit, screenshots, and remaining release gates.
   `40c1d18e18732052c8865ea7d802ccf8cdc2dca2`
 - Current live digest:
   `ghcr.io/bttfw/streamflow@sha256:bf353a09c8ac6abf4c361a3f6d8b252edd970d78cf4364563c522edfea8d5c09`
-- The live container was updated through the normal managed-container update
-  path with repository `ghcr.io/bttfw/streamflow:release-hardening`.
+- The live runtime was updated through the standard release deployment
+  workflow with repository `ghcr.io/bttfw/streamflow:release-hardening`.
 - Live image smoke passed after deploy: health healthy, version
   `release-hardening-20260606`, automation idle, Stream Checker idle, Teamarr
   Preflight idle, Shadow Monitor enabled/running, Auto-Create rules/events
@@ -200,11 +200,11 @@ digest, deployed commit, screenshots, and remaining release gates.
 This PR must remain draft until:
 
 - The post-full-run UI/metrics follow-up is pushed, CI/GHCR succeeds, and the
-  resulting image is deployed through the normal managed-container update path.
+  resulting image is deployed through the standard release deployment workflow.
 - Final live image smoke confirms health/version, Stream Checker/Preflight
   idle state, dashboard run metrics, low-quality reason display, and dark-mode
   screenshots on the final image.
 - PR body is updated with final head, digest, checks, live-smoke, screenshots,
   and full-run outcome.
 - Final sanitized screenshots are committed or explicitly waived.
-- The operator explicitly approves ready/merge state.
+- Final release approval is given for ready/merge state.
