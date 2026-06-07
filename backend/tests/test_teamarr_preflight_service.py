@@ -622,6 +622,49 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(checker.queued, [])
         self.assertEqual(service.get_status()["recent_events"][0]["type"], "deferred_automation_active")
 
+    def test_active_automation_run_queues_preflight_when_queue_setting_enabled(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event()],
+            checker=checker,
+            automation_status={
+                "running": True,
+                "thread_alive": True,
+                "run_status": {"active": True, "state": "running", "stage": "stream_matching"},
+            },
+        )
+        service.update_config({"queue_during_active_checks": True})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(checker.calls, [])
+        self.assertEqual(len(checker.queued), 1)
+        self.assertEqual(checker.queued[0][1]["metadata"]["source"], "teamarr_preflight")
+        self.assertEqual(service.get_status()["recent_events"][0]["type"], "preflight_queued")
+        self.assertIn(("teamarr_preflight_automation", True), checker.gates)
+
+    def test_automation_queue_gate_clears_when_no_run_active(self):
+        checker = FakeChecker()
+        automation_status = {
+            "running": True,
+            "thread_alive": True,
+            "run_status": {"active": True, "state": "running", "stage": "stream_matching"},
+        }
+        service, _, _ = self.make_service(
+            [make_event()],
+            checker=checker,
+            automation_status=automation_status,
+        )
+
+        service.run_once(force=True)
+        automation_status["run_status"] = {"active": False, "state": "idle"}
+        service.run_once(force=True)
+
+        self.assertIn(("teamarr_preflight_automation", True), checker.gates)
+        self.assertIn(("teamarr_preflight_automation", False), checker.gates)
+
     def test_scheduler_running_without_active_run_does_not_defer_preflight(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(
@@ -698,7 +741,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         while time.time() < deadline and len(checker.gates) < 2:
             time.sleep(0.01)
 
-        self.assertEqual(checker.gates[0], ("teamarr_preflight_direct", True))
+        self.assertIn(("teamarr_preflight_direct", True), checker.gates)
         self.assertEqual(checker.gates[-1], ("teamarr_preflight_direct", False))
 
     def test_direct_capacity_limit_queues_due_teamarr_events_instead_of_hiding_them(self):

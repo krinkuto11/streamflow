@@ -450,6 +450,8 @@ class TeamarrPreflightService:
                 self._save_config()
             self._stop_event.set()
             thread = self._thread
+        self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_automation")
+        self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_direct")
         if thread and thread.is_alive():
             thread.join(timeout=5)
         return True
@@ -633,9 +635,11 @@ class TeamarrPreflightService:
     def run_once(self, *, force: bool = False) -> Dict[str, Any]:
         config = self.get_config(include_secret=True)
         if not config.get("enabled") and not force:
+            self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_automation")
             return {"success": True, "skipped": True, "reason": "disabled"}
 
         try:
+            self._sync_automation_queue_gate(config)
             raw_events = self._fetch_managed_events(config)
             now = datetime.fromtimestamp(self.clock(), tz=timezone.utc)
             candidates = self._build_candidates(raw_events, config, now)
@@ -1174,6 +1178,9 @@ class TeamarrPreflightService:
             self._mark_attempted(event)
             self._record_event("no_streams_yet", event, {"bucket": event.get("trigger_bucket")})
             return False
+        if config.get("queue_during_active_checks", True) and self._automation_active():
+            self._set_stream_checker_event_gate(True, gate_name="teamarr_preflight_automation")
+            return self._queue_check(event, config)
         if self._stream_checker_active():
             return self._queue_check(event, config)
 
@@ -1365,15 +1372,15 @@ class TeamarrPreflightService:
             self._active_checks.pop(key, None)
             has_active_checks = bool(self._active_checks)
         if not has_active_checks:
-            self._set_stream_checker_event_gate(False)
+            self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_direct")
         self._purge_old_attempts()
 
-    def _set_stream_checker_event_gate(self, active: bool) -> None:
+    def _set_stream_checker_event_gate(self, active: bool, *, gate_name: str = "teamarr_preflight_direct") -> None:
         try:
             checker = self.stream_checker_provider()
             setter = getattr(checker, "set_specialized_queue_gate", None)
             if callable(setter):
-                setter("teamarr_preflight_direct", bool(active))
+                setter(gate_name, bool(active))
         except Exception as exc:
             logger.debug("Unable to update Stream Checker event queue gate: %s", exc)
 
@@ -1404,6 +1411,17 @@ class TeamarrPreflightService:
         if self._stream_checker_active():
             return "stream_checker_active"
         return None
+
+    def _sync_automation_queue_gate(self, config: Dict[str, Any]) -> bool:
+        automation_queue_active = bool(
+            config.get("queue_during_active_checks", True)
+            and self._automation_active()
+        )
+        self._set_stream_checker_event_gate(
+            automation_queue_active,
+            gate_name="teamarr_preflight_automation",
+        )
+        return automation_queue_active
 
     def _automation_active(self) -> bool:
         try:
