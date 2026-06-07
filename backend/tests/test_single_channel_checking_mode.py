@@ -429,6 +429,91 @@ class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
         self.assertTrue(data.get('skipped'))
         self.assertEqual(data.get('reason'), 'active_viewers')
 
+    def test_handler_blocks_immediate_check_during_active_automation_run(self):
+        """Immediate full checks must not run in parallel with an automation cycle."""
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_channel_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {'checking': False, 'queue': {}, 'progress': {}}
+        mock_manager = Mock()
+        mock_manager.get_run_status.return_value = {'active': True, 'state': 'running'}
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_channel_now_response(
+                payload={'channel_id': 1},
+                get_stream_checker_service=lambda: mock_service,
+                get_automation_manager=lambda: mock_manager,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 409)
+
+        import json as json_mod
+        data = json_mod.loads(response.get_data(as_text=True))
+        self.assertEqual(data.get('error'), 'automation_run_active')
+        mock_service.check_single_channel.assert_not_called()
+
+    def test_handler_allows_immediate_check_when_automation_service_is_idle(self):
+        """The background automation service thread alone must not block manual checks."""
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_channel_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {'checking': False, 'queue': {}, 'progress': {}}
+        mock_service.check_single_channel.return_value = {
+            'success': True,
+            'channel_id': 1,
+            'channel_name': 'Das Erste HD',
+            'stats': {'total_streams': 1, 'dead_streams': 0},
+        }
+        mock_manager = Mock()
+        mock_manager.get_run_status.return_value = {'active': False, 'state': 'skipped'}
+        mock_manager.automation_running = True
+        mock_thread = Mock()
+        mock_thread.is_alive.return_value = True
+        mock_manager.automation_thread = mock_thread
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_channel_now_response(
+                payload={'channel_id': 1},
+                get_stream_checker_service=lambda: mock_service,
+                get_automation_manager=lambda: mock_manager,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 200)
+        mock_service.check_single_channel.assert_called_once()
+
+    def test_handler_blocks_immediate_check_during_active_stream_checker(self):
+        """A second immediate full check must not overlap an active Stream Checker run."""
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_channel_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {
+            'checking': False,
+            'queue': {'queue_size': 0, 'in_progress': 0},
+            'progress': {'is_single_channel_check': True},
+        }
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_channel_now_response(
+                payload={'channel_id': 1},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 409)
+
+        import json as json_mod
+        data = json_mod.loads(response.get_data(as_text=True))
+        self.assertEqual(data.get('error'), 'stream_checker_active')
+        mock_service.check_single_channel.assert_not_called()
+
     def test_handler_sanitizes_unexpected_service_errors(self):
         """Handler must not expose internal exception details from service results."""
         from flask import Flask

@@ -557,10 +557,10 @@ export default function Dashboard() {
     skippedRunDisplay,
   })
   const displayRunMessage = streamRunActive
-    ? 'Running manual quality checks'
+    ? streamCheckerRunDisplay.displayMessage
     : abortedRunDisplay.message || skippedRunDisplay.message || runProgress.message || runStatus.message || 'Automation run status'
-  const displayRunStageId = normalizeRunStageKey(streamRunActive ? 'quality_checking' : runStage)
-  const displayRunStageLabel = streamRunActive ? 'Quality Checking' : runStageLabel
+  const displayRunStageId = normalizeRunStageKey(streamRunActive ? streamCheckerRunDisplay.displayStageId : runStage)
+  const displayRunStageLabel = streamRunActive ? streamCheckerRunDisplay.displayStageLabel : runStageLabel
   const displayRunningRun = runningRun || streamRunActive
   const runDisplayStageLabel = skippedRunDisplay.stageLabel || displayRunStageLabel
   const runDisplayBadgeLabel = streamRunActive
@@ -584,7 +584,7 @@ export default function Dashboard() {
     ? elapsedSecondsSince(runStatus.stage_started_at, dashboardNow) ?? runStatus.stage_duration_seconds
     : runStatus.stage_duration_seconds
   const displayRunUpdatedAt = streamRunActive
-    ? (streamCheckerStatus?.queue?.started_at || streamCheckerStatus?.progress?.timestamp || runStatus.updated_at)
+    ? (streamCheckerStatus?.progress?.timestamp || streamCheckerStatus?.queue?.started_at || runStatus.updated_at)
     : runStatus.updated_at
   const displayRunElapsedSeconds = streamRunActive
     ? streamCheckerElapsedSeconds

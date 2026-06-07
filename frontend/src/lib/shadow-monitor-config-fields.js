@@ -29,4 +29,5 @@ export const shadowMonitorThresholdFields = [
   { key: 'freeze_min_duration_seconds', label: 'Freeze Duration', step: '0.5', min: 1, max: 120 },
   { key: 'freeze_noise_threshold', label: 'Freeze Noise', step: '0.001', min: 0, max: 1 },
   { key: 'freeze_ratio_threshold', label: 'Freeze Ratio', step: '0.01', min: 0.1, max: 1 },
+  { key: 'no_decodable_frames_min_duration_seconds', label: 'Decoder Stall Duration', step: '0.5', min: 3, max: 60 },
 ]

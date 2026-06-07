@@ -5082,6 +5082,24 @@ class StreamCheckerService:
                 is_single_channel_check=True,
             )
 
+            def update_single_channel_progress(
+                current_step: int,
+                total_steps: int,
+                status: str,
+                step: str,
+                detail: str = "",
+            ):
+                self.progress.update(
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                    current=current_step,
+                    total=total_steps,
+                    status=status,
+                    step=step,
+                    step_detail=detail or step,
+                    is_single_channel_check=True,
+                )
+
             # Check if channel has active viewers or if its playlist has reached max concurrent streams
             current_streams = fetch_channel_streams(channel_id)
             if current_streams:
@@ -5110,6 +5128,13 @@ class StreamCheckerService:
             
             # Step 1: Identify M3U accounts for channel (reusing current_streams from limit check above)
             logger.info(f"Step 1/6: Identifying M3U accounts for channel {channel_name}...")
+            update_single_channel_progress(
+                1,
+                6,
+                "preparing",
+                "Identifying provider accounts",
+                f"Finding provider accounts for {channel_name}",
+            )
             account_ids = set()
             if current_streams:
                 for stream in current_streams:
@@ -5160,6 +5185,13 @@ class StreamCheckerService:
                     f"Step 2a/6: Refreshing playlists for {len(account_ids)} M3U account(s) "
                     f"(m3u_update enabled in profile)..."
                 )
+                update_single_channel_progress(
+                    2,
+                    6,
+                    "m3u_refresh",
+                    "Refreshing M3U playlists",
+                    f"Refreshing {len(account_ids)} provider playlist(s)",
+                )
                 # Capture stream count before triggering refresh so we can detect completion.
                 pre_refresh_stream_count = udi.get_stream_count()
 
@@ -5199,6 +5231,13 @@ class StreamCheckerService:
                 logger.info(
                     "Step 2a/6: Syncing UDI cache after provider refresh..."
                 )
+                update_single_channel_progress(
+                    3,
+                    6,
+                    "cache_sync",
+                    "Syncing UDI cache",
+                    "Reading refreshed Dispatcharr streams into StreamFlow cache",
+                )
                 udi.refresh_streams()
                 udi.refresh_channels()
                 logger.info("✓ UDI cache synced — Steps 3-6 will use current stream IDs")
@@ -5207,10 +5246,24 @@ class StreamCheckerService:
                     "Step 2a/6: m3u_update enabled but no M3U accounts found for this "
                     "channel — skipping provider fetch."
                 )
+                update_single_channel_progress(
+                    2,
+                    6,
+                    "m3u_refresh",
+                    "Skipping M3U refresh",
+                    "No provider accounts were found for this channel",
+                )
             else:
                 logger.info(
                     "Step 2a/6: Skipping provider fetch (m3u_update disabled in profile). "
                     "Subsequent steps will use the current UDI cache state."
+                )
+                update_single_channel_progress(
+                    2,
+                    6,
+                    "m3u_refresh",
+                    "Skipping M3U refresh",
+                    "M3U refresh is disabled by the selected profile",
                 )
 
             # NOTE: No mid-pipeline UDI sync occurs here except when m3u_update=True.
@@ -5239,6 +5292,13 @@ class StreamCheckerService:
             # in Step 6 (_check_channel). Clearing all dead state here (the previous
             # behaviour) made both profile flags permanently ineffective on this path.
             logger.info(f"Step 3/6: Cleaning stale dead stream tracker entries for channel {channel_name}...")
+            update_single_channel_progress(
+                3,
+                6,
+                "preparing",
+                "Cleaning stale dead-stream entries",
+                f"Cleaning stale stream URLs for {channel_name}",
+            )
             try:
                 # Build the set of stream URLs currently visible in the UDI cache.
                 # After Step 2a this reflects the post-refresh state; when m3u_update
@@ -5273,6 +5333,13 @@ class StreamCheckerService:
             # Step 4: Validate existing streams against regex patterns (if matching is enabled)
             if matching_enabled:
                 logger.info(f"Step 4/6: Validating existing streams for channel {channel_name}...")
+                update_single_channel_progress(
+                    4,
+                    6,
+                    "stream_matching",
+                    "Validating existing stream matches",
+                    f"Checking current assignments for {channel_name}",
+                )
                 if not legacy_default_profile:
                     failed_connectivity = self._require_quality_check_connectivity(
                         phase='single_channel_validation_removal',
@@ -5300,6 +5367,13 @@ class StreamCheckerService:
                     logger.error(f"✗ Failed to validate streams: {e}")
             else:
                 logger.info(f"Step 4/6: Skipping stream validation (matching is disabled for this channel)")
+                update_single_channel_progress(
+                    4,
+                    6,
+                    "stream_matching",
+                    "Skipping stream validation",
+                    "Stream matching is disabled by the selected profile",
+                )
             
             # Step 5: Re-match and assign streams for this specific channel (if matching is enabled)
             # With stale dead-stream URLs cleaned, streams with new URLs can be re-matched.
@@ -5319,6 +5393,13 @@ class StreamCheckerService:
 
             if matching_enabled:
                 logger.info(f"Step 5/6: Re-matching streams for channel {channel_name}...")
+                update_single_channel_progress(
+                    5,
+                    6,
+                    "stream_matching",
+                    "Matching streams",
+                    f"Matching provider streams for {channel_name}",
+                )
                 if not legacy_default_profile:
                     failed_connectivity = self._require_quality_check_connectivity(
                         phase='single_channel_matching_update',
@@ -5355,6 +5436,13 @@ class StreamCheckerService:
                     logger.error(f"✗ Failed to match streams: {e}")
             else:
                 logger.info(f"Step 5/6: Skipping stream matching (matching is disabled for this channel)")
+                update_single_channel_progress(
+                    5,
+                    6,
+                    "stream_matching",
+                    "Skipping stream matching",
+                    "Stream matching is disabled by the selected profile",
+                )
             
             # After matching writes new assignments to Dispatcharr, refresh only this
             # channel's cache entry so Step 6 sees the updated stream list.
@@ -5380,6 +5468,13 @@ class StreamCheckerService:
                 logger.info(
                     f"Step 6/6: Checking streams for channel {channel_name} "
                     f"({'force checking all streams' if force_check else 'respecting profile grace period settings'})..."
+                )
+                update_single_channel_progress(
+                    6,
+                    6,
+                    "quality_checking",
+                    "Quality checking streams",
+                    f"Checking stream quality for {channel_name}",
                 )
                 
                 # Perform the check using normal profile logic.
@@ -5415,6 +5510,13 @@ class StreamCheckerService:
                 }
             else:
                 logger.info(f"Step 6/6: Skipping stream checking (checking is disabled for this channel)")
+                update_single_channel_progress(
+                    6,
+                    6,
+                    "finalizing",
+                    "Skipping quality check",
+                    "Stream quality checking is disabled by the selected profile",
+                )
                 analyzed_lookup = {}
             
             # Gather statistics after check using cached channel data.
@@ -5549,6 +5651,13 @@ class StreamCheckerService:
                 check_stats['stream_details'].append(stream_detail)
             
             # Calculate duration
+            update_single_channel_progress(
+                6,
+                6,
+                "finalizing",
+                "Finalizing single channel check",
+                f"Writing results for {channel_name}",
+            )
             end_time = time_module.time()
             duration_seconds = int(end_time - start_time)
             

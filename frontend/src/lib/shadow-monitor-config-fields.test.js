@@ -44,6 +44,7 @@ describe('shadowMonitorNumberFields', () => {
       'freeze_min_duration_seconds',
       'freeze_noise_threshold',
       'freeze_ratio_threshold',
+      'no_decodable_frames_min_duration_seconds',
     ])
   })
 })

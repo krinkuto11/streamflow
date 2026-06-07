@@ -144,6 +144,8 @@ describe('dashboard stream checker run display', () => {
     expect(display.streamCheckerOnlyActive).toBe(true)
     expect(display.streamQueueActive).toBe(false)
     expect(display.streamCheckerElapsedSeconds).toBe(60)
+    expect(display.displayMessage).toBe('Running single channel check')
+    expect(display.displayStageId).toBe('settings')
   })
 
   it('keeps single-channel checks visible when the legacy mode flag lags behind progress', () => {
@@ -174,6 +176,49 @@ describe('dashboard stream checker run display', () => {
     expect(display.streamCheckerOnlyActive).toBe(true)
     expect(display.streamQueueActive).toBe(false)
     expect(display.streamCheckerElapsedSeconds).toBe(60)
+    expect(display.displayStageId).toBe('settings')
+  })
+
+  it('maps single-channel matching progress without reusing stale completed queue totals', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'skipped',
+      runStage: 'skipped',
+      batchTotal: 2,
+      completed: 2,
+      now: Date.parse('2026-06-07T09:30:00Z'),
+      streamCheckerStatus: {
+        stream_checking_mode: true,
+        queue: {
+          state: 'completed',
+          queue_size: 0,
+          in_progress: 0,
+          completed: 2,
+          started_at: '2026-06-07T03:02:10Z',
+        },
+        progress: {
+          is_single_channel_check: true,
+          status: 'stream_matching',
+          step: 'Matching streams',
+          channel_name: 'Das Erste HD',
+          current_stream: 5,
+          total_streams: 6,
+          timestamp: '2026-06-07T09:27:00Z',
+        },
+      },
+    })
+
+    expect(display.isProcessing).toBe(true)
+    expect(display.streamQueueActive).toBe(false)
+    expect(display.streamCheckerElapsedSeconds).toBe(180)
+    expect(display.displayMessage).toBe('Running single channel check')
+    expect(display.displayStageId).toBe('stream_matching')
+    expect(display.displayStageLabel).toBe('Matching')
+    expect(display.stageCards[0]).toMatchObject({
+      key: 'stream_matching',
+      label: 'Matching',
+      current: 5,
+      total: 6,
+    })
   })
 
   it('ignores completed queue history when the stream checker is idle', () => {
@@ -332,6 +377,21 @@ describe('dashboard stream checker run display', () => {
     })
 
     expect(value).toBe(128)
+  })
+
+  it('uses manual single-channel elapsed time for the active non-quality stage', () => {
+    const value = getRunDurationValue({
+      runDurations: {},
+      durationKey: 'stream_matching_seconds',
+      stageId: 'stream_matching',
+      displayRunStageId: 'stream_matching',
+      streamRunActive: true,
+      streamCheckerElapsedSeconds: 240,
+      displayRunStageElapsedSeconds: 90,
+      stages,
+    })
+
+    expect(value).toBe(90)
   })
 
   it('keeps manual stream checker predecessor durations neutral', () => {

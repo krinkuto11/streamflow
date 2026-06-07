@@ -1307,6 +1307,7 @@ def check_single_channel_now():
     return check_single_channel_now_response(
         payload=request.get_json(silent=True),
         get_stream_checker_service=get_stream_checker_service,
+        get_automation_manager=get_automation_manager,
     )
 
 @app.route('/api/stream-checker/mark-updated', methods=['POST'])

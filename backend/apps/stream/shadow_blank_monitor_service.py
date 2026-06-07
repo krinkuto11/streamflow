@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import time
@@ -44,6 +45,15 @@ WATCHER_API_KEY_REQUIRED_CODE = "watcher_api_key_required"
 WATCHER_API_KEY_REQUIRED_MESSAGE = "Watcher API Key is required before Shadow Monitor can start."
 SHADOW_MONITOR_LOOP_ERROR_MESSAGE = "Shadow monitor loop failed; see server logs."
 SHADOW_MONITOR_SCAN_ERROR_MESSAGE = "Shadow monitor scan failed; see server logs."
+NO_DECODABLE_FRAME_ERROR_PATTERNS = (
+    "could not find codec parameters",
+    "unspecified size",
+    "output file does not contain any stream",
+    "cannot determine format of input stream",
+    "no decodable frames",
+    "no frame could be decoded",
+)
+FFMPEG_FRAME_RE = re.compile(r"\bframe=\s*(?P<frames>\d+)")
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -59,6 +69,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "freeze_min_duration_seconds": 5.0,
     "freeze_noise_threshold": 0.001,
     "freeze_ratio_threshold": 0.80,
+    "no_decodable_frames_detection_enabled": True,
+    "no_decodable_frames_min_duration_seconds": 10.0,
     "confirmation_count": 2,
     "channel_cooldown_seconds": 300,
     "max_switches_per_hour": 3,
@@ -89,6 +101,7 @@ FLOAT_BOUNDS = {
     "freeze_min_duration_seconds": (1.0, 120.0),
     "freeze_noise_threshold": (0.0, 1.0),
     "freeze_ratio_threshold": (0.1, 1.0),
+    "no_decodable_frames_min_duration_seconds": (3.0, 60.0),
 }
 
 
@@ -138,6 +151,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["enabled"] = bool(config.get("enabled"))
     config["dry_run"] = bool(config.get("dry_run"))
     config["freeze_detection_enabled"] = bool(config.get("freeze_detection_enabled"))
+    config["no_decodable_frames_detection_enabled"] = bool(config.get("no_decodable_frames_detection_enabled"))
     config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
     if config["watch_mode"] not in WATCH_MODES:
         config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
@@ -496,6 +510,8 @@ class ShadowBlankMonitorService:
             self._watched = watched
             self._watcher_absences = next_absences if continuous_mode else {}
         for event_type, event_target, details in continuity_events:
+            if event_type == "watcher_recovered":
+                self._reset_detection_state(event_target["channel_uuid"])
             self._record_event(event_type, event_target, details)
         return targets
 
@@ -585,7 +601,12 @@ class ShadowBlankMonitorService:
                 result = self.blank_probe(proxy_url, config)
             blank = bool(result.get("blank_detected"))
             freeze = bool(result.get("freeze_detected"))
-            detection_reason = "blank" if blank else ("freeze" if freeze else "")
+            no_decodable_frames = bool(result.get("no_decodable_frames_detected"))
+            detection_reason = (
+                "blank"
+                if blank
+                else ("freeze" if freeze else ("no_decodable_frames" if no_decodable_frames else ""))
+            )
             target["last_probe"] = {
                 "blank_detected": blank,
                 "blank_ratio": result.get("blank_ratio"),
@@ -593,6 +614,9 @@ class ShadowBlankMonitorService:
                 "freeze_detected": freeze,
                 "freeze_ratio": result.get("freeze_ratio"),
                 "freeze_duration_secs": result.get("freeze_duration_secs"),
+                "no_decodable_frames_detected": no_decodable_frames,
+                "no_decodable_frames_duration_secs": result.get("no_decodable_frames_duration_secs"),
+                "no_decodable_frames_error": result.get("no_decodable_frames_error"),
             }
 
             if result.get("viewer_left"):
@@ -612,6 +636,9 @@ class ShadowBlankMonitorService:
                 self._reset_blank_count(channel_uuid)
                 self._clear_switch_attempts(channel_uuid)
                 self._record_event("probe_ok", target, target["last_probe"])
+                return True
+
+            if self._guard_recent_watcher_recovery(channel_uuid, target, fresh_status, config, reason=detection_reason):
                 return True
 
             blank_count = self._increment_blank_count(channel_uuid, detection_reason)
@@ -643,6 +670,9 @@ class ShadowBlankMonitorService:
             return
 
         fresh_stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
+        if self._guard_recent_watcher_recovery(channel_uuid, target, fresh_status, config, reason=reason):
+            return
+
         if target.get("stream_id") and fresh_stream_id != target.get("stream_id"):
             self._reset_blank_count(channel_uuid)
             self._clear_switch_attempts(channel_uuid)
@@ -739,12 +769,56 @@ class ShadowBlankMonitorService:
             self._blank_counts.pop(channel_uuid, None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "blank"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "freeze"), None)
+            self._blank_counts.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
+
+    def _reset_detection_state(self, channel_uuid: str) -> None:
+        self._reset_blank_count(channel_uuid)
+        self._clear_switch_attempts(channel_uuid)
 
     def _increment_blank_count(self, channel_uuid: str, reason: str = "blank") -> int:
         key = self._detection_count_key(channel_uuid, reason)
         with self._lock:
             self._blank_counts[key] += 1
             return self._blank_counts[key]
+
+    def _guard_recent_watcher_recovery(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        reason: str,
+    ) -> bool:
+        if config.get("watch_mode") != "continuous":
+            return False
+
+        with self._lock:
+            watched = dict(self._watched.get(channel_uuid) or {})
+        recovery_age = watched.get("watcher_recovered_after_seconds")
+        guard_details: Optional[Dict[str, Any]] = None
+        if recovery_age is not None:
+            guard_details = {
+                "reason": reason,
+                "watcher_recovered_after_seconds": recovery_age,
+            }
+        else:
+            fresh_details = self._watcher_client_details(fresh_status, config)
+            target_watcher_ref = target.get("watcher_client_ref")
+            fresh_watcher_ref = fresh_details.get("watcher_client_ref")
+            if target_watcher_ref and fresh_watcher_ref and fresh_watcher_ref != target_watcher_ref:
+                guard_details = {
+                    "reason": reason,
+                    "last_watcher_client_ref": target_watcher_ref,
+                    "watcher_client_ref": fresh_watcher_ref,
+                }
+
+        if guard_details is None:
+            return False
+
+        self._reset_detection_state(channel_uuid)
+        self._record_event("watcher_recovery_guard", target, guard_details)
+        return True
 
     def _channel_proxy_url(self, channel_uuid: str) -> str:
         base_url = (self.base_url_provider() or "").rstrip("/")
@@ -799,9 +873,71 @@ class ShadowBlankMonitorService:
             command[input_index:input_index] = ["-t", str(duration)]
         return command, duration
 
+    @staticmethod
+    def _parse_no_decodable_frames_detection(
+        output: str,
+        config: Dict[str, Any],
+        *,
+        observed_duration: float,
+        returncode: Optional[int],
+    ) -> Dict[str, Any]:
+        result = {
+            "no_decodable_frames_detected": False,
+            "no_decodable_frames_duration_secs": None,
+            "no_decodable_frames_error": None,
+        }
+        if not config.get("no_decodable_frames_detection_enabled", True):
+            return result
+
+        output = output or ""
+        lowered = output.lower()
+        matched_pattern = next(
+            (pattern for pattern in NO_DECODABLE_FRAME_ERROR_PATTERNS if pattern in lowered),
+            None,
+        )
+        if not matched_pattern:
+            return result
+
+        decoded_frames = 0
+        for match in FFMPEG_FRAME_RE.finditer(output):
+            try:
+                decoded_frames = max(decoded_frames, int(match.group("frames")))
+            except (TypeError, ValueError):
+                continue
+        if decoded_frames > 0:
+            return result
+
+        min_duration = float(
+            config.get(
+                "no_decodable_frames_min_duration_seconds",
+                DEFAULT_CONFIG["no_decodable_frames_min_duration_seconds"],
+            )
+        )
+        strong_terminal_error = (
+            returncode not in (None, 0)
+            and (
+                "output file does not contain any stream" in lowered
+                or (
+                    "could not find codec parameters" in lowered
+                    and "unspecified size" in lowered
+                )
+            )
+        )
+        if float(observed_duration or 0.0) < min_duration and not strong_terminal_error:
+            return result
+
+        result["no_decodable_frames_detected"] = True
+        result["no_decodable_frames_duration_secs"] = round(
+            max(float(observed_duration or 0.0), min_duration if strong_terminal_error else 0.0),
+            3,
+        )
+        result["no_decodable_frames_error"] = matched_pattern
+        return result
+
     def _run_blank_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         command, duration = self._blank_probe_command(url, config)
         try:
+            start = time.time()
             completed = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
@@ -809,6 +945,7 @@ class ShadowBlankMonitorService:
                 timeout=duration + 15,
                 text=True,
             )
+            elapsed = time.time() - start
             output = completed.stderr or ""
             parsed = _parse_blank_detection(
                 output,
@@ -821,6 +958,12 @@ class ShadowBlankMonitorService:
                     duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+            parsed.update(self._parse_no_decodable_frames_detection(
+                output,
+                config,
+                observed_duration=elapsed,
+                returncode=completed.returncode,
+            ))
             parsed["returncode"] = completed.returncode
             return parsed
         except subprocess.TimeoutExpired as exc:
@@ -836,6 +979,12 @@ class ShadowBlankMonitorService:
                     duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+            parsed.update(self._parse_no_decodable_frames_detection(
+                output,
+                config,
+                observed_duration=duration,
+                returncode=None,
+            ))
             parsed["timeout"] = True
             return parsed
 
@@ -851,8 +1000,12 @@ class ShadowBlankMonitorService:
         stopped = False
         detected_reason = ""
         detected_duration = 0.0
+        no_decodable_error: Optional[str] = None
+        no_decodable_first_seen_wall: Optional[float] = None
+        decoded_frames = 0
         lines: List[str] = []
         line_queue: queue.Queue[str] = queue.Queue()
+        probe_started_wall = time.monotonic()
         process = subprocess.Popen(
             command,
             stdout=subprocess.DEVNULL,
@@ -890,6 +1043,12 @@ class ShadowBlankMonitorService:
             freeze_required = float(
                 config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
             )
+            no_decodable_required = float(
+                config.get(
+                    "no_decodable_frames_min_duration_seconds",
+                    DEFAULT_CONFIG["no_decodable_frames_min_duration_seconds"],
+                )
+            )
             last_media_time = 0.0
             active_blank_start: Optional[float] = None
             active_blank_wall: Optional[float] = None
@@ -905,6 +1064,10 @@ class ShadowBlankMonitorService:
                 if wall_start is not None:
                     wall_duration = max(0.0, time.monotonic() - wall_start)
                 return max(media_duration, wall_duration)
+
+            def no_decodable_observed_duration() -> float:
+                start = no_decodable_first_seen_wall if no_decodable_first_seen_wall is not None else probe_started_wall
+                return max(0.0, time.monotonic() - start)
 
             def mark_detection(reason: str, event_duration: float) -> bool:
                 nonlocal detected_reason, detected_duration
@@ -926,6 +1089,29 @@ class ShadowBlankMonitorService:
                     progress_time = _parse_ffmpeg_progress_time(line)
                     if progress_time is not None:
                         last_media_time = max(last_media_time, progress_time)
+
+                    for frame_match in FFMPEG_FRAME_RE.finditer(line):
+                        try:
+                            decoded_frames = max(decoded_frames, int(frame_match.group("frames")))
+                        except (TypeError, ValueError):
+                            continue
+
+                    if (
+                        config.get("no_decodable_frames_detection_enabled", True)
+                        and decoded_frames <= 0
+                    ):
+                        lowered_line = line.lower()
+                        matched_no_decodable = next(
+                            (
+                                pattern
+                                for pattern in NO_DECODABLE_FRAME_ERROR_PATTERNS
+                                if pattern in lowered_line
+                            ),
+                            None,
+                        )
+                        if matched_no_decodable and no_decodable_error is None:
+                            no_decodable_error = matched_no_decodable
+                            no_decodable_first_seen_wall = now
 
                     blank_start_match = BLACK_START_RE.search(line)
                     if blank_start_match:
@@ -989,6 +1175,14 @@ class ShadowBlankMonitorService:
                     break
 
                 if (
+                    no_decodable_error
+                    and decoded_frames <= 0
+                    and no_decodable_observed_duration() >= no_decodable_required
+                ):
+                    mark_detection("no_decodable_frames", no_decodable_observed_duration())
+                    break
+
+                if (
                     active_blank_start is not None
                     and observed_duration(active_blank_start, active_blank_wall) >= blank_required
                 ):
@@ -1033,6 +1227,52 @@ class ShadowBlankMonitorService:
                     break
 
             output = "".join(lines)
+            no_decodable_probe_duration = no_decodable_observed_duration()
+            no_decodable_parsed = self._parse_no_decodable_frames_detection(
+                output,
+                config,
+                observed_duration=no_decodable_probe_duration,
+                # Continuous mode intentionally does not treat a fast terminal
+                # ffmpeg error as enough by itself. It waits for the configured
+                # stall duration so confirmation_count still controls switch speed.
+                returncode=0,
+            )
+            if (
+                not detected_reason
+                and no_decodable_parsed.get("no_decodable_frames_detected")
+                and not viewer_left
+                and not stopped
+            ):
+                detected_reason = "no_decodable_frames"
+                detected_duration = float(no_decodable_parsed.get("no_decodable_frames_duration_secs") or 0.0)
+            elif (
+                not detected_reason
+                and no_decodable_error
+                and decoded_frames <= 0
+                and not viewer_left
+                and not stopped
+            ):
+                while no_decodable_probe_duration < no_decodable_required and not self._stop_event.is_set():
+                    try:
+                        fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                        if self._real_client_count(fresh_status, config) <= 0:
+                            viewer_left = True
+                            break
+                    except Exception as exc:
+                        logger.warning(f"Shadow blank monitor viewer poll failed: {exc}")
+                    time.sleep(0.2)
+                    no_decodable_probe_duration = no_decodable_observed_duration()
+
+                no_decodable_parsed = self._parse_no_decodable_frames_detection(
+                    output,
+                    config,
+                    observed_duration=no_decodable_probe_duration,
+                    returncode=0,
+                )
+                if no_decodable_parsed.get("no_decodable_frames_detected") and not viewer_left:
+                    detected_reason = "no_decodable_frames"
+                    detected_duration = float(no_decodable_parsed.get("no_decodable_frames_duration_secs") or 0.0)
+
             observed_probe_duration = max(
                 duration,
                 int(last_media_time) if last_media_time else 0,
@@ -1049,6 +1289,7 @@ class ShadowBlankMonitorService:
                     observed_probe_duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+            parsed.update(no_decodable_parsed)
             parsed["returncode"] = process.returncode
             if detected_reason == "blank":
                 parsed["blank_detected"] = True
@@ -1059,6 +1300,15 @@ class ShadowBlankMonitorService:
                 parsed["freeze_detected"] = True
                 parsed["freeze_duration_secs"] = round(detected_duration, 3)
                 parsed["freeze_ratio"] = round(min(1.0, detected_duration / float(duration or 1)), 4)
+            elif detected_reason == "no_decodable_frames":
+                parsed.setdefault("blank_detected", False)
+                parsed.setdefault("freeze_detected", False)
+                parsed["no_decodable_frames_detected"] = True
+                parsed["no_decodable_frames_duration_secs"] = round(detected_duration, 3)
+                parsed["no_decodable_frames_error"] = (
+                    no_decodable_parsed.get("no_decodable_frames_error")
+                    or no_decodable_error
+                )
             if viewer_left:
                 parsed["viewer_left"] = True
             if stopped:

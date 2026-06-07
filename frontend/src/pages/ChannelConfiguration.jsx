@@ -872,6 +872,20 @@ export default function ChannelConfiguration() {
         return
       }
 
+      if (
+        err.response?.status === 409 &&
+        ['automation_run_active', 'stream_checker_active'].includes(err.response?.data?.error)
+      ) {
+        toast({
+          title: 'Check Not Started',
+          description:
+            err.response.data.message ||
+            'A channel check cannot start while another run is active. Queue the channel check instead.',
+          variant: 'destructive',
+        })
+        return
+      }
+
       if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
         toast({
           title: "Check Taking Longer Than Expected",

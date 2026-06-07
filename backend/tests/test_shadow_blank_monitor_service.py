@@ -96,6 +96,8 @@ def test_watch_mode_controls_scan_delay():
     assert defaults["watch_gap_seconds"] == 1
     assert defaults["probe_duration_seconds"] == 60
     assert defaults["freeze_detection_enabled"] is True
+    assert defaults["no_decodable_frames_detection_enabled"] is True
+    assert defaults["no_decodable_frames_min_duration_seconds"] == 10.0
     assert defaults["confirmation_count"] == 2
     assert defaults["channel_cooldown_seconds"] == 300
     assert defaults["max_switches_per_hour"] == 3
@@ -331,6 +333,78 @@ def test_continuous_probe_detects_open_blank_after_min_duration(tmp_path, monkey
     assert result["blank_detected"] is True
     assert result["blank_duration_secs"] < 10
     assert result["blank_ratio"] < 0.8
+
+
+def test_continuous_probe_detects_no_decodable_frames_after_min_duration(tmp_path, monkeypatch):
+    processes = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO(
+                "Could not find codec parameters for stream 0 (Video: h264, none): unspecified size\n"
+                "Output file does not contain any stream\n"
+            )
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    def fake_popen(command, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    current_time = {"value": 100.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.1
+        return current_time["value"]
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "probe_duration_seconds": 60,
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+
+    result = service._run_blank_probe_until_viewer_left(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+        udi,
+        {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "stream_id": 10,
+        },
+    )
+
+    assert processes
+    assert result["no_decodable_frames_detected"] is True
+    assert result["no_decodable_frames_duration_secs"] >= 10
+    assert result["no_decodable_frames_error"] in {
+        "could not find codec parameters",
+        "output file does not contain any stream",
+    }
+    assert result.get("blank_detected") is False
 
 
 def test_continuous_probe_holds_ffmpeg_until_viewer_leaves(tmp_path, monkeypatch):
@@ -588,6 +662,87 @@ def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["reason"] == "freeze"
     assert status["cooldowns"] == []
+
+
+def test_confirmed_no_decodable_frames_switches_to_next_stream_when_live(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "no_decodable_frames_detected": True,
+            "no_decodable_frames_duration_secs": 10.2,
+            "no_decodable_frames_error": "could not find codec parameters",
+        },
+        switch_calls=switch_calls,
+    )
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+    })
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["reason"] == "no_decodable_frames"
+    assert status["cooldowns"] == []
+
+
+def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True, "blank_duration_secs": 3.0},
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 2,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+        "watcher_client_ref": "client-old",
+    }
+    with service._lock:
+        service._watched["uuid-1"] = {
+            **target,
+            "watcher_recovered_after_seconds": 1.5,
+        }
+        service._blank_counts[service._detection_count_key("uuid-1", "blank")] = 1
+        service._switch_attempts["uuid-1"] = {
+            "origin_stream_id": 10,
+            "target_stream_ids": [11],
+        }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is True
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "watcher_recovery_guard"
+    with service._lock:
+        assert service._blank_counts[service._detection_count_key("uuid-1", "blank")] == 0
+        assert "uuid-1" not in service._switch_attempts
 
 
 def test_confirmed_blank_rechecks_after_switch_and_skips_attempted_target(tmp_path):

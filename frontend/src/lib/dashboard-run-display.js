@@ -25,6 +25,54 @@ const STAGE_KEY_ALIASES = {
 
 export const normalizeRunStageKey = (key) => STAGE_KEY_ALIASES[key] || key
 
+const SINGLE_CHANNEL_STATUS_STAGE = {
+  starting: 'settings',
+  preparing: 'settings',
+  m3u_refresh: 'm3u_refresh',
+  cache_sync: 'cache_sync',
+  stream_matching: 'stream_matching',
+  matching: 'stream_matching',
+  quality_checking: 'quality_checking',
+  checking: 'quality_checking',
+  finalizing: 'finalizing',
+  complete: 'finalizing',
+  completed: 'finalizing',
+}
+
+const SINGLE_CHANNEL_STAGE_LABELS = {
+  settings: 'Preparing',
+  m3u_refresh: 'M3U Refresh',
+  cache_sync: 'Cache Sync',
+  stream_matching: 'Matching',
+  quality_checking: 'Quality Check',
+  finalizing: 'Finalizing',
+}
+
+const getSingleChannelStageId = (progress = {}) => {
+  const statusStage = SINGLE_CHANNEL_STATUS_STAGE[String(progress?.status || '').toLowerCase()]
+  if (statusStage) {
+    return statusStage
+  }
+
+  const text = `${progress?.step || ''} ${progress?.step_detail || ''}`.toLowerCase()
+  if (text.includes('cache') || text.includes('udi')) {
+    return 'cache_sync'
+  }
+  if (text.includes('m3u') || text.includes('playlist') || text.includes('provider')) {
+    return 'm3u_refresh'
+  }
+  if (text.includes('match') || text.includes('validating')) {
+    return 'stream_matching'
+  }
+  if (text.includes('quality') || text.includes('checking streams')) {
+    return 'quality_checking'
+  }
+  if (text.includes('final')) {
+    return 'finalizing'
+  }
+  return 'settings'
+}
+
 export const preferLiveRunSeconds = ({
   reportedSeconds,
   liveSeconds,
@@ -99,8 +147,8 @@ export const getRunDurationValue = ({
   const normalizedDisplayStageId = normalizeRunStageKey(displayRunStageId)
 
   if (streamRunActive) {
-    if (normalizedStageId === 'quality_checking') {
-      return streamCheckerElapsedSeconds
+    if (normalizedStageId === normalizedDisplayStageId) {
+      return displayRunStageElapsedSeconds ?? streamCheckerElapsedSeconds
     }
 
     return null
@@ -326,11 +374,14 @@ export const getStreamCheckerRunDisplay = ({
     || queueActive
     || singleChannelProgressActive
   )
-  const activeBatchTotal = isProcessing ? batchTotal : 0
+  const singleChannelStageId = singleChannelProgressActive ? getSingleChannelStageId(progress) : null
+  const activeBatchTotal = isProcessing && !singleChannelProgressActive ? batchTotal : 0
   const qualityStageActive = runStage === 'quality_checking' && activeBatchTotal > 0
   const streamCheckerOnlyActive = isProcessing && runState !== 'running'
   const streamQueueActive = (qualityStageActive || streamCheckerOnlyActive) && activeBatchTotal > 0
-  const queueStartedAt = isProcessing ? parseTimestamp(streamCheckerStatus?.queue?.started_at) : null
+  const queueStartedAt = isProcessing && !singleChannelProgressActive
+    ? parseTimestamp(streamCheckerStatus?.queue?.started_at)
+    : null
   const currentStreamStartedAt = isProcessing
     ? earliestStreamStart(streamCheckerStatus?.progress?.streams_detail || [])
     : null
@@ -345,15 +396,25 @@ export const getStreamCheckerRunDisplay = ({
 
   return {
     currentStreamElapsedSeconds,
+    displayMessage: singleChannelProgressActive
+      ? 'Running single channel check'
+      : 'Running manual quality checks',
+    displayStageId: singleChannelStageId || 'quality_checking',
+    displayStageLabel: singleChannelStageId
+      ? SINGLE_CHANNEL_STAGE_LABELS[singleChannelStageId] || 'Single Channel Check'
+      : 'Quality Checking',
     isProcessing,
     qualityStageActive,
+    singleChannelProgressActive,
     stageCards: isProcessing
       ? [{
-          key: 'quality_checking',
-          label: 'Quality Check',
+          key: singleChannelStageId || 'quality_checking',
+          label: singleChannelStageId
+            ? SINGLE_CHANNEL_STAGE_LABELS[singleChannelStageId] || 'Single Channel Check'
+            : 'Quality Check',
           status: 'running',
-          current: completed,
-          total: batchTotal,
+          current: singleChannelProgressActive ? Number(progress?.current_stream || 0) : completed,
+          total: singleChannelProgressActive ? Number(progress?.total_streams || 1) : batchTotal,
         }]
       : [],
     streamCheckerElapsedSeconds,
