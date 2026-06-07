@@ -651,7 +651,7 @@ describe('dashboard stream checker run display', () => {
     })).toBe(true)
   })
 
-  it('keeps UDI reload available during stream checks but blocks conflicting automation starts', () => {
+  it('keeps run automation queueable during stream checks', () => {
     const actions = getDashboardActionStates({
       actionLoading: '',
       isStreamCheckerProcessing: true,
@@ -659,8 +659,8 @@ describe('dashboard stream checker run display', () => {
     })
 
     expect(actions.reloadUdi.disabled).toBe(false)
-    expect(actions.runAutomation.disabled).toBe(true)
-    expect(actions.runAutomation.reason).toMatch(/stream check/i)
+    expect(actions.runAutomation.disabled).toBe(false)
+    expect(actions.runAutomation.reason).toBeNull()
   })
 
   it('blocks automation actions while Dispatcharr cache refresh is running', () => {

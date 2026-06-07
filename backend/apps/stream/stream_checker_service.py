@@ -1625,8 +1625,8 @@ class StreamCheckerService:
         }
         config = self.config.get('connectivity_guard', {}) or {}
         recovery_wait_seconds = self._bounded_float(
-            config.get('recovery_wait_seconds', 120),
-            default=120.0,
+            config.get('recovery_wait_seconds', 240),
+            default=240.0,
             minimum=0.0,
             maximum=600.0,
         )

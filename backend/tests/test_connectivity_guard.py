@@ -321,6 +321,12 @@ def test_active_status_marks_current_connectivity_failure_as_active():
     assert status["connectivity_guard"]["stale_failure"] is False
 
 
+def test_connectivity_recovery_wait_default_is_four_minutes():
+    service = StreamCheckerService()
+
+    assert service.config.config["connectivity_guard"]["recovery_wait_seconds"] == 240
+
+
 def test_mid_run_transient_outage_waits_for_recovery_before_marking_dead():
     service = StreamCheckerService()
     service.config.config["concurrent_streams"]["enabled"] = False

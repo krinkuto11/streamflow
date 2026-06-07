@@ -501,8 +501,6 @@ export const getDashboardActionStates = ({
       : null
   const runAutomationReason = udiInitializing
     ? 'Automation can start after the Dispatcharr cache is ready.'
-    : isStreamCheckerProcessing
-    ? 'Automation cannot start while a stream check is already active.'
     : actionBusy
       ? 'Another dashboard action is running.'
       : null
@@ -513,7 +511,7 @@ export const getDashboardActionStates = ({
       reason: reloadUdiReason,
     },
     runAutomation: {
-      disabled: udiInitializing || isStreamCheckerProcessing || actionBusy,
+      disabled: udiInitializing || actionBusy,
       reason: runAutomationReason,
     },
   }

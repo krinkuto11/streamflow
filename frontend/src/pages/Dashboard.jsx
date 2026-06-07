@@ -496,6 +496,7 @@ export default function Dashboard() {
   const abortedRun = runState === 'aborted'
   const completedRun = runState === 'completed'
   const skippedRun = runState === 'skipped'
+  const queuedRun = runState === 'queued'
   const queueSize     = streamCheckerStatus?.queue?.queue_size || 0
   const completed     = streamCheckerStatus?.queue?.completed  || 0
   const inProgress    = streamCheckerStatus?.queue?.in_progress || 0
@@ -556,8 +557,11 @@ export default function Dashboard() {
     showRunProgress,
     skippedRunDisplay,
   })
+  const streamRunDisplayMessage = streamRunActive && queuedRun
+    ? `${streamCheckerRunDisplay.displayMessage}; automation queued`
+    : streamCheckerRunDisplay.displayMessage
   const displayRunMessage = streamRunActive
-    ? streamCheckerRunDisplay.displayMessage
+    ? streamRunDisplayMessage
     : abortedRunDisplay.message || skippedRunDisplay.message || runProgress.message || runStatus.message || 'Automation run status'
   const displayRunStageId = normalizeRunStageKey(streamRunActive ? streamCheckerRunDisplay.displayStageId : runStage)
   const displayRunStageLabel = streamRunActive ? streamCheckerRunDisplay.displayStageLabel : runStageLabel
@@ -569,6 +573,8 @@ export default function Dashboard() {
       ? 'Waiting'
       : runningRun
         ? 'Running'
+        : queuedRun
+          ? 'Queued'
         : completedRun
           ? 'Completed'
           : failedRun

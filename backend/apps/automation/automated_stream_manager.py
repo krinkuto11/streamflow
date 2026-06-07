@@ -2372,6 +2372,25 @@ class AutomatedStreamManager:
                 if stage_item["key"] == active_stage and stage_item["status"] == "running":
                     stage_item["status"] = "completed" if final_state == "completed" else final_state
 
+    def _queue_run_status(self, message: str) -> None:
+        """Mark the current automation intent as queued, not completed."""
+        self._ensure_run_status_fields()
+        now = datetime.now()
+        with self._run_status_lock:
+            status_data = self._run_status
+            active_stage = status_data.get("stage")
+            status_data["state"] = "queued"
+            status_data["status"] = "queued"
+            status_data["active"] = False
+            status_data["stage"] = "queued"
+            status_data["stage_label"] = "Queued"
+            status_data["message"] = message
+            status_data["updated_at"] = now.isoformat()
+            status_data["completed_at"] = None
+            for stage_item in status_data.get("stages", []):
+                if stage_item["key"] == active_stage and stage_item["status"] == "running":
+                    stage_item["status"] = "queued"
+
     def _manual_stop_message(self) -> str:
         return "Automation run was stopped by the user"
 
@@ -4586,18 +4605,23 @@ class AutomatedStreamManager:
             )
             return
 
-        # Check if stream checking mode is active - if so, skip this cycle
+        # Check if stream checking mode is active. Full automation must not run
+        # next to single-channel checks or preflight work, but the run intent
+        # should remain pending so it can start when the checker becomes idle.
         try:
             stream_checker = get_stream_checker_service()
             status = stream_checker.get_status()
-            if status.get('stream_checking_mode', False) and not forced:
-                logger.debug("Stream checking is active. Skipping automation cycle.")
-                self._finish_run_status(
-                    state="skipped",
-                    stage="skipped",
-                    stage_label="Skipped",
-                    message="Stream checker is already active",
-                )
+            if status.get('stream_checking_mode', False):
+                if forced:
+                    self.force_next_run = True
+                    self.forced_period_id = forced_period_id
+                    logger.info(
+                        "Stream checking is active. Queuing forced automation cycle%s.",
+                        f" for period {forced_period_id}" if forced_period_id else "",
+                    )
+                else:
+                    logger.info("Stream checking is active. Deferring automation cycle until checker is idle.")
+                self._queue_run_status("Stream checker is active; automation run is queued")
                 return
         except Exception as e:
             logger.debug(f"Could not check stream checking mode status: {e}")
