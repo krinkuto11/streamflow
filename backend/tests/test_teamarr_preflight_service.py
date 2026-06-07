@@ -118,11 +118,20 @@ class QueueBackedChecker(FakeChecker):
 
 
 class FakeUdi:
-    def __init__(self, streams=None):
+    def __init__(self, streams=None, streams_after_channel_refresh=None):
         self.streams = streams if streams is not None else [{"id": 1}, {"id": 2}]
+        self.streams_after_channel_refresh = streams_after_channel_refresh
+        self.refresh_channel_calls = []
 
     def get_channel_streams(self, channel_id):
         return self.streams
+
+    def refresh_channel_by_id(self, channel_id):
+        self.refresh_channel_calls.append(channel_id)
+        if self.streams_after_channel_refresh is not None:
+            self.streams = self.streams_after_channel_refresh
+            return True
+        return False
 
 
 class FakeAutomationConfig:
@@ -568,6 +577,42 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["details"]["bucket"], "post+4m")
 
+    def test_missed_configured_post_start_bucket_catches_up_inside_grace(self):
+        checker = FakeChecker()
+        event = make_event(event_date="2026-05-28T21:55:00+00:00")
+        service, _, _ = self.make_service([event], checker=checker)
+        identity = "id:100:2026-05-28T21:55:00+00:00"
+        service._attempted_buckets[f"{identity}:post+2m"] = FIXED_NOW
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(len(checker.calls), 1)
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["details"]["bucket"], "post+4m")
+
+    def test_post_start_catchup_does_not_invent_unconfigured_four_minute_bucket(self):
+        checker = FakeChecker()
+        event = make_event(event_date="2026-05-28T21:55:00+00:00")
+        service, _, _ = self.make_service([event], checker=checker)
+        service.update_config({"post_start_offsets_minutes": [2]})
+        identity = "id:100:2026-05-28T21:55:00+00:00"
+        service._attempted_buckets[f"{identity}:post+2m"] = FIXED_NOW
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "already_attempted")
+        self.assertEqual(upcoming[0]["trigger_bucket"], "post+2m")
+
     def test_no_streams_records_no_streams_without_launching_check(self):
         checker = FakeChecker()
         service, _, _ = self.make_service([make_event()], checker=checker, udi=FakeUdi(streams=[]))
@@ -579,6 +624,24 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
 
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["type"], "no_streams_yet")
+
+    def test_no_streams_refreshes_channel_before_marking_bucket_attempted(self):
+        checker = FakeChecker()
+        udi = FakeUdi(streams=[], streams_after_channel_refresh=[{"id": 99}])
+        service, _, _ = self.make_service([make_event()], checker=checker, udi=udi)
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(udi.refresh_channel_calls, [77])
+        self.assertEqual(len(checker.calls), 1)
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["type"], "preflight_completed")
 
     def test_active_automation_run_defers_preflight_without_marking_attempted(self):
         checker = FakeChecker()

@@ -587,6 +587,15 @@ class ShadowBlankMonitorService:
                     if watcher_count > 0:
                         self._watcher_absences.pop(channel_uuid, None)
                     self._watched[channel_uuid] = dict(target)
+                if watcher_count > 0:
+                    guard_details = {
+                        "reason": "active_watcher_between_confirmations",
+                        "watcher_client_count": watcher_count,
+                    }
+                    if target.get("watcher_client_ref"):
+                        guard_details["watcher_client_ref"] = target.get("watcher_client_ref")
+                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+                    break
         finally:
             with self._lock:
                 self._active_probes.discard(channel_uuid)
@@ -639,7 +648,7 @@ class ShadowBlankMonitorService:
                 return True
 
             if self._guard_recent_watcher_recovery(channel_uuid, target, fresh_status, config, reason=detection_reason):
-                return True
+                return False
 
             blank_count = self._increment_blank_count(channel_uuid, detection_reason)
             confirmations = int(config.get("confirmation_count", 2))
@@ -812,13 +821,27 @@ class ShadowBlankMonitorService:
                     "last_watcher_client_ref": target_watcher_ref,
                     "watcher_client_ref": fresh_watcher_ref,
                 }
+            elif not target_watcher_ref and fresh_watcher_ref:
+                guard_details = {
+                    "reason": reason,
+                    "watcher_client_ref": fresh_watcher_ref,
+                    "watcher_client_count": fresh_details.get("watcher_client_count"),
+                }
 
         if guard_details is None:
             return False
 
+        self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+        return True
+
+    def _record_watcher_recovery_guard(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        guard_details: Dict[str, Any],
+    ) -> None:
         self._reset_detection_state(channel_uuid)
         self._record_event("watcher_recovery_guard", target, guard_details)
-        return True
 
     def _channel_proxy_url(self, channel_uuid: str) -> str:
         base_url = (self.base_url_provider() or "").rstrip("/")

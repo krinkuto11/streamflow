@@ -1114,7 +1114,7 @@ class TeamarrPreflightService:
             if direction == "pre":
                 is_due = threshold_seconds - poll_window_seconds <= seconds <= threshold_seconds
             else:
-                is_due = threshold_seconds <= seconds <= threshold_seconds + poll_window_seconds
+                is_due = threshold_seconds <= seconds
             if not is_due:
                 continue
 
@@ -1467,7 +1467,17 @@ class TeamarrPreflightService:
 
     def _channel_has_streams(self, channel_id: int) -> bool:
         try:
-            streams = self.udi_provider().get_channel_streams(int(channel_id)) or []
+            udi = self.udi_provider()
+            channel_id = int(channel_id)
+            streams = udi.get_channel_streams(channel_id) or []
+            if streams:
+                return True
+            if hasattr(udi, "refresh_channel_by_id"):
+                try:
+                    udi.refresh_channel_by_id(channel_id)
+                    streams = udi.get_channel_streams(channel_id) or []
+                except Exception as exc:
+                    logger.warning(f"Teamarr preflight could not refresh channel {channel_id}: {exc}")
             return len(streams) > 0
         except Exception as exc:
             logger.warning(f"Teamarr preflight could not read streams for channel {channel_id}: {exc}")

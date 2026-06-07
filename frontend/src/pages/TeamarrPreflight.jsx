@@ -339,9 +339,20 @@ export default function TeamarrPreflight() {
   const queueActiveChecks = status?.queue_active_checks || []
   const queuedChecksCount = Number(status?.queued_checks_count ?? queuedChecks.length)
   const queueActiveChecksCount = Number(status?.queue_active_checks_count ?? queueActiveChecks.length)
+  const allActiveChecks = useMemo(
+    () => [
+      ...activeChecks.map(check => ({ ...check, run_source: check.run_source || 'direct' })),
+      ...queueActiveChecks.map(check => ({ ...check, run_source: check.run_source || 'queue' })),
+    ],
+    [activeChecks, queueActiveChecks]
+  )
   const sortedUpcomingEvents = useMemo(
     () => sortTeamarrManagedEvents(upcomingEvents),
     [upcomingEvents]
+  )
+  const upcomingViewEvents = useMemo(
+    () => filterTeamarrEventsByView(sortedUpcomingEvents, 'upcoming'),
+    [sortedUpcomingEvents]
   )
   const viewFilteredUpcomingEvents = useMemo(
     () => filterTeamarrEventsByView(sortedUpcomingEvents, managedEventView),
@@ -356,8 +367,8 @@ export default function TeamarrPreflight() {
     [recentEvents, eventSearch]
   )
   const filteredActiveChecks = useMemo(
-    () => filterTeamarrEventsBySearch(activeChecks, eventSearch),
-    [activeChecks, eventSearch]
+    () => filterTeamarrEventsBySearch(allActiveChecks, eventSearch),
+    [allActiveChecks, eventSearch]
   )
   const managedEventPageCount = Math.max(1, Math.ceil(filteredUpcomingEvents.length / MANAGED_EVENT_PAGE_SIZE))
   const safeManagedEventPage = Math.min(managedEventPage, managedEventPageCount)
@@ -374,6 +385,11 @@ export default function TeamarrPreflight() {
     RECENT_EVENT_PAGE_SIZE,
   )
   const displayedActiveChecks = filteredActiveChecks.slice(0, ACTIVE_CHECK_DISPLAY_LIMIT)
+  const activeChecksCount = allActiveChecks.length
+  const directActiveChecksCount = activeChecks.length
+  const upcomingViewCount = upcomingViewEvents.length
+  const allManagedEventsCount = upcomingEvents.length
+  const pastEventsCount = allManagedEventsCount - upcomingViewCount
   const managedCandidates = Number(status?.managed_candidates ?? upcomingEvents.length)
   const managedEventsSeen = Number(status?.managed_events_seen ?? managedCandidates)
   const managedEventsReturned = Number(status?.managed_events_returned ?? upcomingEvents.length)
@@ -384,6 +400,20 @@ export default function TeamarrPreflight() {
   const queuedChecksDetail = queuedChecksCount > 0
     ? (queueActiveChecksCount > 0 ? `${queueActiveChecksCount} running from queue` : 'Waiting for Stream Checker')
     : (queueActiveChecksCount > 0 ? `${queueActiveChecksCount} running from queue` : 'No queued events')
+  const activeChecksDetail = queueActiveChecksCount > 0
+    ? `${directActiveChecksCount} direct, ${queueActiveChecksCount} from queue`
+    : `Limit ${editedConfig.max_concurrent_checks}`
+  const managedEventViewLabels = {
+    upcoming: 'upcoming',
+    due: 'due',
+    no_check: 'without checks',
+    past: 'past',
+    all: 'all',
+  }
+  const managedViewLabel = managedEventViewLabels[managedEventView] || 'managed'
+  const managedEventSummary = eventSearch.trim()
+    ? `${filteredUpcomingEvents.length} of ${viewFilteredUpcomingEvents.length} ${managedViewLabel} events (${managedCandidates} all)`
+    : `${viewFilteredUpcomingEvents.length} ${managedViewLabel} events (${managedCandidates} all)`
   const previewConfig = useMemo(() => ({
     ...(editedConfig || {}),
     retry_offsets_minutes: parseCsv(retryOffsets).map(item => Number(item)).filter(Number.isFinite),
@@ -764,9 +794,12 @@ export default function TeamarrPreflight() {
             <CalendarCheck className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{upcomingEvents.length}</div>
+            <div className="text-2xl font-bold">{upcomingViewCount}</div>
             <p className="mt-2 text-xs text-muted-foreground">
-              {nextEvent ? formatOffset(nextEvent.seconds_to_start) : 'No events'}
+              {nextEvent ? formatOffset(nextEvent.seconds_to_start) : 'No upcoming'}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {allManagedEventsCount} all events{pastEventsCount > 0 ? `, ${pastEventsCount} past` : ''}
             </p>
           </CardContent>
         </Card>
@@ -777,8 +810,8 @@ export default function TeamarrPreflight() {
             <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{activeChecks.length}</div>
-            <p className="mt-2 text-xs text-muted-foreground">Limit {editedConfig.max_concurrent_checks}</p>
+            <div className="text-2xl font-bold">{activeChecksCount}</div>
+            <p className="mt-2 text-xs text-muted-foreground">{activeChecksDetail}</p>
           </CardContent>
         </Card>
 
@@ -812,12 +845,12 @@ export default function TeamarrPreflight() {
               <CardTitle>Active Event Checks</CardTitle>
               <CardDescription>
                 {eventSearch.trim()
-                  ? `${filteredActiveChecks.length} of ${activeChecks.length} running checks`
-                  : `${activeChecks.length} running checks`}
+                  ? `${filteredActiveChecks.length} of ${activeChecksCount} running checks`
+                  : `${activeChecksCount} running checks`}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {activeChecks.length === 0 ? (
+              {activeChecksCount === 0 ? (
                 <p className="text-sm text-muted-foreground">No active event checks</p>
               ) : filteredActiveChecks.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No active checks match this search</p>
@@ -830,10 +863,15 @@ export default function TeamarrPreflight() {
                           <p className="truncate font-medium">{check.event_name || 'Managed Event'}</p>
                           <p className="text-sm text-muted-foreground">{check.channel_name || `Channel ${check.dispatcharr_channel_id || 'N/A'}`}</p>
                         </div>
-                        <Badge variant="secondary">{check.bucket || 'manual'}</Badge>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
+                          {check.run_source === 'queue' ? <Badge variant="outline">Queued Runner</Badge> : null}
+                          <Badge variant="secondary">{check.bucket || check.trigger_bucket || 'manual'}</Badge>
+                        </div>
                       </div>
                       <p className="mt-2 text-xs text-muted-foreground">
-                        Started {formatTimestamp(check.started_at)} - running {formatElapsedSince(check.started_at)}
+                        {check.started_at
+                          ? `Started ${formatTimestamp(check.started_at)} - running ${formatElapsedSince(check.started_at)}`
+                          : 'Running from stream-checker queue'}
                       </p>
                     </div>
                   ))}
@@ -1099,9 +1137,7 @@ export default function TeamarrPreflight() {
             <CardHeader>
               <CardTitle>Managed Events</CardTitle>
               <CardDescription>
-                {eventSearch.trim()
-                  ? `${filteredUpcomingEvents.length} of ${managedCandidates} Teamarr event channels`
-                  : `${managedCandidates} Teamarr event channels`}
+                {managedEventSummary}
                 {managedEventsSeen !== managedCandidates ? ` from ${managedEventsSeen} managed records` : ''}
               </CardDescription>
             </CardHeader>
