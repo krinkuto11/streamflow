@@ -1582,20 +1582,41 @@ class TeamarrPreflightService:
 
     @staticmethod
     def _default_automation_status_provider() -> Dict[str, Any]:
+        fallback_status: Optional[Dict[str, Any]] = None
+        seen_modules = set()
+
+        def consider_module(module: Any) -> Optional[Dict[str, Any]]:
+            nonlocal fallback_status
+            if module is None:
+                return None
+            module_id = id(module)
+            if module_id in seen_modules:
+                return None
+            seen_modules.add(module_id)
+
+            status = TeamarrPreflightService._automation_status_from_module(module)
+            if status is None:
+                return None
+            if fallback_status is None:
+                fallback_status = status
+            if TeamarrPreflightService._automation_status_indicates_active_run(status):
+                return status
+            return None
+
         try:
             for module_name in ("apps.api.web_api", "web_api", "__main__"):
-                status = TeamarrPreflightService._automation_status_from_module(sys.modules.get(module_name))
+                status = consider_module(sys.modules.get(module_name))
                 if status is not None:
                     return status
 
             from apps.api import web_api
 
-            status = TeamarrPreflightService._automation_status_from_module(web_api)
+            status = consider_module(web_api)
             if status is not None:
                 return status
         except Exception as exc:
             logger.debug("Could not read global automation run status: %s", exc)
-        return {}
+        return fallback_status or {}
 
 
 _teamarr_preflight_instance: Optional[TeamarrPreflightService] = None
