@@ -21,6 +21,7 @@ import {
 } from '@/lib/teamarr-preflight-event-search.js'
 import { getTeamarrEventHealthAlert } from '@/lib/teamarr-preflight-event-health.js'
 import { getTeamarrAutomaticCheck, getTeamarrSchedulePreview } from '@/lib/teamarr-preflight-schedule.js'
+import { getTeamarrActiveChecksDetail } from '@/lib/teamarr-preflight-status-display.js'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import {
   Activity,
@@ -400,9 +401,13 @@ export default function TeamarrPreflight() {
   const queuedChecksDetail = queuedChecksCount > 0
     ? (queueActiveChecksCount > 0 ? `${queueActiveChecksCount} running from queue` : 'Waiting for Stream Checker')
     : (queueActiveChecksCount > 0 ? `${queueActiveChecksCount} running from queue` : 'No queued events')
-  const activeChecksDetail = queueActiveChecksCount > 0
-    ? `${directActiveChecksCount} direct, ${queueActiveChecksCount} from queue`
-    : `Limit ${editedConfig.max_concurrent_checks}`
+  const activeChecksDetail = getTeamarrActiveChecksDetail({
+    directActiveChecksCount,
+    queueActiveChecksCount,
+    editedConfig,
+    status,
+    config,
+  })
   const managedEventViewLabels = {
     upcoming: 'upcoming',
     due: 'due',
