@@ -103,6 +103,26 @@ describe('getAutoCreateRuleTestToast', () => {
     })
   })
 
+  it('reports guardrail-blocked matches before generic no-schedulable messaging', () => {
+    expect(getAutoCreateRuleTestToast({
+      responseData: {
+        matches: 0,
+        total_epg_matches: 12,
+        guardrail_blocked_matches: 12,
+        guardrail: {
+          blocked: true,
+          limit: 10,
+          reason: 'max_events_per_rule_run',
+        },
+      },
+      selectedChannelCount: 12,
+    })).toEqual({
+      title: 'Guardrail Blocked',
+      description: '12 schedulable matches would exceed the configured max of 10. Narrow the regex or raise the rule limit intentionally.',
+      variant: 'destructive',
+    })
+  })
+
   it('treats null test data as an empty diagnostic snapshot', () => {
     expect(getAutoCreateRuleTestToast({
       responseData: null,
@@ -173,6 +193,32 @@ describe('getAutoCreateRuleTestToast', () => {
         count: 4,
         detail: '3 already ended, 1 missing start/end time',
         channels: [{ id: 9, name: 'No Time' }],
+      },
+    ])
+  })
+
+  it('builds guardrail diagnostics with blocked program examples', () => {
+    expect(getAutoCreateRuleTestDiagnostics({
+      guardrail_blocked_matches: 2,
+      guardrail: {
+        blocked: true,
+        limit: 1,
+      },
+      guardrail_blocked_programs: [
+        { title: 'Live: MLB', channel_id: 10, channel_name: 'Team A' },
+        { title: 'Live: NHL', channel_id: 11, channel_name: 'Team B' },
+      ],
+    })).toEqual([
+      {
+        key: 'guardrail_blocked',
+        label: 'Guardrail blocked',
+        count: 2,
+        detail: 'This rule would create too many checks for the configured limit of 1. Narrow the regex or raise the max checks value deliberately.',
+        sampleTitles: ['Live: MLB', 'Live: NHL'],
+        channels: [
+          { id: 10, name: 'Team A' },
+          { id: 11, name: 'Team B' },
+        ],
       },
     ])
   })

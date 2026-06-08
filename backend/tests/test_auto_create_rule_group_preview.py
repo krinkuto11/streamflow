@@ -163,6 +163,48 @@ def test_auto_create_preview_reports_due_and_unscheduled_matches(tmp_path, monke
     assert [channel["id"] for channel in result["channels_with_unscheduled_matches"]] == [12, 13]
 
 
+def test_auto_create_preview_guardrail_blocks_massqueue(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    channels = {
+        10: {"id": 10, "name": "Team A", "tvg_id": "team-a"},
+        11: {"id": 11, "name": "Team B", "tvg_id": "team-b"},
+        12: {"id": 12, "name": "Team C", "tvg_id": "team-c"},
+    }
+    udi = Mock()
+    udi.get_channel_group_by_id.return_value = {"id": 50, "name": "Team Channels"}
+    udi.get_channels_by_group.return_value = list(channels.values())
+    udi.get_channel_by_id.side_effect = lambda channel_id: channels.get(int(channel_id))
+    monkeypatch.setattr(scheduling_service, "get_udi_manager", lambda: udi)
+
+    service._epg_cache = [
+        {
+            "title": "Live: Baseball",
+            "start_time": (now + timedelta(minutes=5)).isoformat(),
+            "end_time": (now + timedelta(hours=2)).isoformat(),
+            "tvg_id": tvg_id,
+        }
+        for tvg_id in ["team-a", "team-b", "team-c"]
+    ]
+
+    result = service.test_regex_against_epg_for_rule(
+        channel_group_ids=[50],
+        regex_pattern="^Live:",
+        minutes_before=10,
+        max_events_per_run=2,
+    )
+
+    assert result["total_epg_matches"] == 3
+    assert result["matches"] == 0
+    assert result["guardrail"]["blocked"] is True
+    assert result["guardrail"]["reason"] == "max_events_per_rule_run"
+    assert result["guardrail"]["limit"] == 2
+    assert result["guardrail_blocked_matches"] == 3
+    assert len(result["guardrail_blocked_programs"]) == 3
+    assert result["programs"] == []
+
+
 def test_group_only_auto_create_rule_does_not_persist_group_channels_as_individuals(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
 
@@ -255,6 +297,49 @@ def test_auto_create_schedules_currently_airing_programs(tmp_path, monkeypatch):
     events = service.get_scheduled_events()
     assert len(events) == 3
     assert {event["channel_id"] for event in events} == {10, 11, 12}
+
+
+def test_auto_create_match_guardrail_blocks_massqueue_events(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    channels = {
+        10: {"id": 10, "name": "Team A", "tvg_id": "team-a"},
+        11: {"id": 11, "name": "Team B", "tvg_id": "team-b"},
+        12: {"id": 12, "name": "Team C", "tvg_id": "team-c"},
+    }
+    udi = Mock()
+    udi.get_channel_group_by_id.return_value = {"id": 50, "name": "Team Channels"}
+    udi.get_channels_by_group.return_value = list(channels.values())
+    udi.get_channel_by_id.side_effect = lambda channel_id: channels.get(int(channel_id))
+    monkeypatch.setattr(scheduling_service, "get_udi_manager", lambda: udi)
+
+    service._auto_create_rules = [{
+        "id": "rule-wide",
+        "name": "Wide live rule",
+        "channel_group_ids": [50],
+        "channel_ids": [],
+        "regex_pattern": "^Live:",
+        "minutes_before": 0,
+        "max_events_per_run": 2,
+    }]
+    service._epg_cache = [
+        {
+            "title": "Live: Baseball",
+            "start_time": (now - timedelta(minutes=5)).isoformat(),
+            "end_time": (now + timedelta(hours=2)).isoformat(),
+            "tvg_id": tvg_id,
+        }
+        for tvg_id in ["team-a", "team-b", "team-c"]
+    ]
+
+    result = service.match_programs_to_rules()
+
+    assert result["matched"] == 3
+    assert result["created"] == 0
+    assert result["guardrail_blocked_matches"] == 3
+    assert result["guardrail_blocked_rules"][0]["rule_id"] == "rule-wide"
+    assert service.get_scheduled_events() == []
 
 
 def test_auto_create_schedules_programs_with_guide_time_aliases(tmp_path, monkeypatch):

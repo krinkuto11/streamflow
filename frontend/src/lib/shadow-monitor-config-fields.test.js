@@ -31,10 +31,14 @@ describe('shadowMonitorNumberFields', () => {
       'poll_interval_seconds',
       'watch_gap_seconds',
       'probe_duration_seconds',
+      'garbled_audio_error_threshold',
       'confirmation_count',
       'channel_cooldown_seconds',
       'max_switches_per_hour',
       'max_concurrent_watchers',
+      'silent_audio_noise_db',
+      'offline_image_hash_threshold',
+      'offline_image_capture_offset_seconds',
     ])
 
     expect(shadowMonitorThresholdFields.map(field => field.key)).toEqual([
@@ -45,6 +49,7 @@ describe('shadowMonitorNumberFields', () => {
       'freeze_noise_threshold',
       'freeze_ratio_threshold',
       'no_decodable_frames_min_duration_seconds',
+      'silent_audio_min_duration_seconds',
     ])
   })
 })

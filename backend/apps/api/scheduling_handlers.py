@@ -252,6 +252,7 @@ def test_auto_create_rule_response(*, payload: Any, get_scheduling_service: Call
             channel_group_ids=schema.channel_group_ids,
             regex_pattern=schema.regex_pattern,
             minutes_before=schema.minutes_before,
+            max_events_per_run=schema.max_events_per_run,
             force_refresh=True,
         )
         return jsonify(result)

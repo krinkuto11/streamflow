@@ -37,6 +37,10 @@ DUPLICATE_DETECTION_WINDOW_SECONDS = 300  # 5 minutes window for detecting dupli
 EXECUTED_EVENTS_RETENTION_DAYS = 7  # Keep executed events history for 7 days
 DEFAULT_UDI_REFRESH_INTERVAL_MINUTES = 240
 AUTO_CREATE_QUEUE_PRIORITY = 90
+AUTO_CREATE_DEFAULT_MAX_EVENTS_PER_RULE_RUN = 10
+AUTO_CREATE_DEFAULT_MAX_EVENTS_PER_POLL = 25
+AUTO_CREATE_MAX_EVENTS_PER_RULE_BOUNDS = (1, 250)
+AUTO_CREATE_MAX_EVENTS_PER_POLL_BOUNDS = (1, 1000)
 
 
 # ── SCH-002 ────────────────────────────────────────────────────────────────
@@ -68,6 +72,14 @@ def _parse_dt(value: str) -> datetime:
     return dt
 
 
+def _coerce_guardrail_int(value: Any, default: int, bounds: tuple[int, int]) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(bounds[0], min(bounds[1], parsed))
+
+
 class SchedulingService:
     """
     Service for managing EPG-based scheduled channel checks.
@@ -87,6 +99,53 @@ class SchedulingService:
         self._config_dir = Path(CONFIG_DIR)
         logger.info("Scheduling service initialized")
 
+    @staticmethod
+    def _normalize_auto_create_guardrails(raw_guardrails: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        guardrails = raw_guardrails if isinstance(raw_guardrails, dict) else {}
+        return {
+            'enabled': bool(guardrails.get('enabled', True)),
+            'max_events_per_rule_run': _coerce_guardrail_int(
+                guardrails.get('max_events_per_rule_run'),
+                AUTO_CREATE_DEFAULT_MAX_EVENTS_PER_RULE_RUN,
+                AUTO_CREATE_MAX_EVENTS_PER_RULE_BOUNDS,
+            ),
+            'max_events_per_poll': _coerce_guardrail_int(
+                guardrails.get('max_events_per_poll'),
+                AUTO_CREATE_DEFAULT_MAX_EVENTS_PER_POLL,
+                AUTO_CREATE_MAX_EVENTS_PER_POLL_BOUNDS,
+            ),
+        }
+
+    def _get_auto_create_guardrails(self) -> Dict[str, Any]:
+        return self._normalize_auto_create_guardrails(self._config.get('auto_create_guardrails'))
+
+    def _normalize_rule_max_events_per_run(self, value: Any = None) -> int:
+        guardrails = self._get_auto_create_guardrails()
+        return _coerce_guardrail_int(
+            value,
+            guardrails['max_events_per_rule_run'],
+            AUTO_CREATE_MAX_EVENTS_PER_RULE_BOUNDS,
+        )
+
+    def _rule_max_events_per_run(self, rule: Dict[str, Any]) -> int:
+        return self._normalize_rule_max_events_per_run(rule.get('max_events_per_run'))
+
+    @staticmethod
+    def _guardrail_block_payload(
+        *,
+        scope: str,
+        limit: int,
+        candidate_count: int,
+        reason: str,
+    ) -> Dict[str, Any]:
+        return {
+            'blocked': True,
+            'scope': scope,
+            'limit': limit,
+            'candidate_count': candidate_count,
+            'reason': reason,
+        }
+
     def _get_regex_matcher(self):
         """Get or create regex matcher instance (singleton pattern)."""
         if self._regex_matcher is None:
@@ -105,6 +164,11 @@ class SchedulingService:
             'epg_schedule': {'type': 'interval', 'value': 60},
             'epg_refresh_interval_minutes': 60,
             'udi_refresh_schedule': {'type': 'interval', 'value': DEFAULT_UDI_REFRESH_INTERVAL_MINUTES},
+            'auto_create_guardrails': {
+                'enabled': True,
+                'max_events_per_rule_run': AUTO_CREATE_DEFAULT_MAX_EVENTS_PER_RULE_RUN,
+                'max_events_per_poll': AUTO_CREATE_DEFAULT_MAX_EVENTS_PER_POLL,
+            },
             'enabled': True
         }
         from apps.database.connection import get_session
@@ -137,6 +201,12 @@ class SchedulingService:
                     config['epg_refresh_interval_minutes'] = int(
                         config.get('epg_schedule', {}).get('value', 60)
                     )
+                normalized_guardrails = self._normalize_auto_create_guardrails(
+                    config.get('auto_create_guardrails')
+                )
+                if config.get('auto_create_guardrails') != normalized_guardrails:
+                    config['auto_create_guardrails'] = normalized_guardrails
+                    needs_save = True
 
                 # Persist only when something actually changed
                 if needs_save:
@@ -151,6 +221,9 @@ class SchedulingService:
             session.rollback()
         finally:
             session.close()
+        default_config['auto_create_guardrails'] = self._normalize_auto_create_guardrails(
+            default_config.get('auto_create_guardrails')
+        )
         return default_config
 
     def _save_config(self) -> bool:
@@ -389,7 +462,14 @@ class SchedulingService:
 
     def update_config(self, config: Dict[str, Any]) -> bool:
         with self._lock:
-            self._config.update(config)
+            next_config = dict(config or {})
+            if 'auto_create_guardrails' in next_config:
+                next_config['auto_create_guardrails'] = self._normalize_auto_create_guardrails(
+                    next_config.get('auto_create_guardrails')
+                )
+            self._config.update(next_config)
+            if 'auto_create_guardrails' not in self._config:
+                self._config['auto_create_guardrails'] = self._normalize_auto_create_guardrails(None)
             return self._save_config()
 
     def get_epg_schedule(self) -> dict:
@@ -1085,6 +1165,7 @@ class SchedulingService:
         target['channel_group_ids'] = channel_group_ids
         target['channel_groups_info'] = channel_groups_info
         target['channels_info'] = channels_info
+        target['max_events_per_run'] = self._rule_max_events_per_run(rule)
 
         if channels_info:
             target['channel_id'] = channels_info[0]['id']
@@ -1152,6 +1233,9 @@ class SchedulingService:
                 'channels_info': channels_info,
                 'regex_pattern': rule_data['regex_pattern'],
                 'minutes_before': rule_data.get('minutes_before', 5),
+                'max_events_per_run': self._normalize_rule_max_events_per_run(
+                    rule_data.get('max_events_per_run')
+                ),
                 'schedule_type': schedule_type,
                 'enable_looping_detection': rule_data.get('enable_looping_detection', True),
                 'enable_logo_detection': rule_data.get('enable_logo_detection', True),
@@ -1232,6 +1316,13 @@ class SchedulingService:
                           'enable_looping_detection', 'enable_logo_detection']:
                 if field in rule_data:
                     rule[field] = rule_data[field]
+
+            if 'max_events_per_run' in rule_data:
+                rule['max_events_per_run'] = self._normalize_rule_max_events_per_run(
+                    rule_data.get('max_events_per_run')
+                )
+            elif 'max_events_per_run' not in rule:
+                rule['max_events_per_run'] = self._normalize_rule_max_events_per_run(None)
 
             self._auto_create_rules[rule_index] = rule
             if not self._save_auto_create_rules():
@@ -1326,6 +1417,7 @@ class SchedulingService:
         channel_group_ids: Optional[List[Any]] = None,
         regex_pattern: str,
         minutes_before: int = 0,
+        max_events_per_run: Optional[int] = None,
         force_refresh: bool = False,
     ) -> Dict[str, Any]:
         """Test an auto-create regex against every selected channel and group channel."""
@@ -1507,10 +1599,30 @@ class SchedulingService:
         )
 
         schedulable_matches = len(matching_programs)
+        guardrails = self._get_auto_create_guardrails()
+        guardrail = {'blocked': False}
+        guardrail_blocked_programs: List[Dict[str, Any]] = []
+        if guardrails.get('enabled', True):
+            rule_limit = self._normalize_rule_max_events_per_run(max_events_per_run)
+            if schedulable_matches > rule_limit:
+                guardrail = self._guardrail_block_payload(
+                    scope='rule',
+                    limit=rule_limit,
+                    candidate_count=schedulable_matches,
+                    reason='max_events_per_rule_run',
+                )
+                guardrail_blocked_programs = matching_programs[:10]
+                matching_programs = []
+                schedulable_matches = 0
+                channels_with_matches = set()
+
         return {
             'matches': schedulable_matches,
             'total_epg_matches': total_epg_matches,
             'schedulable_matches': schedulable_matches,
+            'guardrail': guardrail,
+            'guardrail_blocked_matches': guardrail.get('candidate_count', 0) if guardrail.get('blocked') else 0,
+            'guardrail_blocked_programs': guardrail_blocked_programs,
             'future_matches': future_matches,
             'due_now_matches': due_now_matches,
             'ended_matches': ended_matches,
@@ -1573,6 +1685,9 @@ class SchedulingService:
 
             udi = get_udi_manager()
             programs_by_epg_key: Dict[tuple, List] = {}
+            guardrails = self._get_auto_create_guardrails()
+            guardrail_blocked_count = 0
+            guardrail_blocked_rules: List[Dict[str, Any]] = []
 
             # Build a lookup of existing auto-created events keyed by
             # (channel_id, rule_id, program_start_time) for O(1) deduplication.
@@ -1595,6 +1710,8 @@ class SchedulingService:
                 rule_name = rule.get('name', rule_id)
                 regex_pattern = rule.get('regex_pattern')
                 minutes_before = rule.get('minutes_before', 5)
+                rule_events_start_index = len(events_to_add)
+                created_before_rule = created_count
 
                 # Bug 4: reject empty pattern — it would match every program
                 if not regex_pattern or not regex_pattern.strip():
@@ -1764,6 +1881,49 @@ class SchedulingService:
                         existing_keys[dedup_key] = new_event
                         created_count += 1
 
+                if guardrails.get('enabled', True):
+                    rule_new_count = len(events_to_add) - rule_events_start_index
+                    rule_limit = self._rule_max_events_per_run(rule)
+                    poll_limit = guardrails['max_events_per_poll']
+                    blocked_reason = None
+                    blocked_limit = rule_limit
+                    blocked_scope = 'rule'
+                    if rule_new_count > rule_limit:
+                        blocked_reason = 'max_events_per_rule_run'
+                    elif len(events_to_add) > poll_limit:
+                        blocked_reason = 'max_events_per_poll'
+                        blocked_limit = poll_limit
+                        blocked_scope = 'poll'
+
+                    if blocked_reason:
+                        blocked_events = events_to_add[rule_events_start_index:]
+                        for blocked_event in blocked_events:
+                            existing_keys.pop((
+                                blocked_event.get('channel_id'),
+                                blocked_event.get('auto_create_rule_id'),
+                                blocked_event.get('program_start_time'),
+                            ), None)
+                        del events_to_add[rule_events_start_index:]
+                        created_count = created_before_rule
+                        guardrail_blocked_count += rule_new_count
+                        guardrail_blocked_rules.append({
+                            'rule_id': rule_id,
+                            'rule_name': rule_name,
+                            'scope': blocked_scope,
+                            'reason': blocked_reason,
+                            'limit': blocked_limit,
+                            'candidate_count': rule_new_count,
+                        })
+                        logger.warning(
+                            "Auto-create guardrail blocked rule '%s' (%s): %s "
+                            "candidate events exceeds limit %s (%s)",
+                            rule_name,
+                            rule_id,
+                            rule_new_count,
+                            blocked_limit,
+                            blocked_reason,
+                        )
+
             if events_to_add:
                 self._scheduled_events.extend(events_to_add)
             if events_to_add or updated_count:
@@ -1775,7 +1935,8 @@ class SchedulingService:
             f"({matched_count} matched; {future_match_count} future, "
             f"{due_now_match_count} due now, {ended_match_count} ended, "
             f"{already_checked_count} already checked, "
-            f"{missing_time_count} missing time, {invalid_time_count} invalid time)"
+            f"{missing_time_count} missing time, {invalid_time_count} invalid time, "
+            f"{guardrail_blocked_count} guardrail blocked)"
         )
         return {
             'created': created_count,
@@ -1788,6 +1949,8 @@ class SchedulingService:
             'already_checked_matches': already_checked_count,
             'missing_time_matches': missing_time_count,
             'invalid_time_matches': invalid_time_count,
+            'guardrail_blocked_matches': guardrail_blocked_count,
+            'guardrail_blocked_rules': guardrail_blocked_rules,
         }
 
     def execute_scheduled_check(self, event_id: str, stream_checker_service) -> bool:
@@ -2308,6 +2471,7 @@ class SchedulingService:
                 'channel_group_ids': rule.get('channel_group_ids', []),
                 'regex_pattern': rule.get('regex_pattern'),
                 'minutes_before': rule.get('minutes_before', 5),
+                'max_events_per_run': self._rule_max_events_per_run(rule),
             }
             if len(exported_rule['channel_ids']) == 1 and not exported_rule['channel_group_ids']:
                 exported_rule['channel_id'] = exported_rule['channel_ids'][0]
@@ -2369,6 +2533,9 @@ class SchedulingService:
                                 existing_group_ids == import_group_ids_set):
                             matching_rule['name'] = import_name
                             matching_rule['minutes_before'] = rule_data.get('minutes_before', 5)
+                            matching_rule['max_events_per_run'] = self._normalize_rule_max_events_per_run(
+                                rule_data.get('max_events_per_run')
+                            )
                             if not self._save_auto_create_rules():
                                 raise IOError("Failed to save replaced rule")
                             replaced_count += 1
@@ -2385,6 +2552,9 @@ class SchedulingService:
                                     })
                             matching_rule['channel_ids'] = all_ids
                             matching_rule['channels_info'] = channels_info
+                            matching_rule['max_events_per_run'] = self._normalize_rule_max_events_per_run(
+                                rule_data.get('max_events_per_run')
+                            )
                             if not self._save_auto_create_rules():
                                 raise IOError("Failed to save merged rule")
                             merged_count += 1
