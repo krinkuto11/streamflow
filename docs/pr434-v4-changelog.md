@@ -170,7 +170,7 @@ digest, deployed commit, screenshots, and remaining release gates.
 - Final code-validation digest:
   `ghcr.io/bttfw/streamflow@sha256:6371c04ceece8393d4e0d43bc57f0b69188db6e98152f3b6f9873477cc571fec`.
 - The final live runtime was built by GitHub Actions/GHCR and deployed through
-  the normal Unraid DockerMan update path with repository
+  the standard image update path with repository
   `ghcr.io/bttfw/streamflow:release-hardening`.
 - Live image smoke passed after deploy: StreamFlow health `healthy`,
   RestartCount `0`, version `release-hardening-20260608`, automation idle,
@@ -193,11 +193,6 @@ digest, deployed commit, screenshots, and remaining release gates.
   a Stream Checker item was already active. The UI showed queued and
   queue-active states, the queue drained cleanly, and final counters were
   `queued=0`, `queue_active=0`, `completed=2`, `failed=0`.
-- The final watcher/restart safety check kept the Unraid User Scripts disabled:
-  `Restart Tv` and `Streamflow Check` both had `frequency=disabled`, no root
-  crontab entries existed for them, no watcher/user-script process was
-  running, and the 2026-06-08 00:00-08:00 log scan found no Telegram/Unraid
-  notification or restart trigger evidence.
 - The d94d244 follow-up did not change Auto-Create, BossSports, or Team
   channel matching behavior. The Scheduling route itself was not opened during
   the final UI smoke because it auto-loads Auto-Create rule data on page load;
@@ -260,9 +255,9 @@ digest, deployed commit, screenshots, and remaining release gates.
 Release gate status for code-validation head `d94d244`: complete.
 
 - Final code fixes were pushed and CI/GHCR passed.
-- Final image was deployed only through GitHub Actions/GHCR plus the normal
-  Unraid DockerMan update path; no local Docker build was used.
-- Final live matrix and watcher/restart safety checks are green.
+- Final image was deployed only through GitHub Actions/GHCR plus the standard
+  image update path; no local Docker build was used.
+- Final live matrix checks are green.
 - Auto-Create, BossSports, and Team channel matching were not changed by the
   final hardening follow-up.
 - PR body and this detailed changelog have been refreshed with final head,
@@ -271,6 +266,4 @@ Release gate status for code-validation head `d94d244`: complete.
   behavior, but they still need the normal CI/GHCR/deploy confirmation before
   the PR is marked ready.
 - PR #434 may be marked ready/mergeable after the final documentation refresh
-  is also built, deployed, and reflected in the PR body. The Unraid watcher
-  schedule remains disabled until the post-gate operator path intentionally
-  re-enables it.
+  is also built, deployed, and reflected in the PR body.
