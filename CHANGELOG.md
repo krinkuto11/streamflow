@@ -43,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mobile scheduling toolbar** - The Scheduling header and Auto-Create toolbar wrap cleanly on narrow dark-mode layouts instead of clipping action buttons.
 - **Shadow Monitor status safety** - Shadow Monitor startup is gated on watcher API-key readiness, keeps viewer/EPG context visible, and avoids exposing raw backend exception detail in monitor status responses.
 - **Low-quality reason visibility** - Stream Checker rows now show the low-quality reason directly under the `Low Quality` status badge instead of relying only on the stream-name subtext.
+- **Shadow Monitor recovery guard** - Continuous watcher recovery now cancels pending blank/freeze confirmations when a real watcher client returns before the confirmation pass, avoiding false stream switches after transient watcher reconnects.
+- **Teamarr post-start bucket handling** - Teamarr Preflight catches configured `post_start_offsets_minutes` inside the configured post-start grace window instead of hard-coding one offset or missing buckets after long serialized checks.
+- **Teamarr stale stream refresh** - The `no_streams_yet` path refreshes the affected channel stream mapping before making the final decision, reducing false no-stream outcomes after Dispatcharr/Teamarr updates.
+- **Teamarr Preflight loading and queue display** - The Teamarr Preflight page no longer crashes while config/status data is still loading, and queued checks running through the Stream Checker queue are shown in the active/running area with the configured concurrency limit.
 
 ### Removed
 - **AceStream Monitoring** - Removed the unused AceStream Monitoring surface while keeping normal Stream Monitoring, Stream Checker, Shadow Monitor, and Teamarr Preflight intact.
