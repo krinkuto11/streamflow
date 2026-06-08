@@ -118,6 +118,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 }
 CONFIG_KEYS = set(DEFAULT_CONFIG)
 WATCH_MODES = {"periodic", "continuous"}
+MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
+    "offline_image",
+    "garbled_audio",
+    "silent_audio",
+}
 
 INT_BOUNDS = {
     "poll_interval_seconds": (5, 3600),
@@ -638,6 +643,18 @@ class ShadowBlankMonitorService:
                         self._watcher_absences.pop(channel_uuid, None)
                     self._watched[channel_uuid] = dict(target)
                 if watcher_count > 0:
+                    bypass_details = self._pending_media_recovery_guard_bypass_details(
+                        channel_uuid,
+                        target,
+                        fresh_status,
+                        config,
+                    )
+                    if bypass_details is not None:
+                        target["media_recovery_guard_bypass"] = bypass_details
+                        target["media_recovery_guard_observed"] = bypass_details
+                        self._record_event("watcher_recovery_observed", target, bypass_details)
+                        time.sleep(float(config.get("watch_gap_seconds", 1)))
+                        continue
                     guard_details = {
                         "reason": "active_watcher_between_confirmations",
                         "watcher_client_count": watcher_count,
@@ -653,6 +670,8 @@ class ShadowBlankMonitorService:
     def _probe_target_once(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> bool:
         channel_uuid = target["channel_uuid"]
         try:
+            target.pop("media_recovery_guard_reason", None)
+            target.pop("media_recovery_guard_bypass", None)
             proxy_url = self._channel_proxy_url(channel_uuid)
             if config.get("watch_mode") == "continuous" and self._uses_default_blank_probe:
                 result = self._run_blank_probe_until_viewer_left(proxy_url, config, udi, target)
@@ -717,6 +736,7 @@ class ShadowBlankMonitorService:
             if result.get("viewer_left") or self._real_client_count(fresh_status, config) <= 0:
                 self._reset_blank_count(channel_uuid)
                 self._clear_switch_attempts(channel_uuid)
+                target.pop("media_recovery_guard_observed", None)
                 self._record_event("viewer_left", target, {})
                 with self._lock:
                     self._watched.pop(channel_uuid, None)
@@ -725,19 +745,50 @@ class ShadowBlankMonitorService:
             if not detection_reason:
                 self._reset_blank_count(channel_uuid)
                 self._clear_switch_attempts(channel_uuid)
+                target.pop("media_recovery_guard_observed", None)
                 self._record_event("probe_ok", target, target["last_probe"])
                 return True
 
-            if self._guard_recent_watcher_recovery(channel_uuid, target, fresh_status, config, reason=detection_reason):
-                return False
+            guard_details = self._watcher_recovery_guard_details(
+                channel_uuid,
+                target,
+                fresh_status,
+                config,
+                reason=detection_reason,
+            )
+            confirmations = self._required_confirmations(config, detection_reason, guard_details)
+            recovery_guard_bypass: Optional[Dict[str, Any]] = None
+            if guard_details is not None:
+                next_count = self._current_detection_count(channel_uuid, detection_reason) + 1
+                recovery_guard_bypass = self._media_recovery_guard_bypass_details(
+                    target,
+                    fresh_status,
+                    config,
+                    reason=detection_reason,
+                    guard_details=guard_details,
+                    confirmed_count=next_count,
+                    required_confirmations=confirmations,
+                    require_confirmed=False,
+                )
+                if recovery_guard_bypass is None:
+                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+                    return False
+                target["media_recovery_guard_reason"] = detection_reason
+                target["media_recovery_guard_bypass"] = recovery_guard_bypass
 
             blank_count = self._increment_blank_count(channel_uuid, detection_reason)
-            confirmations = int(config.get("confirmation_count", 2))
             if blank_count < confirmations:
+                pending_details = {
+                    "confirmations": blank_count,
+                    "required": confirmations,
+                    "reason": detection_reason,
+                }
+                if recovery_guard_bypass:
+                    pending_details["recovery_guard"] = recovery_guard_bypass
                 self._record_event(
                     f"{detection_reason}_pending",
                     target,
-                    {"confirmations": blank_count, "required": confirmations, "reason": detection_reason},
+                    pending_details,
                 )
                 return True
 
@@ -760,8 +811,47 @@ class ShadowBlankMonitorService:
             return
 
         fresh_stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
-        if self._guard_recent_watcher_recovery(channel_uuid, target, fresh_status, config, reason=reason):
-            return
+        guard_details = self._watcher_recovery_guard_details(
+            channel_uuid,
+            target,
+            fresh_status,
+            config,
+            reason=reason,
+        )
+        recovery_guard_bypass: Optional[Dict[str, Any]] = None
+        if guard_details is not None:
+            current_count = self._current_detection_count(channel_uuid, reason)
+            required_confirmations = self._required_confirmations(config, reason, guard_details)
+            recovery_guard_bypass = self._media_recovery_guard_bypass_details(
+                target,
+                fresh_status,
+                config,
+                reason=reason,
+                guard_details=guard_details,
+                confirmed_count=current_count,
+                required_confirmations=required_confirmations,
+                require_confirmed=True,
+            )
+            if recovery_guard_bypass is None:
+                self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+                return
+        else:
+            observed_guard = target.get("media_recovery_guard_observed")
+            if isinstance(observed_guard, dict) and observed_guard.get("reason") == reason:
+                current_count = self._current_detection_count(channel_uuid, reason)
+                required_confirmations = self._required_confirmations(config, reason, observed_guard)
+                recovery_guard_bypass = self._media_recovery_guard_bypass_details(
+                    target,
+                    fresh_status,
+                    config,
+                    reason=reason,
+                    guard_details=observed_guard,
+                    confirmed_count=current_count,
+                    required_confirmations=required_confirmations,
+                    require_confirmed=True,
+                )
+                if recovery_guard_bypass is not None:
+                    recovery_guard_bypass["observed_between_confirmations"] = True
 
         if target.get("stream_id") and fresh_stream_id != target.get("stream_id"):
             self._reset_blank_count(channel_uuid)
@@ -807,6 +897,8 @@ class ShadowBlankMonitorService:
         switch_details = {"target_stream_ref": _ref("stream", alternative), "reason": reason}
         if pre_probe_details:
             switch_details["pre_probe"] = pre_probe_details
+        if recovery_guard_bypass:
+            switch_details["recovery_guard"] = recovery_guard_bypass
 
         if config.get("dry_run"):
             self._set_cooldown(channel_uuid, config)
@@ -1131,7 +1223,23 @@ class ShadowBlankMonitorService:
             self._blank_counts[key] += 1
             return self._blank_counts[key]
 
-    def _guard_recent_watcher_recovery(
+    def _current_detection_count(self, channel_uuid: str, reason: str = "blank") -> int:
+        key = self._detection_count_key(channel_uuid, reason)
+        with self._lock:
+            return int(self._blank_counts.get(key) or 0)
+
+    @staticmethod
+    def _required_confirmations(
+        config: Dict[str, Any],
+        reason: str,
+        guard_details: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        confirmations = int(config.get("confirmation_count", 2))
+        if guard_details is not None and reason in MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS:
+            return max(confirmations, 2)
+        return confirmations
+
+    def _watcher_recovery_guard_details(
         self,
         channel_uuid: str,
         target: Dict[str, Any],
@@ -1139,9 +1247,9 @@ class ShadowBlankMonitorService:
         config: Dict[str, Any],
         *,
         reason: str,
-    ) -> bool:
+    ) -> Optional[Dict[str, Any]]:
         if config.get("watch_mode") != "continuous":
-            return False
+            return None
 
         with self._lock:
             watched = dict(self._watched.get(channel_uuid) or {})
@@ -1169,6 +1277,103 @@ class ShadowBlankMonitorService:
                     "watcher_client_count": fresh_details.get("watcher_client_count"),
                 }
 
+        return guard_details
+
+    def _media_recovery_guard_bypass_details(
+        self,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        reason: str,
+        guard_details: Dict[str, Any],
+        confirmed_count: int,
+        required_confirmations: int,
+        require_confirmed: bool,
+    ) -> Optional[Dict[str, Any]]:
+        if reason not in MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS:
+            return None
+        if config.get("watch_mode") != "continuous":
+            return None
+        if not config.get("next_stream_pre_probe_enabled"):
+            return None
+        if require_confirmed and confirmed_count < required_confirmations:
+            return None
+        if self._real_client_count(fresh_status, config) <= 0:
+            return None
+
+        target_stream_id = target.get("stream_id")
+        fresh_stream_id = self._extract_stream_id(fresh_status) or target_stream_id
+        if target_stream_id and fresh_stream_id != target_stream_id:
+            return None
+
+        details = dict(guard_details)
+        guard_reason = guard_details.get("reason")
+        details.update({
+            "bypassed": True,
+            "bypass_scope": "confirmed_media_fault",
+            "guard_reason": guard_reason,
+            "reason": reason,
+            "pre_probe_required": True,
+            "confirmations": confirmed_count,
+            "required": required_confirmations,
+            "current_stream_ref": _ref("stream", fresh_stream_id),
+        })
+        return details
+
+    def _pending_media_recovery_guard_bypass_details(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        reason = (
+            target.get("media_recovery_guard_reason")
+            or (target.get("media_recovery_guard_bypass") or {}).get("reason")
+        )
+        if not reason:
+            return None
+
+        current_count = self._current_detection_count(channel_uuid, str(reason))
+        guard_details = {
+            "reason": "active_watcher_between_confirmations",
+            "watcher_client_count": self._watcher_client_count(fresh_status, config),
+        }
+        fresh_details = self._watcher_client_details(fresh_status, config)
+        if fresh_details.get("watcher_client_ref"):
+            guard_details["watcher_client_ref"] = fresh_details.get("watcher_client_ref")
+        required_confirmations = self._required_confirmations(config, str(reason), guard_details)
+        if current_count <= 0 or current_count >= required_confirmations:
+            return None
+
+        return self._media_recovery_guard_bypass_details(
+            target,
+            fresh_status,
+            config,
+            reason=str(reason),
+            guard_details=guard_details,
+            confirmed_count=current_count,
+            required_confirmations=required_confirmations,
+            require_confirmed=False,
+        )
+
+    def _guard_recent_watcher_recovery(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        reason: str,
+    ) -> bool:
+        guard_details = self._watcher_recovery_guard_details(
+            channel_uuid,
+            target,
+            fresh_status,
+            config,
+            reason=reason,
+        )
         if guard_details is None:
             return False
 
