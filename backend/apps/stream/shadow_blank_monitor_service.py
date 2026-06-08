@@ -909,7 +909,8 @@ class ShadowBlankMonitorService:
             excluded_stream_ids=excluded_stream_ids,
         ):
             candidate_ref = _ref("stream", candidate_id)
-            candidate_url = self._stream_url_for_id(udi, target.get("channel_id"), candidate_id)
+            candidate_stream = self._stream_for_id(udi, target.get("channel_id"), candidate_id)
+            candidate_url = self._stream_url(candidate_stream)
             details: Dict[str, Any] = {
                 "enabled": True,
                 "target_stream_ref": candidate_ref,
@@ -921,7 +922,22 @@ class ShadowBlankMonitorService:
                 self._record_event("pre_probe_unavailable", target, {**details, "reason": reason})
                 continue
 
-            probe_result = self._run_next_stream_pre_probe(candidate_url, config)
+            provider_slot = self._acquire_pre_probe_provider_slot(udi, candidate_stream)
+            details.update(provider_slot.get("details") or {})
+            if not provider_slot.get("acquired"):
+                details["result"] = "rejected"
+                details["rejection_reason"] = provider_slot.get("reason") or "provider_capacity"
+                last_details = details
+                self._record_event("pre_probe_rejected", target, {**details, "reason": reason})
+                continue
+
+            try:
+                probe_result = self._run_next_stream_pre_probe(
+                    str(provider_slot.get("url") or candidate_url),
+                    config,
+                )
+            finally:
+                self._release_pre_probe_provider_slot(provider_slot)
             rejection_reason = self._pre_probe_rejection_reason(probe_result)
             details.update({
                 "result": "rejected" if rejection_reason else "ok",
@@ -940,7 +956,7 @@ class ShadowBlankMonitorService:
             return candidate_id, details
         return None, last_details
 
-    def _stream_url_for_id(self, udi: Any, channel_id: Optional[int], stream_id: int) -> Optional[str]:
+    def _stream_for_id(self, udi: Any, channel_id: Optional[int], stream_id: int) -> Optional[Dict[str, Any]]:
         stream: Optional[Dict[str, Any]] = None
         if hasattr(udi, "get_stream_by_id"):
             stream = udi.get_stream_by_id(stream_id)
@@ -954,10 +970,121 @@ class ShadowBlankMonitorService:
                 ),
                 None,
             )
+        return stream if isinstance(stream, dict) else None
+
+    @staticmethod
+    def _stream_url(stream: Optional[Dict[str, Any]]) -> Optional[str]:
         if not isinstance(stream, dict):
             return None
         url = str(stream.get("url") or "").strip()
         return url or None
+
+    @staticmethod
+    def _stream_m3u_account_id(stream: Optional[Dict[str, Any]]) -> Optional[int]:
+        if not isinstance(stream, dict):
+            return None
+        account_id = stream.get("m3u_account_id")
+        if account_id in (None, ""):
+            account_id = stream.get("m3u_account")
+        try:
+            return int(account_id) if account_id not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    def _acquire_pre_probe_provider_slot(
+        self,
+        udi: Any,
+        stream: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        account_id = self._stream_m3u_account_id(stream)
+        details: Dict[str, Any] = {"provider_limited": account_id is not None}
+        if account_id is not None:
+            details["m3u_account_ref"] = _ref("m3u_account", account_id)
+
+        if account_id is None:
+            return {
+                "acquired": True,
+                "reason": "custom_stream",
+                "url": self._stream_url(stream),
+                "details": details,
+            }
+
+        try:
+            from apps.stream.concurrent_stream_limiter import (
+                get_account_limiter,
+                initialize_account_limits,
+            )
+
+            limiter = get_account_limiter()
+            limiter.udi_manager = udi
+            if hasattr(udi, "get_m3u_accounts"):
+                accounts = udi.get_m3u_accounts() or []
+                if accounts:
+                    initialize_account_limits(accounts)
+
+            acquired, limit_reason = limiter.acquire(account_id, timeout=0)
+            if not acquired:
+                details["provider_limit_reason"] = limit_reason
+                return {
+                    "acquired": False,
+                    "reason": limit_reason or "provider_capacity",
+                    "details": details,
+                }
+
+            profile_acquired = False
+            profile = None
+            try:
+                profile_acquired, profile_reason, profile = limiter.reserve_profile_for_stream(stream or {})
+                if not profile_acquired:
+                    details["provider_limit_reason"] = profile_reason
+                    limiter.release(account_id)
+                    return {
+                        "acquired": False,
+                        "reason": profile_reason or "provider_capacity",
+                        "details": details,
+                    }
+
+                url = self._stream_url(stream)
+                if profile and hasattr(udi, "apply_profile_url_transformation"):
+                    transformed_url = udi.apply_profile_url_transformation(stream or {}, profile=profile)
+                    if transformed_url:
+                        url = str(transformed_url)
+                        details["profile_url_transformed"] = True
+                if profile:
+                    details["m3u_profile_ref"] = _ref("m3u_profile", profile.get("id"))
+                details["provider_slot_acquired"] = True
+                return {
+                    "acquired": True,
+                    "reason": "acquired",
+                    "limiter": limiter,
+                    "account_id": account_id,
+                    "profile": profile,
+                    "url": url,
+                    "details": details,
+                }
+            except Exception:
+                if profile_acquired and profile is not None:
+                    limiter.release_profile(profile)
+                limiter.release(account_id)
+                raise
+        except Exception as exc:
+            logger.warning("Shadow next-stream pre-probe provider limit check failed: %s", exc)
+            details["provider_limit_reason"] = type(exc).__name__
+            return {
+                "acquired": False,
+                "reason": "provider_limit_unavailable",
+                "details": details,
+            }
+
+    @staticmethod
+    def _release_pre_probe_provider_slot(slot: Dict[str, Any]) -> None:
+        limiter = slot.get("limiter")
+        if limiter is None:
+            return
+        try:
+            limiter.release_profile(slot.get("profile"))
+        finally:
+            limiter.release(slot.get("account_id"))
 
     def _run_next_stream_pre_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         pre_probe_config = dict(config)
