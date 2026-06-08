@@ -26,17 +26,7 @@ def _reconcile_sqlite_schema(engine) -> None:
         return
 
     # Keep this map explicit so startup upgrades are predictable and safe.
-    required_columns = {
-        'automation_profiles': {
-            'enable_loop_detection': 'BOOLEAN NOT NULL DEFAULT 0',
-        },
-        'automation_periods': {
-            'enable_loop_detection': 'BOOLEAN NOT NULL DEFAULT 0',
-        },
-        'monitoring_sessions': {
-            'enable_loop_detection': 'BOOLEAN NOT NULL DEFAULT 0',
-        },
-    }
+    required_columns = {}
 
     with engine.begin() as conn:
         existing_tables = {

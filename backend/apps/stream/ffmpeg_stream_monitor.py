@@ -369,8 +369,8 @@ class FFmpegStreamMonitor:
         
         # Check for supported protocols
         import re
-        # Allow http(s), acestream, rtmp(s), etc.
-        protocol_pattern = r'^(https?|acestream|rtmp|rtmps|rtp|rtsp|udp|tcp)://'
+        # Allow common stream transport protocols.
+        protocol_pattern = r'^(https?|rtmp|rtmps|rtp|rtsp|udp|tcp)://'
         if not re.match(protocol_pattern, url, re.IGNORECASE):
             logger.warning(f"Rejected URL with unsupported protocol: {url_ref(url)}")
             return False

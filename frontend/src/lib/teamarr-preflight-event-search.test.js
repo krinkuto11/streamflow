@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import { filterTeamarrEventsBySearch } from './teamarr-preflight-event-search'
+import {
+  filterTeamarrEventsBySearch,
+  filterTeamarrEventsByView,
+  paginateTeamarrEvents,
+  sortTeamarrManagedEvents,
+} from './teamarr-preflight-event-search'
 
 describe('Teamarr preflight event search helpers', () => {
   const events = [
@@ -38,5 +43,33 @@ describe('Teamarr preflight event search helpers', () => {
   it('matches latest preflight and decision detail fields', () => {
     expect(filterTeamarrEventsBySearch(events, 'completed')).toEqual([events[0]])
     expect(filterTeamarrEventsBySearch(events, 'active_viewers')).toEqual([events[1]])
+  })
+
+  it('sorts current and upcoming managed events before past events', () => {
+    const sorted = sortTeamarrManagedEvents([
+      { event_name: 'Oldest past', state: 'past', seconds_to_start: -7200 },
+      { event_name: 'Upcoming later', state: 'scheduled', seconds_to_start: 3600 },
+      { event_name: 'Due now', state: 'due', seconds_to_start: -30 },
+      { event_name: 'Recent past', state: 'past', seconds_to_start: -300 },
+    ])
+
+    expect(sorted.map(event => event.event_name)).toEqual([
+      'Due now',
+      'Upcoming later',
+      'Recent past',
+      'Oldest past',
+    ])
+  })
+
+  it('filters managed events by operator view', () => {
+    expect(filterTeamarrEventsByView(events, 'upcoming')).toEqual([events[0]])
+    expect(filterTeamarrEventsByView(events, 'past')).toEqual([events[1]])
+    expect(filterTeamarrEventsByView(events, 'no_check')).toEqual([events[1]])
+    expect(filterTeamarrEventsByView(events, 'all')).toEqual(events)
+  })
+
+  it('paginates managed event lists', () => {
+    expect(paginateTeamarrEvents([1, 2, 3, 4, 5], 2, 2)).toEqual([3, 4])
+    expect(paginateTeamarrEvents([1, 2, 3], 0, 2)).toEqual([1, 2])
   })
 })

@@ -8,7 +8,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.j
 import { AlertCircle, CheckCircle2, KeyRound, Loader2, UserRound } from 'lucide-react'
 import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
-import { automationAPI, streamCheckerAPI, dispatcharrAPI, sessionSettingsAPI, schedulingAPI, aceStreamOrchestratorAPI } from '@/services/api.js'
+import { automationAPI, streamCheckerAPI, dispatcharrAPI, sessionSettingsAPI, schedulingAPI } from '@/services/api.js'
 import AutomationProfileStudio from '@/components/Automation/AutomationProfileStudio.jsx'
 import AutomationPeriods from '@/components/Automation/AutomationPeriods.jsx'
 
@@ -24,7 +24,6 @@ export default function AutomationSettings() {
     udi_refresh_schedule: { type: 'interval', value: DEFAULT_UDI_REFRESH_INTERVAL_MINUTES },
     enabled: true
   })
-  const [orchestratorConfig, setOrchestratorConfig] = useState({ host: '', port: 8000, has_api_key: false, api_key: '' })
   const [testingConnection, setTestingConnection] = useState(false)
   const [connectionTestResult, setConnectionTestResult] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -39,13 +38,12 @@ export default function AutomationSettings() {
   const loadConfig = async () => {
     try {
       setLoading(true)
-      const [automationResponse, streamCheckerResponse, dispatcharrResponse, sessionResponse, schedulingResponse, orchestratorResponse] = await Promise.all([
+      const [automationResponse, streamCheckerResponse, dispatcharrResponse, sessionResponse, schedulingResponse] = await Promise.all([
         automationAPI.getConfig(),
         streamCheckerAPI.getConfig(),
         dispatcharrAPI.getConfig(),
         sessionSettingsAPI.getSettings(),
         schedulingAPI.getConfig(),
-        aceStreamOrchestratorAPI.getConfig(),
       ])
       setConfig(automationResponse.data)
       setStreamCheckerConfig(streamCheckerResponse.data)
@@ -57,12 +55,6 @@ export default function AutomationSettings() {
       })
       setSessionConfig(sessionResponse.data)
       setSchedulingConfig(schedulingResponse.data)
-      setOrchestratorConfig({
-        host: orchestratorResponse.data?.host || '',
-        port: orchestratorResponse.data?.port ?? 8000,
-        has_api_key: !!orchestratorResponse.data?.has_api_key,
-        api_key: '',
-      })
     } catch (err) {
       console.error('Failed to load config:', err)
       toast({
@@ -84,11 +76,6 @@ export default function AutomationSettings() {
         dispatcharrAPI.updateConfig(dispatcharrConfig),
         sessionSettingsAPI.updateSettings(sessionConfig),
         schedulingAPI.updateConfig(schedulingConfig),
-        aceStreamOrchestratorAPI.updateConfig({
-          host: orchestratorConfig?.host,
-          port: orchestratorConfig?.port,
-          api_key: orchestratorConfig?.api_key || undefined,
-        })
       ])
       toast({
         title: "Success",
@@ -160,17 +147,20 @@ export default function AutomationSettings() {
   }
 
 
-  const handleOrchestratorConfigChange = (field, value) => {
-    setOrchestratorConfig(prev => ({
+  const handleGlobalAutomationChange = (field, value) => {
+    setConfig(prev => ({
       ...prev,
       [field]: value
     }))
   }
 
-  const handleGlobalAutomationChange = (field, value) => {
+  const handleM3uRefreshWaitChange = (field, value) => {
     setConfig(prev => ({
       ...prev,
-      [field]: value
+      m3u_refresh_wait: {
+        ...(prev?.m3u_refresh_wait || {}),
+        [field]: value,
+      },
     }))
   }
 
@@ -403,53 +393,69 @@ export default function AutomationSettings() {
               <div className="grid gap-6 md:grid-cols-2">
                 <div className="flex items-start justify-between gap-4 rounded-md border p-4">
                   <div className="space-y-1">
-                    <Label htmlFor="teamarr-event-window-enabled">Teamarr event window</Label>
+                    <Label htmlFor="m3u-refresh-retry-failed">Retry failed M3U providers</Label>
                     <p className="text-xs text-muted-foreground leading-relaxed">
-                      Automatic runs pause around cached Teamarr events. Manual forced runs still work.
+                      If Dispatcharr reports failed providers after a refresh request, StreamFlow retries only those providers once before continuing with a partial warning.
                     </p>
                   </div>
                   <Switch
-                    id="teamarr-event-window-enabled"
-                    checked={Boolean(config?.teamarr_event_window_enabled)}
-                    onCheckedChange={(checked) => handleGlobalAutomationChange('teamarr_event_window_enabled', checked)}
+                    id="m3u-refresh-retry-failed"
+                    checked={Boolean(config?.m3u_refresh_wait?.retry_failed_providers)}
+                    onCheckedChange={(checked) => handleM3uRefreshWaitChange('retry_failed_providers', checked)}
                   />
                 </div>
 
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="teamarr-event-window-before">Before start</Label>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        id="teamarr-event-window-before"
-                        type="number"
-                        min="0"
-                        max="1440"
-                        value={config?.teamarr_event_window_before_minutes ?? 30}
-                        onChange={(e) => handleGlobalAutomationChange(
-                          'teamarr_event_window_before_minutes',
-                          Math.max(0, parseInt(e.target.value) || 0)
-                        )}
-                        disabled={!config?.teamarr_event_window_enabled}
-                      />
-                      <span className="text-sm text-muted-foreground">min</span>
+                <div className="space-y-4 rounded-md border p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div className="space-y-1">
+                      <Label htmlFor="teamarr-event-window-enabled">Teamarr event window</Label>
+                      <p className="text-xs text-muted-foreground leading-relaxed">
+                        Defers regular automatic runs around cached Teamarr event start times. Manual forced runs still work.
+                      </p>
                     </div>
+                    <Switch
+                      id="teamarr-event-window-enabled"
+                      checked={Boolean(config?.teamarr_event_window_enabled)}
+                      onCheckedChange={(checked) => handleGlobalAutomationChange('teamarr_event_window_enabled', checked)}
+                    />
                   </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="teamarr-event-window-after">After start</Label>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        id="teamarr-event-window-after"
-                        type="number"
-                        min="0"
-                        max="1440"
-                        value={config?.teamarr_event_window_after_minutes ?? 10}
-                        onChange={(e) => handleGlobalAutomationChange(
-                          'teamarr_event_window_after_minutes',
-                          Math.max(0, parseInt(e.target.value) || 0)
-                        )}
-                        disabled={!config?.teamarr_event_window_enabled}
-                      />
-                      <span className="text-sm text-muted-foreground">min</span>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="teamarr-event-window-before">Pause before event start</Label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          id="teamarr-event-window-before"
+                          type="number"
+                          min="0"
+                          max="1440"
+                          value={config?.teamarr_event_window_before_minutes ?? 30}
+                          onChange={(e) => handleGlobalAutomationChange(
+                            'teamarr_event_window_before_minutes',
+                            Math.max(0, parseInt(e.target.value) || 0)
+                          )}
+                          disabled={!config?.teamarr_event_window_enabled}
+                        />
+                        <span className="text-sm text-muted-foreground">min</span>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="teamarr-event-window-after">Continue pause after start</Label>
+                      <div className="flex items-center gap-2">
+                        <Input
+                          id="teamarr-event-window-after"
+                          type="number"
+                          min="0"
+                          max="1440"
+                          value={config?.teamarr_event_window_after_minutes ?? 10}
+                          onChange={(e) => handleGlobalAutomationChange(
+                            'teamarr_event_window_after_minutes',
+                            Math.max(0, parseInt(e.target.value) || 0)
+                          )}
+                          disabled={!config?.teamarr_event_window_enabled}
+                        />
+                        <span className="text-sm text-muted-foreground">min</span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -632,61 +638,6 @@ export default function AutomationSettings() {
                   </div>
                 )}
               </div>
-              <div className="flex justify-end pt-4">
-                <Button onClick={handleSave} disabled={saving}>
-                  {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  Save Settings
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle>AceStream Orchestrator</CardTitle>
-              <CardDescription>
-                Configure AceStream monitoring orchestrator host, port, and API key
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="orchestrator-host">Host</Label>
-                <Input
-                  id="orchestrator-host"
-                  type="text"
-                  value={orchestratorConfig?.host || ''}
-                  onChange={(e) => handleOrchestratorConfigChange('host', e.target.value)}
-                  placeholder="orchestrator.local or http://orchestrator.local"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="orchestrator-port">Port</Label>
-                <Input
-                  id="orchestrator-port"
-                  type="number"
-                  min="1"
-                  max="65535"
-                  value={orchestratorConfig?.port ?? ''}
-                  onChange={(e) => handleOrchestratorConfigChange('port', parseInt(e.target.value || '0', 10) || '')}
-                  placeholder="8000"
-                />
-              </div>
-
-              <div className="space-y-2">
-                <Label htmlFor="orchestrator-api-key">API Key</Label>
-                <Input
-                  id="orchestrator-api-key"
-                  type="password"
-                  value={orchestratorConfig?.api_key || ''}
-                  onChange={(e) => handleOrchestratorConfigChange('api_key', e.target.value)}
-                  placeholder={orchestratorConfig?.has_api_key ? '••••••••' : 'Enter API key'}
-                />
-                <p className="text-sm text-muted-foreground">
-                  Leave blank to keep the existing key.
-                </p>
-              </div>
-
               <div className="flex justify-end pt-4">
                 <Button onClick={handleSave} disabled={saving}>
                   {saving && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

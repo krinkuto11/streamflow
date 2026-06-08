@@ -39,7 +39,6 @@ from apps.background.scheduling_workers import (
 from apps.stream.udp_proxy import UDPProxyManager
 
 from apps.config.dispatcharr_config import get_dispatcharr_config
-from apps.config.acestream_orchestrator_config import get_acestream_orchestrator_config
 from apps.channels.channel_order_manager import get_channel_order_manager
 from apps.channels.repository import UdiChannelRepository
 from apps.channels.service import ChannelService
@@ -51,9 +50,8 @@ from apps.api.channel_handlers import (
     get_channel_stats_response,
     get_channels_response,
 )
-# ── NEW: active profile resolution handler ──────────────────────────────────
+# Active profile resolution handler
 from apps.api.active_profile_handlers import get_channel_active_profile_response
-# ────────────────────────────────────────────────────────────────────────────
 from apps.api.regex_handlers import (
     add_bulk_regex_patterns_response,
     add_regex_pattern_response,
@@ -192,26 +190,6 @@ from apps.api.scheduling_handlers import (
     update_auto_create_rule_response,
     update_scheduling_config_response,
     update_udi_refresh_schedule_response,
-)
-from apps.api.acestream_handlers import (
-    check_acestream_orchestrator_ready_response,
-    create_acestream_channel_session_response,
-    create_acestream_group_sessions_response,
-    delete_acestream_channel_session_response,
-    delete_acestream_monitor_entry_response,
-    get_acestream_channel_session_response,
-    get_acestream_monitor_session_response,
-    get_acestream_orchestrator_config_response,
-    list_acestream_channel_sessions_response,
-    list_acestream_monitor_sessions_response,
-    list_acestream_started_streams_response,
-    parse_acestream_m3u_response,
-    quarantine_acestream_channel_stream_response,
-    revive_acestream_channel_stream_response,
-    start_acestream_monitor_session_response,
-    stop_acestream_channel_session_response,
-    stop_acestream_monitor_session_response,
-    update_acestream_orchestrator_config_response,
 )
 from apps.api.legacy_automation_handlers import (
     assign_profile_to_channel_legacy_response,
@@ -1329,6 +1307,7 @@ def check_single_channel_now():
     return check_single_channel_now_response(
         payload=request.get_json(silent=True),
         get_stream_checker_service=get_stream_checker_service,
+        get_automation_manager=get_automation_manager,
     )
 
 @app.route('/api/stream-checker/mark-updated', methods=['POST'])
@@ -1829,7 +1808,7 @@ def assign_automation_profile_channels():
 @app.route('/api/automation/assign/group', methods=['GET', 'POST'])
 @log_function_call
 def assign_automation_profile_group():
-    """GET: Return all group→automation-profile assignments.
+    """GET: Return all group-to-automation-profile assignments.
     POST: Assign (or remove) an automation profile for a channel group."""
     return assign_automation_profile_group_response(
         method=request.method,
@@ -1871,7 +1850,7 @@ def assign_epg_scheduled_profile_channels():
 @app.route('/api/automation/assign/epg-profile/group', methods=['GET', 'POST'])
 @log_function_call
 def assign_epg_scheduled_profile_group():
-    """GET: Return all group→EPG-profile assignments.
+    """GET: Return all group-to-EPG-profile assignments.
     POST: Assign (or remove) an EPG scheduled automation profile for a channel group."""
     return assign_epg_scheduled_profile_group_response(
         method=request.method,
@@ -2018,7 +1997,7 @@ def get_channel_automation_periods(channel_id):
         get_udi_manager=get_udi_manager,
     )
 
-# ── NEW: active profile resolution endpoint ─────────────────────────────────
+# Active profile resolution endpoint
 @app.route('/api/channels/<int:channel_id>/active-profile', methods=['GET'])
 @log_function_call
 def get_channel_active_profile(channel_id):
@@ -2033,7 +2012,6 @@ def get_channel_active_profile(channel_id):
         get_automation_config_manager=get_automation_config_manager,
         get_udi_manager=get_udi_manager,
     )
-# ────────────────────────────────────────────────────────────────────────────
 
 @app.route('/api/channels/batch/assign-periods', methods=['POST'])
 @log_function_call
@@ -2072,403 +2050,6 @@ def invalidate_automation_events_cache():
 
 from apps.stream.stream_session_manager import get_session_manager, REVIEW_DURATION
 from apps.stream.stream_monitoring_service import get_monitoring_service
-from apps.stream.acestream_monitoring_client import AceStreamMonitoringClient, normalize_content_id
-from apps.stream.acestream_session_service import (
-    annotate_monitors_with_playback as _service_annotate_monitors_with_playback,
-    _compute_ace_management_score as _service_compute_ace_management_score,
-    _evaluate_ace_entry_management as _service_evaluate_ace_entry_management,
-    _schedule_ace_ffprobe_recheck as _service_schedule_ace_ffprobe_recheck,
-    apply_ace_dispatcharr_sync as _service_apply_ace_dispatcharr_sync,
-    build_ace_channel_session_summary as _service_build_ace_channel_session_summary,
-    check_ace_session_epg_auto_stop as _service_check_ace_session_epg_auto_stop,
-    compact_ace_monitor_payload as _service_compact_ace_monitor_payload,
-    create_acestream_channel_session_impl as _service_create_acestream_channel_session_impl,
-    evaluate_ace_session_management as _service_evaluate_ace_session_management,
-    get_ace_management_settings as _service_get_ace_management_settings,
-    refresh_ace_session_streams as _service_refresh_ace_session_streams,
-    save_ace_session_telemetry_snapshot as _service_save_ace_session_telemetry_snapshot,
-)
-
-
-def _get_acestream_monitoring_client() -> AceStreamMonitoringClient:
-    """Build client for external AceStream orchestrator monitoring contract."""
-    return AceStreamMonitoringClient()
-
-
-def _acestream_client_or_error():
-    client = _get_acestream_monitoring_client()
-    if not client.is_configured():
-        return None, (
-            jsonify({
-                "error": "AceStream orchestrator is not configured",
-                "required_env": [
-                    "ACESTREAM_ORCHESTRATOR_BASE_URL",
-                    "ACESTREAM_ORCHESTRATOR_API_KEY"
-                ]
-            }),
-            500,
-        )
-    return client, None
-
-
-def _ping_orchestrator_ready(client=None):
-    """Ping the orchestrator /api/v1/version endpoint to verify it is running and reachable."""
-    if client is None:
-        client = _get_acestream_monitoring_client()
-    if not client.is_configured():
-        return False, "AceStream orchestrator is not configured"
-
-    base_url = client.base_url
-    version_url = f"{base_url.rstrip('/')}/api/v1/version"
-    try:
-        resp = requests.get(version_url, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, dict):
-            return False, "Orchestrator /api/v1/version returned unexpected format"
-        title = str(data.get('title') or '')
-        if 'AceStream Orchestrator' not in title:
-            return False, f"Unexpected orchestrator title: '{title}'"
-        version = data.get('version', 'unknown')
-        return True, str(version)
-    except requests.exceptions.ConnectionError:
-        return False, f"Cannot connect to AceStream orchestrator at {base_url}"
-    except requests.exceptions.Timeout:
-        return False, f"Timeout connecting to AceStream orchestrator at {base_url}"
-    except requests.exceptions.HTTPError as exc:
-        return False, f"Orchestrator /api/v1/version returned HTTP {exc.response.status_code}"
-    except Exception as exc:
-        logger.error("Unexpected error while pinging AceStream orchestrator", exc_info=True)
-        return False, "Unexpected error while pinging orchestrator"
-
-
-def _parse_m3u_acestream_entries(m3u_content: str):
-    """Local parser fallback for acestream:// and /ace/getstream?id=<id> entries."""
-    items = []
-    pending_name = None
-
-    for idx, raw_line in enumerate((m3u_content or '').splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        if line.startswith('#EXTINF:'):
-            if ',' in line:
-                pending_name = line.split(',', 1)[1].strip() or None
-            else:
-                pending_name = None
-            continue
-
-        content_id = normalize_content_id(line)
-        if content_id:
-            items.append({
-                'content_id': content_id,
-                'name': pending_name,
-                'line_number': str(idx),
-            })
-            pending_name = None
-
-    merged = {}
-    for item in items:
-        key = item['content_id']
-        if key not in merged:
-            merged[key] = item
-        elif not merged[key].get('name') and item.get('name'):
-            merged[key]['name'] = item['name']
-
-    return list(merged.values())
-
-
-def _ace_channel_sessions_store():
-    from apps.database.manager import get_db_manager
-    db = get_db_manager()
-    store = db.get_system_setting('acestream_channel_sessions', {})
-    return store if isinstance(store, dict) else {}
-
-
-def _save_ace_channel_sessions_store(store):
-    from apps.database.manager import get_db_manager
-    db = get_db_manager()
-    return bool(db.set_system_setting('acestream_channel_sessions', store))
-
-
-def _get_ace_management_settings():
-    return _service_get_ace_management_settings()
-
-
-def _compute_ace_management_score(monitor, entry=None):
-    return _service_compute_ace_management_score(monitor, entry)
-
-
-def _evaluate_ace_entry_management(entry, monitor, now_ts, settings):
-    return _service_evaluate_ace_entry_management(entry, monitor, now_ts, settings)
-
-def _schedule_ace_ffprobe_recheck(entry, monitor):
-    return _service_schedule_ace_ffprobe_recheck(entry, monitor)
-
-
-def _evaluate_ace_session_management(raw_session, monitors_by_id, settings):
-    return _service_evaluate_ace_session_management(raw_session, monitors_by_id, settings)
-
-
-def _check_ace_session_epg_auto_stop(raw_session, client):
-    return _service_check_ace_session_epg_auto_stop(raw_session, client)
-
-
-def _apply_ace_dispatcharr_sync(raw_session):
-    return _service_apply_ace_dispatcharr_sync(raw_session)
-
-
-def _save_ace_session_telemetry_snapshot(raw_session, monitors_by_id):
-    return _service_save_ace_session_telemetry_snapshot(raw_session, monitors_by_id)
-
-
-def _build_ace_channel_session_summary(raw_session, monitors_by_id):
-    return _service_build_ace_channel_session_summary(raw_session, monitors_by_id)
-
-
-def _annotate_monitors_with_playback(client, monitors_by_id):
-    return _service_annotate_monitors_with_playback(client, monitors_by_id)
-
-
-def _compact_ace_monitor_payload(monitor, recent_limit=8):
-    return _service_compact_ace_monitor_payload(monitor, recent_limit=recent_limit)
-
-
-@app.route('/api/acestream-channel-sessions', methods=['GET'])
-def list_acestream_channel_sessions():
-    """List channel-scoped AceStream monitoring sessions."""
-    return list_acestream_channel_sessions_response(
-        args=request.args,
-        get_client_or_error=_acestream_client_or_error,
-        load_store=_ace_channel_sessions_store,
-        get_management_settings=_get_ace_management_settings,
-        save_store=_save_ace_channel_sessions_store,
-        annotate_playback=_annotate_monitors_with_playback,
-        evaluate_management=_evaluate_ace_session_management,
-        save_telemetry_snapshot=_save_ace_session_telemetry_snapshot,
-        check_epg_auto_stop=_check_ace_session_epg_auto_stop,
-        refresh_session_streams=_refresh_ace_session_streams,
-        apply_dispatcharr_sync=_apply_ace_dispatcharr_sync,
-        build_summary=_build_ace_channel_session_summary,
-    )
-
-
-def _refresh_ace_session_streams(raw_session, client, interval_s=1.0, run_seconds=0, per_sample_timeout_s=1.0):
-    return _service_refresh_ace_session_streams(
-        raw_session,
-        client,
-        interval_s=interval_s,
-        run_seconds=run_seconds,
-        per_sample_timeout_s=per_sample_timeout_s,
-    )
-
-
-def create_acestream_channel_session_impl(
-    channel_id,
-    interval_s=1.0,
-    run_seconds=0,
-    per_sample_timeout_s=1.0,
-    engine_container_id=None,
-    epg_event_title=None,
-    epg_event_description=None,
-    epg_event_start=None,
-    epg_event_end=None,
-    epg_event_id=None,
-):
-    return _service_create_acestream_channel_session_impl(
-        channel_id,
-        interval_s=interval_s,
-        run_seconds=run_seconds,
-        per_sample_timeout_s=per_sample_timeout_s,
-        engine_container_id=engine_container_id,
-        epg_event_title=epg_event_title,
-        epg_event_description=epg_event_description,
-        epg_event_start=epg_event_start,
-        epg_event_end=epg_event_end,
-        epg_event_id=epg_event_id,
-        get_client_or_error=_acestream_client_or_error,
-        ping_orchestrator_ready=_ping_orchestrator_ready,
-        load_store=_ace_channel_sessions_store,
-        save_store=_save_ace_channel_sessions_store,
-    )
-
-
-@app.route('/api/acestream-channel-sessions', methods=['POST'])
-def create_acestream_channel_session():
-    """Create and start AceStream monitoring for all AceStream streams in a channel."""
-    return create_acestream_channel_session_response(
-        payload=request.get_json(silent=True),
-        create_session_impl=create_acestream_channel_session_impl,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/group/start', methods=['POST'])
-def create_acestream_group_sessions():
-    """Create AceStream channel sessions for all channels in a group."""
-    return create_acestream_group_sessions_response(
-        payload=request.get_json(silent=True),
-        get_client_or_error=_acestream_client_or_error,
-        ping_orchestrator_ready=_ping_orchestrator_ready,
-        get_udi_manager=get_udi_manager,
-        create_session_impl=create_acestream_channel_session_impl,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>', methods=['GET'])
-def get_acestream_channel_session(session_id):
-    """Get detailed channel-scoped AceStream monitoring session."""
-    return get_acestream_channel_session_response(
-        session_id=session_id,
-        get_client_or_error=_acestream_client_or_error,
-        load_store=_ace_channel_sessions_store,
-        get_management_settings=_get_ace_management_settings,
-        save_store=_save_ace_channel_sessions_store,
-        annotate_playback=_annotate_monitors_with_playback,
-        evaluate_management=_evaluate_ace_session_management,
-        save_telemetry_snapshot=_save_ace_session_telemetry_snapshot,
-        check_epg_auto_stop=_check_ace_session_epg_auto_stop,
-        apply_dispatcharr_sync=_apply_ace_dispatcharr_sync,
-        build_summary=_build_ace_channel_session_summary,
-        compact_monitor_payload=_compact_ace_monitor_payload,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>/stop', methods=['POST'])
-def stop_acestream_channel_session(session_id):
-    """Stop all orchestrator monitor sessions attached to a channel session."""
-    return stop_acestream_channel_session_response(
-        session_id=session_id,
-        get_client_or_error=_acestream_client_or_error,
-        load_store=_ace_channel_sessions_store,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>', methods=['DELETE'])
-def delete_acestream_channel_session(session_id):
-    """Delete channel session and all orchestrator monitor entries."""
-    return delete_acestream_channel_session_response(
-        session_id=session_id,
-        get_client_or_error=_acestream_client_or_error,
-        load_store=_ace_channel_sessions_store,
-        save_store=_save_ace_channel_sessions_store,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>/streams/<int:stream_id>/quarantine', methods=['POST'])
-def quarantine_acestream_channel_stream(session_id, stream_id):
-    """Manually quarantine one Ace stream entry within a channel session."""
-    return quarantine_acestream_channel_stream_response(
-        session_id=session_id,
-        stream_id=stream_id,
-        load_store=_ace_channel_sessions_store,
-        save_store=_save_ace_channel_sessions_store,
-        now_ts=time.time(),
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>/streams/<int:stream_id>/revive', methods=['POST'])
-def revive_acestream_channel_stream(session_id, stream_id):
-    """Revive one manually quarantined Ace stream entry back to review."""
-    return revive_acestream_channel_stream_response(
-        session_id=session_id,
-        stream_id=stream_id,
-        load_store=_ace_channel_sessions_store,
-        save_store=_save_ace_channel_sessions_store,
-        now_ts=time.time(),
-    )
-
-
-@app.route('/api/acestream-orchestrator/config', methods=['GET'])
-def get_acestream_orchestrator_config_endpoint():
-    """Get AceStream orchestrator configuration (without exposing API key)."""
-    return get_acestream_orchestrator_config_response(
-        get_acestream_orchestrator_config=get_acestream_orchestrator_config,
-    )
-
-
-@app.route('/api/acestream-orchestrator/config', methods=['PUT'])
-def update_acestream_orchestrator_config_endpoint():
-    """Update AceStream orchestrator host, port, and API key."""
-    return update_acestream_orchestrator_config_response(
-        payload=request.get_json(silent=True),
-        get_acestream_orchestrator_config=get_acestream_orchestrator_config,
-    )
-
-
-@app.route('/api/acestream-orchestrator/ready', methods=['GET'])
-def check_acestream_orchestrator_ready():
-    """Check if the AceStream orchestrator is configured and reachable."""
-    return check_acestream_orchestrator_ready_response(
-        make_client=_get_acestream_monitoring_client,
-        ping_orchestrator_ready=_ping_orchestrator_ready,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/start', methods=['POST'])
-def start_acestream_monitor_session():
-    """Start AceStream monitoring session via external orchestrator contract."""
-    return start_acestream_monitor_session_response(
-        payload=request.get_json(silent=True),
-        get_client_or_error=_acestream_client_or_error,
-        normalize_content_id=normalize_content_id,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions', methods=['GET'])
-def list_acestream_monitor_sessions():
-    """List AceStream monitoring sessions with optional playback correlation."""
-    return list_acestream_monitor_sessions_response(
-        args=request.args,
-        get_client_or_error=_acestream_client_or_error,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/<monitor_id>', methods=['GET'])
-def get_acestream_monitor_session(monitor_id):
-    """Get one AceStream monitoring session with detailed history."""
-    return get_acestream_monitor_session_response(
-        monitor_id=monitor_id,
-        args=request.args,
-        get_client_or_error=_acestream_client_or_error,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/<monitor_id>', methods=['DELETE'])
-def stop_acestream_monitor_session(monitor_id):
-    """Stop AceStream monitoring session lifecycle."""
-    return stop_acestream_monitor_session_response(
-        monitor_id=monitor_id,
-        get_client_or_error=_acestream_client_or_error,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/<monitor_id>/entry', methods=['DELETE'])
-def delete_acestream_monitor_entry(monitor_id):
-    """Delete AceStream monitoring entry and ensure it is stopped."""
-    return delete_acestream_monitor_entry_response(
-        monitor_id=monitor_id,
-        get_client_or_error=_acestream_client_or_error,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/parse-m3u', methods=['POST'])
-def parse_acestream_m3u():
-    """Parse M3U and extract AceStream IDs and names via orchestrator contract."""
-    return parse_acestream_m3u_response(
-        payload=request.get_json(silent=True),
-        get_client_or_error=_acestream_client_or_error,
-        parse_m3u_fallback=_parse_m3u_acestream_entries,
-        normalize_content_id=normalize_content_id,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/streams/started', methods=['GET'])
-def list_acestream_started_streams():
-    """Optional playback correlation source from orchestrator proxy streams endpoint."""
-    return list_acestream_started_streams_response(
-        get_client_or_error=_acestream_client_or_error,
-    )
 
 
 @app.route('/api/stream-sessions', methods=['GET'])
@@ -2883,11 +2464,11 @@ if __name__ == '__main__':
                     while elapsed < MAX_WAIT_SECONDS:
                         if fetcher.test_connection():
                             logger.info(
-                                f"Dispatcharr ready after {elapsed}s — starting UDI refresh..."
+                                f"Dispatcharr ready after {elapsed}s - starting UDI refresh..."
                             )
                             break
                         logger.info(
-                            f"Dispatcharr not ready yet ({elapsed}s elapsed) — "
+                            f"Dispatcharr not ready yet ({elapsed}s elapsed) - "
                             f"retrying in {POLL_INTERVAL_SECONDS}s..."
                         )
                         time.sleep(POLL_INTERVAL_SECONDS)
@@ -2895,7 +2476,7 @@ if __name__ == '__main__':
                     else:
                         logger.error(
                             f"Dispatcharr did not become ready within {MAX_WAIT_SECONDS}s. "
-                            "Skipping startup UDI refresh — use 'Reload UDI' on the dashboard."
+                            "Skipping startup UDI refresh - use 'Reload UDI' on the dashboard."
                         )
                         return
 

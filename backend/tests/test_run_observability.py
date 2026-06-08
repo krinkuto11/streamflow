@@ -305,6 +305,282 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(events[-1]["state"], "skipped")
         self.assertEqual(events[-1]["message"], "No active playlists matched the refresh request")
 
+    def test_refresh_playlists_monitors_already_running_account_without_retriggering(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {
+                "auto_playlist_update": True,
+                "changelog_tracking": False,
+            },
+            "enabled_m3u_accounts": [],
+        }
+        events = []
+        scheduling_service = Mock()
+
+        with patch(
+            "apps.automation.automated_stream_manager.get_m3u_accounts",
+            return_value=[{"id": 1, "name": "One", "is_active": True, "status": "refreshing"}],
+        ), patch(
+            "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+        ) as refresh_mock, patch(
+            "apps.automation.scheduling_service.get_scheduling_service",
+            return_value=scheduling_service,
+        ):
+            success, accounts = manager.refresh_playlists(
+                skip_changelog=True,
+                progress_callback=events.append,
+            )
+
+        self.assertTrue(success)
+        self.assertEqual(accounts, [{"id": 1, "name": "One", "already_running": True}])
+        refresh_mock.assert_not_called()
+        self.assertEqual(events[-1]["state"], "already_running")
+
+    def test_refresh_playlists_continues_when_some_provider_requests_fail(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {
+                "auto_playlist_update": True,
+                "changelog_tracking": False,
+            },
+            "enabled_m3u_accounts": [],
+        }
+        events = []
+        scheduling_service = Mock()
+        success_response = Mock(status_code=200)
+        failed_response = Mock(status_code=500)
+
+        with patch(
+            "apps.automation.automated_stream_manager.get_m3u_accounts",
+            return_value=[
+                {"id": 1, "name": "One", "is_active": True},
+                {"id": 2, "name": "Two", "is_active": True},
+            ],
+        ), patch(
+            "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+            side_effect=[success_response, failed_response],
+        ), patch(
+            "apps.automation.scheduling_service.get_scheduling_service",
+            return_value=scheduling_service,
+        ):
+            success, accounts = manager.refresh_playlists(
+                skip_changelog=True,
+                progress_callback=events.append,
+            )
+
+        self.assertTrue(success)
+        self.assertEqual([account["id"] for account in accounts], [1])
+        self.assertEqual(events[-1]["state"], "partial")
+        self.assertEqual(events[-1]["failed_refresh_requests"], 1)
+
+    def test_m3u_refresh_wait_settles_after_stable_snapshot(self):
+        manager = self._manager()
+        manager.config = {
+            "m3u_refresh_wait": {
+                "timeout_seconds": 30,
+                "poll_interval_seconds": 1,
+                "stable_polls_required": 2,
+                "min_wait_seconds": 0,
+            },
+        }
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.return_value = [{"id": 1, "name": "One", "status": "idle"}]
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
+        udi.get_streams.return_value = [{"id": 10}, {"id": 11}]
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
+            "apps.automation.automated_stream_manager.time.sleep"
+        ) as sleep_mock:
+            result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "settled")
+        self.assertEqual(events[-1]["state"], "settled")
+        self.assertEqual(events[-1]["wait_streams_seen"], 2)
+        udi.refresh_streams.assert_not_called()
+        sleep_mock.assert_called_once_with(1)
+
+    def test_m3u_refresh_wait_treats_parsing_account_as_busy(self):
+        manager = self._manager()
+        manager.config = {
+            "m3u_refresh_wait": {
+                "timeout_seconds": 30,
+                "poll_interval_seconds": 1,
+                "stable_polls_required": 1,
+                "min_wait_seconds": 0,
+            },
+        }
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.side_effect = [
+            [{"id": 1, "name": "One", "status": "parsing"}],
+            [{"id": 1, "name": "One", "status": "success"}],
+        ]
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
+        udi.get_streams.return_value = [{"id": 10}, {"id": 11}]
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
+            "apps.automation.automated_stream_manager.time.sleep"
+        ) as sleep_mock:
+            result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "settled")
+        self.assertEqual(events[0]["wait_busy_accounts"], 1)
+        self.assertEqual(events[0]["current"], 0)
+        self.assertEqual(events[0]["total"], 1)
+        self.assertIn("playlist parsing", events[0]["message"])
+        self.assertEqual(events[-1]["state"], "settled")
+        udi.refresh_streams.assert_not_called()
+        sleep_mock.assert_called_once_with(1)
+
+    def test_m3u_refresh_wait_reports_failed_account_status(self):
+        manager = self._manager()
+        manager.config = {"m3u_refresh_wait": {"stable_polls_required": 2, "min_wait_seconds": 0}}
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.return_value = [{"id": 1, "name": "One", "status": "failed"}]
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
+        udi.get_streams.return_value = [{"id": 10}]
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi):
+            result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "failed")
+        self.assertEqual(events[-1]["state"], "waiting")
+        self.assertEqual(events[-1]["wait_streams_seen"], 1)
+        udi.refresh_streams.assert_not_called()
+
+    def test_m3u_refresh_wait_continues_with_partial_failed_account_status(self):
+        manager = self._manager()
+        manager.config = {
+            "m3u_refresh_wait": {
+                "stable_polls_required": 1,
+                "min_wait_seconds": 0,
+                "retry_failed_providers": False,
+            },
+        }
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.return_value = [
+            {"id": 1, "name": "One", "status": "failed"},
+            {"id": 2, "name": "Two", "status": "idle"},
+        ]
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
+        udi.get_streams.return_value = [{"id": 10}]
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi):
+            result = manager._wait_for_m3u_refresh_completion(
+                [{"id": 1, "name": "One"}, {"id": 2, "name": "Two"}],
+                events.append,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "partial")
+        self.assertEqual(events[-1]["state"], "partial")
+        self.assertEqual(events[-1]["wait_failed_accounts"], 1)
+        udi.refresh_streams.assert_not_called()
+
+    def test_m3u_refresh_wait_retries_failed_accounts_only_once(self):
+        manager = self._manager()
+        manager.config = {
+            "m3u_refresh_wait": {
+                "timeout_seconds": 30,
+                "poll_interval_seconds": 1,
+                "stable_polls_required": 1,
+                "min_wait_seconds": 0,
+                "retry_failed_providers": True,
+            },
+        }
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.side_effect = [
+            [
+                {"id": 1, "name": "One", "status": "failed"},
+                {"id": 2, "name": "Two", "status": "idle"},
+            ],
+            [
+                {"id": 1, "name": "One", "status": "idle"},
+                {"id": 2, "name": "Two", "status": "idle"},
+            ],
+        ]
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
+        udi.get_streams.return_value = [{"id": 10}]
+        response = Mock(status_code=200)
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
+            "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+            return_value=response,
+        ) as refresh_mock, patch(
+            "apps.automation.automated_stream_manager.time.sleep"
+        ):
+            result = manager._wait_for_m3u_refresh_completion(
+                [{"id": 1, "name": "One"}, {"id": 2, "name": "Two"}],
+                events.append,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["state"], "settled")
+        refresh_mock.assert_called_once_with(account_id=1)
+        self.assertIn("retrying_failed", [event["state"] for event in events])
+        udi.refresh_streams.assert_not_called()
+
+    def test_cache_sync_reports_progress_before_long_fetch_completes(self):
+        manager = self._manager()
+        manager._start_run_status(forced=True)
+        manager._update_run_status(
+            stage="cache_sync",
+            stage_label="Syncing Cache",
+            message="Refreshing cache after playlist update",
+        )
+
+        udi = Mock()
+
+        def refresh_streams(progress_callback=None):
+            status = manager.get_run_status()
+            self.assertEqual(status["current"], 1)
+            self.assertEqual(status["total"], 100)
+            self.assertEqual(status["percent"], 1)
+            stages = {stage["key"]: stage for stage in status["stages"]}
+            self.assertEqual(stages["cache_sync"]["percent"], 1)
+            self.assertIsNotNone(progress_callback)
+            progress_callback({
+                "completed_pages": 2,
+                "total_pages": 4,
+                "items_fetched": 10000,
+                "expected_count": 20000,
+            })
+            status = manager.get_run_status()
+            self.assertEqual(status["current"], 40)
+            self.assertEqual(status["total"], 100)
+            self.assertEqual(status["percent"], 40)
+            self.assertIn("2/4 pages", status["message"])
+            return True
+
+        def refresh_channels():
+            status = manager.get_run_status()
+            self.assertEqual(status["current"], 90)
+            self.assertEqual(status["total"], 100)
+            self.assertEqual(status["percent"], 90)
+            return True
+
+        udi.refresh_streams.side_effect = refresh_streams
+        udi.refresh_channels.side_effect = refresh_channels
+
+        self.assertTrue(manager._sync_udi_cache_after_playlist_refresh(udi))
+        status = manager.get_run_status()
+        self.assertEqual(status["current"], 100)
+        self.assertEqual(status["percent"], 100)
+        self.assertEqual(status["counts"]["cache_sync_successful_steps"], 2)
+        self.assertEqual(status["counts"]["cache_sync_total_steps"], 2)
+
 
 class FetcherTimingSummaryTests(unittest.TestCase):
     def test_api_timing_summary_is_sanitized_and_percentiled(self):

@@ -234,10 +234,10 @@ export default function OperatorHelp() {
             <h1 className="text-3xl font-bold tracking-tight">Help</h1>
           </div>
           <p className="max-w-3xl text-muted-foreground">
-            Operational notes for the V3 workflows that operators use most often.
+            Operational notes for the StreamFlow workflows that operators use most often.
           </p>
         </div>
-        <Badge variant="outline" className="w-fit px-3 py-1 text-sm">V3 Guide</Badge>
+        <Badge variant="outline" className="w-fit px-3 py-1 text-sm">Operator Guide</Badge>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">

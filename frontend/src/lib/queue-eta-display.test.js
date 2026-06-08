@@ -19,6 +19,36 @@ describe('getQueueEtaDisplay', () => {
     })
   })
 
+  it('marks floor-based ETA as conservative', () => {
+    expect(getQueueEtaDisplay({
+      eta_seconds: 26460,
+      completed: 23,
+      eta_basis_detail: 'channel_floor',
+      eta_configured_workers: 10,
+      eta_effective_workers: 10,
+    })).toMatchObject({
+      state: 'ready',
+      label: 'Rough ETA: ~7h 21m remaining',
+      title: 'Provider limits and long channel waits can make this estimate swing between channels.',
+      pulse: false,
+    })
+  })
+
+  it('marks provider-limited worker ETA as conservative', () => {
+    expect(getQueueEtaDisplay({
+      eta_seconds: 3000,
+      completed: 12,
+      eta_basis_detail: 'observed_stream',
+      eta_configured_workers: 10,
+      eta_effective_workers: 3,
+    })).toMatchObject({
+      state: 'ready',
+      label: 'Rough ETA: ~50m remaining',
+      title: 'Provider limits and long channel waits can make this estimate swing between channels.',
+      pulse: false,
+    })
+  })
+
   it('shows learning state when work exists before average timing is known', () => {
     expect(getQueueEtaDisplay({
       eta_seconds: 0,

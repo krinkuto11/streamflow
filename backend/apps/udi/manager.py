@@ -156,7 +156,9 @@ class UDIManager:
         self._automation_busy_since: Optional[datetime] = None
         # If busy flag is not cleared within this window (e.g. due to a crash),
         # is_automation_busy() auto-clears it to prevent permanent deadlock.
-        self._automation_busy_timeout_seconds: int = 3600
+        # Full quality runs can legitimately take several hours on large
+        # channel sets, so this must be longer than a normal overnight run.
+        self._automation_busy_timeout_seconds: int = 24 * 60 * 60
 
         # Last run timestamp for the scheduled UDI refresh worker.
         # In-memory only — resets on restart, which is correct behaviour.
@@ -1435,7 +1437,7 @@ class UDIManager:
             logger.error(f"Error refreshing channel {channel_id}: {e}")
             return False
     
-    def refresh_streams(self) -> bool:
+    def refresh_streams(self, progress_callback=None) -> bool:
         """Refresh only streams data.
         
         Returns:
@@ -1443,7 +1445,20 @@ class UDIManager:
         """
         logger.info("Refreshing streams...")
         try:
-            result = self.fetcher.fetch_streams()
+            result = self.fetcher.fetch_streams(progress_callback=progress_callback)
+            existing_stream_count = len(self._streams_cache)
+            if not (
+                _check_fetch_integrity('streams', result)
+                and _check_nonempty_live_fetch('streams', result, existing_stream_count)
+            ):
+                logger.warning(
+                    "Preserving existing stream cache with %s records after "
+                    "incomplete refresh_streams() result (%s/%s)",
+                    existing_stream_count,
+                    len(result),
+                    result.expected_count,
+                )
+                return False
             with self._lock:
                 self._streams_cache = result.items
                 self._streams_by_id = {

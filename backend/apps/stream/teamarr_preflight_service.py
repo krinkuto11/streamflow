@@ -120,14 +120,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "post_start_grace_minutes": 5,
     "max_concurrent_checks": 1,
     "event_cooldown_minutes": 720,
-    "skip_during_quality_check": True,
-    "provider_limit_override": False,
+    "queue_during_active_checks": True,
     "forced_profile_id": "",
     "include_sports": [],
     "exclude_sports": [],
     "include_leagues": [],
     "exclude_leagues": [],
 }
+LEGACY_CONFIG_KEYS = {"defer_during_active_checks", "skip_during_quality_check"}
 CONFIG_KEYS = set(DEFAULT_CONFIG)
 
 INT_BOUNDS = {
@@ -176,19 +176,36 @@ def _normalize_minute_offsets(value: Any, *, min_value: int = 1, max_value: int 
     return sorted(set(offsets), reverse=reverse)
 
 
+def _legacy_queue_during_active_checks(payload: Optional[Dict[str, Any]]) -> Optional[bool]:
+    if not isinstance(payload, dict):
+        return None
+    if "queue_during_active_checks" in payload:
+        return bool(payload.get("queue_during_active_checks"))
+    if "defer_during_active_checks" in payload:
+        return not bool(payload.get("defer_during_active_checks"))
+    if "skip_during_quality_check" in payload:
+        return not bool(payload.get("skip_during_quality_check"))
+    return None
+
+
 def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
     if current:
-        config.update({key: value for key, value in current.items() if key in CONFIG_KEYS})
+        config.update({key: value for key, value in current.items() if key in DEFAULT_CONFIG})
+        legacy_queue_setting = _legacy_queue_during_active_checks(current)
+        if legacy_queue_setting is not None:
+            config["queue_during_active_checks"] = legacy_queue_setting
     if payload:
         config.update({key: value for key, value in payload.items() if key in CONFIG_KEYS})
+        legacy_queue_setting = _legacy_queue_during_active_checks(payload)
+        if legacy_queue_setting is not None:
+            config["queue_during_active_checks"] = legacy_queue_setting
 
     for key, bounds in INT_BOUNDS.items():
         config[key] = _coerce_int(config.get(key), DEFAULT_CONFIG[key], bounds)
 
     config["enabled"] = bool(config.get("enabled"))
-    config["skip_during_quality_check"] = bool(config.get("skip_during_quality_check"))
-    config["provider_limit_override"] = bool(config.get("provider_limit_override"))
+    config["queue_during_active_checks"] = bool(config.get("queue_during_active_checks"))
     config["teamarr_base_url"] = str(config.get("teamarr_base_url") or "").strip().rstrip("/")
     config["api_key"] = str(config.get("api_key") or "").strip()
     config["api_key_header"] = str(config.get("api_key_header") or DEFAULT_CONFIG["api_key_header"]).strip()[:80]
@@ -208,6 +225,8 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
 
 def public_config(config: Dict[str, Any], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     visible = dict(config)
+    visible["defer_during_active_checks"] = not bool(visible.get("queue_during_active_checks", True))
+    visible["skip_during_quality_check"] = not bool(visible.get("queue_during_active_checks", True))
     visible["has_api_key"] = bool(visible.get("api_key"))
     visible["api_key"] = ""
     if metadata:
@@ -308,7 +327,14 @@ class TeamarrPreflightService:
         try:
             if self.config_file.exists():
                 with open(self.config_file, "r", encoding="utf-8") as handle:
-                    return normalize_config(json.load(handle))
+                    raw_config = json.load(handle)
+                config = normalize_config(raw_config)
+                if any(key in raw_config for key in LEGACY_CONFIG_KEYS):
+                    self.config_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(self.config_file, "w", encoding="utf-8") as handle:
+                        json.dump(config, handle, indent=2, sort_keys=True)
+                        handle.write("\n")
+                return config
         except Exception as exc:
             logger.warning(f"Failed to load Teamarr preflight config: {exc}")
         return normalize_config({})
@@ -378,6 +404,10 @@ class TeamarrPreflightService:
     def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
             payload = dict(payload or {})
+            if "queue_during_active_checks" not in payload:
+                legacy_queue_setting = _legacy_queue_during_active_checks(payload)
+                if legacy_queue_setting is not None:
+                    payload["queue_during_active_checks"] = legacy_queue_setting
             current = dict(self._config)
             if payload.get("clear_api_key"):
                 current["api_key"] = ""
@@ -420,20 +450,28 @@ class TeamarrPreflightService:
                 self._save_config()
             self._stop_event.set()
             thread = self._thread
+        self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_automation")
+        self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_direct")
         if thread and thread.is_alive():
             thread.join(timeout=5)
         return True
 
     def get_status(self) -> Dict[str, Any]:
+        queue_snapshot = self._teamarr_queue_snapshot()
         with self._lock:
-            recent_events = list(self._events)[:25]
-            upcoming_events = self._attach_recent_events_to_upcoming(self._upcoming, recent_events)
+            all_events = list(self._events)
+            recent_events = all_events[:25]
+            upcoming_events = self._attach_recent_events_to_upcoming(self._upcoming, all_events)
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
                 "last_scan_at": self._last_scan_at,
                 "last_error": self._last_error,
                 "active_checks": list(self._active_checks.values()),
+                "queued_checks": queue_snapshot["queued_checks"],
+                "queued_checks_count": len(queue_snapshot["queued_checks"]),
+                "queue_active_checks": queue_snapshot["queue_active_checks"],
+                "queue_active_checks_count": len(queue_snapshot["queue_active_checks"]),
                 "upcoming_events": upcoming_events,
                 "managed_events_seen": self._last_events_seen,
                 "managed_candidates": self._last_candidates_count,
@@ -445,6 +483,66 @@ class TeamarrPreflightService:
                 "teamarr_connector": self._teamarr_connector_status(),
                 "config": public_config(self._config, self._default_profile_metadata()),
             }
+
+    def _teamarr_queue_snapshot(self) -> Dict[str, List[Dict[str, Any]]]:
+        snapshot: Dict[str, List[Dict[str, Any]]] = {
+            "queued_checks": [],
+            "queue_active_checks": [],
+        }
+        try:
+            checker = self.stream_checker_provider()
+        except Exception as exc:
+            logger.debug("Unable to read Stream Checker queue for Teamarr preflight status: %s", exc)
+            return snapshot
+
+        check_queue = getattr(checker, "check_queue", None)
+        if check_queue is None:
+            return snapshot
+
+        def collect(mapping_name: str) -> List[Dict[str, Any]]:
+            mapping = getattr(check_queue, mapping_name, {}) or {}
+            priorities = getattr(check_queue, "queued_priorities", {}) or {}
+            items: List[Dict[str, Any]] = []
+            for raw_channel_id, metadata in list(mapping.items()):
+                if not isinstance(metadata, dict) or metadata.get("source") != "teamarr_preflight":
+                    continue
+                event = metadata.get("event") or {}
+                if not isinstance(event, dict):
+                    event = {}
+                dispatcharr_channel_id = event.get("dispatcharr_channel_id") or raw_channel_id
+                item = {
+                    "identity": event.get("identity"),
+                    "teamarr_id": event.get("teamarr_id"),
+                    "event_id": event.get("event_id"),
+                    "event_name": event.get("event_name") or metadata.get("program_name"),
+                    "event_date": event.get("event_date"),
+                    "channel_name": event.get("channel_name"),
+                    "dispatcharr_channel_id": dispatcharr_channel_id,
+                    "sport": event.get("sport"),
+                    "league": event.get("league"),
+                    "seconds_to_start": event.get("seconds_to_start"),
+                    "bucket": event.get("trigger_bucket") or metadata.get("trigger_bucket"),
+                }
+                if mapping_name == "queued_metadata":
+                    item["priority"] = priorities.get(raw_channel_id)
+                items.append(item)
+            items.sort(key=lambda item: (
+                str(item.get("event_date") or ""),
+                str(item.get("channel_name") or ""),
+                str(item.get("event_name") or ""),
+            ))
+            return items
+
+        lock = getattr(check_queue, "lock", None)
+        if lock is None:
+            snapshot["queued_checks"] = collect("queued_metadata")
+            snapshot["queue_active_checks"] = collect("in_progress_metadata")
+            return snapshot
+
+        with lock:
+            snapshot["queued_checks"] = collect("queued_metadata")
+            snapshot["queue_active_checks"] = collect("in_progress_metadata")
+        return snapshot
 
     def _teamarr_connector_status(self) -> Dict[str, Any]:
         base_url = str(self._config.get("teamarr_base_url") or "").strip()
@@ -537,9 +635,11 @@ class TeamarrPreflightService:
     def run_once(self, *, force: bool = False) -> Dict[str, Any]:
         config = self.get_config(include_secret=True)
         if not config.get("enabled") and not force:
+            self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_automation")
             return {"success": True, "skipped": True, "reason": "disabled"}
 
         try:
+            self._sync_automation_queue_gate(config)
             raw_events = self._fetch_managed_events(config)
             now = datetime.fromtimestamp(self.clock(), tz=timezone.utc)
             candidates = self._build_candidates(raw_events, config, now)
@@ -863,8 +963,21 @@ class TeamarrPreflightService:
             )
             candidates.append(candidate)
 
-        candidates.sort(key=lambda item: item.get("seconds_to_start", 10**12))
+        candidates.sort(key=self._candidate_sort_key)
         return candidates
+
+    @staticmethod
+    def _candidate_sort_key(event: Dict[str, Any]) -> tuple[int, int, str]:
+        try:
+            seconds = int(event.get("seconds_to_start"))
+        except (TypeError, ValueError):
+            seconds = 10**12
+        state = str(event.get("state") or "")
+        if state == "past":
+            return (2, -seconds, str(event.get("event_name") or ""))
+        if seconds < 0 and state not in {"due", "already_attempted"}:
+            return (1, abs(seconds), str(event.get("event_name") or ""))
+        return (0, seconds, str(event.get("event_name") or ""))
 
     def _public_event(self, event: Dict[str, Any], now: datetime) -> Optional[Dict[str, Any]]:
         event_at = _parse_event_datetime(_event_datetime_value(event))
@@ -990,6 +1103,7 @@ class TeamarrPreflightService:
         *,
         direction: str,
     ) -> tuple[str, Optional[str]]:
+        poll_window_seconds = max(1, int(self._config.get("poll_interval_seconds", 60)))
         normalized = sorted(
             {int(offset) for offset in offsets if int(offset) > 0},
             reverse=(direction == "pre"),
@@ -998,9 +1112,9 @@ class TeamarrPreflightService:
         for offset in normalized:
             threshold_seconds = offset * 60
             if direction == "pre":
-                is_due = seconds <= threshold_seconds
+                is_due = threshold_seconds - poll_window_seconds <= seconds <= threshold_seconds
             else:
-                is_due = seconds >= threshold_seconds
+                is_due = threshold_seconds <= seconds
             if not is_due:
                 continue
 
@@ -1052,13 +1166,21 @@ class TeamarrPreflightService:
         if not channel_id:
             self._record_event("no_dispatcharr_channel", event, {})
             return False
-        if self._automation_active(config):
-            self._record_event("deferred_automation_active", event, {"bucket": event.get("trigger_bucket")})
+        defer_reason = self._active_work_defer_reason(config)
+        if defer_reason:
+            self._record_event(
+                "deferred_automation_active" if defer_reason == "automation_active" else "deferred_stream_checker_active",
+                event,
+                {"bucket": event.get("trigger_bucket"), "reason": defer_reason},
+            )
             return False
         if not self._channel_has_streams(channel_id):
             self._mark_attempted(event)
             self._record_event("no_streams_yet", event, {"bucket": event.get("trigger_bucket")})
             return False
+        if config.get("queue_during_active_checks", True) and self._automation_active():
+            self._set_stream_checker_event_gate(True, gate_name="teamarr_preflight_automation")
+            return self._queue_check(event, config)
         if self._stream_checker_active():
             return self._queue_check(event, config)
 
@@ -1079,6 +1201,7 @@ class TeamarrPreflightService:
                     "bucket": event.get("trigger_bucket"),
                     "started_at": self.clock(),
                 }
+                self._set_stream_checker_event_gate(True)
 
         if queue_due_to_capacity:
             if self._queue_check(event, config):
@@ -1131,8 +1254,6 @@ class TeamarrPreflightService:
                 "trigger_bucket": event.get("trigger_bucket"),
             },
         }
-        if config.get("provider_limit_override"):
-            metadata["provider_limit_override"] = True
         queued = bool(checker.queue_channel(
             int(channel_id),
             priority=TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
@@ -1208,7 +1329,6 @@ class TeamarrPreflightService:
                 is_epg_scheduled=True,
                 forced_profile_id=forced_profile_id,
                 force_check=True,
-                **({"provider_limit_override": True} if config.get("provider_limit_override") else {}),
             )
             deferral_reason = self._controlled_deferral_reason(result)
             if deferral_reason:
@@ -1250,7 +1370,19 @@ class TeamarrPreflightService:
     def _finish_active_check(self, key: str) -> None:
         with self._lock:
             self._active_checks.pop(key, None)
-            self._purge_old_attempts()
+            has_active_checks = bool(self._active_checks)
+        if not has_active_checks:
+            self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_direct")
+        self._purge_old_attempts()
+
+    def _set_stream_checker_event_gate(self, active: bool, *, gate_name: str = "teamarr_preflight_direct") -> None:
+        try:
+            checker = self.stream_checker_provider()
+            setter = getattr(checker, "set_specialized_queue_gate", None)
+            if callable(setter):
+                setter(gate_name, bool(active))
+        except Exception as exc:
+            logger.debug("Unable to update Stream Checker event queue gate: %s", exc)
 
     def _resolve_profile_id(self, profile_id: Any) -> Optional[str]:
         requested = str(profile_id or "").strip()
@@ -1271,17 +1403,51 @@ class TeamarrPreflightService:
         with self._lock:
             return self._default_profile_id or None
 
-    def _automation_active(self, config: Dict[str, Any]) -> bool:
-        if not config.get("skip_during_quality_check", True):
-            return False
+    def _active_work_defer_reason(self, config: Dict[str, Any]) -> Optional[str]:
+        if config.get("queue_during_active_checks", True):
+            return None
+        if self._automation_active():
+            return "automation_active"
+        if self._stream_checker_active():
+            return "stream_checker_active"
+        return None
+
+    def _sync_automation_queue_gate(self, config: Dict[str, Any]) -> bool:
+        automation_queue_active = bool(
+            config.get("queue_during_active_checks", True)
+            and self._automation_active()
+        )
+        self._set_stream_checker_event_gate(
+            automation_queue_active,
+            gate_name="teamarr_preflight_automation",
+        )
+        return automation_queue_active
+
+    def _automation_active(self) -> bool:
         try:
             automation_status = self.automation_status_provider() or {}
         except Exception as exc:
             logger.warning(f"Teamarr preflight could not read automation status: {exc}")
             return True
 
-        if automation_status.get("active") or automation_status.get("state") == "running":
+        return self._automation_status_indicates_active_run(automation_status)
+
+    @classmethod
+    def _automation_status_indicates_active_run(cls, automation_status: Any) -> bool:
+        if not isinstance(automation_status, dict):
+            return False
+
+        if automation_status.get("active") is True:
             return True
+
+        state = str(automation_status.get("state") or automation_status.get("status") or "").lower()
+        if state == "running":
+            return True
+
+        for key in ("run_status", "run_progress"):
+            if cls._automation_status_indicates_active_run(automation_status.get(key)):
+                return True
+
         return False
 
     def _stream_checker_active(self) -> bool:
@@ -1301,7 +1467,17 @@ class TeamarrPreflightService:
 
     def _channel_has_streams(self, channel_id: int) -> bool:
         try:
-            streams = self.udi_provider().get_channel_streams(int(channel_id)) or []
+            udi = self.udi_provider()
+            channel_id = int(channel_id)
+            streams = udi.get_channel_streams(channel_id) or []
+            if streams:
+                return True
+            if hasattr(udi, "refresh_channel_by_id"):
+                try:
+                    udi.refresh_channel_by_id(channel_id)
+                    streams = udi.get_channel_streams(channel_id) or []
+                except Exception as exc:
+                    logger.warning(f"Teamarr preflight could not refresh channel {channel_id}: {exc}")
             return len(streams) > 0
         except Exception as exc:
             logger.warning(f"Teamarr preflight could not read streams for channel {channel_id}: {exc}")
@@ -1405,6 +1581,10 @@ class TeamarrPreflightService:
     @staticmethod
     def _automation_status_from_module(module: Any) -> Optional[Dict[str, Any]]:
         manager = getattr(module, "automation_manager", None) if module is not None else None
+        if manager is None and module is not None:
+            manager_factory = getattr(module, "get_automation_manager", None)
+            if callable(manager_factory):
+                manager = manager_factory()
         getter = getattr(manager, "get_run_status", None)
         if callable(getter):
             return getter() or {}
@@ -1412,20 +1592,41 @@ class TeamarrPreflightService:
 
     @staticmethod
     def _default_automation_status_provider() -> Dict[str, Any]:
+        fallback_status: Optional[Dict[str, Any]] = None
+        seen_modules = set()
+
+        def consider_module(module: Any) -> Optional[Dict[str, Any]]:
+            nonlocal fallback_status
+            if module is None:
+                return None
+            module_id = id(module)
+            if module_id in seen_modules:
+                return None
+            seen_modules.add(module_id)
+
+            status = TeamarrPreflightService._automation_status_from_module(module)
+            if status is None:
+                return None
+            if fallback_status is None:
+                fallback_status = status
+            if TeamarrPreflightService._automation_status_indicates_active_run(status):
+                return status
+            return None
+
         try:
             for module_name in ("apps.api.web_api", "web_api", "__main__"):
-                status = TeamarrPreflightService._automation_status_from_module(sys.modules.get(module_name))
+                status = consider_module(sys.modules.get(module_name))
                 if status is not None:
                     return status
 
             from apps.api import web_api
 
-            status = TeamarrPreflightService._automation_status_from_module(web_api)
+            status = consider_module(web_api)
             if status is not None:
                 return status
         except Exception as exc:
             logger.debug("Could not read global automation run status: %s", exc)
-        return {}
+        return fallback_status or {}
 
 
 _teamarr_preflight_instance: Optional[TeamarrPreflightService] = None

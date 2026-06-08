@@ -21,6 +21,7 @@ integrates with the stream_check_utils.py module for stream analysis.
 
 import json
 import logging
+import math
 import os
 import threading
 import time
@@ -78,6 +79,8 @@ try:
     CHANGELOG_AVAILABLE = True
 except ImportError:
     CHANGELOG_AVAILABLE = False
+
+SPECIALIZED_QUEUE_SOURCES = {"teamarr_preflight", "auto_create"}
 
 # Import croniter for cron expression validation
 try:
@@ -212,6 +215,7 @@ class StreamCheckerService:
         self.lock = threading.Lock()
         self._cancel_queueing = False
         self._sync_batch_generation = 0
+        self._specialized_queue_gates = set()
         
         self.sync_batch_state = {
             'active': False,
@@ -219,6 +223,7 @@ class StreamCheckerService:
             'completed': 0,
             'failed': 0,
             'in_progress': 0,
+            'good_streams_count': 0,
             'dead_streams_count': 0,
             'blank_streams_count': 0,
             'freeze_streams_count': 0,
@@ -294,6 +299,11 @@ class StreamCheckerService:
                 # not clear this after a channel is pulled: a manual queue clear
                 # can legitimately request abort in that narrow handoff window.
                 self.abort_current_check.clear()
+                if self._sync_batch_active():
+                    logger.debug("Worker paused while synchronous quality batch is active")
+                    time.sleep(1)
+                    continue
+                self._apply_specialized_queue_deferral()
                 logger.debug("Worker waiting for next channel from queue...")
                 queue_entry = self.check_queue.get_next_entry(timeout=1.0)
                 if queue_entry is None:
@@ -306,10 +316,7 @@ class StreamCheckerService:
                 channel_id = queue_entry.get('channel_id')
                 queue_metadata = queue_entry.get('metadata') or {}
                 
-                single_check_metadata = bool(
-                    queue_metadata.get('is_epg_scheduled')
-                    or queue_metadata.get('source') == 'teamarr_preflight'
-                )
+                single_check_metadata = self._is_specialized_queue_metadata(queue_metadata)
 
                 # Start a new batch if not already started. Specialized single-channel
                 # queue entries keep their own changelog path and should not create an
@@ -321,38 +328,7 @@ class StreamCheckerService:
                 # Check this channel
                 forced_profile_id = queue_metadata.get('forced_profile_id')
                 if single_check_metadata:
-                    single_check_kwargs = {
-                        'program_name': queue_metadata.get('program_name'),
-                        'is_epg_scheduled': bool(queue_metadata.get('is_epg_scheduled')),
-                        'forced_profile_id': forced_profile_id,
-                    }
-                    if queue_metadata.get('provider_limit_override'):
-                        single_check_kwargs['provider_limit_override'] = True
-                    result = self.check_single_channel(
-                        channel_id,
-                        **single_check_kwargs,
-                    )
-                    if queue_metadata.get('source') == 'teamarr_preflight':
-                        try:
-                            from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
-
-                            get_teamarr_preflight_service().record_queued_check_result(
-                                queue_metadata,
-                                result,
-                            )
-                        except Exception as exc:
-                            logger.warning(
-                                "Failed to record queued Teamarr preflight result for channel %s: %s",
-                                channel_id,
-                                exc,
-                            )
-                    if isinstance(result, dict) and result.get('success') is False:
-                        self.check_queue.mark_failed(
-                            channel_id,
-                            result.get('error') or result.get('reason') or 'single channel check failed',
-                        )
-                    else:
-                        self.check_queue.mark_completed(channel_id)
+                    self._run_specialized_queue_entry(queue_entry)
                 else:
                     check_kwargs = {}
                     if forced_profile_id:
@@ -398,6 +374,145 @@ class StreamCheckerService:
                 logger.error(f"Error in scheduler loop: {e}", exc_info=True)
         
         logger.info("Stream checker scheduler stopped")
+
+    def _is_specialized_queue_metadata(self, metadata: Dict[str, Any]) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        return bool(
+            metadata.get('is_epg_scheduled')
+            or metadata.get('source') in SPECIALIZED_QUEUE_SOURCES
+        )
+
+    @staticmethod
+    def _should_isolate_teamarr_connectivity_abort(
+        queue_metadata: Dict[str, Any],
+        result: Any,
+        abort_was_set: bool,
+    ) -> bool:
+        if abort_was_set:
+            return False
+        if not isinstance(queue_metadata, dict) or queue_metadata.get('source') != 'teamarr_preflight':
+            return False
+        if not isinstance(result, dict) or not result.get('aborted'):
+            return False
+        for key in ('skip_reason', 'error', 'reason', 'quality_reason_detail'):
+            if str(result.get(key) or '').lower() == 'connectivity_guard':
+                return True
+        return False
+
+    def _sync_batch_active(self) -> bool:
+        try:
+            with self.lock:
+                return bool(
+                    self.sync_batch_state.get('active')
+                    and self.sync_batch_state.get('generation') == self._sync_batch_generation
+                )
+        except Exception:
+            return False
+
+    def _specialized_queue_gate_active_locked(self) -> bool:
+        sync_batch_state = getattr(self, 'sync_batch_state', {}) or {}
+        return bool(
+            getattr(self, '_specialized_queue_gates', set())
+            or (
+                sync_batch_state.get('active')
+                and sync_batch_state.get('generation') == getattr(self, '_sync_batch_generation', None)
+            )
+        )
+
+    def _apply_specialized_queue_deferral(self) -> None:
+        defer_metadata_sources = getattr(self.check_queue, 'defer_metadata_sources', None)
+        if not callable(defer_metadata_sources):
+            return
+        lock = getattr(self, 'lock', None)
+        if lock is None:
+            should_defer = self._specialized_queue_gate_active_locked()
+        else:
+            with lock:
+                should_defer = self._specialized_queue_gate_active_locked()
+        defer_metadata_sources(SPECIALIZED_QUEUE_SOURCES if should_defer else set())
+
+    def set_specialized_queue_gate(self, gate_name: str, active: bool) -> None:
+        """Pause event-style queue entries while an external event check runs."""
+        gate = str(gate_name or '').strip()
+        if not gate:
+            return
+        with self.lock:
+            if not hasattr(self, '_specialized_queue_gates'):
+                self._specialized_queue_gates = set()
+            if active:
+                self._specialized_queue_gates.add(gate)
+            else:
+                self._specialized_queue_gates.discard(gate)
+        self._apply_specialized_queue_deferral()
+
+    def _run_specialized_queue_entry(self, queue_entry: Dict[str, Any]) -> None:
+        channel_id = queue_entry.get('channel_id')
+        queue_metadata = queue_entry.get('metadata') or {}
+        forced_profile_id = queue_metadata.get('forced_profile_id')
+        single_check_kwargs = {
+            'program_name': queue_metadata.get('program_name'),
+            'is_epg_scheduled': bool(queue_metadata.get('is_epg_scheduled')),
+            'forced_profile_id': forced_profile_id,
+        }
+        if queue_metadata.get('provider_limit_override'):
+            single_check_kwargs['provider_limit_override'] = True
+
+        abort_was_set = self.abort_current_check.is_set()
+        result = self.check_single_channel(
+            channel_id,
+            **single_check_kwargs,
+        )
+        if queue_metadata.get('source') == 'teamarr_preflight':
+            try:
+                from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+
+                get_teamarr_preflight_service().record_queued_check_result(
+                    queue_metadata,
+                    result,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Failed to record queued Teamarr preflight result for channel %s: %s",
+                    channel_id,
+                    exc,
+                )
+        if self._should_isolate_teamarr_connectivity_abort(queue_metadata, result, abort_was_set):
+            logger.info(
+                "Isolating Teamarr queued connectivity abort from synchronous batch "
+                "channel_id=%s source=%s",
+                channel_id,
+                queue_metadata.get('source'),
+            )
+            self.abort_current_check.clear()
+            self._cancel_queueing = False
+        if isinstance(result, dict) and result.get('success') is False:
+            self.check_queue.mark_failed(
+                channel_id,
+                result.get('error') or result.get('reason') or 'single channel check failed',
+            )
+        else:
+            self.check_queue.mark_completed(channel_id)
+
+    def _drain_specialized_queue_entries(self, *, max_entries: int = 25) -> int:
+        drained = 0
+        for _ in range(max(0, int(max_entries))):
+            if self.abort_current_check.is_set():
+                break
+            queue_entry = self.check_queue.get_next_entry_for_metadata_sources(
+                SPECIALIZED_QUEUE_SOURCES
+            )
+            if queue_entry is None:
+                break
+            logger.info(
+                "Running specialized queued check serially during synchronous batch "
+                "channel_id=%s source=%s",
+                queue_entry.get('channel_id'),
+                (queue_entry.get('metadata') or {}).get('source'),
+            )
+            self._run_specialized_queue_entry(queue_entry)
+            drained += 1
+        return drained
     
     def _queue_updated_channels(self):
         """Queue channels that have received M3U updates.
@@ -961,6 +1076,7 @@ class StreamCheckerService:
             "channel_layout": stream_data.get("channel_layout"),
             "audio_bitrate": stream_data.get("audio_bitrate"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
+            "bitrate_source": stream_data.get("bitrate_source"),
             "quality_score": stream_data.get("score"),
             "quality_reason": stream_data.get("quality_reason"),
             "quality_reason_detail": stream_data.get("quality_reason_detail"),
@@ -1078,6 +1194,7 @@ class StreamCheckerService:
             "channel_layout": stream_data.get("channel_layout"),
             "audio_bitrate": stream_data.get("audio_bitrate"),
             "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
+            "bitrate_source": stream_data.get("bitrate_source"),
             "quality_score": stream_data.get("score"),
             "quality_reason": stream_data.get("quality_reason"),
             "quality_reason_detail": stream_data.get("quality_reason_detail"),
@@ -1190,6 +1307,14 @@ class StreamCheckerService:
                 total_streams = sum(entry.get('total_streams', 0) for entry in self.batch_changelog_entries)
                 streams_analyzed = sum(entry.get('streams_analyzed', 0) for entry in self.batch_changelog_entries)
                 dead_streams = sum(entry.get('dead_streams_detected', 0) for entry in self.batch_changelog_entries)
+                blank_streams = sum(
+                    self._count_checked_stream_status({'checked_streams': entry.get('stream_stats', [])}, 'blank')
+                    for entry in self.batch_changelog_entries
+                )
+                freeze_streams = sum(
+                    self._count_checked_stream_status({'checked_streams': entry.get('stream_stats', [])}, 'freeze')
+                    for entry in self.batch_changelog_entries
+                )
                 streams_revived = sum(entry.get('streams_revived', 0) for entry in self.batch_changelog_entries)
                 successful_checks = sum(1 for entry in self.batch_changelog_entries if entry.get('success', False))
                 failed_checks = total_channels - successful_checks
@@ -1206,6 +1331,14 @@ class StreamCheckerService:
                                 "total_streams": entry.get('total_streams', 0),
                                 "streams_analyzed": entry.get('streams_analyzed', 0),
                                 "dead_streams": entry.get('dead_streams_detected', 0),
+                                "blank_streams": self._count_checked_stream_status(
+                                    {'checked_streams': entry.get('stream_stats', [])},
+                                    'blank',
+                                ),
+                                "freeze_streams": self._count_checked_stream_status(
+                                    {'checked_streams': entry.get('stream_stats', [])},
+                                    'freeze',
+                                ),
                                 "streams_revived": entry.get('streams_revived', 0),
                                 "avg_resolution": entry.get('avg_resolution', 'N/A'),
                                 "avg_bitrate": entry.get('avg_bitrate', 'N/A'),
@@ -1227,6 +1360,8 @@ class StreamCheckerService:
                         'total_streams': total_streams,
                         'streams_analyzed': streams_analyzed,
                         'dead_streams': dead_streams,
+                        'blank_streams': blank_streams,
+                        'freeze_streams': freeze_streams,
                         'streams_revived': streams_revived,
                         'duration': duration_str,
                         'duration_seconds': duration_seconds
@@ -1480,6 +1615,68 @@ class StreamCheckerService:
         result = self._run_connectivity_guard(phase)
         if result.ok:
             return None
+
+        recoverable_phases = {
+            'mark_dead_stream',
+            'keep_dead_stream_marked',
+            'channel_stream_update',
+            'single_channel_validation_removal',
+            'single_channel_matching_update',
+        }
+        config = self.config.get('connectivity_guard', {}) or {}
+        recovery_wait_seconds = self._bounded_float(
+            config.get('recovery_wait_seconds', 240),
+            default=240.0,
+            minimum=0.0,
+            maximum=600.0,
+        )
+        recovery_poll_seconds = self._bounded_float(
+            config.get('recovery_poll_seconds', 10),
+            default=10.0,
+            minimum=1.0,
+            maximum=120.0,
+        )
+        if phase in recoverable_phases and recovery_wait_seconds > 0:
+            safe_channel_name = channel_name or (
+                f"Channel {channel_id}" if channel_id is not None else "Quality check"
+            )
+            deadline = time.time() + recovery_wait_seconds
+            logger.warning(
+                "Connectivity guard failed at %s for %s: %s; waiting up to %.0fs for recovery",
+                phase,
+                safe_channel_name,
+                result.message,
+                recovery_wait_seconds,
+            )
+            while time.time() < deadline and not self.abort_current_check.is_set():
+                remaining = max(0.0, deadline - time.time())
+                sleep_for = min(recovery_poll_seconds, remaining)
+                if update_progress and channel_id is not None:
+                    try:
+                        self.progress.update(
+                            channel_id=channel_id,
+                            channel_name=safe_channel_name,
+                            current=0,
+                            total=0,
+                            status='waiting_connectivity',
+                            step='Waiting for Dispatcharr API',
+                            step_detail=(
+                                f"{result.message}; retrying for up to {int(remaining)}s"
+                            ),
+                        )
+                    except Exception as exc:
+                        logger.debug("Failed to publish connectivity recovery progress: %s", exc)
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                recovery_result = self._run_connectivity_guard(f"{phase}_recovery")
+                if recovery_result.ok:
+                    logger.info(
+                        "Connectivity guard recovered at %s for %s; continuing quality work",
+                        phase,
+                        safe_channel_name,
+                    )
+                    return None
+                result = recovery_result
 
         self.abort_current_check.set()
         self._cancel_queueing = True
@@ -2437,6 +2634,8 @@ class StreamCheckerService:
                 removed_count = len(analyzed_streams) - stream_limit
                 logger.info(f"Applying profile stream limit: Keeping top {stream_limit} streams, removing {removed_count}")
                 analyzed_streams = analyzed_streams[:stream_limit]
+
+            report_analyzed_streams = list(analyzed_streams)
             
             # Remove dead streams from the channel (if enabled in config)
             # Dead streams are checked during all channel checks (normal and global)
@@ -2536,11 +2735,12 @@ class StreamCheckerService:
                     logo_url = f"/api/logos/{logo_id}"
                 
                 # Calculate channel-level averages from analyzed streams
-                averages = self._calculate_channel_averages(analyzed_streams, dead_stream_ids)
+                averages = self._calculate_channel_averages(report_analyzed_streams, dead_stream_ids)
                 
                 stream_stats = []
-                # Use all analyzed streams for stats, not just first 10
-                for analyzed in analyzed_streams:
+                # Use all analyzed streams for stats, including dead streams
+                # removed from the channel so cause counters stay accurate.
+                for analyzed in report_analyzed_streams:
                     stream_id = analyzed.get('stream_id')
                     is_dead = stream_id in dead_stream_ids
                     is_revived = stream_id in revived_stream_ids
@@ -2577,6 +2777,7 @@ class StreamCheckerService:
                     elif analyzed.get('reason_detail') == 'viewer_preempted':
                         stream_stat['status'] = 'viewer_preempted'
                     else:
+                        stream_stat['status'] = 'completed'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
 
                     if analyzed.get('quality_reason') and analyzed.get('quality_reason') != 'none':
@@ -2664,9 +2865,11 @@ class StreamCheckerService:
                 {'checked_streams': stream_stats},
                 'freeze',
             )
+            good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
 
             # Return statistics for callers that need them
             return {
+                'good_streams_count': good_streams_count,
                 'dead_streams_count': len(dead_stream_ids),
                 'blank_streams_count': blank_streams_count,
                 'freeze_streams_count': freeze_streams_count,
@@ -3401,6 +3604,8 @@ class StreamCheckerService:
                 removed_count = len(analyzed_streams) - stream_limit
                 logger.info(f"Applying profile stream limit: Keeping top {stream_limit} streams, removing {removed_count}")
                 analyzed_streams = analyzed_streams[:stream_limit]
+
+            report_analyzed_streams = list(analyzed_streams)
             
             # Remove dead streams from the channel (if enabled in config)
             # Dead streams are checked during all channel checks (normal and global)
@@ -3513,8 +3718,8 @@ class StreamCheckerService:
             # active — without this, sequential runs produce an empty Quality Check table.
             stream_stats = []
             try:
-                averages = self._calculate_channel_averages(analyzed_streams, dead_stream_ids)
-                for analyzed in analyzed_streams:
+                averages = self._calculate_channel_averages(report_analyzed_streams, dead_stream_ids)
+                for analyzed in report_analyzed_streams:
                     stream_id = analyzed.get('stream_id')
                     is_dead = stream_id in dead_stream_ids
                     is_revived = stream_id in revived_stream_ids
@@ -3545,6 +3750,7 @@ class StreamCheckerService:
                         stream_stat['status'] = 'revived'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                     else:
+                        stream_stat['status'] = 'completed'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                         if 'status' in analyzed:
                             stream_stat['analysis_status'] = analyzed.get('status')
@@ -3632,9 +3838,11 @@ class StreamCheckerService:
                 {'checked_streams': stream_stats},
                 'freeze',
             )
+            good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
 
             # Return statistics for callers that need them
             return {
+                'good_streams_count': good_streams_count,
                 'dead_streams_count': len(dead_stream_ids),
                 'blank_streams_count': blank_streams_count,
                 'freeze_streams_count': freeze_streams_count,
@@ -4163,6 +4371,41 @@ class StreamCheckerService:
         return max(0.0, (now - started_at).total_seconds())
 
     @staticmethod
+    def _active_worker_context(progress: Optional[Dict[str, Any]]) -> Dict[str, int]:
+        if not isinstance(progress, dict):
+            return {'active': 0, 'waiting': 0}
+
+        provider_summary = progress.get('provider_summary') or {}
+        try:
+            active = int(provider_summary.get('checking_streams') or 0)
+        except (TypeError, ValueError):
+            active = 0
+        try:
+            waiting = int(provider_summary.get('waiting_streams') or 0)
+        except (TypeError, ValueError):
+            waiting = 0
+
+        if active <= 0 or waiting <= 0:
+            streams_detail = progress.get('streams_detail') or []
+            if isinstance(streams_detail, list):
+                if active <= 0:
+                    active = sum(
+                        1
+                        for stream in streams_detail
+                        if isinstance(stream, dict)
+                        and stream.get('status') in {'checking', 'probing'}
+                    )
+                if waiting <= 0:
+                    waiting = sum(
+                        1
+                        for stream in streams_detail
+                        if isinstance(stream, dict)
+                        and stream.get('status') == 'waiting_provider_limit'
+                    )
+
+        return {'active': max(0, active), 'waiting': max(0, waiting)}
+
+    @staticmethod
     def _clear_active_stream_reason(stream_status: Dict) -> None:
         for key in (
             'reason_detail',
@@ -4174,30 +4417,57 @@ class StreamCheckerService:
 
     def _calculate_queue_eta_seconds(self, queue_status: Dict) -> int:
         avg_seconds = self._queue_number(queue_status.get('avg_stream_process_time_sec'))
+        analysis_config = self.config.get('stream_analysis', {}) or {}
+        configured_stream_seconds = 0.0
+        configured_timeout_floor_seconds = 0.0
+        if isinstance(analysis_config, dict):
+            configured_stream_seconds = self._queue_number(analysis_config.get('ffmpeg_duration'))
+            configured_timeout = self._queue_number(analysis_config.get('timeout'))
+            startup_buffer = self._queue_number(analysis_config.get('stream_startup_buffer'))
+            if configured_timeout > 0 or startup_buffer > 0:
+                configured_timeout_floor_seconds = (
+                    configured_stream_seconds
+                    + configured_timeout
+                    + startup_buffer
+                )
+        effective_stream_seconds = max(
+            avg_seconds,
+            configured_stream_seconds,
+            configured_timeout_floor_seconds,
+        )
         remaining_streams = (
             self._queue_number(queue_status.get('queued_streams_count'))
             + self._queue_number(queue_status.get('in_progress_streams_count'))
         )
 
+        configured_workers = 1
+        if self.config.get('concurrent_streams.enabled', True):
+            concurrent_config = self.config.get('concurrent_streams', {}) or {}
+            max_workers = self.config.get('concurrent_streams.global_limit', None)
+            if isinstance(concurrent_config, dict):
+                max_workers = concurrent_config.get(
+                    'global_limit',
+                    concurrent_config.get('max_workers', max_workers),
+                )
+            try:
+                configured_workers = int(max_workers or 1)
+            except (TypeError, ValueError):
+                configured_workers = 1
+            if configured_workers <= 0:
+                configured_workers = max(1, int(remaining_streams or 1))
+
+        effective_workers = configured_workers
+        observed_workers = self._queue_number(queue_status.get('eta_active_stream_workers'))
+        provider_waiting = self._queue_number(queue_status.get('eta_provider_waiting_streams'))
+        if provider_waiting > 0 and observed_workers > 0:
+            effective_workers = max(1, min(configured_workers, int(observed_workers)))
+
         stream_eta_seconds = 0.0
-        if avg_seconds > 0 and remaining_streams > 0:
+        if effective_stream_seconds > 0 and remaining_streams > 0:
             if self.config.get('concurrent_streams.enabled', True):
-                concurrent_config = self.config.get('concurrent_streams', {}) or {}
-                max_workers = self.config.get('concurrent_streams.global_limit', None)
-                if isinstance(concurrent_config, dict):
-                    max_workers = concurrent_config.get(
-                        'global_limit',
-                        concurrent_config.get('max_workers', max_workers),
-                    )
-                try:
-                    max_workers = int(max_workers or 1)
-                except (TypeError, ValueError):
-                    max_workers = 1
-                if max_workers <= 0:
-                    max_workers = max(1, int(remaining_streams or 1))
-                stream_eta_seconds = (avg_seconds * remaining_streams) / max_workers
+                stream_eta_seconds = (effective_stream_seconds * remaining_streams) / effective_workers
             else:
-                stream_eta_seconds = avg_seconds * remaining_streams
+                stream_eta_seconds = effective_stream_seconds * remaining_streams
 
         completed_channels = (
             self._queue_number(queue_status.get('completed'))
@@ -4220,20 +4490,56 @@ class StreamCheckerService:
             elapsed_avg = self._elapsed_seconds_since(queue_status.get('started_at')) / completed_channels
             avg_channel_seconds = max(avg_channel_seconds, elapsed_avg)
 
+        channel_floor_seconds = 0.0
+        if effective_stream_seconds > 0 and remaining_channels > 0:
+            if remaining_streams > 0:
+                avg_streams_per_channel = remaining_streams / max(1.0, remaining_channels)
+                channel_batches = max(1, math.ceil(avg_streams_per_channel / max(1, effective_workers)))
+            else:
+                channel_batches = 1
+            channel_floor_seconds = effective_stream_seconds * channel_batches * remaining_channels
+
         channel_eta_seconds = 0.0
         if avg_channel_seconds > 0 and remaining_channels > 0:
             channel_eta_seconds = avg_channel_seconds * remaining_channels
+        channel_eta_seconds = max(channel_eta_seconds, channel_floor_seconds)
 
         eta_seconds = max(stream_eta_seconds, channel_eta_seconds)
         queue_status['eta_stream_seconds'] = int(stream_eta_seconds)
         queue_status['eta_channel_seconds'] = int(channel_eta_seconds)
-        queue_status['eta_basis'] = 'channel' if channel_eta_seconds >= stream_eta_seconds and channel_eta_seconds > 0 else 'stream'
+        queue_status['eta_stream_observed_seconds'] = int(avg_seconds)
+        queue_status['eta_stream_floor_seconds'] = int(configured_stream_seconds)
+        queue_status['eta_stream_timeout_floor_seconds'] = int(configured_timeout_floor_seconds)
+        queue_status['eta_channel_floor_seconds'] = int(channel_floor_seconds)
+        queue_status['eta_configured_workers'] = int(configured_workers)
+        queue_status['eta_effective_workers'] = int(effective_workers)
+        if channel_eta_seconds > stream_eta_seconds and channel_eta_seconds > 0:
+            queue_status['eta_basis'] = 'channel'
+            queue_status['eta_basis_detail'] = (
+                'channel_floor'
+                if channel_floor_seconds >= channel_eta_seconds and channel_floor_seconds > 0
+                else 'observed_channel'
+            )
+        elif configured_timeout_floor_seconds > configured_stream_seconds and configured_timeout_floor_seconds >= avg_seconds:
+            queue_status['eta_basis'] = 'stream_timeout_floor'
+            queue_status['eta_basis_detail'] = 'stream_timeout_floor'
+        elif configured_stream_seconds >= avg_seconds and configured_stream_seconds > 0:
+            queue_status['eta_basis'] = 'stream_floor'
+            queue_status['eta_basis_detail'] = 'stream_floor'
+        else:
+            queue_status['eta_basis'] = 'observed_stream'
+            queue_status['eta_basis_detail'] = 'observed_stream'
         return int(eta_seconds)
 
     def get_status(self) -> Dict:
         """Get current service status."""
         queue_status = self.check_queue.get_status()
         progress = self.progress.get()
+        worker_context = self._active_worker_context(progress)
+        if worker_context['active'] > 0:
+            queue_status['eta_active_stream_workers'] = worker_context['active']
+        if worker_context['waiting'] > 0:
+            queue_status['eta_provider_waiting_streams'] = worker_context['waiting']
         
         with self.lock:
             sync_state = dict(self.sync_batch_state)
@@ -4269,6 +4575,7 @@ class StreamCheckerService:
             # Map tracking stream properties back over queue_status for calculations
             queue_status['queued_streams_count'] = sync_state.get('queued_streams_count', 0)
             queue_status['in_progress_streams_count'] = sync_state.get('in_progress_streams_count', 0)
+            queue_status['good_streams_count'] = sync_state.get('good_streams_count', 0)
             queue_status['dead_streams_count'] = sync_state.get('dead_streams_count', 0)
             queue_status['blank_streams_count'] = sync_state.get('blank_streams_count', 0)
             queue_status['freeze_streams_count'] = sync_state.get('freeze_streams_count', 0)
@@ -4280,13 +4587,17 @@ class StreamCheckerService:
             
         queue_status['eta_seconds'] = self._calculate_queue_eta_seconds(queue_status)
         
+        single_channel_progress_active = bool(progress and progress.get('is_single_channel_check'))
+
         # Stream checking mode is active when:
-        # - An individual channel is being checked, OR
+        # - An individual channel is being checked or preparing to be checked, OR
         # - There are channels in the queue waiting to be checked
         stream_checking_mode = (
             self.checking or 
             queue_status.get('queue_size', 0) > 0 or
             queue_status.get('in_progress', 0) > 0 or
+            queue_status.get('current_channel') is not None or
+            single_channel_progress_active or
             sync_state.get('active', False)
         )
 
@@ -4390,19 +4701,49 @@ class StreamCheckerService:
             )
         )
 
+    @staticmethod
+    def _count_good_checked_streams(result: Dict) -> int:
+        checked_streams = result.get('checked_streams', []) if isinstance(result, dict) else []
+        if not isinstance(checked_streams, list):
+            return 0
+        bad_reasons = {'blank', 'freeze', 'low_quality', 'offline', 'unstable'}
+        good_statuses = {None, '', 'completed', 'revived'}
+        return sum(
+            1
+            for stream in checked_streams
+            if isinstance(stream, dict)
+            and stream.get('status') in good_statuses
+            and stream.get('blank_detected') is not True
+            and stream.get('freeze_detected') is not True
+            and stream.get('dead_reason') not in bad_reasons
+            and stream.get('quality_reason_detail') in {None, '', 'none'}
+        )
+
+    @classmethod
+    def _result_good_streams_count(cls, result: Dict) -> int:
+        if not isinstance(result, dict):
+            return 0
+        fallback_count = cls._count_good_checked_streams(result)
+        try:
+            raw = result.get('good_streams_count')
+            if raw is not None:
+                return max(0, int(raw or 0), fallback_count)
+        except (TypeError, ValueError):
+            pass
+        return fallback_count
+
     @classmethod
     def _result_count(cls, result: Dict, key: str, fallback_status: Optional[str] = None) -> int:
         if not isinstance(result, dict):
             return 0
+        fallback_count = cls._count_checked_stream_status(result, fallback_status) if fallback_status else 0
         try:
             raw = result.get(key)
             if raw is not None:
-                return max(0, int(raw or 0))
+                return max(0, int(raw or 0), fallback_count)
         except (TypeError, ValueError):
             pass
-        if fallback_status:
-            return cls._count_checked_stream_status(result, fallback_status)
-        return 0
+        return fallback_count
     
     def check_channels_synchronously(
         self,
@@ -4413,9 +4754,10 @@ class StreamCheckerService:
     ) -> Dict[int, Dict]:
         """Check multiple channels synchronously and return results.
         
-        Using this method Bypasses the queue and worker/scheduler entirely.
-        This is useful for automation cycles where we want to wait for results
-        and consolidate them into a single report.
+        Using this method bypasses the normal worker/scheduler for the batch
+        channels. Event-triggered queue entries are still drained serially
+        between batch channels so preflight/auto-create checks can run without
+        opening parallel provider streams next to the synchronous batch.
         
         Args:
             channel_ids: List of channel IDs to check
@@ -4474,6 +4816,7 @@ class StreamCheckerService:
                 'in_progress': 0,
                 'queued_streams_count': total_streams,
                 'in_progress_streams_count': 0,
+                'good_streams_count': 0,
                 'dead_streams_count': 0,
                 'blank_streams_count': 0,
                 'freeze_streams_count': 0,
@@ -4481,12 +4824,20 @@ class StreamCheckerService:
                 'generation': sync_generation,
             }
             self.checking = True
+        if hasattr(self.check_queue, 'set_paused'):
+            self.check_queue.set_paused(True)
+        self._apply_specialized_queue_deferral()
         
         try:
             # Process each channel
             for channel_id in channel_ids:
                 if self.abort_current_check.is_set():
                     logger.info("Synchronous channel batch aborted before next channel")
+                    break
+
+                self._drain_specialized_queue_entries()
+                if self.abort_current_check.is_set():
+                    logger.info("Synchronous channel batch aborted after specialized queue drain")
                     break
 
                 stream_count = channel_streams.get(channel_id, 1)
@@ -4523,6 +4874,7 @@ class StreamCheckerService:
                             else:
                                 self.sync_batch_state['completed'] += 1
                             if isinstance(channel_result, dict):
+                                self.sync_batch_state['good_streams_count'] += self._result_good_streams_count(channel_result)
                                 self.sync_batch_state['dead_streams_count'] += self._result_count(channel_result, 'dead_streams_count')
                                 self.sync_batch_state['blank_streams_count'] += self._result_count(
                                     channel_result,
@@ -4567,6 +4919,8 @@ class StreamCheckerService:
                         if self.sync_batch_state.get('generation') == sync_generation and self.sync_batch_state.get('active'):
                             self.sync_batch_state['in_progress'] = 0
                             self.sync_batch_state['in_progress_streams_count'] = 0
+            if not self.abort_current_check.is_set():
+                self._drain_specialized_queue_entries()
         finally:
             with self.lock:
                 if self.sync_batch_state.get('generation') == sync_generation:
@@ -4574,6 +4928,9 @@ class StreamCheckerService:
                     queue_status = self.check_queue.get_status()
                     if queue_status.get('queue_size', 0) == 0 and queue_status.get('in_progress', 0) == 0:
                         self.checking = False
+            self._apply_specialized_queue_deferral()
+            if hasattr(self.check_queue, 'set_paused'):
+                self.check_queue.set_paused(False)
                 
         return results
 
@@ -4787,6 +5144,24 @@ class StreamCheckerService:
                 is_single_channel_check=True,
             )
 
+            def update_single_channel_progress(
+                current_step: int,
+                total_steps: int,
+                status: str,
+                step: str,
+                detail: str = "",
+            ):
+                self.progress.update(
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                    current=current_step,
+                    total=total_steps,
+                    status=status,
+                    step=step,
+                    step_detail=detail or step,
+                    is_single_channel_check=True,
+                )
+
             # Check if channel has active viewers or if its playlist has reached max concurrent streams
             current_streams = fetch_channel_streams(channel_id)
             if current_streams:
@@ -4802,6 +5177,7 @@ class StreamCheckerService:
                     # as the dashboard and managed-event preflight from treating
                     # viewer/provider protection as an internal error.
                     skip_reason = limit_check_result.get('skip_reason', 'limits reached')
+                    self.progress.clear()
                     return {
                         'success': True,
                         'skipped': True,
@@ -4814,6 +5190,13 @@ class StreamCheckerService:
             
             # Step 1: Identify M3U accounts for channel (reusing current_streams from limit check above)
             logger.info(f"Step 1/6: Identifying M3U accounts for channel {channel_name}...")
+            update_single_channel_progress(
+                1,
+                6,
+                "preparing",
+                "Identifying provider accounts",
+                f"Finding provider accounts for {channel_name}",
+            )
             account_ids = set()
             if current_streams:
                 for stream in current_streams:
@@ -4864,6 +5247,13 @@ class StreamCheckerService:
                     f"Step 2a/6: Refreshing playlists for {len(account_ids)} M3U account(s) "
                     f"(m3u_update enabled in profile)..."
                 )
+                update_single_channel_progress(
+                    2,
+                    6,
+                    "m3u_refresh",
+                    "Refreshing M3U playlists",
+                    f"Refreshing {len(account_ids)} provider playlist(s)",
+                )
                 # Capture stream count before triggering refresh so we can detect completion.
                 pre_refresh_stream_count = udi.get_stream_count()
 
@@ -4903,6 +5293,13 @@ class StreamCheckerService:
                 logger.info(
                     "Step 2a/6: Syncing UDI cache after provider refresh..."
                 )
+                update_single_channel_progress(
+                    3,
+                    6,
+                    "cache_sync",
+                    "Syncing UDI cache",
+                    "Reading refreshed Dispatcharr streams into StreamFlow cache",
+                )
                 udi.refresh_streams()
                 udi.refresh_channels()
                 logger.info("✓ UDI cache synced — Steps 3-6 will use current stream IDs")
@@ -4911,10 +5308,24 @@ class StreamCheckerService:
                     "Step 2a/6: m3u_update enabled but no M3U accounts found for this "
                     "channel — skipping provider fetch."
                 )
+                update_single_channel_progress(
+                    2,
+                    6,
+                    "m3u_refresh",
+                    "Skipping M3U refresh",
+                    "No provider accounts were found for this channel",
+                )
             else:
                 logger.info(
                     "Step 2a/6: Skipping provider fetch (m3u_update disabled in profile). "
                     "Subsequent steps will use the current UDI cache state."
+                )
+                update_single_channel_progress(
+                    2,
+                    6,
+                    "m3u_refresh",
+                    "Skipping M3U refresh",
+                    "M3U refresh is disabled by the selected profile",
                 )
 
             # NOTE: No mid-pipeline UDI sync occurs here except when m3u_update=True.
@@ -4943,6 +5354,13 @@ class StreamCheckerService:
             # in Step 6 (_check_channel). Clearing all dead state here (the previous
             # behaviour) made both profile flags permanently ineffective on this path.
             logger.info(f"Step 3/6: Cleaning stale dead stream tracker entries for channel {channel_name}...")
+            update_single_channel_progress(
+                3,
+                6,
+                "preparing",
+                "Cleaning stale dead-stream entries",
+                f"Cleaning stale stream URLs for {channel_name}",
+            )
             try:
                 # Build the set of stream URLs currently visible in the UDI cache.
                 # After Step 2a this reflects the post-refresh state; when m3u_update
@@ -4977,6 +5395,13 @@ class StreamCheckerService:
             # Step 4: Validate existing streams against regex patterns (if matching is enabled)
             if matching_enabled:
                 logger.info(f"Step 4/6: Validating existing streams for channel {channel_name}...")
+                update_single_channel_progress(
+                    4,
+                    6,
+                    "stream_matching",
+                    "Validating existing stream matches",
+                    f"Checking current assignments for {channel_name}",
+                )
                 if not legacy_default_profile:
                     failed_connectivity = self._require_quality_check_connectivity(
                         phase='single_channel_validation_removal',
@@ -4984,6 +5409,7 @@ class StreamCheckerService:
                         channel_name=channel_name,
                     )
                     if failed_connectivity is not None:
+                        self.progress.clear()
                         return self._connectivity_abort_payload(
                             failed_connectivity,
                             channel_id=channel_id,
@@ -5003,6 +5429,13 @@ class StreamCheckerService:
                     logger.error(f"✗ Failed to validate streams: {e}")
             else:
                 logger.info(f"Step 4/6: Skipping stream validation (matching is disabled for this channel)")
+                update_single_channel_progress(
+                    4,
+                    6,
+                    "stream_matching",
+                    "Skipping stream validation",
+                    "Stream matching is disabled by the selected profile",
+                )
             
             # Step 5: Re-match and assign streams for this specific channel (if matching is enabled)
             # With stale dead-stream URLs cleaned, streams with new URLs can be re-matched.
@@ -5022,6 +5455,13 @@ class StreamCheckerService:
 
             if matching_enabled:
                 logger.info(f"Step 5/6: Re-matching streams for channel {channel_name}...")
+                update_single_channel_progress(
+                    5,
+                    6,
+                    "stream_matching",
+                    "Matching streams",
+                    f"Matching provider streams for {channel_name}",
+                )
                 if not legacy_default_profile:
                     failed_connectivity = self._require_quality_check_connectivity(
                         phase='single_channel_matching_update',
@@ -5029,6 +5469,7 @@ class StreamCheckerService:
                         channel_name=channel_name,
                     )
                     if failed_connectivity is not None:
+                        self.progress.clear()
                         return self._connectivity_abort_payload(
                             failed_connectivity,
                             channel_id=channel_id,
@@ -5057,6 +5498,13 @@ class StreamCheckerService:
                     logger.error(f"✗ Failed to match streams: {e}")
             else:
                 logger.info(f"Step 5/6: Skipping stream matching (matching is disabled for this channel)")
+                update_single_channel_progress(
+                    5,
+                    6,
+                    "stream_matching",
+                    "Skipping stream matching",
+                    "Stream matching is disabled by the selected profile",
+                )
             
             # After matching writes new assignments to Dispatcharr, refresh only this
             # channel's cache entry so Step 6 sees the updated stream list.
@@ -5082,6 +5530,13 @@ class StreamCheckerService:
                 logger.info(
                     f"Step 6/6: Checking streams for channel {channel_name} "
                     f"({'force checking all streams' if force_check else 'respecting profile grace period settings'})..."
+                )
+                update_single_channel_progress(
+                    6,
+                    6,
+                    "quality_checking",
+                    "Quality checking streams",
+                    f"Checking stream quality for {channel_name}",
                 )
                 
                 # Perform the check using normal profile logic.
@@ -5117,6 +5572,13 @@ class StreamCheckerService:
                 }
             else:
                 logger.info(f"Step 6/6: Skipping stream checking (checking is disabled for this channel)")
+                update_single_channel_progress(
+                    6,
+                    6,
+                    "finalizing",
+                    "Skipping quality check",
+                    "Stream quality checking is disabled by the selected profile",
+                )
                 analyzed_lookup = {}
             
             # Gather statistics after check using cached channel data.
@@ -5251,6 +5713,13 @@ class StreamCheckerService:
                 check_stats['stream_details'].append(stream_detail)
             
             # Calculate duration
+            update_single_channel_progress(
+                6,
+                6,
+                "finalizing",
+                "Finalizing single channel check",
+                f"Writing results for {channel_name}",
+            )
             end_time = time_module.time()
             duration_seconds = int(end_time - start_time)
             
@@ -5369,6 +5838,7 @@ class StreamCheckerService:
                     'in_progress': 0,
                     'queued_streams_count': 0,
                     'in_progress_streams_count': 0,
+                    'good_streams_count': 0,
                     'dead_streams_count': 0,
                     'blank_streams_count': 0,
                     'freeze_streams_count': 0,

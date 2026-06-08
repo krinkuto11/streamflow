@@ -72,8 +72,16 @@ def test_udi_cache_sync_progress_tracks_streams_and_channels():
     observed = []
     udi = Mock()
 
-    def refresh_streams():
+    def refresh_streams(progress_callback=None):
         observed.append(manager.get_run_status()["progress"].copy())
+        if progress_callback is not None:
+            progress_callback({
+                "completed_pages": 11,
+                "total_pages": 44,
+                "items_fetched": 55000,
+                "expected_count": 217606,
+            })
+            observed.append(manager.get_run_status()["progress"].copy())
         return True
 
     def refresh_channels():
@@ -86,29 +94,35 @@ def test_udi_cache_sync_progress_tracks_streams_and_channels():
     assert manager._sync_udi_cache_after_playlist_refresh(udi) is True
 
     assert observed[0] == {
-        "current": 0,
-        "total": 2,
-        "percent": 0,
+        "current": 1,
+        "total": 100,
+        "percent": 1,
         "message": "Syncing stream cache",
     }
     assert observed[1] == {
-        "current": 1,
-        "total": 2,
-        "percent": 50,
+        "current": 20,
+        "total": 100,
+        "percent": 20,
+        "message": "Syncing stream cache (11/44 pages, 55000/217606 streams)",
+    }
+    assert observed[2] == {
+        "current": 90,
+        "total": 100,
+        "percent": 90,
         "message": "Syncing channel cache",
     }
 
     status = manager.get_run_status()
     assert status["stage"] == "cache_sync"
     assert status["progress"] == {
-        "current": 2,
-        "total": 2,
+        "current": 100,
+        "total": 100,
         "percent": 100,
         "message": "Syncing channel cache completed",
     }
     cache_stage = next(stage for stage in status["stages"] if stage["key"] == "cache_sync")
-    assert cache_stage["current"] == 2
-    assert cache_stage["total"] == 2
+    assert cache_stage["current"] == 100
+    assert cache_stage["total"] == 100
     assert cache_stage["percent"] == 100
     assert status["counts"]["cache_sync_successful_steps"] == 2
     assert status["counts"]["cache_sync_total_steps"] == 2
@@ -128,15 +142,15 @@ def test_udi_cache_sync_progress_reports_partial_warning():
 
     status = manager.get_run_status()
     assert status["progress"] == {
-        "current": 1,
-        "total": 2,
-        "percent": 50,
+        "current": 100,
+        "total": 100,
+        "percent": 100,
         "message": "Syncing channel cache reported warnings",
     }
     cache_stage = next(stage for stage in status["stages"] if stage["key"] == "cache_sync")
-    assert cache_stage["current"] == 1
-    assert cache_stage["total"] == 2
-    assert cache_stage["percent"] == 50
+    assert cache_stage["current"] == 100
+    assert cache_stage["total"] == 100
+    assert cache_stage["percent"] == 100
     assert status["counts"]["cache_sync_successful_steps"] == 1
     assert status["counts"]["cache_sync_total_steps"] == 2
     assert status["counts"]["cache_sync_state"] == "warning"
@@ -204,3 +218,18 @@ def test_automation_run_status_tracks_freeze_stream_counts():
     assert "freeze_streams_count += ch_freeze" in source
     assert "'freeze_streams_count': ch_freeze" in source
     assert '"freeze_streams": freeze_streams_count' in source
+
+
+def test_automation_run_status_tracks_good_stream_counts():
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "apps"
+        / "automation"
+        / "automated_stream_manager.py"
+    )
+    source = source_path.read_text(encoding="utf-8")
+
+    assert "'good_streams': 0" in source
+    assert "good_streams_count += ch_good" in source
+    assert "'good_streams_count': ch_good" in source
+    assert '"good_streams": good_streams_count' in source

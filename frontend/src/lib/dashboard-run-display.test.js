@@ -144,6 +144,81 @@ describe('dashboard stream checker run display', () => {
     expect(display.streamCheckerOnlyActive).toBe(true)
     expect(display.streamQueueActive).toBe(false)
     expect(display.streamCheckerElapsedSeconds).toBe(60)
+    expect(display.displayMessage).toBe('Running single channel check')
+    expect(display.displayStageId).toBe('settings')
+  })
+
+  it('keeps single-channel checks visible when the legacy mode flag lags behind progress', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'skipped',
+      runStage: 'skipped',
+      batchTotal: 0,
+      completed: 0,
+      now: Date.parse('2026-05-29T18:05:41Z'),
+      streamCheckerStatus: {
+        checking: false,
+        stream_checking_mode: false,
+        queue: {
+          queue_size: 0,
+          in_progress: 0,
+          current_channel: null,
+        },
+        progress: {
+          is_single_channel_check: true,
+          timestamp: '2026-05-29T18:04:41Z',
+          channel_name: 'Single Channel',
+          step: 'Starting single channel check',
+        },
+      },
+    })
+
+    expect(display.isProcessing).toBe(true)
+    expect(display.streamCheckerOnlyActive).toBe(true)
+    expect(display.streamQueueActive).toBe(false)
+    expect(display.streamCheckerElapsedSeconds).toBe(60)
+    expect(display.displayStageId).toBe('settings')
+  })
+
+  it('maps single-channel matching progress without reusing stale completed queue totals', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'skipped',
+      runStage: 'skipped',
+      batchTotal: 2,
+      completed: 2,
+      now: Date.parse('2026-06-07T09:30:00Z'),
+      streamCheckerStatus: {
+        stream_checking_mode: true,
+        queue: {
+          state: 'completed',
+          queue_size: 0,
+          in_progress: 0,
+          completed: 2,
+          started_at: '2026-06-07T03:02:10Z',
+        },
+        progress: {
+          is_single_channel_check: true,
+          status: 'stream_matching',
+          step: 'Matching streams',
+          channel_name: 'Das Erste HD',
+          current_stream: 5,
+          total_streams: 6,
+          timestamp: '2026-06-07T09:27:00Z',
+        },
+      },
+    })
+
+    expect(display.isProcessing).toBe(true)
+    expect(display.streamQueueActive).toBe(false)
+    expect(display.streamCheckerElapsedSeconds).toBe(180)
+    expect(display.displayMessage).toBe('Running single channel check')
+    expect(display.displayStageId).toBe('stream_matching')
+    expect(display.displayStageLabel).toBe('Matching')
+    expect(display.stageCards[0]).toMatchObject({
+      key: 'stream_matching',
+      label: 'Matching',
+      current: 5,
+      total: 6,
+    })
   })
 
   it('ignores completed queue history when the stream checker is idle', () => {
@@ -304,6 +379,21 @@ describe('dashboard stream checker run display', () => {
     expect(value).toBe(128)
   })
 
+  it('uses manual single-channel elapsed time for the active non-quality stage', () => {
+    const value = getRunDurationValue({
+      runDurations: {},
+      durationKey: 'stream_matching_seconds',
+      stageId: 'stream_matching',
+      displayRunStageId: 'stream_matching',
+      streamRunActive: true,
+      streamCheckerElapsedSeconds: 240,
+      displayRunStageElapsedSeconds: 90,
+      stages,
+    })
+
+    expect(value).toBe(90)
+  })
+
   it('keeps manual stream checker predecessor durations neutral', () => {
     const value = getRunDurationValue({
       runDurations: { m3u_refresh_seconds: 0 },
@@ -375,6 +465,50 @@ describe('dashboard stream checker run display', () => {
         m3u_refresh_total: 3,
       },
     })).toBe('2/3 refresh requests failed')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'waiting',
+        m3u_refresh_wait_elapsed_seconds: 20,
+        m3u_refresh_wait_streams_seen: 1234,
+      },
+    })).toBe('Waiting for Dispatcharr to settle (1234 streams, 20s)')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'settled',
+        m3u_refresh_wait_streams_seen: 1234,
+      },
+    })).toBe('Playlist refresh settled (1234 streams)')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'partial',
+        m3u_refresh_wait_failed_accounts: 1,
+      },
+    })).toBe('Playlist refresh settled with 1 failed provider')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'already_running',
+        m3u_refresh_current: 1,
+        m3u_refresh_total: 2,
+      },
+    })).toBe('1/2 refresh requests already running')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'retrying_failed',
+        m3u_refresh_wait_failed_accounts: 2,
+        m3u_refresh_wait_retry_count: 1,
+      },
+    })).toBe('Retrying failed providers (1/2 accepted)')
+
+    expect(getM3uRefreshCardDetail({
+      runCounts: {
+        m3u_refresh_state: 'timeout',
+      },
+    })).toBe('Playlist refresh wait timed out')
   })
 
   it('keeps skipped and manual-check M3U refresh card details explicit', () => {
@@ -517,7 +651,7 @@ describe('dashboard stream checker run display', () => {
     })).toBe(true)
   })
 
-  it('keeps UDI reload available during stream checks but blocks conflicting automation starts', () => {
+  it('keeps run automation queueable during stream checks', () => {
     const actions = getDashboardActionStates({
       actionLoading: '',
       isStreamCheckerProcessing: true,
@@ -525,8 +659,8 @@ describe('dashboard stream checker run display', () => {
     })
 
     expect(actions.reloadUdi.disabled).toBe(false)
-    expect(actions.runAutomation.disabled).toBe(true)
-    expect(actions.runAutomation.reason).toMatch(/stream check/i)
+    expect(actions.runAutomation.disabled).toBe(false)
+    expect(actions.runAutomation.reason).toBeNull()
   })
 
   it('blocks automation actions while Dispatcharr cache refresh is running', () => {

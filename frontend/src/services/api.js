@@ -275,11 +275,6 @@ export const dispatcharrAPI = {
   getInitializationStatus: () => api.get('/dispatcharr/initialization-status'),
 };
 
-export const aceStreamOrchestratorAPI = {
-  getConfig: () => api.get('/acestream-orchestrator/config'),
-  updateConfig: (config) => api.put('/acestream-orchestrator/config', config),
-};
-
 export const sessionSettingsAPI = {
   getSettings: () => api.get('/settings/session'),
   updateSettings: (settings) => api.post('/settings/session', settings),

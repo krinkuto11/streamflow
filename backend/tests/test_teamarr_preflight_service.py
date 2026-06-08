@@ -36,6 +36,7 @@ class FakeChecker:
     def __init__(self):
         self.calls = []
         self.queued = []
+        self.gates = []
 
     def get_status(self):
         return {"stream_checking_mode": False, "queue": {"queue_size": 0, "in_progress": 0}}
@@ -57,6 +58,9 @@ class FakeChecker:
             },
         }
 
+    def set_specialized_queue_gate(self, gate_name, active):
+        self.gates.append((gate_name, active))
+
 
 class SequencedChecker(FakeChecker):
     def __init__(self, results):
@@ -75,12 +79,59 @@ class BusyChecker(FakeChecker):
         return {"stream_checking_mode": True, "queue": {"queue_size": 0, "in_progress": 1}}
 
 
+class QueueBackedChecker(FakeChecker):
+    def __init__(self):
+        super().__init__()
+        self.check_queue = type("FakeQueue", (), {})()
+        self.check_queue.queued_priorities = {77: TEAMARR_PREFLIGHT_QUEUE_PRIORITY}
+        self.check_queue.queued_metadata = {
+            77: {
+                "source": "teamarr_preflight",
+                "program_name": "Queued Match",
+                "trigger_bucket": "pre",
+                "event": {
+                    "identity": "id:queued",
+                    "event_name": "Queued Match",
+                    "event_date": "2026-05-28T22:10:00+00:00",
+                    "channel_name": "Queued Channel",
+                    "dispatcharr_channel_id": 77,
+                    "sport": "soccer",
+                    "league": "fifa.friendly",
+                    "seconds_to_start": 600,
+                    "trigger_bucket": "pre",
+                },
+            }
+        }
+        self.check_queue.in_progress_metadata = {
+            78: {
+                "source": "teamarr_preflight",
+                "program_name": "Running Match",
+                "event": {
+                    "identity": "id:running",
+                    "event_name": "Running Match",
+                    "event_date": "2026-05-28T22:20:00+00:00",
+                    "channel_name": "Running Channel",
+                    "dispatcharr_channel_id": 78,
+                },
+            }
+        }
+
+
 class FakeUdi:
-    def __init__(self, streams=None):
+    def __init__(self, streams=None, streams_after_channel_refresh=None):
         self.streams = streams if streams is not None else [{"id": 1}, {"id": 2}]
+        self.streams_after_channel_refresh = streams_after_channel_refresh
+        self.refresh_channel_calls = []
 
     def get_channel_streams(self, channel_id):
         return self.streams
+
+    def refresh_channel_by_id(self, channel_id):
+        self.refresh_channel_calls.append(channel_id)
+        if self.streams_after_channel_refresh is not None:
+            self.streams = self.streams_after_channel_refresh
+            return True
+        return False
 
 
 class FakeAutomationConfig:
@@ -172,13 +223,19 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(normalize_config({})["post_start_offsets_minutes"], [2, 4])
         self.assertEqual(normalize_config({"retry_offsets_minutes": "3"})["retry_offsets_minutes"], [3])
         self.assertEqual(normalize_config({"post_start_offsets_minutes": 2})["post_start_offsets_minutes"], [2])
-        self.assertFalse(normalize_config({})["provider_limit_override"])
-        self.assertTrue(normalize_config({"provider_limit_override": True})["provider_limit_override"])
+        self.assertTrue(normalize_config({})["queue_during_active_checks"])
+        self.assertFalse(normalize_config({"skip_during_quality_check": True})["queue_during_active_checks"])
+        self.assertFalse(normalize_config({"defer_during_active_checks": True})["queue_during_active_checks"])
+        self.assertTrue(normalize_config({"defer_during_active_checks": False})["queue_during_active_checks"])
+        self.assertTrue(normalize_config({"queue_during_active_checks": True})["queue_during_active_checks"])
 
         service, _, _ = self.make_service([])
         public_config = service.get_config()
         self.assertTrue(public_config["has_api_key"])
         self.assertEqual(public_config["api_key"], "")
+        self.assertTrue(public_config["queue_during_active_checks"])
+        self.assertFalse(public_config["defer_during_active_checks"])
+        self.assertFalse(public_config["skip_during_quality_check"])
 
     def test_default_profile_is_created_and_selected_for_preflight(self):
         automation_config = FakeAutomationConfig()
@@ -395,6 +452,54 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             "timestamp": "2026-05-28T22:25:00+00:00",
         })
 
+    def test_due_bucket_is_limited_to_poll_window(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2026-05-28T22:09:00+00:00")],
+            checker=checker,
+        )
+        service.update_config({"poll_interval_seconds": 30})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "scheduled")
+
+    def test_pre_start_bucket_fires_inside_poll_window(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event(event_date="2026-05-28T22:09:50+00:00")],
+            checker=checker,
+        )
+        service.update_config({"poll_interval_seconds": 30})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+
+    def test_managed_events_sort_current_and_upcoming_before_past(self):
+        checker = FakeChecker()
+        events = [
+            make_event(id=1, event_id="past", event_name="Past Match", event_date="2026-05-28T19:00:00+00:00"),
+            make_event(id=2, event_id="future", event_name="Future Match", event_date="2026-05-28T22:45:00+00:00"),
+            make_event(id=3, event_id="due", event_name="Due Match", event_date="2026-05-28T22:10:00+00:00"),
+        ]
+        service, _, _ = self.make_service(events, checker=checker)
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual([event["event_name"] for event in upcoming], [
+            "Due Match",
+            "Future Match",
+            "Past Match",
+        ])
+
     def test_post_start_offset_launches_after_game_start(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(
@@ -472,6 +577,42 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["details"]["bucket"], "post+4m")
 
+    def test_missed_configured_post_start_bucket_catches_up_inside_grace(self):
+        checker = FakeChecker()
+        event = make_event(event_date="2026-05-28T21:55:00+00:00")
+        service, _, _ = self.make_service([event], checker=checker)
+        identity = "id:100:2026-05-28T21:55:00+00:00"
+        service._attempted_buckets[f"{identity}:post+2m"] = FIXED_NOW
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(len(checker.calls), 1)
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["details"]["bucket"], "post+4m")
+
+    def test_post_start_catchup_does_not_invent_unconfigured_four_minute_bucket(self):
+        checker = FakeChecker()
+        event = make_event(event_date="2026-05-28T21:55:00+00:00")
+        service, _, _ = self.make_service([event], checker=checker)
+        service.update_config({"post_start_offsets_minutes": [2]})
+        identity = "id:100:2026-05-28T21:55:00+00:00"
+        service._attempted_buckets[f"{identity}:post+2m"] = FIXED_NOW
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["state"], "already_attempted")
+        self.assertEqual(upcoming[0]["trigger_bucket"], "post+2m")
+
     def test_no_streams_records_no_streams_without_launching_check(self):
         checker = FakeChecker()
         service, _, _ = self.make_service([make_event()], checker=checker, udi=FakeUdi(streams=[]))
@@ -484,6 +625,24 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["type"], "no_streams_yet")
 
+    def test_no_streams_refreshes_channel_before_marking_bucket_attempted(self):
+        checker = FakeChecker()
+        udi = FakeUdi(streams=[], streams_after_channel_refresh=[{"id": 99}])
+        service, _, _ = self.make_service([make_event()], checker=checker, udi=udi)
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+
+        self.assertEqual(udi.refresh_channel_calls, [77])
+        self.assertEqual(len(checker.calls), 1)
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["type"], "preflight_completed")
+
     def test_active_automation_run_defers_preflight_without_marking_attempted(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(
@@ -491,6 +650,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             checker=checker,
             automation_status={"active": True, "stage": "stream_matching"},
         )
+        service.update_config({"queue_during_active_checks": False})
 
         result = service.run_once(force=True)
         self.assertTrue(result["success"])
@@ -502,6 +662,89 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["type"], "deferred_automation_active")
         upcoming = service.get_status()["upcoming_events"]
         self.assertEqual(upcoming[0]["state"], "due")
+
+    def test_wrapped_public_automation_status_defers_preflight(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event()],
+            checker=checker,
+            automation_status={
+                "running": True,
+                "thread_alive": True,
+                "run_status": {"active": True, "state": "running", "stage": "quality_checking"},
+            },
+        )
+        service.update_config({"queue_during_active_checks": False})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(checker.calls, [])
+        self.assertEqual(checker.queued, [])
+        self.assertEqual(service.get_status()["recent_events"][0]["type"], "deferred_automation_active")
+
+    def test_active_automation_run_queues_preflight_when_queue_setting_enabled(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event()],
+            checker=checker,
+            automation_status={
+                "running": True,
+                "thread_alive": True,
+                "run_status": {"active": True, "state": "running", "stage": "stream_matching"},
+            },
+        )
+        service.update_config({"queue_during_active_checks": True})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(checker.calls, [])
+        self.assertEqual(len(checker.queued), 1)
+        self.assertEqual(checker.queued[0][1]["metadata"]["source"], "teamarr_preflight")
+        self.assertEqual(service.get_status()["recent_events"][0]["type"], "preflight_queued")
+        self.assertIn(("teamarr_preflight_automation", True), checker.gates)
+
+    def test_automation_queue_gate_clears_when_no_run_active(self):
+        checker = FakeChecker()
+        automation_status = {
+            "running": True,
+            "thread_alive": True,
+            "run_status": {"active": True, "state": "running", "stage": "stream_matching"},
+        }
+        service, _, _ = self.make_service(
+            [make_event()],
+            checker=checker,
+            automation_status=automation_status,
+        )
+
+        service.run_once(force=True)
+        automation_status["run_status"] = {"active": False, "state": "idle"}
+        service.run_once(force=True)
+
+        self.assertIn(("teamarr_preflight_automation", True), checker.gates)
+        self.assertIn(("teamarr_preflight_automation", False), checker.gates)
+
+    def test_scheduler_running_without_active_run_does_not_defer_preflight(self):
+        checker = FakeChecker()
+        service, _, _ = self.make_service(
+            [make_event()],
+            checker=checker,
+            automation_status={
+                "running": True,
+                "thread_alive": True,
+                "run_status": {"active": False, "state": "idle"},
+            },
+        )
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(result["skipped"], 0)
 
     def test_active_stream_checker_queues_teamarr_event_with_preflight_context(self):
         checker = BusyChecker()
@@ -538,34 +781,31 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 2)
         self.assertNotIn("priority", recent[0]["details"])
 
-    def test_provider_limit_override_is_queued_only_when_enabled(self):
-        checker = BusyChecker()
-        service, _, _ = self.make_service([make_event()], checker=checker)
-        service.update_config({"provider_limit_override": True})
+    def test_status_exposes_teamarr_stream_checker_queue(self):
+        checker = QueueBackedChecker()
+        service, _, _ = self.make_service([], checker=checker)
 
-        result = service.run_once(force=True)
+        status = service.get_status()
 
-        self.assertTrue(result["success"])
-        self.assertEqual(len(checker.queued), 1)
-        _, kwargs = checker.queued[0]
-        self.assertTrue(kwargs["metadata"]["provider_limit_override"])
+        self.assertEqual(status["queued_checks_count"], 1)
+        self.assertEqual(status["queued_checks"][0]["event_name"], "Queued Match")
+        self.assertEqual(status["queued_checks"][0]["priority"], TEAMARR_PREFLIGHT_QUEUE_PRIORITY)
+        self.assertEqual(status["queue_active_checks_count"], 1)
+        self.assertEqual(status["queue_active_checks"][0]["event_name"], "Running Match")
 
-    def test_provider_limit_override_is_passed_to_direct_check(self):
+    def test_direct_check_gates_specialized_queue_until_finished(self):
         checker = FakeChecker()
         service, _, _ = self.make_service([make_event()], checker=checker)
-        service.update_config({"provider_limit_override": True})
 
         result = service.run_once(force=True)
         self.assertTrue(result["success"])
 
         deadline = time.time() + 2
-        while time.time() < deadline and not checker.calls:
+        while time.time() < deadline and len(checker.gates) < 2:
             time.sleep(0.01)
 
-        self.assertEqual(len(checker.calls), 1)
-        _, kwargs = checker.calls[0]
-        self.assertTrue(kwargs["provider_limit_override"])
-        self.assertTrue(kwargs["force_check"])
+        self.assertIn(("teamarr_preflight_direct", True), checker.gates)
+        self.assertEqual(checker.gates[-1], ("teamarr_preflight_direct", False))
 
     def test_direct_capacity_limit_queues_due_teamarr_events_instead_of_hiding_them(self):
         checker = FakeChecker()
@@ -652,6 +892,69 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertTrue(status["active"])
         self.assertEqual(status["stage"], "stream_matching")
 
+    def test_default_automation_status_provider_uses_web_api_manager_factory(self):
+        class FakeAutomationManager:
+            def get_run_status(self):
+                return {"active": True, "stage": "quality_checking"}
+
+        class FakeWebApiModule:
+            automation_manager = None
+
+            @staticmethod
+            def get_automation_manager():
+                return FakeAutomationManager()
+
+        sentinel = object()
+        previous_api_module = sys.modules.get("apps.api.web_api", sentinel)
+
+        try:
+            sys.modules["apps.api.web_api"] = FakeWebApiModule()
+            status = TeamarrPreflightService._default_automation_status_provider()
+        finally:
+            if previous_api_module is sentinel:
+                sys.modules.pop("apps.api.web_api", None)
+            else:
+                sys.modules["apps.api.web_api"] = previous_api_module
+
+        self.assertTrue(status["active"])
+        self.assertEqual(status["stage"], "quality_checking")
+
+    def test_default_automation_status_provider_prefers_active_duplicate_module(self):
+        class InactiveAutomationManager:
+            def get_run_status(self):
+                return {"active": False, "stage": "idle"}
+
+        class ActiveAutomationManager:
+            def get_run_status(self):
+                return {"active": True, "stage": "stream_matching"}
+
+        class InactiveWebApiModule:
+            automation_manager = InactiveAutomationManager()
+
+        class ActiveWebApiModule:
+            automation_manager = ActiveAutomationManager()
+
+        sentinel = object()
+        previous_api_module = sys.modules.get("apps.api.web_api", sentinel)
+        previous_web_module = sys.modules.get("web_api", sentinel)
+
+        try:
+            sys.modules["apps.api.web_api"] = InactiveWebApiModule()
+            sys.modules["web_api"] = ActiveWebApiModule()
+            status = TeamarrPreflightService._default_automation_status_provider()
+        finally:
+            if previous_api_module is sentinel:
+                sys.modules.pop("apps.api.web_api", None)
+            else:
+                sys.modules["apps.api.web_api"] = previous_api_module
+            if previous_web_module is sentinel:
+                sys.modules.pop("web_api", None)
+            else:
+                sys.modules["web_api"] = previous_web_module
+
+        self.assertTrue(status["active"])
+        self.assertEqual(status["stage"], "stream_matching")
+
     def test_include_filters_keep_non_matching_sports_out_of_due_set(self):
         service, _, _ = self.make_service([make_event(sport="basketball")])
         service.update_config({"include_sports": ["soccer"]})
@@ -725,6 +1028,53 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
 
         self.assertEqual(enriched[0]["last_preflight_event"]["type"], "preflight_completed")
         self.assertEqual(enriched[0]["last_preflight_event"]["identity"], "old-identity")
+
+    def test_status_attaches_checks_beyond_recent_event_display_limit(self):
+        event = make_event(
+            id=100,
+            event_date="2026-05-28T20:00:00+00:00",
+            dispatcharr_channel_id=77,
+        )
+        service, _, _ = self.make_service([event])
+        scan_result = service.run_once(force=True)
+        self.assertTrue(scan_result["success"])
+        upcoming = service.get_status()["upcoming_events"]
+        target = upcoming[0]
+
+        old_check = {
+            "timestamp": FIXED_NOW - 3600,
+            "type": "preflight_completed",
+            "identity": target["identity"],
+            "event_name": target["event_name"],
+            "event_date": target["event_date"],
+            "dispatcharr_channel_id": target["dispatcharr_channel_id"],
+            "details": {"bucket": "20m"},
+        }
+        with service._lock:
+            service._events.clear()
+            for index in range(30):
+                service._events.append({
+                    "timestamp": FIXED_NOW + index,
+                    "type": "preflight_completed",
+                    "identity": f"other-{index}",
+                    "event_name": f"Other {index}",
+                    "event_date": "2026-05-28T22:00:00+00:00",
+                    "dispatcharr_channel_id": 9000 + index,
+                    "details": {"bucket": "manual"},
+                })
+            service._events.append(old_check)
+
+        status = service.get_status()
+
+        self.assertEqual(len(status["recent_events"]), 25)
+        self.assertEqual(
+            status["upcoming_events"][0]["last_preflight_event"]["type"],
+            "preflight_completed",
+        )
+        self.assertEqual(
+            status["upcoming_events"][0]["last_preflight_event"]["details"]["bucket"],
+            "20m",
+        )
 
     def test_manual_force_launches_past_event_as_manual_check(self):
         checker = FakeChecker()

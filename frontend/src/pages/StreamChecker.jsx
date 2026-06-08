@@ -554,7 +554,10 @@ export default function StreamChecker() {
             <div className="flex justify-between items-center">
               <CardTitle>Batch Progress</CardTitle>
               {queueEtaDisplay.label ? (
-                <span className={`text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md ${queueEtaDisplay.pulse ? 'animate-pulse text-primary/70' : ''}`}>
+                <span
+                  className={`text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md ${queueEtaDisplay.pulse ? 'animate-pulse text-primary/70' : ''}`}
+                  title={queueEtaDisplay.title}
+                >
                   {queueEtaDisplay.label}
                 </span>
               ) : (
@@ -884,9 +887,16 @@ export default function StreamChecker() {
                                 {stream.status === 'probing' && <Badge variant="outline" className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse">Probing</Badge>}
                                 {stream.status === 'loop_detected' && <Badge variant="outline" className="text-[10px] bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">⚠ {stream.loop_duration_secs ? formatDuration(stream.loop_duration_secs) : ''} Loop Found</Badge>}
                                 {stream.status === 'low_quality' && (
-                                  <Badge variant="outline" className="text-[10px] bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
-                                    Low Quality
-                                  </Badge>
+                                  <div className="mx-auto flex max-w-[180px] flex-col items-center gap-1" title={qualityReason?.title}>
+                                    <Badge variant="outline" className="text-[10px] bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
+                                      Low Quality
+                                    </Badge>
+                                    {qualityReason && (
+                                      <span className="max-w-full truncate text-[10px] leading-tight text-orange-700 dark:text-orange-300">
+                                        {qualityReason.text}
+                                      </span>
+                                    )}
+                                  </div>
                                 )}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right">

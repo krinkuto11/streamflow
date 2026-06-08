@@ -1,10 +1,10 @@
 # V3 Draft Release Notes
 
-These notes summarize the V3 draft branch for operator review before release.
+These notes summarize the V3 draft branch for release review.
 
 ## Status
 
-V3 remains a draft until the operator explicitly approves release. The branch has
+V3 remains a draft until release approval is given. The branch has
 been locally tested, CI-tested, image-built, and live-smoked through the existing
 template update path.
 
@@ -51,7 +51,7 @@ template update path.
 - In-app Help covers startup/cache, profiles/periods, Stream Checker, Shadow
   Monitor, hardware/fallback, and troubleshooting.
 
-## Operator Changes
+## User-Facing Changes
 
 - `Post-Start Checks` in Teamarr Preflight lets event checks run after game
   start when event channels appear late.
@@ -67,7 +67,7 @@ template update path.
 - `Missed-run grace` skips stale automatic runs after the configured window and
   records the latest skip reason in Automation Periods.
 - `Run all due periods` is off by default; automatic scheduler passes process
-  only the highest-priority due period unless the operator enables it.
+  only the highest-priority due period unless the user enables it.
 - `Catch-up cap` limits how many due periods an automatic scheduler pass handles
   at once when run-all-due is enabled. Extra due periods are deferred to the
   next pass.
@@ -133,4 +133,4 @@ template update path.
 
 ## Release Gate
 
-Do not merge until the operator explicitly approves the draft PR for release.
+Do not merge until final release approval is given.

@@ -10,6 +10,19 @@ from apps.core.logging_config import setup_logging
 logger = setup_logging(__name__)
 
 
+def _configuration_status_details(status: Dict[str, Any]) -> Dict[str, Any]:
+    """Return only safe configuration fields for client-facing error details."""
+    allowed_keys = {
+        "enabled",
+        "running",
+        "configuration_required",
+        "configuration_issue",
+        "configuration_message",
+        "watched_count",
+    }
+    return {key: status.get(key) for key in allowed_keys if key in status}
+
+
 def get_shadow_blank_monitor_config_response(*, get_service: Callable[[], Any]):
     try:
         return jsonify(get_service().get_config()), 200
@@ -40,8 +53,17 @@ def get_shadow_blank_monitor_status_response(*, get_service: Callable[[], Any]):
 
 def start_shadow_blank_monitor_response(*, get_service: Callable[[], Any]):
     try:
-        get_service().start()
-        return jsonify({"success": True, "status": get_service().get_status()}), 200
+        service = get_service()
+        started = service.start()
+        status = service.get_status()
+        if not started:
+            return error_response(
+                status.get("configuration_message") or "Shadow monitor could not start",
+                status_code=400,
+                code=status.get("configuration_issue") or "shadow_monitor_not_started",
+                details={"status": _configuration_status_details(status)},
+            )
+        return jsonify({"success": True, "status": status}), 200
     except Exception as exc:
         logger.error(f"Error starting shadow blank monitor: {exc}", exc_info=True)
         return error_response("Internal Server Error", status_code=500, code="internal_error")
@@ -58,7 +80,15 @@ def stop_shadow_blank_monitor_response(*, get_service: Callable[[], Any]):
 
 def run_shadow_blank_monitor_once_response(*, get_service: Callable[[], Any]):
     try:
-        return jsonify(get_service().run_once(force=True)), 200
+        status = get_service().run_once(force=True)
+        if status.get("configuration_required"):
+            return error_response(
+                status.get("configuration_message") or "Shadow monitor scan could not start",
+                status_code=400,
+                code=status.get("configuration_issue") or "shadow_monitor_scan_not_started",
+                details={"status": _configuration_status_details(status)},
+            )
+        return jsonify(status), 200
     except Exception as exc:
         logger.error(f"Error running shadow blank monitor scan: {exc}", exc_info=True)
         return error_response("Internal Server Error", status_code=500, code="internal_error")

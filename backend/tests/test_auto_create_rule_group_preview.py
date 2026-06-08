@@ -3,7 +3,11 @@ from unittest.mock import Mock
 from datetime import datetime, timedelta, timezone
 
 from apps.automation import scheduling_service
-from apps.automation.scheduling_service import NoTvgIdError, SchedulingService
+from apps.automation.scheduling_service import (
+    AUTO_CREATE_QUEUE_PRIORITY,
+    NoTvgIdError,
+    SchedulingService,
+)
 
 
 def _make_service(tmp_path: Path, monkeypatch):
@@ -18,6 +22,7 @@ def _make_service(tmp_path: Path, monkeypatch):
 
 def test_auto_create_rule_preview_expands_group_channels(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
 
     channels = {
         1: {"id": 1, "name": "No Match Channel", "tvg_id": "no-match"},
@@ -29,16 +34,20 @@ def test_auto_create_rule_preview_expands_group_channels(tmp_path, monkeypatch):
     udi.get_channel_by_id.side_effect = lambda channel_id: channels.get(int(channel_id))
     monkeypatch.setattr(scheduling_service, "get_udi_manager", lambda: udi)
 
-    programs_by_channel = {
-        1: [{"title": "Regular Show", "start_time": "2026-06-03T18:00:00Z"}],
-        2: [{"title": "World Cup Friendly", "start_time": "2026-06-03T19:00:00Z"}],
-    }
-    def get_programs_by_channel(channel_id):
-        if int(channel_id) == 1:
-            raise NoTvgIdError(channel_id)
-        return programs_by_channel[int(channel_id)]
-
-    monkeypatch.setattr(service, "get_programs_by_channel", get_programs_by_channel)
+    service._epg_cache = [
+        {
+            "title": "Regular Show",
+            "start_time": (now + timedelta(hours=1)).isoformat(),
+            "end_time": (now + timedelta(hours=2)).isoformat(),
+            "tvg_id": "no-match",
+        },
+        {
+            "title": "World Cup Friendly",
+            "start_time": (now + timedelta(hours=1)).isoformat(),
+            "end_time": (now + timedelta(hours=3)).isoformat(),
+            "tvg_id": "match",
+        },
+    ]
 
     result = service.test_regex_against_epg_for_rule(
         channel_group_ids=[50],
@@ -54,6 +63,7 @@ def test_auto_create_rule_preview_expands_group_channels(tmp_path, monkeypatch):
 
 def test_auto_create_rule_preview_reports_why_group_channels_do_not_match(tmp_path, monkeypatch):
     service = _make_service(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
 
     channels = {
         1: {"id": 1, "name": "No TVG Channel", "tvg_id": None},
@@ -67,17 +77,20 @@ def test_auto_create_rule_preview_reports_why_group_channels_do_not_match(tmp_pa
     udi.get_channel_by_id.side_effect = lambda channel_id: channels.get(int(channel_id))
     monkeypatch.setattr(scheduling_service, "get_udi_manager", lambda: udi)
 
-    programs_by_channel = {
-        2: [],
-        3: [{"title": "Pregame Baseball", "start_time": "2026-06-03T18:00:00Z"}],
-        4: [{"title": "Live: Baseball", "start_time": "2026-06-03T19:00:00Z"}],
-    }
-    def get_programs_by_channel(channel_id):
-        if int(channel_id) == 1:
-            raise NoTvgIdError(channel_id)
-        return programs_by_channel[int(channel_id)]
-
-    monkeypatch.setattr(service, "get_programs_by_channel", get_programs_by_channel)
+    service._epg_cache = [
+        {
+            "title": "Pregame Baseball",
+            "start_time": (now + timedelta(hours=1)).isoformat(),
+            "end_time": (now + timedelta(hours=2)).isoformat(),
+            "tvg_id": "wrong-title",
+        },
+        {
+            "title": "Live: Baseball",
+            "start_time": (now + timedelta(hours=1)).isoformat(),
+            "end_time": (now + timedelta(hours=2)).isoformat(),
+            "tvg_id": "match",
+        },
+    ]
 
     result = service.test_regex_against_epg_for_rule(
         channel_group_ids=[50],
@@ -87,10 +100,67 @@ def test_auto_create_rule_preview_reports_why_group_channels_do_not_match(tmp_pa
     assert result["matches"] == 1
     assert result["channels_tested"] == 4
     assert result["channels_with_matches"] == 1
-    assert [channel["id"] for channel in result["channels_without_tvg"]] == [1]
-    assert [channel["id"] for channel in result["channels_without_programs"]] == [2]
+    assert [channel["id"] for channel in result["channels_without_tvg"]] == []
+    assert [channel["id"] for channel in result["channels_without_programs"]] == [1, 2]
     assert result["channels_without_matches"][0]["id"] == 3
     assert result["channels_without_matches"][0]["sample_titles"] == ["Pregame Baseball"]
+
+
+def test_auto_create_preview_reports_due_and_unscheduled_matches(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    channels = {
+        10: {"id": 10, "name": "Due Team", "tvg_id": "due"},
+        11: {"id": 11, "name": "Future Team", "tvg_id": "future"},
+        12: {"id": 12, "name": "Ended Team", "tvg_id": "ended"},
+        13: {"id": 13, "name": "Missing Time Team", "tvg_id": "missing"},
+    }
+    udi = Mock()
+    udi.get_channel_group_by_id.return_value = {"id": 50, "name": "Team Channels"}
+    udi.get_channels_by_group.return_value = list(channels.values())
+    udi.get_channel_by_id.side_effect = lambda channel_id: channels.get(int(channel_id))
+    monkeypatch.setattr(scheduling_service, "get_udi_manager", lambda: udi)
+
+    service._epg_cache = [
+        {
+            "title": "Live: Baseball",
+            "start_time": (now + timedelta(minutes=5)).isoformat(),
+            "end_time": (now + timedelta(hours=2)).isoformat(),
+            "tvg_id": "due",
+        },
+        {
+            "title": "Live: Baseball",
+            "start_time": (now + timedelta(hours=2)).isoformat(),
+            "end_time": (now + timedelta(hours=4)).isoformat(),
+            "tvg_id": "future",
+        },
+        {
+            "title": "Live: Baseball",
+            "start_time": (now - timedelta(hours=3)).isoformat(),
+            "end_time": (now - timedelta(hours=1)).isoformat(),
+            "tvg_id": "ended",
+        },
+        {
+            "title": "Live: Baseball",
+            "tvg_id": "missing",
+        },
+    ]
+
+    result = service.test_regex_against_epg_for_rule(
+        channel_group_ids=[50],
+        regex_pattern="^Live:",
+        minutes_before=10,
+    )
+
+    assert result["total_epg_matches"] == 4
+    assert result["matches"] == 2
+    assert result["due_now_matches"] == 1
+    assert result["future_matches"] == 1
+    assert result["ended_matches"] == 1
+    assert result["missing_time_matches"] == 1
+    assert {program["schedule_state"] for program in result["programs"]} == {"due_now", "future"}
+    assert [channel["id"] for channel in result["channels_with_unscheduled_matches"]] == [12, 13]
 
 
 def test_group_only_auto_create_rule_does_not_persist_group_channels_as_individuals(tmp_path, monkeypatch):
@@ -185,3 +255,93 @@ def test_auto_create_schedules_currently_airing_programs(tmp_path, monkeypatch):
     events = service.get_scheduled_events()
     assert len(events) == 3
     assert {event["channel_id"] for event in events} == {10, 11, 12}
+
+
+def test_auto_create_schedules_programs_with_guide_time_aliases(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    channels = {
+        10: {
+            "id": 10,
+            "name": "San Francisco Giants",
+            "tvg_id": "giants",
+            "uuid": "channel-uuid-10",
+        },
+    }
+    udi = Mock()
+    udi.get_channel_group_by_id.return_value = {"id": 50, "name": "MLB Teams"}
+    udi.get_channels_by_group.return_value = list(channels.values())
+    udi.get_channel_by_id.side_effect = lambda channel_id: channels.get(int(channel_id))
+    monkeypatch.setattr(scheduling_service, "get_udi_manager", lambda: udi)
+
+    service._auto_create_rules = [{
+        "id": "rule-1",
+        "name": "Live team checks",
+        "channel_group_ids": [50],
+        "channel_ids": [],
+        "regex_pattern": "^Live:",
+        "minutes_before": 15,
+    }]
+    service._epg_cache = [{
+        "sub_title": "Live: MLB",
+        "start": (now + timedelta(hours=1)).isoformat(),
+        "stop": (now + timedelta(hours=4)).isoformat(),
+        "channel_uuid": "channel-uuid-10",
+    }]
+
+    result = service.match_programs_to_rules()
+
+    events = service.get_scheduled_events()
+    assert result["created"] == 1
+    assert result["future_matches"] == 1
+    assert len(events) == 1
+    assert events[0]["channel_id"] == 10
+    assert events[0]["program_title"] == "Live: MLB"
+    assert events[0]["program_start_time"] == service._epg_cache[0]["start"]
+    assert events[0]["program_end_time"] == service._epg_cache[0]["stop"]
+
+
+def test_auto_create_scheduled_check_queues_with_event_priority(tmp_path, monkeypatch):
+    service = _make_service(tmp_path, monkeypatch)
+    now = datetime.now(timezone.utc)
+    event = {
+        "id": "event-1",
+        "channel_id": 10,
+        "channel_name": "Team A",
+        "program_title": "Live: MLB",
+        "program_start_time": (now + timedelta(minutes=5)).isoformat(),
+        "program_end_time": (now + timedelta(hours=2)).isoformat(),
+        "check_time": now.isoformat(),
+        "minutes_before": 5,
+        "schedule_type": "check",
+        "auto_created": True,
+        "auto_create_rule_id": "rule-1",
+    }
+    service._scheduled_events = [event]
+
+    class Checker:
+        def __init__(self):
+            self.queued = []
+
+        def queue_channel(self, *args, **kwargs):
+            self.queued.append((args, kwargs))
+            return True
+
+        def check_single_channel(self, *args, **kwargs):
+            raise AssertionError("auto-create checks should be queued")
+
+    checker = Checker()
+
+    assert service.execute_scheduled_check("event-1", checker) is True
+    assert service.get_scheduled_events() == []
+    assert len(checker.queued) == 1
+
+    args, kwargs = checker.queued[0]
+    assert args == (10,)
+    assert kwargs["priority"] == AUTO_CREATE_QUEUE_PRIORITY
+    assert kwargs["force_check"] is True
+    assert kwargs["metadata"]["source"] == "auto_create"
+    assert kwargs["metadata"]["program_name"] == "Live: MLB"
+    assert kwargs["metadata"]["is_epg_scheduled"] is True
+    assert kwargs["metadata"]["auto_create_rule_id"] == "rule-1"

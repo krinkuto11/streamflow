@@ -1,6 +1,6 @@
 """Stream checker API handler functions extracted from web_api."""
 
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from flask import jsonify
 
@@ -12,6 +12,57 @@ from apps.stream.queue_start import (
 )
 
 logger = setup_logging(__name__)
+
+
+def _automation_run_is_active(manager: Any) -> bool:
+    """Return True only while an automation cycle is actively executing."""
+    if manager is None:
+        return False
+
+    inspected_run_status = False
+    try:
+        run_status = manager.get_run_status() if hasattr(manager, "get_run_status") else None
+    except Exception as exc:
+        logger.debug("Could not inspect automation run status before single-channel check: %s", exc)
+        run_status = None
+
+    if isinstance(run_status, dict):
+        inspected_run_status = True
+        state = str(run_status.get("state") or run_status.get("status") or "").lower()
+        if run_status.get("active") is True or state == "running":
+            return True
+        return False
+    if inspected_run_status or hasattr(manager, "get_run_status"):
+        return False
+
+    thread = getattr(manager, "automation_thread", None)
+    try:
+        thread_alive = bool(thread and thread.is_alive())
+    except Exception:
+        thread_alive = False
+    return bool(thread_alive and getattr(manager, "automation_running", False))
+
+
+def _stream_checker_work_is_active(service: Any) -> bool:
+    """Return True when Stream Checker is already doing active work."""
+    try:
+        status = service.get_status() if hasattr(service, "get_status") else None
+    except Exception as exc:
+        logger.debug("Could not inspect stream checker status before single-channel check: %s", exc)
+        return False
+
+    if not isinstance(status, dict):
+        return False
+    progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
+    if progress.get("is_single_channel_check"):
+        return True
+    queue = status.get("queue") if isinstance(status.get("queue"), dict) else {}
+    queue_active = (
+        int(queue.get("queue_size") or 0) > 0
+        or int(queue.get("in_progress") or 0) > 0
+        or queue.get("current_channel") is not None
+    )
+    return bool(status.get("checking") or queue_active)
 
 
 def _sanitize_hardware_acceleration_status(status: Any) -> Dict[str, Any]:
@@ -333,6 +384,7 @@ def check_single_channel_now_response(
     *,
     payload: Any,
     get_stream_checker_service: Callable[[], Any],
+    get_automation_manager: Optional[Callable[[], Any]] = None,
 ):
     """Handle immediate synchronous check for one channel.
 
@@ -363,6 +415,34 @@ def check_single_channel_now_response(
         forced_profile_id = data.get("profile_id")
         force_check = bool(data.get("force_check", False))
         service = get_stream_checker_service()
+        if get_automation_manager is not None:
+            try:
+                if _automation_run_is_active(get_automation_manager()):
+                    return jsonify(
+                        {
+                            "success": False,
+                            "error": "automation_run_active",
+                            "message": (
+                                "A single-channel full check cannot run while an automation run is active. "
+                                "Queue the channel check instead or wait until the automation run finishes."
+                            ),
+                        }
+                    ), 409
+            except Exception as exc:
+                logger.warning("Could not enforce automation-run guard for single-channel check: %s", exc)
+
+        if _stream_checker_work_is_active(service):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "stream_checker_active",
+                    "message": (
+                        "A single-channel full check cannot run while Stream Checker is already active. "
+                        "Queue the channel check instead or wait for the active run to finish."
+                    ),
+                }
+            ), 409
+
         result = service.check_single_channel(
             channel_id,
             forced_profile_id=forced_profile_id,

@@ -484,7 +484,7 @@ def is_stream_dead(stream_data: Dict[str, Any], config: Dict[str, Any] = None) -
     - The quality probe identified a mostly frozen video window and freeze-as-dead
       handling is enabled (Reason: 'freeze')
     - Resolution is '0x0' or contains 0 in width or height (Reason: 'offline')
-    - Bitrate is 0 or None (Reason: 'offline')
+    - Bitrate is explicitly 0 (Reason: 'offline'); missing bitrate is unknown
     - Falls below configured minimum thresholds (Reason: 'low_quality')
     
     Args:

@@ -67,24 +67,8 @@ export default function Scheduling() {
   const [ruleRegexPattern, setRuleRegexPattern] = useState('')
   const [ruleMinutesBefore, setRuleMinutesBefore] = useState(5)
   const [ruleScheduleType, setRuleScheduleType] = useState('check')  // 'check' or 'monitoring'
-  const [ruleEnableLoopDetection, setRuleEnableLoopDetection] = useState(false)
   const [ruleEnableLoopingDetection, setRuleEnableLoopingDetection] = useState(true)
   const [ruleEnableLogoDetection, setRuleEnableLogoDetection] = useState(true)
-  
-  // Single Event AceStream Config
-  const [enableLoopDetection, setEnableLoopDetection] = useState(false)
-  const [sessionType, setSessionType] = useState('standard')
-  const [intervalS, setIntervalS] = useState(1.0)
-  const [runSeconds, setRunSeconds] = useState(0)
-  const [perSampleTimeoutS, setPerSampleTimeoutS] = useState(1.0)
-  const [engineContainerId, setEngineContainerId] = useState('')
-
-  // Rule AceStream Config
-  const [ruleSessionType, setRuleSessionType] = useState('standard')
-  const [ruleIntervalS, setRuleIntervalS] = useState(1.0)
-  const [ruleRunSeconds, setRuleRunSeconds] = useState(0)
-  const [rulePerSampleTimeoutS, setRulePerSampleTimeoutS] = useState(1.0)
-  const [ruleEngineContainerId, setRuleEngineContainerId] = useState('')
 
   const [testingRegex, setTestingRegex] = useState(false)
   const [regexMatches, setRegexMatches] = useState([])
@@ -118,12 +102,6 @@ export default function Scheduling() {
     setRuleRegexPattern('')
     setRuleMinutesBefore(5)
     setRuleScheduleType('check')
-    setRuleSessionType('standard')
-    setRuleIntervalS(1.0)
-    setRuleRunSeconds(0)
-    setRulePerSampleTimeoutS(1.0)
-    setRuleEngineContainerId('')
-    setRuleEnableLoopDetection(false)
     setRuleEnableLoopingDetection(true)
     setRuleEnableLogoDetection(true)
     setRuleChannelComboboxOpen(false)
@@ -242,12 +220,6 @@ export default function Scheduling() {
         program_title: selectedProgram.title,
         minutes_before: minutesBeforeValue,
         schedule_type: scheduleType,
-        session_type: sessionType,
-        interval_s: intervalS,
-        run_seconds: runSeconds,
-        per_sample_timeout_s: perSampleTimeoutS,
-        engine_container_id: engineContainerId,
-        enable_loop_detection: enableLoopDetection,
       }
 
       await schedulingAPI.createEvent(eventData)
@@ -264,12 +236,6 @@ export default function Scheduling() {
       setChannelComboboxOpen(false)
       setMinutesBefore(5)
       setScheduleType('check')
-      setSessionType('standard')
-      setIntervalS(1.0)
-      setRunSeconds(0)
-      setPerSampleTimeoutS(1.0)
-      setEngineContainerId('')
-      setEnableLoopDetection(false)
       await loadData()
     } catch (err) {
       console.error('Failed to create event:', err)
@@ -348,7 +314,8 @@ export default function Scheduling() {
       const response = await schedulingAPI.testAutoCreateRule({
         channel_ids: selectedChannelIds,
         channel_group_ids: selectedGroupIds,
-        regex_pattern: ruleRegexPattern
+        regex_pattern: ruleRegexPattern,
+        minutes_before: parseInt(ruleMinutesBefore) || 0,
       })
 
       setRegexMatches(response.data.programs || [])
@@ -370,6 +337,23 @@ export default function Scheduling() {
       clearRegexTestState()
     } finally {
       setTestingRegex(false)
+    }
+  }
+
+  const handleRefresh = async () => {
+    try {
+      setLoading(true)
+      await schedulingAPI.getEPGGrid(true)
+      await loadData()
+    } catch (err) {
+      console.error('Failed to refresh scheduling data:', err)
+      toast({
+        title: "Error",
+        description: "Failed to refresh EPG matches",
+        variant: "destructive"
+      })
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -402,12 +386,6 @@ export default function Scheduling() {
         regex_pattern: ruleRegexPattern,
         minutes_before: minutesBeforeValue,
         schedule_type: ruleScheduleType,
-        session_type: ruleSessionType,
-        interval_s: ruleIntervalS,
-        run_seconds: ruleRunSeconds,
-        per_sample_timeout_s: rulePerSampleTimeoutS,
-        engine_container_id: ruleEngineContainerId,
-        enable_loop_detection: ruleEnableLoopDetection,
         enable_looping_detection: ruleEnableLoopingDetection,
         enable_logo_detection: ruleEnableLogoDetection
       }
@@ -468,12 +446,6 @@ export default function Scheduling() {
     setRuleRegexPattern(rule.regex_pattern)
     setRuleMinutesBefore(rule.minutes_before)
     setRuleScheduleType(rule.schedule_type || 'check')  // Default to 'check' for backward compatibility
-    setRuleSessionType(rule.session_type || 'standard')
-    setRuleIntervalS(rule.interval_s || 1.0)
-    setRuleRunSeconds(rule.run_seconds || 0)
-    setRulePerSampleTimeoutS(rule.per_sample_timeout_s || 1.0)
-    setRuleEngineContainerId(rule.engine_container_id || '')
-    setRuleEnableLoopDetection(rule.enable_loop_detection || false)
     setRuleEnableLoopingDetection(rule.enable_looping_detection !== false)
     setRuleEnableLogoDetection(rule.enable_logo_detection !== false)
 
@@ -708,21 +680,21 @@ export default function Scheduling() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h1 className="text-3xl font-bold">Scheduling</h1>
           <p className="text-muted-foreground mt-1">
             Schedule channel checks before EPG events
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => loadData()}>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-end">
+          <Button variant="outline" size="sm" onClick={handleRefresh} className="w-full sm:w-auto">
             <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
             Refresh
           </Button>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
-              <Button>
+              <Button className="w-full sm:w-auto">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Event Check
               </Button>
@@ -879,91 +851,12 @@ export default function Scheduling() {
                   </div>
                 )}
 
-                {/* Session Type (Monitoring only) */}
                 {selectedProgram && scheduleType === 'monitoring' && (
-                  <div className="space-y-4 border rounded-lg p-4">
+                  <div className="space-y-2 border rounded-lg p-4">
                     <h4 className="text-sm font-medium">Monitoring Settings</h4>
-                    <div className="space-y-2">
-                      <Label htmlFor="session-type">Session Type</Label>
-                      <Select
-                        value={sessionType}
-                        onValueChange={(value) => setSessionType(value)}
-                      >
-                        <SelectTrigger id="session-type">
-                          <SelectValue placeholder="Select session type" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="standard">Standard (FFmpeg)</SelectItem>
-                          <SelectItem value="acestream">AceStream</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <p className="text-sm text-muted-foreground">
-                        {sessionType === 'standard'
-                          ? 'Creates a standard monitoring session using ffmpeg'
-                          : 'Creates an AceStream quality monitoring session'}
-                      </p>
-                    </div>
-
-                    {sessionType === 'acestream' && (
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label htmlFor="interval-s">Interval (s)</Label>
-                          <Input
-                            id="interval-s"
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            value={intervalS}
-                            onChange={(e) => setIntervalS(parseFloat(e.target.value) || 1.0)}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="run-seconds">Run Seconds</Label>
-                          <Input
-                            id="run-seconds"
-                            type="number"
-                            min="0"
-                            value={runSeconds}
-                            onChange={(e) => setRunSeconds(parseInt(e.target.value) || 0)}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="per-sample-timeout">Sample Timeout (s)</Label>
-                          <Input
-                            id="per-sample-timeout"
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            value={perSampleTimeoutS}
-                            onChange={(e) => setPerSampleTimeoutS(parseFloat(e.target.value) || 1.0)}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="engine-container">Engine Container ID</Label>
-                          <Input
-                            id="engine-container"
-                            placeholder="Optional"
-                            value={engineContainerId}
-                            onChange={(e) => setEngineContainerId(e.target.value)}
-                          />
-                        </div>
-                        <div className="flex items-center justify-between col-span-2 border-t pt-2">
-                          <div className="space-y-0.5">
-                            <Label htmlFor="ace-loop-detection" className="text-sm">
-                              Enable Zero-Decode Loop Detection
-                            </Label>
-                            <p className="text-[11px] text-muted-foreground mr-4">
-                              Monitors packet metadata to detect if the stream is a looping VOD file. (Negligible CPU impact)
-                            </p>
-                          </div>
-                          <Switch
-                            id="ace-loop-detection"
-                            checked={enableLoopDetection}
-                            onCheckedChange={setEnableLoopDetection}
-                          />
-                        </div>
-                      </div>
-                    )}
+                    <p className="text-sm text-muted-foreground">
+                      Creates a standard FFmpeg monitoring session for the selected program.
+                    </p>
                   </div>
                 )}
               </div>
@@ -1291,20 +1184,21 @@ export default function Scheduling() {
       {/* Auto-Create Rules Card */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
               <CardTitle>Auto-Create Rules</CardTitle>
               <CardDescription>
                 Automatically create scheduled events based on regex patterns matching EPG program names
               </CardDescription>
             </div>
-            <div className="flex gap-2">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-end">
               {/* Export Button */}
               <Button
                 variant="outline"
                 size="sm"
                 onClick={handleExportRules}
                 disabled={autoCreateRules.length === 0}
+                className="w-full sm:w-auto"
               >
                 <Download className="h-4 w-4 mr-2" />
                 Export
@@ -1315,6 +1209,7 @@ export default function Scheduling() {
                 variant="outline"
                 size="sm"
                 onClick={() => fileInputRef.current?.click()}
+                className="w-full sm:w-auto"
               >
                 <Upload className="h-4 w-4 mr-2" />
                 Import
@@ -1337,7 +1232,7 @@ export default function Scheduling() {
                 <DialogTrigger asChild>
                   <Button size="sm" onClick={() => {
                     resetRuleForm()
-                  }}>
+                  }} className="w-full sm:w-auto">
                     <Plus className="h-4 w-4 mr-2" />
                     Add Rule
                   </Button>
@@ -1345,13 +1240,14 @@ export default function Scheduling() {
                 <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col">
                   <DialogHeader>
                     <DialogTitle>
-                      <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <span>{editingRuleId ? 'Edit Auto-Create Rule' : 'Create Auto-Create Rule'}</span>
                         {!editingRuleId && (
                           <Button
                             variant="outline"
                             size="sm"
                             onClick={() => wizardFileInputRef.current?.click()}
+                            className="w-full sm:w-auto"
                           >
                             <FileJson className="h-4 w-4 mr-2" />
                             Import JSON
@@ -1581,6 +1477,13 @@ export default function Scheduling() {
                                   <div className="text-muted-foreground text-xs mt-1">
                                     {formatTime(program.start_time)} - {formatTime(program.end_time)}
                                   </div>
+                                  {program.schedule_state && (
+                                    <div className="mt-1">
+                                      <Badge variant="outline" className="text-[10px]">
+                                        {program.schedule_state === 'due_now' ? 'Due now' : 'Future event'}
+                                      </Badge>
+                                    </div>
+                                  )}
                                 </div>
                               ))}
                             </div>
@@ -1692,7 +1595,7 @@ export default function Scheduling() {
                         </div>
 
                         {/* Monitoring Toggles */}
-                        {ruleScheduleType === 'monitoring' && ruleSessionType !== 'acestream' && (
+                        {ruleScheduleType === 'monitoring' && (
                           <div className="border rounded-lg p-3 space-y-3">
                             <h4 className="text-sm font-medium">Monitoring Features</h4>
 
@@ -1727,86 +1630,6 @@ export default function Scheduling() {
                                 onCheckedChange={(checked) => setRuleEnableLogoDetection(checked)}
                               />
                             </div>
-                          </div>
-                        )}
-                        
-                        {/* Session Type Settings Group */}
-                        {ruleScheduleType === 'monitoring' && (
-                          <div className="border rounded-lg p-3 space-y-3">
-                            <h4 className="text-sm font-medium">Session Type</h4>
-                            <Select
-                              value={ruleSessionType}
-                              onValueChange={(value) => setRuleSessionType(value)}
-                            >
-                              <SelectTrigger id="rule-session-type">
-                                <SelectValue placeholder="Select session type" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="standard">Standard (FFmpeg)</SelectItem>
-                                <SelectItem value="acestream">AceStream</SelectItem>
-                              </SelectContent>
-                            </Select>
-
-                            {ruleSessionType === 'acestream' && (
-                              <div className="grid grid-cols-2 gap-4 pt-2">
-                                <div className="space-y-2">
-                                  <Label htmlFor="rule-interval-s">Interval (s)</Label>
-                                  <Input
-                                    id="rule-interval-s"
-                                    type="number"
-                                    step="0.1"
-                                    min="0.1"
-                                    value={ruleIntervalS}
-                                    onChange={(e) => setRuleIntervalS(parseFloat(e.target.value) || 1.0)}
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <Label htmlFor="rule-run-seconds">Run Seconds</Label>
-                                  <Input
-                                    id="rule-run-seconds"
-                                    type="number"
-                                    min="0"
-                                    value={ruleRunSeconds}
-                                    onChange={(e) => setRuleRunSeconds(parseInt(e.target.value) || 0)}
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <Label htmlFor="rule-per-sample-timeout">Sample Timeout (s)</Label>
-                                  <Input
-                                    id="rule-per-sample-timeout"
-                                    type="number"
-                                    step="0.1"
-                                    min="0.1"
-                                    value={rulePerSampleTimeoutS}
-                                    onChange={(e) => setRulePerSampleTimeoutS(parseFloat(e.target.value) || 1.0)}
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <Label htmlFor="rule-engine-container">Engine Container ID</Label>
-                                  <Input
-                                    id="rule-engine-container"
-                                    placeholder="Optional"
-                                    value={ruleEngineContainerId}
-                                    onChange={(e) => setRuleEngineContainerId(e.target.value)}
-                                  />
-                                </div>
-                                <div className="flex items-center justify-between col-span-2 border-t pt-2">
-                                  <div className="space-y-0.5">
-                                    <Label htmlFor="rule-ace-loop" className="text-sm">
-                                      Enable Zero-Decode Loop Detection
-                                    </Label>
-                                    <p className="text-[11px] text-muted-foreground mr-4">
-                                      Monitors packet metadata to detect if the stream is a looping VOD file. (Negligible CPU impact)
-                                    </p>
-                                  </div>
-                                  <Switch
-                                    id="rule-ace-loop"
-                                    checked={ruleEnableLoopDetection}
-                                    onCheckedChange={setRuleEnableLoopDetection}
-                                  />
-                                </div>
-                              </div>
-                            )}
                           </div>
                         )}
                       </>

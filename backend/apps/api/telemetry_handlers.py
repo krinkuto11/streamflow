@@ -26,7 +26,7 @@ def get_changelog_response(*, request_args: Any):
         try:
             runs = (
                 session.query(Run)
-                .filter(Run.timestamp >= cutoff, Run.run_type != "acestream_monitor")
+                .filter(Run.timestamp >= cutoff)
                 .order_by(Run.timestamp.desc())
                 .all()
             )

@@ -37,7 +37,7 @@ const getJpegDimensions = (assetPath) => {
 }
 
 describe('operatorHelpSections', () => {
-  it('covers the non-Teamarr V3 operator areas', () => {
+  it('covers the operator areas outside dedicated Teamarr details', () => {
     expect(operatorHelpSections.map(section => section.id)).toEqual([
       'startup-cache',
       'profiles-periods',
@@ -156,20 +156,21 @@ describe('operatorHelpSections', () => {
     expect(teamarr.smokeChecks.join(' ')).toMatch(/2-minute post-start check/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/4 minutes/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/dead-stream removal off/i)
-    expect(teamarr.steps.join(' ')).toMatch(/automation can defer/i)
-    expect(teamarr.settings.find(setting => setting.name === 'Busy Handling').effect).toMatch(/priority queue/i)
-    expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override').defaultValue).toBe('Off')
-    expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override').risk).toMatch(/active-viewer protection/i)
+    expect(teamarr.steps.join(' ')).toMatch(/priority queue during Automation or Stream Checker runs/i)
+    expect(teamarr.settings.find(setting => setting.name === 'Queue Events During Active Checks').defaultValue).toBe('On')
+    expect(teamarr.settings.find(setting => setting.name === 'Queue Events During Active Checks').effect).toMatch(/does not queue new event checks/i)
+    expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override')).toBeUndefined()
     expect(teamarr.smokeChecks.join(' ')).toMatch(/queued or deferred event-check context/i)
-    expect(teamarr.smokeChecks.join(' ')).toMatch(/active-viewer events/i)
     const automation = getOperatorHelpDetailTopic('automation-periods')
     expect(automation.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Catch-up cap',
       'Run all due periods',
       'Maintenance window',
       'Teamarr event window',
+      'Retry failed M3U providers',
     ]))
     expect(automation.settings.find(setting => setting.name === 'Maintenance window').location).toBe('Settings -> Scheduling tab -> Automation Run Policy -> Maintenance window/start/end')
+    expect(automation.settings.find(setting => setting.name === 'Retry failed M3U providers').effect).toMatch(/only providers/i)
     const streamChecker = getOperatorHelpDetailTopic('stream-checker')
     expect(streamChecker.settings.find(setting => setting.name === 'Check on update').controlType).toBe('Status/API')
     expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Concurrent Checking tab -> Global Concurrent Limit')
@@ -224,7 +225,6 @@ describe('operatorHelpSections', () => {
       'automation-periods:Run all due periods',
       'automation-periods:Catch-up cap',
       'teamarr-preflight:Post-Start Checks',
-      'teamarr-preflight:Busy Handling',
     ])
 
     for (const reference of references) {

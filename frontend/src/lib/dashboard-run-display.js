@@ -25,6 +25,54 @@ const STAGE_KEY_ALIASES = {
 
 export const normalizeRunStageKey = (key) => STAGE_KEY_ALIASES[key] || key
 
+const SINGLE_CHANNEL_STATUS_STAGE = {
+  starting: 'settings',
+  preparing: 'settings',
+  m3u_refresh: 'm3u_refresh',
+  cache_sync: 'cache_sync',
+  stream_matching: 'stream_matching',
+  matching: 'stream_matching',
+  quality_checking: 'quality_checking',
+  checking: 'quality_checking',
+  finalizing: 'finalizing',
+  complete: 'finalizing',
+  completed: 'finalizing',
+}
+
+const SINGLE_CHANNEL_STAGE_LABELS = {
+  settings: 'Preparing',
+  m3u_refresh: 'M3U Refresh',
+  cache_sync: 'Cache Sync',
+  stream_matching: 'Matching',
+  quality_checking: 'Quality Check',
+  finalizing: 'Finalizing',
+}
+
+const getSingleChannelStageId = (progress = {}) => {
+  const statusStage = SINGLE_CHANNEL_STATUS_STAGE[String(progress?.status || '').toLowerCase()]
+  if (statusStage) {
+    return statusStage
+  }
+
+  const text = `${progress?.step || ''} ${progress?.step_detail || ''}`.toLowerCase()
+  if (text.includes('cache') || text.includes('udi')) {
+    return 'cache_sync'
+  }
+  if (text.includes('m3u') || text.includes('playlist') || text.includes('provider')) {
+    return 'm3u_refresh'
+  }
+  if (text.includes('match') || text.includes('validating')) {
+    return 'stream_matching'
+  }
+  if (text.includes('quality') || text.includes('checking streams')) {
+    return 'quality_checking'
+  }
+  if (text.includes('final')) {
+    return 'finalizing'
+  }
+  return 'settings'
+}
+
 export const preferLiveRunSeconds = ({
   reportedSeconds,
   liveSeconds,
@@ -99,8 +147,8 @@ export const getRunDurationValue = ({
   const normalizedDisplayStageId = normalizeRunStageKey(displayRunStageId)
 
   if (streamRunActive) {
-    if (normalizedStageId === 'quality_checking') {
-      return streamCheckerElapsedSeconds
+    if (normalizedStageId === normalizedDisplayStageId) {
+      return displayRunStageElapsedSeconds ?? streamCheckerElapsedSeconds
     }
 
     return null
@@ -182,6 +230,47 @@ export const getM3uRefreshCardDetail = ({
   if (state === 'requesting' && total !== null && total > 0) {
     const active = current !== null ? Math.min(current + 1, total) : 1
     return `Refreshing playlist ${active}/${total}`
+  }
+
+  if (state === 'already_running' && total !== null && total > 0) {
+    return `${current ?? total}/${total} refresh request${total === 1 ? '' : 's'} already running`
+  }
+
+  if (state === 'retrying_failed') {
+    const retryCount = finiteNumber(runCounts.m3u_refresh_wait_retry_count)
+    const failedCount = finiteNumber(runCounts.m3u_refresh_wait_failed_accounts)
+    if (failedCount !== null) {
+      return `Retrying failed providers${retryCount !== null ? ` (${retryCount}/${failedCount} accepted)` : ` (${failedCount})`}`
+    }
+    return 'Retrying failed providers'
+  }
+
+  if (state === 'waiting') {
+    const elapsed = finiteNumber(runCounts.m3u_refresh_wait_elapsed_seconds)
+    const streamsSeen = finiteNumber(runCounts.m3u_refresh_wait_streams_seen)
+    if (streamsSeen !== null) {
+      return `Waiting for Dispatcharr to settle (${streamsSeen} streams${elapsed !== null ? `, ${elapsed}s` : ''})`
+    }
+    return `Waiting for Dispatcharr to settle${elapsed !== null ? ` (${elapsed}s)` : ''}`
+  }
+
+  if (state === 'settled') {
+    const streamsSeen = finiteNumber(runCounts.m3u_refresh_wait_streams_seen)
+    return streamsSeen !== null
+      ? `Playlist refresh settled (${streamsSeen} streams)`
+      : 'Playlist refresh settled'
+  }
+
+  if (state === 'partial') {
+    const failedCount = finiteNumber(runCounts.m3u_refresh_wait_failed_accounts)
+    if (failedCount !== null && failedCount > 0) {
+      return `Playlist refresh settled with ${failedCount} failed provider${failedCount === 1 ? '' : 's'}`
+    }
+    return 'Playlist refresh partially accepted'
+  }
+
+  if (state === 'timeout') {
+    return 'Playlist refresh wait timed out'
   }
 
   if (['accepted', 'completed'].includes(state) && current !== null && total !== null && total > 0) {
@@ -273,12 +362,26 @@ export const getStreamCheckerRunDisplay = ({
   completed = 0,
   now = Date.now(),
 } = {}) => {
-  const isProcessing = Boolean(streamCheckerStatus?.stream_checking_mode)
-  const activeBatchTotal = isProcessing ? batchTotal : 0
+  const queue = streamCheckerStatus?.queue || {}
+  const progress = streamCheckerStatus?.progress || {}
+  const queueActive = Number(queue?.queue_size || 0) > 0
+    || Number(queue?.in_progress || 0) > 0
+    || (queue?.current_channel !== null && queue?.current_channel !== undefined)
+  const singleChannelProgressActive = Boolean(progress?.is_single_channel_check)
+  const isProcessing = Boolean(
+    streamCheckerStatus?.stream_checking_mode
+    || streamCheckerStatus?.checking
+    || queueActive
+    || singleChannelProgressActive
+  )
+  const singleChannelStageId = singleChannelProgressActive ? getSingleChannelStageId(progress) : null
+  const activeBatchTotal = isProcessing && !singleChannelProgressActive ? batchTotal : 0
   const qualityStageActive = runStage === 'quality_checking' && activeBatchTotal > 0
   const streamCheckerOnlyActive = isProcessing && runState !== 'running'
   const streamQueueActive = (qualityStageActive || streamCheckerOnlyActive) && activeBatchTotal > 0
-  const queueStartedAt = isProcessing ? parseTimestamp(streamCheckerStatus?.queue?.started_at) : null
+  const queueStartedAt = isProcessing && !singleChannelProgressActive
+    ? parseTimestamp(streamCheckerStatus?.queue?.started_at)
+    : null
   const currentStreamStartedAt = isProcessing
     ? earliestStreamStart(streamCheckerStatus?.progress?.streams_detail || [])
     : null
@@ -293,15 +396,25 @@ export const getStreamCheckerRunDisplay = ({
 
   return {
     currentStreamElapsedSeconds,
+    displayMessage: singleChannelProgressActive
+      ? 'Running single channel check'
+      : 'Running manual quality checks',
+    displayStageId: singleChannelStageId || 'quality_checking',
+    displayStageLabel: singleChannelStageId
+      ? SINGLE_CHANNEL_STAGE_LABELS[singleChannelStageId] || 'Single Channel Check'
+      : 'Quality Checking',
     isProcessing,
     qualityStageActive,
+    singleChannelProgressActive,
     stageCards: isProcessing
       ? [{
-          key: 'quality_checking',
-          label: 'Quality Check',
+          key: singleChannelStageId || 'quality_checking',
+          label: singleChannelStageId
+            ? SINGLE_CHANNEL_STAGE_LABELS[singleChannelStageId] || 'Single Channel Check'
+            : 'Quality Check',
           status: 'running',
-          current: completed,
-          total: batchTotal,
+          current: singleChannelProgressActive ? Number(progress?.current_stream || 0) : completed,
+          total: singleChannelProgressActive ? Number(progress?.total_streams || 1) : batchTotal,
         }]
       : [],
     streamCheckerElapsedSeconds,
@@ -388,8 +501,6 @@ export const getDashboardActionStates = ({
       : null
   const runAutomationReason = udiInitializing
     ? 'Automation can start after the Dispatcharr cache is ready.'
-    : isStreamCheckerProcessing
-    ? 'Automation cannot start while a stream check is already active.'
     : actionBusy
       ? 'Another dashboard action is running.'
       : null
@@ -400,7 +511,7 @@ export const getDashboardActionStates = ({
       reason: reloadUdiReason,
     },
     runAutomation: {
-      disabled: udiInitializing || isStreamCheckerProcessing || actionBusy,
+      disabled: udiInitializing || actionBusy,
       reason: runAutomationReason,
     },
   }

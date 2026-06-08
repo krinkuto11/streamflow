@@ -1,9 +1,17 @@
 import io
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
+from flask import Flask
+
+from apps.api.shadow_blank_monitor_handlers import (
+    run_shadow_blank_monitor_once_response,
+    start_shadow_blank_monitor_response,
+)
 from apps.stream import shadow_blank_monitor_service as shadow_module
 from apps.stream.shadow_blank_monitor_service import (
+    SHADOW_MONITOR_SCAN_ERROR_MESSAGE,
     ShadowBlankMonitorService,
     normalize_config,
 )
@@ -38,14 +46,23 @@ class FakeStreamChecker:
         return self.status
 
 
-def make_service(tmp_path, *, udi, blank_probe=None, switch_calls=None, clock=None, checker=None):
+def make_service(
+    tmp_path,
+    *,
+    udi,
+    blank_probe=None,
+    switch_calls=None,
+    clock=None,
+    checker=None,
+    watcher_api_key="test-watcher-key",
+):
     switch_calls = switch_calls if switch_calls is not None else []
 
     def switch_stream(channel_id, stream_id=None, url=None):
         switch_calls.append((channel_id, stream_id, url))
         return True
 
-    return ShadowBlankMonitorService(
+    service = ShadowBlankMonitorService(
         config_file=tmp_path / "shadow.json",
         udi_provider=lambda: udi,
         switch_stream=switch_stream,
@@ -54,6 +71,11 @@ def make_service(tmp_path, *, udi, blank_probe=None, switch_calls=None, clock=No
         stream_checker_provider=lambda: checker or FakeStreamChecker(),
         clock=clock or (lambda: 1000.0),
     )
+    if watcher_api_key is not None:
+        with service._lock:
+            service._config["watcher_api_key"] = watcher_api_key
+            service._save_config()
+    return service
 
 
 def active_status(stream_id=10, clients=None):
@@ -74,6 +96,8 @@ def test_watch_mode_controls_scan_delay():
     assert defaults["watch_gap_seconds"] == 1
     assert defaults["probe_duration_seconds"] == 60
     assert defaults["freeze_detection_enabled"] is True
+    assert defaults["no_decodable_frames_detection_enabled"] is True
+    assert defaults["no_decodable_frames_min_duration_seconds"] == 10.0
     assert defaults["confirmation_count"] == 2
     assert defaults["channel_cooldown_seconds"] == 300
     assert defaults["max_switches_per_hour"] == 3
@@ -96,6 +120,114 @@ def test_watch_mode_controls_scan_delay():
     invalid = normalize_config({"watch_mode": "always-on", "watch_gap_seconds": 0})
     assert invalid["watch_mode"] == "continuous"
     assert invalid["watch_gap_seconds"] == 1
+
+
+def test_start_requires_watcher_api_key(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, watcher_api_key=None)
+
+    assert service.start() is False
+
+    status = service.get_status()
+    config = service.get_config()
+    assert status["configuration_required"] is True
+    assert status["configuration_issue"] == "watcher_api_key_required"
+    assert status["running"] is False
+    assert config["enabled"] is False
+
+
+def test_enabled_config_without_watcher_api_key_stays_off(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, watcher_api_key=None)
+
+    config = service.update_config({"enabled": True})
+    status = service.get_status()
+
+    assert config["enabled"] is False
+    assert status["enabled"] is False
+    assert status["running"] is False
+    assert status["configuration_required"] is True
+    assert status["last_error"] == "Watcher API Key is required before Shadow Monitor can start."
+
+
+def test_forced_scan_requires_watcher_api_key(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, watcher_api_key=None)
+
+    status = service.run_once(force=True)
+
+    assert status["configuration_required"] is True
+    assert status["watched_count"] == 0
+    assert status["last_scan_at"] is None
+    assert udi.status_calls == 0
+
+
+def test_scan_error_status_does_not_expose_raw_exception(tmp_path):
+    def broken_udi():
+        raise RuntimeError("secret dispatcharr stack trace path")
+
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=broken_udi,
+        switch_stream=lambda *_args, **_kwargs: True,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        blank_probe=lambda url, config: {"blank_detected": False},
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+    with service._lock:
+        service._config["watcher_api_key"] = "test-watcher-key"
+        service._save_config()
+
+    status = service.run_once(force=True)
+
+    assert status["last_error"] == SHADOW_MONITOR_SCAN_ERROR_MESSAGE
+    assert "secret" not in str(status)
+
+
+def test_shadow_monitor_handler_configuration_details_are_sanitized():
+    class FakeService:
+        def run_once(self, force=False):
+            return {
+                "configuration_required": True,
+                "configuration_issue": "watcher_api_key_required",
+                "configuration_message": "Watcher API Key is required before Shadow Monitor can start.",
+                "last_error": "secret stack trace path",
+                "recent_events": [{"error": "secret stack trace path"}],
+            }
+
+        def start(self):
+            return False
+
+        def get_status(self):
+            return self.run_once(force=True)
+
+    app = Flask(__name__)
+    with app.app_context():
+        response, status_code = run_shadow_blank_monitor_once_response(get_service=lambda: FakeService())
+
+    payload = response.get_json()
+    assert status_code == 400
+    assert payload["code"] == "watcher_api_key_required"
+    assert "last_error" not in payload["details"]["status"]
+    assert "recent_events" not in payload["details"]["status"]
+    assert "secret" not in str(payload)
+
+    with app.app_context():
+        start_response, start_status_code = start_shadow_blank_monitor_response(get_service=lambda: FakeService())
+
+    start_payload = start_response.get_json()
+    assert start_status_code == 400
+    assert "secret" not in str(start_payload)
 
 
 def test_freeze_detection_config_and_probe_command():
@@ -201,6 +333,78 @@ def test_continuous_probe_detects_open_blank_after_min_duration(tmp_path, monkey
     assert result["blank_detected"] is True
     assert result["blank_duration_secs"] < 10
     assert result["blank_ratio"] < 0.8
+
+
+def test_continuous_probe_detects_no_decodable_frames_after_min_duration(tmp_path, monkeypatch):
+    processes = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO(
+                "Could not find codec parameters for stream 0 (Video: h264, none): unspecified size\n"
+                "Output file does not contain any stream\n"
+            )
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    def fake_popen(command, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    current_time = {"value": 100.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.1
+        return current_time["value"]
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "probe_duration_seconds": 60,
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+
+    result = service._run_blank_probe_until_viewer_left(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+        udi,
+        {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "stream_id": 10,
+        },
+    )
+
+    assert processes
+    assert result["no_decodable_frames_detected"] is True
+    assert result["no_decodable_frames_duration_secs"] >= 10
+    assert result["no_decodable_frames_error"] in {
+        "could not find codec parameters",
+        "output file does not contain any stream",
+    }
+    assert result.get("blank_detected") is False
 
 
 def test_continuous_probe_holds_ffmpeg_until_viewer_leaves(tmp_path, monkeypatch):
@@ -458,6 +662,211 @@ def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["reason"] == "freeze"
     assert status["cooldowns"] == []
+
+
+def test_confirmed_no_decodable_frames_switches_to_next_stream_when_live(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "no_decodable_frames_detected": True,
+            "no_decodable_frames_duration_secs": 10.2,
+            "no_decodable_frames_error": "could not find codec parameters",
+        },
+        switch_calls=switch_calls,
+    )
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+    })
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["reason"] == "no_decodable_frames"
+    assert status["cooldowns"] == []
+
+
+def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True, "blank_duration_secs": 3.0},
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 2,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+        "watcher_client_ref": "client-old",
+    }
+    with service._lock:
+        service._watched["uuid-1"] = {
+            **target,
+            "watcher_recovered_after_seconds": 1.5,
+        }
+        service._blank_counts[service._detection_count_key("uuid-1", "blank")] = 1
+        service._switch_attempts["uuid-1"] = {
+            "origin_stream_id": 10,
+            "target_stream_ids": [11],
+        }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "watcher_recovery_guard"
+    with service._lock:
+        assert service._blank_counts[service._detection_count_key("uuid-1", "blank")] == 0
+        assert "uuid-1" not in service._switch_attempts
+
+
+def test_detection_with_fresh_watcher_client_stops_without_pending_or_switch(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-recovered-watcher",
+                        },
+                    ],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True, "blank_duration_secs": 3.0},
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 2,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+    with service._lock:
+        service._blank_counts[service._detection_count_key("uuid-1", "blank")] = 1
+        service._switch_attempts["uuid-1"] = {
+            "origin_stream_id": 10,
+            "target_stream_ids": [11],
+        }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "watcher_recovery_guard"
+    assert status["recent_events"][0]["details"]["reason"] == "blank"
+    assert "blank_pending" not in [event["type"] for event in status["recent_events"]]
+    with service._lock:
+        assert service._blank_counts[service._detection_count_key("uuid-1", "blank")] == 0
+        assert "uuid-1" not in service._switch_attempts
+
+
+def test_continuous_probe_stops_when_watcher_reappears_between_confirmations(tmp_path):
+    switch_calls = []
+    probe_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-between-confirmations",
+                        },
+                    ],
+                )
+            },
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=lambda *args, **kwargs: switch_calls.append((args, kwargs)) or True,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+
+    def fake_continuous_probe(url, config, probe_udi, target):
+        probe_calls.append((url, target.get("watcher_client_ref")))
+        return {"blank_detected": True, "blank_duration_secs": 3.0}
+
+    service._run_blank_probe_until_viewer_left = fake_continuous_probe
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 2,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+    }
+
+    service._probe_target(udi, target, config)
+    status = service.get_status()
+
+    assert len(probe_calls) == 1
+    assert switch_calls == []
+    assert [event["type"] for event in status["recent_events"][:2]] == [
+        "watcher_recovery_guard",
+        "blank_pending",
+    ]
+    assert status["recent_events"][0]["details"]["reason"] == "active_watcher_between_confirmations"
+    with service._lock:
+        assert service._blank_counts[service._detection_count_key("uuid-1", "blank")] == 0
 
 
 def test_confirmed_blank_rechecks_after_switch_and_skips_attempted_target(tmp_path):
@@ -730,6 +1139,50 @@ def test_watched_status_includes_sanitized_watcher_identity(tmp_path):
     assert "raw-watcher-client-id" not in repr(status)
 
 
+def test_watched_status_includes_current_epg_program(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    scheduling_calls = []
+
+    class FakeSchedulingService:
+        def get_programs_by_channel(self, channel_id, tvg_id=None):
+            scheduling_calls.append((channel_id, tvg_id))
+            return [
+                {
+                    "title": "Live: MLB",
+                    "start_time": (now - timedelta(minutes=5)).isoformat(),
+                    "end_time": (now + timedelta(minutes=55)).isoformat(),
+                },
+                {
+                    "title": "SportsCenter",
+                    "start_time": (now + timedelta(hours=1)).isoformat(),
+                    "end_time": (now + timedelta(hours=2)).isoformat(),
+                },
+            ]
+
+    monkeypatch.setattr(
+        "apps.automation.scheduling_service.get_scheduling_service",
+        lambda: FakeSchedulingService(),
+    )
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "tvg_id": "mlb.tvg", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service.update_config({"enabled": False, "dry_run": False})
+
+    status = service.run_once(force=True)
+    watched = status["watched_channels"][0]
+
+    assert watched["current_program"] == {
+        "title": "Live: MLB",
+        "state": "current",
+        "start_time": (now - timedelta(minutes=5)).isoformat(),
+        "end_time": (now + timedelta(minutes=55)).isoformat(),
+    }
+    assert scheduling_calls == [(1, "mlb.tvg")]
+    assert "mlb.tvg" not in repr(status)
+
+
 def test_continuous_watcher_reconnects_are_visible_without_raw_client_ids(tmp_path):
     now = {"value": 1000.0}
     udi = FakeUdi(
@@ -913,6 +1366,7 @@ def test_continuous_default_probe_does_not_block_new_scans(tmp_path):
         "enabled": False,
         "dry_run": False,
         "watch_mode": "continuous",
+        "watcher_api_key": "test-watcher-key",
     })
 
     status = service.run_once(force=True)

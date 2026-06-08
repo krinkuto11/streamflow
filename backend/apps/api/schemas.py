@@ -408,7 +408,6 @@ class StreamSessionCreateSchema:
     epg_event: Optional[Dict[str, Any]]
     auto_created: bool
     auto_create_rule_id: Optional[str]
-    enable_loop_detection: bool
     enable_looping_detection: bool
     enable_logo_detection: bool
 
@@ -435,9 +434,6 @@ class StreamSessionCreateSchema:
             raise ValidationError("epg_event must be an object")
 
         auto_created = _parse_bool(data.get("auto_created", False), field_name="auto_created")
-        enable_loop_detection = _parse_bool(
-            data.get("enable_loop_detection", False), field_name="enable_loop_detection"
-        )
         enable_looping_detection = _parse_bool(
             data.get("enable_looping_detection", True), field_name="enable_looping_detection"
         )
@@ -457,7 +453,6 @@ class StreamSessionCreateSchema:
             epg_event=epg_event,
             auto_created=auto_created,
             auto_create_rule_id=auto_create_rule_id,
-            enable_loop_detection=enable_loop_detection,
             enable_looping_detection=enable_looping_detection,
             enable_logo_detection=enable_logo_detection,
         )
@@ -470,7 +465,6 @@ class GroupStreamSessionsCreateSchema:
     pre_event_minutes: int
     stagger_ms: int
     timeout_ms: int
-    enable_loop_detection: bool
     enable_looping_detection: bool
     enable_logo_detection: bool
 
@@ -502,9 +496,6 @@ class GroupStreamSessionsCreateSchema:
             pre_event_minutes=pre_event_minutes,
             stagger_ms=stagger_ms,
             timeout_ms=timeout_ms,
-            enable_loop_detection=_parse_bool(
-                data.get("enable_loop_detection", False), field_name="enable_loop_detection"
-            ),
             enable_looping_detection=_parse_bool(
                 data.get("enable_looping_detection", True), field_name="enable_looping_detection"
             ),
@@ -630,6 +621,7 @@ class AutoCreateRuleTestSchema:
     channel_ids: List[Any]
     channel_group_ids: List[Any]
     regex_pattern: str
+    minutes_before: int
 
     @classmethod
     def from_payload(cls, payload: Any) -> "AutoCreateRuleTestSchema":
@@ -661,11 +653,19 @@ class AutoCreateRuleTestSchema:
         if not channel_ids and not channel_group_ids:
             raise ValidationError("Missing required field: channel_id, channel_ids, or channel_group_ids")
 
+        try:
+            minutes_before = int(data.get("minutes_before", 0))
+        except (TypeError, ValueError):
+            raise ValidationError("minutes_before must be an integer") from None
+        if minutes_before < 0:
+            raise ValidationError("minutes_before must be 0 or greater")
+
         return cls(
             channel_id=channel_id,
             channel_ids=channel_ids,
             channel_group_ids=channel_group_ids,
             regex_pattern=str(data["regex_pattern"]),
+            minutes_before=minutes_before,
         )
 
 

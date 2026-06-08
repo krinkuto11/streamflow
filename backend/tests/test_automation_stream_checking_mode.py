@@ -3,7 +3,7 @@
 Unit test to verify that automation cycle respects stream checking mode.
 
 This test verifies that when stream checking mode is active:
-1. The automation cycle skips execution silently
+1. The automation cycle is queued/deferred instead of lost
 2. No UDI refresh calls are made
 3. No API requests are triggered
 """
@@ -38,8 +38,8 @@ class TestAutomationStreamCheckingMode(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
     
-    def test_automation_skips_when_stream_checking_mode_active(self):
-        """Test that automation cycle skips when stream_checking_mode is True."""
+    def test_automation_queues_when_stream_checking_mode_active(self):
+        """Test that automation cycle queues when stream_checking_mode is True."""
         with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
             manager = AutomatedStreamManager(config_file=self.config_file)
             
@@ -68,6 +68,40 @@ class TestAutomationStreamCheckingMode(unittest.TestCase):
                 
                 # Verify that get_status was called to check stream_checking_mode
                 mock_stream_checker.get_status.assert_called_once()
+
+                run_status = manager.get_status()["run_status"]
+                self.assertEqual(run_status["state"], "queued")
+                self.assertEqual(run_status["stage"], "queued")
+                self.assertIn("queued", run_status["message"])
+                self.assertIsNone(run_status["completed_at"])
+
+    def test_forced_automation_requeues_when_stream_checking_mode_active(self):
+        """Test that forced full-run intent is preserved while checker is active."""
+        with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
+            manager = AutomatedStreamManager(config_file=self.config_file)
+
+            mock_stream_checker = Mock()
+            mock_stream_checker.get_status.return_value = {
+                'stream_checking_mode': True,
+                'checking': False,
+                'queue': {'queue_size': 0},
+            }
+
+            with patch('stream_checker_service.get_stream_checker_service', return_value=mock_stream_checker):
+                manager.refresh_playlists = Mock()
+
+                manager.run_automation_cycle(forced=True, forced_period_id="1")
+
+                manager.refresh_playlists.assert_not_called()
+                mock_stream_checker.get_status.assert_called_once()
+                self.assertTrue(manager.force_next_run)
+                self.assertEqual(manager.forced_period_id, "1")
+
+                run_status = manager.get_status()["run_status"]
+                self.assertEqual(run_status["state"], "queued")
+                self.assertEqual(run_status["forced"], True)
+                self.assertEqual(run_status["forced_period_id"], "1")
+                self.assertIsNone(run_status["completed_at"])
     
     def test_automation_runs_when_stream_checking_mode_inactive(self):
         """Test that automation cycle runs when stream_checking_mode is False."""
@@ -101,8 +135,8 @@ class TestAutomationStreamCheckingMode(unittest.TestCase):
                 # Verify that get_status was called to check stream_checking_mode
                 mock_stream_checker.get_status.assert_called_once()
     
-    def test_automation_skips_silently_without_logging(self):
-        """Test that automation cycle skips silently without debug logs when in stream checking mode."""
+    def test_automation_defers_without_running_logs(self):
+        """Test that automation cycle defers without logging a completed run."""
         with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
             manager = AutomatedStreamManager(config_file=self.config_file)
             

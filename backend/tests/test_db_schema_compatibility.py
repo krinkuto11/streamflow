@@ -2,8 +2,8 @@ from apps.automation import automation_config_manager as acm
 from apps.database.connection import get_session, init_db
 
 
-def test_init_db_reconciles_legacy_automation_periods_schema(clean_test_db):
-    """init_db should add missing columns to legacy automation_periods tables."""
+def test_init_db_accepts_legacy_automation_periods_schema(clean_test_db):
+    """init_db should still accept legacy automation_periods tables."""
     with clean_test_db.begin() as conn:
         conn.exec_driver_sql("DROP TABLE automation_periods")
         conn.exec_driver_sql(
@@ -26,20 +26,7 @@ def test_init_db_reconciles_legacy_automation_periods_schema(clean_test_db):
 
     init_db()
 
-    session = get_session()
-    try:
-        columns = {
-            row[1]
-            for row in session.connection().exec_driver_sql(
-                'PRAGMA table_info("automation_periods")'
-            ).fetchall()
-        }
-    finally:
-        session.close()
-
-    assert 'enable_loop_detection' in columns
-
-    # Reset singleton for isolation and verify period creation works against upgraded schema.
+    # Reset singleton for isolation and verify period creation works against the legacy schema.
     acm._automation_config_manager = None
     manager = acm.get_automation_config_manager()
 

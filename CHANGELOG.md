@@ -11,12 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **StreamFlow V3 reliability stack** - Draft-gated work for provider/profile-aware Stream Checker capacity, Teamarr managed-event preflight, Shadow Monitor continuity, startup progress, hardware diagnostics, and in-app operator Help.
 - **Detailed V3 changelog** - Added `docs/pr432-v3-changelog.md` so PR #432 has a readable branch-level changelog and validation record instead of relying on an oversized PR body.
+- **Detailed V4 changelog** - Added `docs/pr434-v4-changelog.md` so PR #434 tracks the release-hardening scope, image digest, live gates, screenshots, and remaining draft blockers outside the PR body.
 - **M3U priority modes** - Added `Playlist Priority -> Score` and `Score -> Playlist Priority` modes for automation profiles.
+- **Automation run stream health metrics** - Added a dashboard `Good Streams` metric and a compact `Checking now` row for active quality batches.
 
 ### Changed
 - **Operator-facing progress and setup wording** - Clarified Stream Checker ETA labels, dashboard run counters, startup duration estimates, Teamarr timing buckets, Shadow Monitor switch limits, and Help `Where` locations.
 - **Help and setup guidance** - Keeps V3 Help platform neutral, points settings to visible UI or explicit status/API locations, and shows shipped UI screenshots as cropped, optimized, collapsible, lazy-loaded references.
 - **Stream Checker ETA** - Batch and full-run ETA now uses a conservative channel-throughput floor alongside stream-level progress, preventing long full checks from reporting unrealistically short remaining time.
+- **Auto-Create scheduling outcomes** - EPG regex previews and refresh results now distinguish total matches from schedulable future events, due-now queue entries, already-checked events, missing time, and invalid time so operators can tell why a large match count may leave fewer Scheduled Events visible.
+- **M3U refresh observation** - Automation now waits for accepted playlist refreshes to settle before cache sync, reports waiting/settled/partial/timeout/failed states, and can retry failed providers without blocking healthy providers.
+- **Synchronous full-run guard** - Long full runs keep the automation busy guard alive for production-scale quality batches instead of being treated as a stale lock after one hour.
+- **Stream Checker ETA wording** - Provider-limited or floor-based estimates now display as `Rough ETA` with a tooltip explaining expected swings between long channel waits.
 
 ### Fixed
 - **V3 reliability fixes** - Preserves active batch dead/blank/freeze counters, avoids misleading DRI hardware warnings, improves Teamarr post-start checks, validates auto-create group previews across channels, and keeps real-viewer wording distinct from watcher probes.
@@ -31,6 +37,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Viewer-proxy blank recovery** - Shadow Monitor now verifies the real viewer proxy path after stream switches and does not hide a failed replacement behind the normal channel cooldown.
 - **Automation catch-up policy** - Adds explicit `Run all due periods` opt-in; automatic scheduler passes now default to the highest-priority due period and only process all due periods when the operator enables it, with Catch-up cap as the load guard.
 - **Stream Checker run metrics** - Keeps synchronous batch blank/freeze totals visible, counts only accepted stream assignments in matching metrics, and clears stale waiting reasons once streams start checking or probing.
+- **Auto-Create rule refresh** - Multi-channel/group Auto-Create rules now match all selected EPG-backed channels, use live channel and TVG identity, avoid duplicate immediate matching, and enqueue one channel-level event check at a time with priority 90.
+- **Queue and Teamarr Preflight isolation** - Direct Teamarr preflight checks, queued event checks, and synchronous quality batches share one serialized stream-check path so due event checks wait instead of overlapping or disappearing.
+- **Blank/freeze result accounting** - Full-run and batch summaries keep dead, blank, and frozen classifications visible while checks are active and after finalization.
+- **Mobile scheduling toolbar** - The Scheduling header and Auto-Create toolbar wrap cleanly on narrow dark-mode layouts instead of clipping action buttons.
+- **Shadow Monitor status safety** - Shadow Monitor startup is gated on watcher API-key readiness, keeps viewer/EPG context visible, and avoids exposing raw backend exception detail in monitor status responses.
+- **Low-quality reason visibility** - Stream Checker rows now show the low-quality reason directly under the `Low Quality` status badge instead of relying only on the stream-name subtext.
+- **Shadow Monitor recovery guard** - Continuous watcher recovery now cancels pending blank/freeze confirmations when a real watcher client returns before the confirmation pass, avoiding false stream switches after transient watcher reconnects.
+- **Teamarr post-start bucket handling** - Teamarr Preflight catches configured `post_start_offsets_minutes` inside the configured post-start grace window instead of hard-coding one offset or missing buckets after long serialized checks.
+- **Teamarr stale stream refresh** - The `no_streams_yet` path refreshes the affected channel stream mapping before making the final decision, reducing false no-stream outcomes after Dispatcharr/Teamarr updates.
+- **Teamarr Preflight loading and queue display** - The Teamarr Preflight page no longer crashes while config/status data is still loading, and queued checks running through the Stream Checker queue are shown in the active/running area with the configured concurrency limit.
+
+### Removed
+- **AceStream Monitoring** - Removed the unused AceStream Monitoring surface while keeping normal Stream Monitoring, Stream Checker, Shadow Monitor, and Teamarr Preflight intact.
 
 
 ## [2.5.6] - 2026-05-07

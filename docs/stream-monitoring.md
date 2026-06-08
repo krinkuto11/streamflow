@@ -8,7 +8,7 @@ Stream Monitoring is a live health tracking system that runs independently of th
 ## 1. FFmpeg Router & Sidecars
 The system employs an efficient "Main + Sidecar" architecture for each monitored stream:
 
-- **Main Monitor ([FFmpegStreamMonitor](file:///Users/anderregidor/AceStream%20Project/streamflow/backend/ffmpeg_stream_monitor.py#43-419))**: Captures high-level telemetry like bitrate, FPS, and speed. It uses health monitoring outputs to detect buffering or terminal failures.
+- **Main Monitor (`backend/apps/stream/ffmpeg_stream_monitor.py`)**: Captures high-level telemetry like bitrate, FPS, and speed. It uses health monitoring outputs to detect buffering or terminal failures.
 - **Sidecar Detectors**: Specialized processes spawned alongside the main monitor to perform computationally intensive tasks without blocking the telemetry loop.
 
 ### Sidecar Mechanism Workflow
@@ -29,7 +29,7 @@ graph TD
 The loop detector analyzes frames in the PPM pipe. It maintains a short-term buffer of frame signatures (simplified as grayscale signatures) and checks for repeating sequences that indicate a stream is "looping".
 
 - **Penalty**: 50 points are deducted from the reliability score immediately upon loop detection.
-- **Quarantine**: If a stream is confirmed to be looping, it is marked as [looping](file:///Users/anderregidor/AceStream%20Project/streamflow/backend/sidecar_loop_detector.py#46-49) and moved to quarantine.
+- **Quarantine**: If a stream is confirmed to be looping, it is marked as looping and moved to quarantine.
 
 ---
 

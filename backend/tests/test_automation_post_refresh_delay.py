@@ -5,6 +5,7 @@ from apps.automation.automated_stream_manager import AutomatedStreamManager
 
 def _build_manager(monkeypatch, *, m3u_enabled: bool) -> AutomatedStreamManager:
     manager = AutomatedStreamManager()
+    manager.config["m3u_refresh_wait"] = {"enabled": False}
 
     manager._save_state = Mock()
     manager.validate_and_remove_non_matching_streams = Mock(return_value={"details": []})
