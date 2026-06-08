@@ -34,6 +34,9 @@ const eventLabels = {
   probe_ok: 'Probe OK',
   blank_pending: 'Blank Pending',
   freeze_pending: 'Freeze Pending',
+  garbled_audio_pending: 'Garbled Audio Pending',
+  silent_audio_pending: 'Silent Audio Pending',
+  offline_image_pending: 'Offline Image Pending',
   dry_run_switch: 'Dry Run Switch',
   switch_success: 'Switch Success',
   switch_failed: 'Switch Failed',
@@ -79,6 +82,7 @@ export default function ShadowBlankMonitor() {
   const [status, setStatus] = useState(null)
   const [excludedIds, setExcludedIds] = useState('')
   const [excludedUuids, setExcludedUuids] = useState('')
+  const [offlineImageHashes, setOfflineImageHashes] = useState('')
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
   const { toast } = useToast()
@@ -106,6 +110,7 @@ export default function ShadowBlankMonitor() {
       setEditedConfig(nextConfig)
       setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
       setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
+      setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
       setStatus(statusResponse.data || {})
     } catch (err) {
       console.error('Failed to load shadow monitor data:', err)
@@ -142,6 +147,7 @@ export default function ShadowBlankMonitor() {
         ...(editedConfig || {}),
         excluded_channel_ids: parseCsv(excludedIds, true),
         excluded_channel_uuids: parseCsv(excludedUuids),
+        offline_image_reference_hashes: parseCsv(offlineImageHashes),
         ...extra,
       }
       const response = await shadowBlankMonitorAPI.updateConfig(payload)
@@ -150,6 +156,7 @@ export default function ShadowBlankMonitor() {
       setEditedConfig(nextConfig)
       setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
       setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
+      setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
       await loadStatus()
       toast({ title: 'Saved', description: 'Shadow monitor configuration updated' })
     } catch (err) {
@@ -350,6 +357,39 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
+              <div className="flex items-center justify-between rounded-md border p-3">
+                <div>
+                  <Label className="text-sm font-medium">Garbled Audio</Label>
+                  <p className="text-xs text-muted-foreground">Treat repeated audio decode errors as a media fault</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.garbled_audio_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('garbled_audio_detection_enabled', value)}
+                />
+              </div>
+
+              <div className="flex items-center justify-between rounded-md border p-3">
+                <div>
+                  <Label className="text-sm font-medium">Silent Audio</Label>
+                  <p className="text-xs text-muted-foreground">Treat long audio silence as a media fault</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.silent_audio_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('silent_audio_detection_enabled', value)}
+                />
+              </div>
+
+              <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
+                <div>
+                  <Label className="text-sm font-medium">Offline Image</Label>
+                  <p className="text-xs text-muted-foreground">Detect provider offline slates by reference pHash</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.offline_image_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('offline_image_detection_enabled', value)}
+                />
+              </div>
+
               <div className="rounded-md border p-3 md:col-span-2">
                 <Label className="text-sm font-medium">Watch Mode</Label>
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -413,6 +453,21 @@ export default function ShadowBlankMonitor() {
                   />
                 </div>
               ))}
+            </div>
+
+            <Separator />
+
+            <div className="space-y-2">
+              <Label htmlFor="offline_image_reference_hashes">Offline Image Reference pHashes</Label>
+              <Input
+                id="offline_image_reference_hashes"
+                placeholder="comma-separated pHash values"
+                value={offlineImageHashes}
+                onChange={(event) => setOfflineImageHashes(event.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Offline-image switching stays disabled unless at least one reference hash is configured.
+              </p>
             </div>
 
             <Separator />
@@ -529,6 +584,9 @@ export default function ShadowBlankMonitor() {
                           )}
                           {channel.last_probe?.freeze_detected && <Badge variant="outline">Frozen</Badge>}
                           {channel.last_probe?.blank_detected && <Badge variant="outline">Blank</Badge>}
+                          {channel.last_probe?.garbled_audio_detected && <Badge variant="outline">Garbled Audio</Badge>}
+                          {channel.last_probe?.silent_audio_detected && <Badge variant="outline">Silent Audio</Badge>}
+                          {channel.last_probe?.offline_image_detected && <Badge variant="outline">Offline Image</Badge>}
                         </div>
                       </div>
                     )

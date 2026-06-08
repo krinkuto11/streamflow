@@ -138,6 +138,7 @@ from apps.api.stream_checker_handlers import (
     update_stream_checker_config_response,
     get_stream_checker_config_response,
     get_stream_checker_hardware_status_response,
+    get_stream_last_quality_stats_response,
     get_stream_checker_progress_response,
     get_stream_checker_queue_response,
     start_stream_checker_response,
@@ -1292,6 +1293,17 @@ def update_stream_checker_config():
 def get_stream_checker_progress():
     """Get current checking progress."""
     return get_stream_checker_progress_response(get_stream_checker_service=get_stream_checker_service)
+
+
+@app.route('/api/stream-checker/streams/<int:stream_id>/last-quality-stats', methods=['GET'])
+def get_stream_last_quality_stats(stream_id):
+    """Get the latest persisted quality stats for a stream without probing."""
+    stale_after_hours = request.args.get("stale_after_hours", type=float)
+    return get_stream_last_quality_stats_response(
+        stream_id=stream_id,
+        stale_after_hours=stale_after_hours,
+    )
+
 
 @app.route('/api/stream-checker/check-channel', methods=['POST'])
 def check_specific_channel():

@@ -98,6 +98,14 @@ def test_watch_mode_controls_scan_delay():
     assert defaults["freeze_detection_enabled"] is True
     assert defaults["no_decodable_frames_detection_enabled"] is True
     assert defaults["no_decodable_frames_min_duration_seconds"] == 10.0
+    assert defaults["garbled_audio_detection_enabled"] is False
+    assert defaults["garbled_audio_error_threshold"] == 3
+    assert defaults["silent_audio_detection_enabled"] is False
+    assert defaults["silent_audio_min_duration_seconds"] == 10.0
+    assert defaults["silent_audio_noise_db"] == -50
+    assert defaults["offline_image_detection_enabled"] is False
+    assert defaults["offline_image_reference_hashes"] == []
+    assert defaults["offline_image_hash_threshold"] == 4
     assert defaults["confirmation_count"] == 2
     assert defaults["channel_cooldown_seconds"] == 300
     assert defaults["max_switches_per_hour"] == 3
@@ -694,6 +702,134 @@ def test_confirmed_no_decodable_frames_switches_to_next_stream_when_live(tmp_pat
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["reason"] == "no_decodable_frames"
     assert status["cooldowns"] == []
+
+
+def test_audio_detection_parser_detects_garbled_audio_after_threshold():
+    config = normalize_config({
+        "garbled_audio_detection_enabled": True,
+        "garbled_audio_error_threshold": 2,
+    })
+    output = (
+        "Error while decoding stream #0:1: audio decode error\n"
+        "[aac @ 000] channel element 3.7 is not allocated in audio stream #0:1\n"
+    )
+
+    parsed = ShadowBlankMonitorService._parse_audio_detection(
+        output,
+        config,
+        observed_duration=12,
+    )
+
+    assert parsed["garbled_audio_detected"] is True
+    assert parsed["garbled_audio_error_count"] == 2
+    assert "audio" in parsed["garbled_audio_error"].lower()
+
+
+def test_audio_detection_parser_detects_silent_audio_duration():
+    config = normalize_config({
+        "silent_audio_detection_enabled": True,
+        "silent_audio_min_duration_seconds": 10,
+        "silent_audio_noise_db": -48,
+    })
+    output = (
+        "[silencedetect @ 000] silence_start: 1.5\n"
+        "[silencedetect @ 000] silence_end: 13.0 | silence_duration: 11.5\n"
+    )
+
+    parsed = ShadowBlankMonitorService._parse_audio_detection(
+        output,
+        config,
+        observed_duration=14,
+    )
+
+    assert parsed["silent_audio_detected"] is True
+    assert parsed["silent_audio_duration_secs"] == 11.5
+    assert parsed["silent_audio_noise_db"] == -48
+
+
+def test_media_fault_results_are_ignored_unless_enabled(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "garbled_audio_detected": True,
+            "silent_audio_detected": True,
+            "offline_image_detected": True,
+        },
+        switch_calls=switch_calls,
+    )
+    service.update_config({"enabled": False, "dry_run": False, "confirmation_count": 1})
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "probe_ok"
+
+
+def test_enabled_media_fault_switches_to_next_stream_when_live(tmp_path):
+    scenarios = [
+        (
+            "garbled_audio",
+            "garbled_audio_detection_enabled",
+            {
+                "garbled_audio_detected": True,
+                "garbled_audio_error_count": 3,
+                "garbled_audio_error": "audio decode error",
+            },
+        ),
+        (
+            "silent_audio",
+            "silent_audio_detection_enabled",
+            {
+                "silent_audio_detected": True,
+                "silent_audio_duration_secs": 12.0,
+            },
+        ),
+        (
+            "offline_image",
+            "offline_image_detection_enabled",
+            {
+                "offline_image_detected": True,
+                "offline_image_hash": "ffeeffeeffeeffee",
+                "offline_image_distance": 2,
+            },
+        ),
+    ]
+
+    for reason, enabled_key, probe_result in scenarios:
+        switch_calls = []
+        udi = FakeUdi(
+            statuses=[{"uuid-1": active_status()}],
+            channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        )
+        service = make_service(
+            tmp_path / reason,
+            udi=udi,
+            blank_probe=lambda url, config, probe_result=probe_result: {
+                "blank_detected": False,
+                "freeze_detected": False,
+                **probe_result,
+            },
+            switch_calls=switch_calls,
+        )
+        service.update_config({
+            "enabled": False,
+            "dry_run": False,
+            "confirmation_count": 1,
+            enabled_key: True,
+        })
+
+        status = service.run_once(force=True)
+
+        assert switch_calls == [("uuid-1", 11, None)]
+        assert status["recent_events"][0]["type"] == "switch_success"
+        assert status["recent_events"][0]["details"]["reason"] == reason
+        assert status["cooldowns"] == []
 
 
 def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp_path):

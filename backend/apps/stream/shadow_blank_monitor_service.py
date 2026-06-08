@@ -8,6 +8,7 @@ channel should receive only one extra local downstream client during a probe.
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import queue
@@ -54,6 +55,29 @@ NO_DECODABLE_FRAME_ERROR_PATTERNS = (
     "no frame could be decoded",
 )
 FFMPEG_FRAME_RE = re.compile(r"\bframe=\s*(?P<frames>\d+)")
+SILENCE_START_RE = re.compile(r"silence_start:\s*(?P<start>\d+(?:\.\d+)?)")
+SILENCE_END_RE = re.compile(r"silence_end:\s*(?P<end>\d+(?:\.\d+)?)")
+SILENCE_DURATION_RE = re.compile(r"silence_duration:\s*(?P<duration>\d+(?:\.\d+)?)")
+AUDIO_MISSING_PATTERNS = (
+    "matches no streams",
+    "stream specifier",
+    "no audio stream",
+)
+AUDIO_ERROR_PATTERNS = (
+    "error while decoding stream",
+    "audio decoding failed",
+    "audio decode error",
+    "invalid audio",
+    "corrupt audio",
+)
+AUDIO_DECODER_RE = re.compile(r"^\[(?:aac|ac3|eac3|mp2|mp3float|opus|vorbis|flac|truehd|dca)\s+@")
+AUDIO_DECODER_ERROR_PATTERNS = (
+    "channel element",
+    "error decoding",
+    "decode error",
+    "invalid",
+    "not allocated",
+)
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -71,6 +95,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "freeze_ratio_threshold": 0.80,
     "no_decodable_frames_detection_enabled": True,
     "no_decodable_frames_min_duration_seconds": 10.0,
+    "garbled_audio_detection_enabled": False,
+    "garbled_audio_error_threshold": 3,
+    "silent_audio_detection_enabled": False,
+    "silent_audio_min_duration_seconds": 10.0,
+    "silent_audio_noise_db": -50,
+    "offline_image_detection_enabled": False,
+    "offline_image_reference_hashes": [],
+    "offline_image_hash_threshold": 4,
+    "offline_image_capture_offset_seconds": 3,
     "confirmation_count": 2,
     "channel_cooldown_seconds": 300,
     "max_switches_per_hour": 3,
@@ -92,6 +125,10 @@ INT_BOUNDS = {
     "channel_cooldown_seconds": (30, 86400),
     "max_switches_per_hour": (1, 20),
     "max_concurrent_watchers": (1, 10),
+    "garbled_audio_error_threshold": (1, 20),
+    "silent_audio_noise_db": (-90, -20),
+    "offline_image_hash_threshold": (0, 20),
+    "offline_image_capture_offset_seconds": (0, 30),
 }
 
 FLOAT_BOUNDS = {
@@ -102,6 +139,7 @@ FLOAT_BOUNDS = {
     "freeze_noise_threshold": (0.0, 1.0),
     "freeze_ratio_threshold": (0.1, 1.0),
     "no_decodable_frames_min_duration_seconds": (3.0, 60.0),
+    "silent_audio_min_duration_seconds": (2.0, 60.0),
 }
 
 
@@ -152,6 +190,9 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["dry_run"] = bool(config.get("dry_run"))
     config["freeze_detection_enabled"] = bool(config.get("freeze_detection_enabled"))
     config["no_decodable_frames_detection_enabled"] = bool(config.get("no_decodable_frames_detection_enabled"))
+    config["garbled_audio_detection_enabled"] = bool(config.get("garbled_audio_detection_enabled"))
+    config["silent_audio_detection_enabled"] = bool(config.get("silent_audio_detection_enabled"))
+    config["offline_image_detection_enabled"] = bool(config.get("offline_image_detection_enabled"))
     config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
     if config["watch_mode"] not in WATCH_MODES:
         config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
@@ -168,6 +209,11 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["excluded_channel_uuids"] = [
         str(item).strip()
         for item in _coerce_list(config.get("excluded_channel_uuids"))
+        if str(item).strip()
+    ]
+    config["offline_image_reference_hashes"] = [
+        str(item).strip().lower()
+        for item in _coerce_list(config.get("offline_image_reference_hashes"))
         if str(item).strip()
     ]
     return config
@@ -611,10 +657,32 @@ class ShadowBlankMonitorService:
             blank = bool(result.get("blank_detected"))
             freeze = bool(result.get("freeze_detected"))
             no_decodable_frames = bool(result.get("no_decodable_frames_detected"))
-            detection_reason = (
-                "blank"
-                if blank
-                else ("freeze" if freeze else ("no_decodable_frames" if no_decodable_frames else ""))
+            garbled_audio = bool(
+                config.get("garbled_audio_detection_enabled")
+                and result.get("garbled_audio_detected")
+            )
+            silent_audio = bool(
+                config.get("silent_audio_detection_enabled")
+                and result.get("silent_audio_detected")
+            )
+            offline_image = bool(
+                config.get("offline_image_detection_enabled")
+                and result.get("offline_image_detected")
+            )
+            detection_reason = next(
+                (
+                    reason
+                    for reason, detected in (
+                        ("blank", blank),
+                        ("offline_image", offline_image),
+                        ("freeze", freeze),
+                        ("no_decodable_frames", no_decodable_frames),
+                        ("garbled_audio", garbled_audio),
+                        ("silent_audio", silent_audio),
+                    )
+                    if detected
+                ),
+                "",
             )
             target["last_probe"] = {
                 "blank_detected": blank,
@@ -626,6 +694,15 @@ class ShadowBlankMonitorService:
                 "no_decodable_frames_detected": no_decodable_frames,
                 "no_decodable_frames_duration_secs": result.get("no_decodable_frames_duration_secs"),
                 "no_decodable_frames_error": result.get("no_decodable_frames_error"),
+                "garbled_audio_detected": garbled_audio,
+                "garbled_audio_error_count": result.get("garbled_audio_error_count"),
+                "garbled_audio_error": result.get("garbled_audio_error"),
+                "silent_audio_detected": silent_audio,
+                "silent_audio_duration_secs": result.get("silent_audio_duration_secs"),
+                "silent_audio_noise_db": result.get("silent_audio_noise_db"),
+                "offline_image_detected": offline_image,
+                "offline_image_hash": result.get("offline_image_hash"),
+                "offline_image_distance": result.get("offline_image_distance"),
             }
 
             if result.get("viewer_left"):
@@ -779,6 +856,9 @@ class ShadowBlankMonitorService:
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "blank"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "freeze"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
+            self._blank_counts.pop(self._detection_count_key(channel_uuid, "garbled_audio"), None)
+            self._blank_counts.pop(self._detection_count_key(channel_uuid, "silent_audio"), None)
+            self._blank_counts.pop(self._detection_count_key(channel_uuid, "offline_image"), None)
 
     def _reset_detection_state(self, channel_uuid: str) -> None:
         self._reset_blank_count(channel_uuid)
@@ -879,22 +959,215 @@ class ShadowBlankMonitorService:
                 f"freezedetect=n={float(config['freeze_noise_threshold'])}:"
                 f"d={float(config['freeze_min_duration_seconds'])}"
             )
-        command.extend(
-            [
-                "-i",
-                url,
-                "-vf",
-                ",".join(video_filters),
-                "-an",
-                "-f",
-                "null",
-                "-",
-            ]
-        )
+        command.extend(["-i", url, "-vf", ",".join(video_filters)])
+        if config.get("garbled_audio_detection_enabled") or config.get("silent_audio_detection_enabled"):
+            audio_filters: List[str] = []
+            if config.get("silent_audio_detection_enabled"):
+                audio_filters.append(
+                    "silencedetect="
+                    f"n={int(config['silent_audio_noise_db'])}dB:"
+                    f"d={float(config['silent_audio_min_duration_seconds'])}"
+                )
+            audio_filters.append("astats=metadata=1:reset=1")
+            command.extend(["-af", ",".join(audio_filters)])
+        else:
+            command.append("-an")
+        command.extend(["-f", "null", "-"])
         if not continuous:
             input_index = command.index("-vf")
             command[input_index:input_index] = ["-t", str(duration)]
         return command, duration
+
+    @staticmethod
+    def _line_is_missing_audio(line: str) -> bool:
+        lowered = (line or "").lower()
+        return any(pattern in lowered for pattern in AUDIO_MISSING_PATTERNS) and (
+            "audio" in lowered or ":a" in lowered
+        )
+
+    @staticmethod
+    def _line_is_garbled_audio(line: str) -> bool:
+        lowered = (line or "").lower()
+        if not lowered or ShadowBlankMonitorService._line_is_missing_audio(lowered):
+            return False
+        if any(pattern in lowered for pattern in AUDIO_ERROR_PATTERNS):
+            return "audio" in lowered or ":a" in lowered or AUDIO_DECODER_RE.search(lowered) is not None
+        if AUDIO_DECODER_RE.search(lowered) is None:
+            return False
+        return any(pattern in lowered for pattern in AUDIO_DECODER_ERROR_PATTERNS)
+
+    @staticmethod
+    def _parse_audio_detection(
+        output: str,
+        config: Dict[str, Any],
+        *,
+        observed_duration: float,
+    ) -> Dict[str, Any]:
+        result = {
+            "garbled_audio_detected": False,
+            "garbled_audio_error_count": 0,
+            "garbled_audio_error": None,
+            "silent_audio_detected": False,
+            "silent_audio_duration_secs": None,
+            "silent_audio_noise_db": None,
+            "audio_stream_present": None,
+        }
+        if not (
+            config.get("garbled_audio_detection_enabled")
+            or config.get("silent_audio_detection_enabled")
+        ):
+            return result
+
+        output = output or ""
+        audio_missing = False
+        garbled_count = 0
+        first_garbled_line: Optional[str] = None
+        active_silence_start: Optional[float] = None
+        longest_silence = 0.0
+
+        for line in output.splitlines():
+            if ShadowBlankMonitorService._line_is_missing_audio(line):
+                audio_missing = True
+                continue
+            if ShadowBlankMonitorService._line_is_garbled_audio(line):
+                garbled_count += 1
+                first_garbled_line = first_garbled_line or line.strip()[:160]
+
+            silence_start = SILENCE_START_RE.search(line)
+            if silence_start:
+                try:
+                    active_silence_start = max(0.0, float(silence_start.group("start")))
+                except (TypeError, ValueError):
+                    active_silence_start = None
+
+            silence_duration = SILENCE_DURATION_RE.search(line)
+            if silence_duration:
+                try:
+                    longest_silence = max(longest_silence, float(silence_duration.group("duration")))
+                except (TypeError, ValueError):
+                    pass
+                active_silence_start = None
+                continue
+
+            silence_end = SILENCE_END_RE.search(line)
+            if silence_end and active_silence_start is not None:
+                try:
+                    longest_silence = max(
+                        longest_silence,
+                        max(0.0, float(silence_end.group("end")) - active_silence_start),
+                    )
+                except (TypeError, ValueError):
+                    pass
+                active_silence_start = None
+
+        if active_silence_start is not None:
+            longest_silence = max(longest_silence, max(0.0, float(observed_duration or 0.0) - active_silence_start))
+
+        result["audio_stream_present"] = not audio_missing if (audio_missing or garbled_count or longest_silence) else None
+        if audio_missing:
+            return result
+
+        if config.get("garbled_audio_detection_enabled"):
+            threshold = int(config.get("garbled_audio_error_threshold", DEFAULT_CONFIG["garbled_audio_error_threshold"]))
+            result["garbled_audio_error_count"] = garbled_count
+            if garbled_count >= threshold:
+                result["garbled_audio_detected"] = True
+                result["garbled_audio_error"] = first_garbled_line or "audio_decode_errors"
+
+        if config.get("silent_audio_detection_enabled"):
+            min_duration = float(
+                config.get(
+                    "silent_audio_min_duration_seconds",
+                    DEFAULT_CONFIG["silent_audio_min_duration_seconds"],
+                )
+            )
+            result["silent_audio_duration_secs"] = round(longest_silence, 3) if longest_silence else None
+            result["silent_audio_noise_db"] = int(config.get("silent_audio_noise_db", DEFAULT_CONFIG["silent_audio_noise_db"]))
+            if longest_silence >= min_duration:
+                result["silent_audio_detected"] = True
+
+        return result
+
+    @staticmethod
+    def _offline_image_probe_command(url: str, config: Dict[str, Any]) -> List[str]:
+        headers = ""
+        api_key = config.get("watcher_api_key")
+        if api_key:
+            headers = f"X-API-Key: {api_key}\r\nAuthorization: ApiKey {api_key}\r\n"
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-user_agent",
+            config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"],
+        ]
+        if headers:
+            command.extend(["-headers", headers])
+        offset = int(config.get("offline_image_capture_offset_seconds", 3))
+        if offset > 0:
+            command.extend(["-ss", str(offset)])
+        command.extend(["-i", url, "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"])
+        return command
+
+    @staticmethod
+    def _hash_distance(left: str, right: str) -> Optional[int]:
+        try:
+            return bin(int(left, 16) ^ int(right, 16)).count("1")
+        except (TypeError, ValueError):
+            return None
+
+    def _run_offline_image_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        result = {
+            "offline_image_detected": False,
+            "offline_image_hash": None,
+            "offline_image_distance": None,
+            "offline_image_reference_count": len(config.get("offline_image_reference_hashes") or []),
+        }
+        if not config.get("offline_image_detection_enabled"):
+            return result
+        reference_hashes = list(config.get("offline_image_reference_hashes") or [])
+        if not reference_hashes:
+            return result
+
+        try:
+            from PIL import Image
+            import imagehash
+        except Exception as exc:
+            result["offline_image_error"] = f"image_hash_unavailable:{type(exc).__name__}"
+            return result
+
+        try:
+            completed = subprocess.run(
+                self._offline_image_probe_command(url, config),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=15,
+            )
+            if completed.returncode != 0 or not completed.stdout:
+                result["offline_image_error"] = "frame_capture_failed"
+                return result
+
+            image = Image.open(io.BytesIO(completed.stdout))
+            phash = str(imagehash.phash(image)).lower()
+            result["offline_image_hash"] = phash
+            distances = [
+                distance
+                for distance in (self._hash_distance(phash, candidate) for candidate in reference_hashes)
+                if distance is not None
+            ]
+            if not distances:
+                return result
+            best_distance = min(distances)
+            result["offline_image_distance"] = best_distance
+            if best_distance <= int(config.get("offline_image_hash_threshold", 4)):
+                result["offline_image_detected"] = True
+            return result
+        except Exception as exc:
+            logger.debug("Shadow offline image probe failed: %s", exc)
+            result["offline_image_error"] = type(exc).__name__
+            return result
 
     @staticmethod
     def _parse_no_decodable_frames_detection(
@@ -981,12 +1254,18 @@ class ShadowBlankMonitorService:
                     duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+            parsed.update(self._parse_audio_detection(
+                output,
+                config,
+                observed_duration=elapsed,
+            ))
             parsed.update(self._parse_no_decodable_frames_detection(
                 output,
                 config,
                 observed_duration=elapsed,
                 returncode=completed.returncode,
             ))
+            parsed.update(self._run_offline_image_probe(url, config))
             parsed["returncode"] = completed.returncode
             return parsed
         except subprocess.TimeoutExpired as exc:
@@ -1002,12 +1281,18 @@ class ShadowBlankMonitorService:
                     duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+            parsed.update(self._parse_audio_detection(
+                output,
+                config,
+                observed_duration=duration,
+            ))
             parsed.update(self._parse_no_decodable_frames_detection(
                 output,
                 config,
                 observed_duration=duration,
                 returncode=None,
             ))
+            parsed.update(self._run_offline_image_probe(url, config))
             parsed["timeout"] = True
             return parsed
 
@@ -1019,12 +1304,26 @@ class ShadowBlankMonitorService:
         target: Dict[str, Any],
     ) -> Dict[str, Any]:
         command, duration = self._blank_probe_command(url, config, continuous=True)
+        offline_image_probe = self._run_offline_image_probe(url, config)
+        if offline_image_probe.get("offline_image_detected"):
+            return {
+                "blank_detected": False,
+                "freeze_detected": False,
+                "no_decodable_frames_detected": False,
+                "garbled_audio_detected": False,
+                "silent_audio_detected": False,
+                **offline_image_probe,
+            }
         viewer_left = False
         stopped = False
         detected_reason = ""
         detected_duration = 0.0
         no_decodable_error: Optional[str] = None
         no_decodable_first_seen_wall: Optional[float] = None
+        garbled_audio_errors = 0
+        first_garbled_audio_error: Optional[str] = None
+        active_silence_start: Optional[float] = None
+        active_silence_wall: Optional[float] = None
         decoded_frames = 0
         lines: List[str] = []
         line_queue: queue.Queue[str] = queue.Queue()
@@ -1070,6 +1369,18 @@ class ShadowBlankMonitorService:
                 config.get(
                     "no_decodable_frames_min_duration_seconds",
                     DEFAULT_CONFIG["no_decodable_frames_min_duration_seconds"],
+                )
+            )
+            silent_audio_required = float(
+                config.get(
+                    "silent_audio_min_duration_seconds",
+                    DEFAULT_CONFIG["silent_audio_min_duration_seconds"],
+                )
+            )
+            garbled_audio_threshold = int(
+                config.get(
+                    "garbled_audio_error_threshold",
+                    DEFAULT_CONFIG["garbled_audio_error_threshold"],
                 )
             )
             last_media_time = 0.0
@@ -1118,6 +1429,47 @@ class ShadowBlankMonitorService:
                             decoded_frames = max(decoded_frames, int(frame_match.group("frames")))
                         except (TypeError, ValueError):
                             continue
+
+                    if config.get("garbled_audio_detection_enabled") and self._line_is_garbled_audio(line):
+                        garbled_audio_errors += 1
+                        first_garbled_audio_error = first_garbled_audio_error or line.strip()[:160]
+                        if garbled_audio_errors >= garbled_audio_threshold:
+                            if mark_detection("garbled_audio", 0.0):
+                                break
+
+                    if config.get("silent_audio_detection_enabled"):
+                        silence_start = SILENCE_START_RE.search(line)
+                        if silence_start:
+                            try:
+                                active_silence_start = max(0.0, float(silence_start.group("start")))
+                                active_silence_wall = now
+                            except (TypeError, ValueError):
+                                active_silence_start = None
+                                active_silence_wall = None
+
+                        silence_duration = SILENCE_DURATION_RE.search(line)
+                        if silence_duration:
+                            try:
+                                silence_secs = max(0.0, float(silence_duration.group("duration")))
+                            except (TypeError, ValueError):
+                                silence_secs = 0.0
+                            active_silence_start = None
+                            active_silence_wall = None
+                            if silence_secs >= silent_audio_required:
+                                if mark_detection("silent_audio", silence_secs):
+                                    break
+
+                        silence_end = SILENCE_END_RE.search(line)
+                        if silence_end and active_silence_start is not None:
+                            try:
+                                silence_secs = max(0.0, float(silence_end.group("end")) - active_silence_start)
+                            except (TypeError, ValueError):
+                                silence_secs = 0.0
+                            active_silence_start = None
+                            active_silence_wall = None
+                            if silence_secs >= silent_audio_required:
+                                if mark_detection("silent_audio", silence_secs):
+                                    break
 
                     if (
                         config.get("no_decodable_frames_detection_enabled", True)
@@ -1195,6 +1547,14 @@ class ShadowBlankMonitorService:
                                 break
 
                 if detected_reason:
+                    break
+
+                if (
+                    config.get("silent_audio_detection_enabled")
+                    and active_silence_start is not None
+                    and observed_duration(active_silence_start, active_silence_wall) >= silent_audio_required
+                ):
+                    mark_detection("silent_audio", observed_duration(active_silence_start, active_silence_wall))
                     break
 
                 if (
@@ -1312,7 +1672,13 @@ class ShadowBlankMonitorService:
                     observed_probe_duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+            parsed.update(self._parse_audio_detection(
+                output,
+                config,
+                observed_duration=max(detected_duration, time.monotonic() - probe_started_wall),
+            ))
             parsed.update(no_decodable_parsed)
+            parsed.update(offline_image_probe)
             parsed["returncode"] = process.returncode
             if detected_reason == "blank":
                 parsed["blank_detected"] = True
@@ -1332,6 +1698,18 @@ class ShadowBlankMonitorService:
                     no_decodable_parsed.get("no_decodable_frames_error")
                     or no_decodable_error
                 )
+            elif detected_reason == "garbled_audio":
+                parsed.setdefault("blank_detected", False)
+                parsed.setdefault("freeze_detected", False)
+                parsed["garbled_audio_detected"] = True
+                parsed["garbled_audio_error_count"] = garbled_audio_errors
+                parsed["garbled_audio_error"] = first_garbled_audio_error or "audio_decode_errors"
+            elif detected_reason == "silent_audio":
+                parsed.setdefault("blank_detected", False)
+                parsed.setdefault("freeze_detected", False)
+                parsed["silent_audio_detected"] = True
+                parsed["silent_audio_duration_secs"] = round(detected_duration, 3)
+                parsed["silent_audio_noise_db"] = int(config.get("silent_audio_noise_db", DEFAULT_CONFIG["silent_audio_noise_db"]))
             if viewer_left:
                 parsed["viewer_left"] = True
             if stopped:
