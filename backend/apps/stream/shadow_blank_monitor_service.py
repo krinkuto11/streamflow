@@ -104,6 +104,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "offline_image_reference_hashes": [],
     "offline_image_hash_threshold": 4,
     "offline_image_capture_offset_seconds": 3,
+    "next_stream_pre_probe_enabled": False,
+    "next_stream_pre_probe_duration_seconds": 8,
     "confirmation_count": 2,
     "channel_cooldown_seconds": 300,
     "max_switches_per_hour": 3,
@@ -129,6 +131,7 @@ INT_BOUNDS = {
     "silent_audio_noise_db": (-90, -20),
     "offline_image_hash_threshold": (0, 20),
     "offline_image_capture_offset_seconds": (0, 30),
+    "next_stream_pre_probe_duration_seconds": (3, 60),
 }
 
 FLOAT_BOUNDS = {
@@ -193,6 +196,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["garbled_audio_detection_enabled"] = bool(config.get("garbled_audio_detection_enabled"))
     config["silent_audio_detection_enabled"] = bool(config.get("silent_audio_detection_enabled"))
     config["offline_image_detection_enabled"] = bool(config.get("offline_image_detection_enabled"))
+    config["next_stream_pre_probe_enabled"] = bool(config.get("next_stream_pre_probe_enabled"))
     config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
     if config["watch_mode"] not in WATCH_MODES:
         config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
@@ -774,24 +778,42 @@ class ShadowBlankMonitorService:
             return
 
         attempted_targets = self._attempted_switch_targets(channel_uuid, fresh_stream_id)
-        alternative = self._choose_alternative_stream(
-            udi,
-            target.get("channel_id"),
-            fresh_stream_id,
-            excluded_stream_ids=attempted_targets,
-        )
+        if config.get("next_stream_pre_probe_enabled"):
+            alternative, pre_probe_details = self._choose_preprobed_alternative_stream(
+                udi,
+                target,
+                config,
+                fresh_stream_id,
+                excluded_stream_ids=attempted_targets,
+                reason=reason,
+            )
+        else:
+            alternative = self._choose_alternative_stream(
+                udi,
+                target.get("channel_id"),
+                fresh_stream_id,
+                excluded_stream_ids=attempted_targets,
+            )
+            pre_probe_details = None
         if not alternative:
             self._set_cooldown(channel_uuid, config)
             self._reset_blank_count(channel_uuid)
-            self._record_event("no_alternative", target, {"reason": reason})
+            details = {"reason": reason}
+            if pre_probe_details:
+                details["pre_probe"] = pre_probe_details
+            self._record_event("no_alternative", target, details)
             return
+
+        switch_details = {"target_stream_ref": _ref("stream", alternative), "reason": reason}
+        if pre_probe_details:
+            switch_details["pre_probe"] = pre_probe_details
 
         if config.get("dry_run"):
             self._set_cooldown(channel_uuid, config)
             self._record_event(
                 "dry_run_switch",
                 target,
-                {"target_stream_ref": _ref("stream", alternative), "reason": reason},
+                switch_details,
             )
             return
 
@@ -807,22 +829,21 @@ class ShadowBlankMonitorService:
             "switch_success" if success else "switch_failed",
             target,
             {
-                "target_stream_ref": _ref("stream", alternative),
-                "reason": reason,
+                **switch_details,
                 "post_switch_verification": bool(success),
             },
         )
 
-    def _choose_alternative_stream(
+    def _ordered_alternative_streams(
         self,
         udi: Any,
         channel_id: Optional[int],
         current_stream_id: Optional[int],
         *,
         excluded_stream_ids: Optional[Iterable[int]] = None,
-    ) -> Optional[int]:
+    ) -> List[int]:
         if channel_id is None:
-            return None
+            return []
         channel = udi.get_channel_by_id(channel_id) if hasattr(udi, "get_channel_by_id") else None
         stream_ids = list((channel or {}).get("streams") or [])
         if not stream_ids and hasattr(udi, "get_channel_streams"):
@@ -833,7 +854,7 @@ class ShadowBlankMonitorService:
             ]
         stream_ids = [int(item) for item in stream_ids if str(item).isdigit()]
         if len(stream_ids) <= 1:
-            return None
+            return []
         excluded = {
             int(item)
             for item in (excluded_stream_ids or [])
@@ -844,7 +865,120 @@ class ShadowBlankMonitorService:
             ordered = stream_ids[index + 1 :] + stream_ids[:index]
         else:
             ordered = stream_ids
-        return next((sid for sid in ordered if sid != current_stream_id and sid not in excluded), None)
+        return [
+            sid
+            for sid in ordered
+            if sid != current_stream_id and sid not in excluded
+        ]
+
+    def _choose_alternative_stream(
+        self,
+        udi: Any,
+        channel_id: Optional[int],
+        current_stream_id: Optional[int],
+        *,
+        excluded_stream_ids: Optional[Iterable[int]] = None,
+    ) -> Optional[int]:
+        return next(
+            iter(
+                self._ordered_alternative_streams(
+                    udi,
+                    channel_id,
+                    current_stream_id,
+                    excluded_stream_ids=excluded_stream_ids,
+                )
+            ),
+            None,
+        )
+
+    def _choose_preprobed_alternative_stream(
+        self,
+        udi: Any,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        current_stream_id: Optional[int],
+        *,
+        excluded_stream_ids: Optional[Iterable[int]] = None,
+        reason: str,
+    ) -> tuple[Optional[int], Optional[Dict[str, Any]]]:
+        last_details: Optional[Dict[str, Any]] = None
+        for candidate_id in self._ordered_alternative_streams(
+            udi,
+            target.get("channel_id"),
+            current_stream_id,
+            excluded_stream_ids=excluded_stream_ids,
+        ):
+            candidate_ref = _ref("stream", candidate_id)
+            candidate_url = self._stream_url_for_id(udi, target.get("channel_id"), candidate_id)
+            details: Dict[str, Any] = {
+                "enabled": True,
+                "target_stream_ref": candidate_ref,
+                "duration_seconds": int(config.get("next_stream_pre_probe_duration_seconds", 8)),
+            }
+            if not candidate_url:
+                details["result"] = "missing_url"
+                last_details = details
+                self._record_event("pre_probe_unavailable", target, {**details, "reason": reason})
+                continue
+
+            probe_result = self._run_next_stream_pre_probe(candidate_url, config)
+            rejection_reason = self._pre_probe_rejection_reason(probe_result)
+            details.update({
+                "result": "rejected" if rejection_reason else "ok",
+                "rejection_reason": rejection_reason,
+                "blank_detected": bool(probe_result.get("blank_detected")),
+                "freeze_detected": bool(probe_result.get("freeze_detected")),
+                "no_decodable_frames_detected": bool(probe_result.get("no_decodable_frames_detected")),
+                "garbled_audio_detected": bool(probe_result.get("garbled_audio_detected")),
+                "silent_audio_detected": bool(probe_result.get("silent_audio_detected")),
+                "offline_image_detected": bool(probe_result.get("offline_image_detected")),
+            })
+            last_details = details
+            if rejection_reason:
+                self._record_event("pre_probe_rejected", target, {**details, "reason": reason})
+                continue
+            return candidate_id, details
+        return None, last_details
+
+    def _stream_url_for_id(self, udi: Any, channel_id: Optional[int], stream_id: int) -> Optional[str]:
+        stream: Optional[Dict[str, Any]] = None
+        if hasattr(udi, "get_stream_by_id"):
+            stream = udi.get_stream_by_id(stream_id)
+        if not stream and channel_id is not None and hasattr(udi, "get_channel_streams"):
+            stream_ref = str(stream_id)
+            stream = next(
+                (
+                    candidate
+                    for candidate in (udi.get_channel_streams(channel_id) or [])
+                    if isinstance(candidate, dict) and str(candidate.get("id") or "") == stream_ref
+                ),
+                None,
+            )
+        if not isinstance(stream, dict):
+            return None
+        url = str(stream.get("url") or "").strip()
+        return url or None
+
+    def _run_next_stream_pre_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        pre_probe_config = dict(config)
+        pre_probe_config["probe_duration_seconds"] = int(
+            config.get("next_stream_pre_probe_duration_seconds", 8)
+        )
+        return self._run_blank_probe(url, pre_probe_config)
+
+    @staticmethod
+    def _pre_probe_rejection_reason(result: Dict[str, Any]) -> Optional[str]:
+        for reason in (
+            "blank",
+            "offline_image",
+            "freeze",
+            "no_decodable_frames",
+            "garbled_audio",
+            "silent_audio",
+        ):
+            if result.get(f"{reason}_detected"):
+                return reason
+        return None
 
     @staticmethod
     def _detection_count_key(channel_uuid: str, reason: str) -> str:

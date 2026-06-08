@@ -48,6 +48,8 @@ const eventLabels = {
   quality_check_active: 'Quality Check Active',
   watcher_reconnecting: 'Watcher Reconnecting',
   watcher_recovered: 'Watcher Recovered',
+  pre_probe_unavailable: 'Pre-Probe Unavailable',
+  pre_probe_rejected: 'Pre-Probe Rejected',
 }
 
 const parseCsv = (value, numeric = false) => {
@@ -387,6 +389,17 @@ export default function ShadowBlankMonitor() {
                 <Switch
                   checked={Boolean(editedConfig.offline_image_detection_enabled)}
                   onCheckedChange={(value) => updateConfigValue('offline_image_detection_enabled', value)}
+                />
+              </div>
+
+              <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
+                <div>
+                  <Label className="text-sm font-medium">Next Stream Pre-Probe</Label>
+                  <p className="text-xs text-muted-foreground">Validate the next candidate before switching</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.next_stream_pre_probe_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('next_stream_pre_probe_enabled', value)}
                 />
               </div>
 

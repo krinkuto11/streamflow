@@ -18,9 +18,10 @@ from apps.stream.shadow_blank_monitor_service import (
 
 
 class FakeUdi:
-    def __init__(self, *, statuses, channels):
+    def __init__(self, *, statuses, channels, streams=None):
         self.statuses = list(statuses)
         self.channels = channels
+        self.streams = streams or {}
         self.status_calls = 0
 
     def get_proxy_status(self):
@@ -36,6 +37,17 @@ class FakeUdi:
             if channel.get("id") == channel_id:
                 return channel
         return None
+
+    def get_stream_by_id(self, stream_id):
+        return self.streams.get(stream_id)
+
+    def get_channel_streams(self, channel_id):
+        channel = self.get_channel_by_id(channel_id)
+        return [
+            self.streams.get(stream_id)
+            for stream_id in (channel or {}).get("streams", [])
+            if self.streams.get(stream_id) is not None
+        ]
 
 
 class FakeStreamChecker:
@@ -106,6 +118,8 @@ def test_watch_mode_controls_scan_delay():
     assert defaults["offline_image_detection_enabled"] is False
     assert defaults["offline_image_reference_hashes"] == []
     assert defaults["offline_image_hash_threshold"] == 4
+    assert defaults["next_stream_pre_probe_enabled"] is False
+    assert defaults["next_stream_pre_probe_duration_seconds"] == 8
     assert defaults["confirmation_count"] == 2
     assert defaults["channel_cooldown_seconds"] == 300
     assert defaults["max_switches_per_hour"] == 3
@@ -643,6 +657,81 @@ def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["post_switch_verification"] is True
     assert status["cooldowns"] == []
+
+
+def test_next_stream_pre_probe_disabled_preserves_direct_switch(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/bad"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True},
+        switch_calls=switch_calls,
+    )
+
+    def fail_if_pre_probe_runs(url, config):
+        raise AssertionError("next-stream pre-probe should be disabled")
+
+    service._run_blank_probe = fail_if_pre_probe_runs
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": False,
+    })
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+
+
+def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={
+            11: {"id": 11, "url": "http://candidate.local/bad"},
+            12: {"id": 12, "url": "http://candidate.local/good"},
+        },
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True},
+        switch_calls=switch_calls,
+    )
+    pre_probe_calls = []
+
+    def pre_probe(url, config):
+        pre_probe_calls.append((url, config["probe_duration_seconds"]))
+        return {"blank_detected": "bad" in url}
+
+    service._run_blank_probe = pre_probe
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+        "next_stream_pre_probe_duration_seconds": 5,
+    })
+
+    status = service.run_once(force=True)
+
+    assert pre_probe_calls == [
+        ("http://candidate.local/bad", 5),
+        ("http://candidate.local/good", 5),
+    ]
+    assert switch_calls == [("uuid-1", 12, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["pre_probe"]["result"] == "ok"
+    assert status["recent_events"][1]["type"] == "pre_probe_rejected"
+    assert status["recent_events"][1]["details"]["rejection_reason"] == "blank"
 
 
 def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):

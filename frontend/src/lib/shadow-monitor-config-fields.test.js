@@ -31,6 +31,7 @@ describe('shadowMonitorNumberFields', () => {
       'poll_interval_seconds',
       'watch_gap_seconds',
       'probe_duration_seconds',
+      'next_stream_pre_probe_duration_seconds',
       'garbled_audio_error_threshold',
       'confirmation_count',
       'channel_cooldown_seconds',
