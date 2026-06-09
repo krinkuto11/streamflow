@@ -1025,6 +1025,162 @@ def get_stream_info(url: str, timeout: int = 30, user_agent: str = 'VLC/3.0.14')
         return None, None
 
 
+def _parse_ffprobe_rate(rate: Any) -> float:
+    """Parse an ffprobe frame-rate string such as 30000/1001 or 30/1."""
+    if not rate:
+        return 0
+    try:
+        rate_text = str(rate).strip()
+        if '/' in rate_text:
+            numerator, denominator = rate_text.split('/', 1)
+            denominator_value = float(denominator)
+            if denominator_value == 0:
+                return 0
+            return _snap_to_common_fps(float(numerator) / denominator_value)
+        return _snap_to_common_fps(float(rate_text))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0
+
+
+def _kbps_from_ffprobe_bit_rate(bit_rate: Any) -> Optional[float]:
+    """Convert ffprobe bit_rate bits/sec values to kbps."""
+    try:
+        if bit_rate in (None, '', 'N/A'):
+            return None
+        kbps = float(bit_rate) / 1000.0
+        return kbps if kbps > MIN_VALID_PROGRESS_BITRATE else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value in (None, '', 'N/A'):
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ffprobe_media_fallback(
+    url: str,
+    *,
+    timeout: int,
+    user_agent: str,
+    reason: str,
+) -> Optional[Dict[str, Any]]:
+    """Use ffprobe as a narrow media-presence fallback after ffmpeg is inconclusive.
+
+    This does not forgive truly offline streams: the fallback is accepted only
+    when ffprobe sees a video stream with non-zero dimensions.
+    """
+    command = [
+        'ffprobe',
+        '-user_agent', user_agent,
+        '-v', 'error',
+        '-show_entries',
+        (
+            'stream=codec_name,codec_type,width,height,avg_frame_rate,'
+            'r_frame_rate,bit_rate,pix_fmt,color_space,color_primaries,'
+            'color_transfer,profile,sample_rate,channels,channel_layout:'
+            'format=bit_rate'
+        ),
+        '-of', 'json',
+        url,
+    ]
+
+    start = time.time()
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(5, timeout),
+            text=True,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("  [ffprobe fallback] Timeout while validating media presence")
+        return None
+    except Exception as exc:
+        logger.warning(f"  [ffprobe fallback] Failed to start: {scrub_urls(exc)}")
+        return None
+
+    elapsed = time.time() - start
+    if result.returncode != 0 or not result.stdout:
+        logger.warning(
+            "  [ffprobe fallback] No usable media info returned "
+            f"(exit={result.returncode})"
+        )
+        return None
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        logger.warning(f"  [ffprobe fallback] Invalid JSON: {exc}")
+        return None
+
+    streams = payload.get('streams') or []
+    video = next(
+        (
+            stream for stream in streams
+            if stream.get('codec_type') == 'video'
+            and (_safe_int(stream.get('width')) or 0) > 0
+            and (_safe_int(stream.get('height')) or 0) > 0
+        ),
+        None,
+    )
+    if not video:
+        logger.warning("  [ffprobe fallback] No valid video stream found")
+        return None
+
+    audio = next((stream for stream in streams if stream.get('codec_type') == 'audio'), None)
+    width = _safe_int(video.get('width')) or 0
+    height = _safe_int(video.get('height')) or 0
+    video_codec = _sanitize_codec_name(video.get('codec_name'))
+    audio_codec = _sanitize_codec_name(audio.get('codec_name')) if audio else 'N/A'
+    fps = _parse_ffprobe_rate(video.get('avg_frame_rate')) or _parse_ffprobe_rate(video.get('r_frame_rate'))
+    bitrate_kbps = (
+        _kbps_from_ffprobe_bit_rate(video.get('bit_rate'))
+        or _kbps_from_ffprobe_bit_rate((payload.get('format') or {}).get('bit_rate'))
+    )
+
+    metadata = {
+        'color_transfer': video.get('color_transfer'),
+        'color_primaries': video.get('color_primaries'),
+        'color_space': video.get('color_space'),
+        'pix_fmt': video.get('pix_fmt'),
+        'profile': video.get('profile'),
+    }
+
+    logger.info(
+        "  [ffprobe fallback] Valid media after %s: %sx%s, %.2f FPS, %s/%s",
+        reason,
+        width,
+        height,
+        fps,
+        video_codec,
+        audio_codec,
+    )
+    return {
+        'video_codec': video_codec,
+        'audio_codec': audio_codec,
+        'resolution': f"{width}x{height}",
+        'fps': fps,
+        'bitrate_kbps': bitrate_kbps,
+        'bitrate_source': 'ffprobe_fallback' if bitrate_kbps is not None else 'ffprobe_media_fallback_no_bitrate',
+        'hdr_format': _detect_hdr_format(metadata),
+        'pixel_format': video.get('pix_fmt'),
+        'audio_sample_rate': _safe_int(audio.get('sample_rate')) if audio else None,
+        'audio_channels': _safe_int(audio.get('channels')) if audio else None,
+        'channel_layout': audio.get('channel_layout') if audio else None,
+        'audio_bitrate': _safe_int(_kbps_from_ffprobe_bit_rate(audio.get('bit_rate'))) if audio else None,
+        'status': 'OK',
+        'ffprobe_fallback_ran': True,
+        'ffprobe_fallback_reason': reason,
+        'ffprobe_fallback_elapsed_time': elapsed,
+    }
+
+
 def get_stream_info_and_bitrate(
     url: str,
     duration: int = 30,
@@ -1213,6 +1369,9 @@ def get_stream_info_and_bitrate(
         'freeze_segments': [],
         'preempted': False, 'preempt_reason': None,
         'bitrate_source': None,
+        'ffprobe_fallback_ran': False,
+        'ffprobe_fallback_reason': None,
+        'ffprobe_fallback_elapsed_time': None,
     }
 
     try:
@@ -1482,8 +1641,20 @@ def get_stream_info_and_bitrate(
 
     except subprocess.TimeoutExpired:
         logger.warning(f"Timeout ({actual_timeout}s) while analyzing stream")
-        result_data['status'] = "Timeout"
-        result_data['elapsed_time'] = actual_timeout
+        fallback = _ffprobe_media_fallback(
+            url,
+            timeout=min(max(timeout, 10), 20),
+            user_agent=user_agent,
+            reason='ffmpeg_timeout',
+        )
+        if fallback:
+            result_data.update(fallback)
+            result_data['elapsed_time'] = actual_timeout + float(
+                fallback.get('ffprobe_fallback_elapsed_time') or 0.0
+            )
+        else:
+            result_data['status'] = "Timeout"
+            result_data['elapsed_time'] = actual_timeout
     except StreamProbePreempted:
         logger.info("Stream analysis preempted because viewer capacity is needed")
         result_data['status'] = "PREEMPTED"
@@ -2022,6 +2193,9 @@ def analyze_stream(
         'freeze_segments': [],
         'preempted': False,
         'preempt_reason': None,
+        'ffprobe_fallback_ran': False,
+        'ffprobe_fallback_reason': None,
+        'ffprobe_fallback_elapsed_time': None,
         'quality_reason': 'offline',
         'quality_reason_detail': 'error',
         'quality_reason_context': {},
@@ -2106,6 +2280,9 @@ def analyze_stream(
                     'freeze_segments': result_data.get('freeze_segments', []),
                     'preempted': bool(result_data.get('preempted')),
                     'preempt_reason': result_data.get('preempt_reason'),
+                    'ffprobe_fallback_ran': bool(result_data.get('ffprobe_fallback_ran')),
+                    'ffprobe_fallback_reason': result_data.get('ffprobe_fallback_reason'),
+                    'ffprobe_fallback_elapsed_time': result_data.get('ffprobe_fallback_elapsed_time'),
                 }
                 if result['status'] == 'OK':
                     result['quality_reason'] = 'none'

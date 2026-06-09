@@ -18,9 +18,10 @@ from apps.stream.shadow_blank_monitor_service import (
 
 
 class FakeUdi:
-    def __init__(self, *, statuses, channels):
+    def __init__(self, *, statuses, channels, streams=None):
         self.statuses = list(statuses)
         self.channels = channels
+        self.streams = streams or {}
         self.status_calls = 0
 
     def get_proxy_status(self):
@@ -36,6 +37,17 @@ class FakeUdi:
             if channel.get("id") == channel_id:
                 return channel
         return None
+
+    def get_stream_by_id(self, stream_id):
+        return self.streams.get(stream_id)
+
+    def get_channel_streams(self, channel_id):
+        channel = self.get_channel_by_id(channel_id)
+        return [
+            self.streams.get(stream_id)
+            for stream_id in (channel or {}).get("streams", [])
+            if self.streams.get(stream_id) is not None
+        ]
 
 
 class FakeStreamChecker:
@@ -98,6 +110,16 @@ def test_watch_mode_controls_scan_delay():
     assert defaults["freeze_detection_enabled"] is True
     assert defaults["no_decodable_frames_detection_enabled"] is True
     assert defaults["no_decodable_frames_min_duration_seconds"] == 10.0
+    assert defaults["garbled_audio_detection_enabled"] is False
+    assert defaults["garbled_audio_error_threshold"] == 3
+    assert defaults["silent_audio_detection_enabled"] is False
+    assert defaults["silent_audio_min_duration_seconds"] == 10.0
+    assert defaults["silent_audio_noise_db"] == -50
+    assert defaults["offline_image_detection_enabled"] is False
+    assert defaults["offline_image_reference_hashes"] == []
+    assert defaults["offline_image_hash_threshold"] == 4
+    assert defaults["next_stream_pre_probe_enabled"] is False
+    assert defaults["next_stream_pre_probe_duration_seconds"] == 8
     assert defaults["confirmation_count"] == 2
     assert defaults["channel_cooldown_seconds"] == 300
     assert defaults["max_switches_per_hour"] == 3
@@ -637,6 +659,139 @@ def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
     assert status["cooldowns"] == []
 
 
+def test_next_stream_pre_probe_disabled_preserves_direct_switch(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/bad"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True},
+        switch_calls=switch_calls,
+    )
+
+    def fail_if_pre_probe_runs(url, config):
+        raise AssertionError("next-stream pre-probe should be disabled")
+
+    service._run_blank_probe = fail_if_pre_probe_runs
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": False,
+    })
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+
+
+def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={
+            11: {"id": 11, "url": "http://candidate.local/bad"},
+            12: {"id": 12, "url": "http://candidate.local/good"},
+        },
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True},
+        switch_calls=switch_calls,
+    )
+    pre_probe_calls = []
+
+    def pre_probe(url, config):
+        pre_probe_calls.append((url, config["probe_duration_seconds"]))
+        return {"blank_detected": "bad" in url}
+
+    service._run_blank_probe = pre_probe
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+        "next_stream_pre_probe_duration_seconds": 5,
+    })
+
+    status = service.run_once(force=True)
+
+    assert pre_probe_calls == [
+        ("http://candidate.local/bad", 5),
+        ("http://candidate.local/good", 5),
+    ]
+    assert switch_calls == [("uuid-1", 12, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["pre_probe"]["result"] == "ok"
+    assert status["recent_events"][1]["type"] == "pre_probe_rejected"
+    assert status["recent_events"][1]["details"]["rejection_reason"] == "blank"
+
+
+def test_next_stream_pre_probe_respects_provider_capacity(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={
+            11: {"id": 11, "url": "http://candidate.local/capacity", "m3u_account": 7},
+            12: {"id": 12, "url": "http://candidate.local/good", "m3u_account": 8},
+        },
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True},
+        switch_calls=switch_calls,
+    )
+    pre_probe_calls = []
+
+    def acquire_slot(_udi, stream):
+        if stream["id"] == 11:
+            return {
+                "acquired": False,
+                "reason": "provider_capacity",
+                "details": {"provider_limited": True},
+            }
+        return {
+            "acquired": True,
+            "reason": "acquired",
+            "url": stream["url"],
+            "details": {"provider_limited": True, "provider_slot_acquired": True},
+        }
+
+    def pre_probe(url, config):
+        pre_probe_calls.append(url)
+        return {"blank_detected": False}
+
+    released = []
+    service._acquire_pre_probe_provider_slot = acquire_slot
+    service._release_pre_probe_provider_slot = lambda slot: released.append(slot)
+    service._run_blank_probe = pre_probe
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+    })
+
+    status = service.run_once(force=True)
+
+    assert pre_probe_calls == ["http://candidate.local/good"]
+    assert switch_calls == [("uuid-1", 12, None)]
+    assert len(released) == 1
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["pre_probe"]["provider_slot_acquired"] is True
+    assert status["recent_events"][1]["type"] == "pre_probe_rejected"
+    assert status["recent_events"][1]["details"]["rejection_reason"] == "provider_capacity"
+
+
 def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):
     switch_calls = []
     udi = FakeUdi(
@@ -694,6 +849,134 @@ def test_confirmed_no_decodable_frames_switches_to_next_stream_when_live(tmp_pat
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["reason"] == "no_decodable_frames"
     assert status["cooldowns"] == []
+
+
+def test_audio_detection_parser_detects_garbled_audio_after_threshold():
+    config = normalize_config({
+        "garbled_audio_detection_enabled": True,
+        "garbled_audio_error_threshold": 2,
+    })
+    output = (
+        "Error while decoding stream #0:1: audio decode error\n"
+        "[aac @ 000] channel element 3.7 is not allocated in audio stream #0:1\n"
+    )
+
+    parsed = ShadowBlankMonitorService._parse_audio_detection(
+        output,
+        config,
+        observed_duration=12,
+    )
+
+    assert parsed["garbled_audio_detected"] is True
+    assert parsed["garbled_audio_error_count"] == 2
+    assert "audio" in parsed["garbled_audio_error"].lower()
+
+
+def test_audio_detection_parser_detects_silent_audio_duration():
+    config = normalize_config({
+        "silent_audio_detection_enabled": True,
+        "silent_audio_min_duration_seconds": 10,
+        "silent_audio_noise_db": -48,
+    })
+    output = (
+        "[silencedetect @ 000] silence_start: 1.5\n"
+        "[silencedetect @ 000] silence_end: 13.0 | silence_duration: 11.5\n"
+    )
+
+    parsed = ShadowBlankMonitorService._parse_audio_detection(
+        output,
+        config,
+        observed_duration=14,
+    )
+
+    assert parsed["silent_audio_detected"] is True
+    assert parsed["silent_audio_duration_secs"] == 11.5
+    assert parsed["silent_audio_noise_db"] == -48
+
+
+def test_media_fault_results_are_ignored_unless_enabled(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "garbled_audio_detected": True,
+            "silent_audio_detected": True,
+            "offline_image_detected": True,
+        },
+        switch_calls=switch_calls,
+    )
+    service.update_config({"enabled": False, "dry_run": False, "confirmation_count": 1})
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "probe_ok"
+
+
+def test_enabled_media_fault_switches_to_next_stream_when_live(tmp_path):
+    scenarios = [
+        (
+            "garbled_audio",
+            "garbled_audio_detection_enabled",
+            {
+                "garbled_audio_detected": True,
+                "garbled_audio_error_count": 3,
+                "garbled_audio_error": "audio decode error",
+            },
+        ),
+        (
+            "silent_audio",
+            "silent_audio_detection_enabled",
+            {
+                "silent_audio_detected": True,
+                "silent_audio_duration_secs": 12.0,
+            },
+        ),
+        (
+            "offline_image",
+            "offline_image_detection_enabled",
+            {
+                "offline_image_detected": True,
+                "offline_image_hash": "ffeeffeeffeeffee",
+                "offline_image_distance": 2,
+            },
+        ),
+    ]
+
+    for reason, enabled_key, probe_result in scenarios:
+        switch_calls = []
+        udi = FakeUdi(
+            statuses=[{"uuid-1": active_status()}],
+            channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        )
+        service = make_service(
+            tmp_path / reason,
+            udi=udi,
+            blank_probe=lambda url, config, probe_result=probe_result: {
+                "blank_detected": False,
+                "freeze_detected": False,
+                **probe_result,
+            },
+            switch_calls=switch_calls,
+        )
+        service.update_config({
+            "enabled": False,
+            "dry_run": False,
+            "confirmation_count": 1,
+            enabled_key: True,
+        })
+
+        status = service.run_once(force=True)
+
+        assert switch_calls == [("uuid-1", 11, None)]
+        assert status["recent_events"][0]["type"] == "switch_success"
+        assert status["recent_events"][0]["details"]["reason"] == reason
+        assert status["cooldowns"] == []
 
 
 def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp_path):
@@ -804,6 +1087,132 @@ def test_detection_with_fresh_watcher_client_stops_without_pending_or_switch(tmp
         assert "uuid-1" not in service._switch_attempts
 
 
+def test_continuous_media_fault_recovery_guard_requires_pre_probe(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-recovered-watcher",
+                        },
+                    ],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/good"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "silent_audio_detected": True,
+            "silent_audio_duration_secs": 12.0,
+        },
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 2,
+        "silent_audio_detection_enabled": True,
+        "next_stream_pre_probe_enabled": False,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+    with service._lock:
+        service._blank_counts[service._detection_count_key("uuid-1", "silent_audio")] = 1
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "watcher_recovery_guard"
+    assert status["recent_events"][0]["details"]["reason"] == "silent_audio"
+    with service._lock:
+        assert service._blank_counts[service._detection_count_key("uuid-1", "silent_audio")] == 0
+
+
+def test_continuous_media_fault_recovery_guard_needs_second_confirmation(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-recovered-watcher",
+                        },
+                    ],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/good"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "silent_audio_detected": True,
+            "silent_audio_duration_secs": 12.0,
+        },
+        switch_calls=switch_calls,
+    )
+    service._run_blank_probe = lambda url, config: {"blank_detected": False, "freeze_detected": False}
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "silent_audio_detection_enabled": True,
+        "next_stream_pre_probe_enabled": True,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    first_result = service._probe_target_once(udi, target, config)
+    second_result = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert first_result is True
+    assert second_result is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    recovery_guard = status["recent_events"][0]["details"]["recovery_guard"]
+    assert recovery_guard["bypassed"] is True
+    assert recovery_guard["pre_probe_required"] is True
+    assert recovery_guard["confirmations"] == 2
+    assert recovery_guard["required"] == 2
+    assert status["recent_events"][1]["type"] == "silent_audio_pending"
+
+
 def test_continuous_probe_stops_when_watcher_reappears_between_confirmations(tmp_path):
     switch_calls = []
     probe_calls = []
@@ -867,6 +1276,81 @@ def test_continuous_probe_stops_when_watcher_reappears_between_confirmations(tmp
     assert status["recent_events"][0]["details"]["reason"] == "active_watcher_between_confirmations"
     with service._lock:
         assert service._blank_counts[service._detection_count_key("uuid-1", "blank")] == 0
+
+
+def test_continuous_media_fault_continues_when_watcher_reappears_between_confirmations(tmp_path, monkeypatch):
+    switch_calls = []
+    probe_calls = []
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-between-confirmations",
+                        },
+                    ],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/good"}},
+    )
+
+    def switch_stream(channel_id, stream_id=None, url=None):
+        switch_calls.append((channel_id, stream_id, url))
+        return True
+
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=switch_stream,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+
+    def fake_continuous_probe(url, config, probe_udi, target):
+        probe_calls.append((url, target.get("media_recovery_guard_reason")))
+        return {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "silent_audio_detected": True,
+            "silent_audio_duration_secs": 12.0,
+        }
+
+    service._run_blank_probe_until_viewer_left = fake_continuous_probe
+    service._run_blank_probe = lambda url, config: {"blank_detected": False, "freeze_detected": False}
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "silent_audio_detection_enabled": True,
+        "next_stream_pre_probe_enabled": True,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+    }
+
+    service._probe_target(udi, target, config)
+    status = service.get_status()
+
+    assert len(probe_calls) == 2
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["recovery_guard"]["bypassed"] is True
+    assert "watcher_recovery_observed" in [event["type"] for event in status["recent_events"]]
 
 
 def test_confirmed_blank_rechecks_after_switch_and_skips_attempted_target(tmp_path):

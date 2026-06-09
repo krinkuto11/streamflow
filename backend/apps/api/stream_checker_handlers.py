@@ -10,6 +10,7 @@ from apps.stream.queue_start import (
     coerce_channel_id as _coerce_channel_id,
     order_channels_for_queue_start,
 )
+from apps.telemetry.last_quality_stats import get_last_quality_stats
 
 logger = setup_logging(__name__)
 
@@ -230,6 +231,20 @@ def get_stream_checker_progress_response(*, get_stream_checker_service: Callable
         return jsonify(status.get("progress", {}))
     except Exception as exc:
         logger.error(f"Error getting stream checker progress: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def get_stream_last_quality_stats_response(*, stream_id: int, stale_after_hours: Optional[float] = None):
+    """Return the latest persisted quality stats for one stream without probing it."""
+    try:
+        return jsonify(
+            get_last_quality_stats(
+                stream_id,
+                stale_after_hours=stale_after_hours,
+            )
+        )
+    except Exception as exc:
+        logger.error("Error getting last quality stats for stream %s: %s", stream_id, exc, exc_info=True)
         return jsonify({"error": "Internal Server Error"}), 500
 
 

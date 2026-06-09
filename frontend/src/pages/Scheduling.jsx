@@ -34,6 +34,7 @@ const SCHEDULE_TYPE_INFO = {
     detailsPlural: 'Creates monitoring sessions for continuous quality tracking'
   }
 }
+const DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN = 10
 
 export default function Scheduling() {
   const [events, setEvents] = useState([])
@@ -66,6 +67,7 @@ export default function Scheduling() {
   const [ruleName, setRuleName] = useState('')
   const [ruleRegexPattern, setRuleRegexPattern] = useState('')
   const [ruleMinutesBefore, setRuleMinutesBefore] = useState(5)
+  const [ruleMaxEventsPerRun, setRuleMaxEventsPerRun] = useState(DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN)
   const [ruleScheduleType, setRuleScheduleType] = useState('check')  // 'check' or 'monitoring'
   const [ruleEnableLoopingDetection, setRuleEnableLoopingDetection] = useState(true)
   const [ruleEnableLogoDetection, setRuleEnableLogoDetection] = useState(true)
@@ -101,6 +103,7 @@ export default function Scheduling() {
     setRuleSelectedChannelGroups([])
     setRuleRegexPattern('')
     setRuleMinutesBefore(5)
+    setRuleMaxEventsPerRun(DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN)
     setRuleScheduleType('check')
     setRuleEnableLoopingDetection(true)
     setRuleEnableLogoDetection(true)
@@ -255,6 +258,11 @@ export default function Scheduling() {
     return !isNaN(minutesValue) && minutesValue >= 0
   }
 
+  const validateMaxEventsPerRun = (value) => {
+    const maxValue = parseInt(value)
+    return !isNaN(maxValue) && maxValue >= 1
+  }
+
   const handleRuleChannelSelect = (channelId) => {
     const channel = channels.find(c => c.id === parseInt(channelId))
     if (!channel) return
@@ -316,6 +324,7 @@ export default function Scheduling() {
         channel_group_ids: selectedGroupIds,
         regex_pattern: ruleRegexPattern,
         minutes_before: parseInt(ruleMinutesBefore) || 0,
+        max_events_per_run: parseInt(ruleMaxEventsPerRun) || DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN,
       })
 
       setRegexMatches(response.data.programs || [])
@@ -377,6 +386,14 @@ export default function Scheduling() {
       })
       return
     }
+    if (!validateMaxEventsPerRun(ruleMaxEventsPerRun)) {
+      toast({
+        title: "Validation Error",
+        description: "Please enter a valid max checks value (1 or greater)",
+        variant: "destructive"
+      })
+      return
+    }
 
     try {
       const ruleData = {
@@ -385,6 +402,7 @@ export default function Scheduling() {
         channel_group_ids: ruleSelectedChannelGroups.map(g => g.id),
         regex_pattern: ruleRegexPattern,
         minutes_before: minutesBeforeValue,
+        max_events_per_run: parseInt(ruleMaxEventsPerRun),
         schedule_type: ruleScheduleType,
         enable_looping_detection: ruleEnableLoopingDetection,
         enable_logo_detection: ruleEnableLogoDetection
@@ -445,6 +463,7 @@ export default function Scheduling() {
     setRuleName(rule.name)
     setRuleRegexPattern(rule.regex_pattern)
     setRuleMinutesBefore(rule.minutes_before)
+    setRuleMaxEventsPerRun(rule.max_events_per_run || DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN)
     setRuleScheduleType(rule.schedule_type || 'check')  // Default to 'check' for backward compatibility
     setRuleEnableLoopingDetection(rule.enable_looping_detection !== false)
     setRuleEnableLogoDetection(rule.enable_logo_detection !== false)
@@ -615,6 +634,7 @@ export default function Scheduling() {
       setRuleName(rule.name || '')
       setRuleRegexPattern(rule.regex_pattern || '')
       setRuleMinutesBefore(rule.minutes_before || 5)
+      setRuleMaxEventsPerRun(rule.max_events_per_run || DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN)
 
       // Handle channel selection
       const channelIds = rule.channel_ids || (rule.channel_id ? [rule.channel_id] : [])
@@ -1562,6 +1582,21 @@ export default function Scheduling() {
                           </p>
                         </div>
 
+                        <div className="space-y-2">
+                          <Label htmlFor="rule-max-events">Max Checks per Rule Run</Label>
+                          <Input
+                            id="rule-max-events"
+                            type="number"
+                            min="1"
+                            max="250"
+                            value={ruleMaxEventsPerRun}
+                            onChange={(e) => setRuleMaxEventsPerRun(e.target.value)}
+                          />
+                          <p className="text-sm text-muted-foreground">
+                            If this rule would create more checks, StreamFlow blocks the rule instead of creating a mass queue.
+                          </p>
+                        </div>
+
                         {/* Schedule Type Selection */}
                         <div className="space-y-2">
                           <Label htmlFor="rule-schedule-type">Schedule Type</Label>
@@ -1671,6 +1706,7 @@ export default function Scheduling() {
                     <TableHead>Channels</TableHead>
                     <TableHead>Regex Pattern</TableHead>
                     <TableHead>Minutes Before</TableHead>
+                    <TableHead>Max Checks</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -1758,6 +1794,7 @@ export default function Scheduling() {
                           <code className="text-xs bg-muted px-2 py-1 rounded">{rule.regex_pattern}</code>
                         </TableCell>
                         <TableCell>{rule.minutes_before} min</TableCell>
+                        <TableCell>{rule.max_events_per_run || DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN}</TableCell>
                         <TableCell className="text-right">
                           <div className="flex items-center justify-end gap-1">
                             <Button

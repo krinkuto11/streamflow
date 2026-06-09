@@ -20,6 +20,7 @@ const getSchedulingBreakdown = (data = {}) => {
   const alreadyCheckedMatches = finiteNumber(data.already_checked_matches)
   const missingTimeMatches = finiteNumber(data.missing_time_matches)
   const invalidTimeMatches = finiteNumber(data.invalid_time_matches)
+  const guardrailBlockedMatches = finiteNumber(data.guardrail_blocked_matches)
   const unscheduledMatches = endedMatches + alreadyCheckedMatches + missingTimeMatches + invalidTimeMatches
 
   return {
@@ -31,6 +32,7 @@ const getSchedulingBreakdown = (data = {}) => {
     alreadyCheckedMatches,
     missingTimeMatches,
     invalidTimeMatches,
+    guardrailBlockedMatches,
     unscheduledMatches,
     hasSchedulingSplit: totalEpgMatches !== matches || dueNowMatches > 0,
   }
@@ -50,6 +52,7 @@ export const getAutoCreateRuleTestToast = ({
     alreadyCheckedMatches,
     missingTimeMatches,
     invalidTimeMatches,
+    guardrailBlockedMatches,
     hasSchedulingSplit,
   } = getSchedulingBreakdown(data)
   const channelsTested = finiteNumber(data.channels_tested, selectedChannelCount)
@@ -66,6 +69,15 @@ export const getAutoCreateRuleTestToast = ({
       description: channelsTested > 1
         ? 'None of the selected channels have a TVG-ID set. EPG matching requires TVG-IDs on the source channels.'
         : 'This channel has no TVG-ID set. EPG matching requires a TVG-ID.',
+      variant: 'destructive',
+    }
+  }
+
+  if (data.guardrail?.blocked || guardrailBlockedMatches > 0) {
+    const limit = data.guardrail?.limit
+    return {
+      title: 'Guardrail Blocked',
+      description: `${guardrailBlockedMatches || totalEpgMatches} schedulable ${plural(guardrailBlockedMatches || totalEpgMatches, 'match', 'matches')} would exceed the configured max${limit ? ` of ${limit}` : ''}. Narrow the regex or raise the rule limit intentionally.`,
       variant: 'destructive',
     }
   }
@@ -148,8 +160,24 @@ export const getAutoCreateRuleTestDiagnostics = (responseData = {}) => {
     alreadyCheckedMatches,
     missingTimeMatches,
     invalidTimeMatches,
+    guardrailBlockedMatches,
   } = getSchedulingBreakdown(data)
   const diagnostics = []
+
+  if (data.guardrail?.blocked || guardrailBlockedMatches > 0) {
+    const blockedPrograms = data.guardrail_blocked_programs || []
+    diagnostics.push({
+      key: 'guardrail_blocked',
+      label: 'Guardrail blocked',
+      count: guardrailBlockedMatches || data.guardrail?.candidate_count || 0,
+      detail: `This rule would create too many checks${data.guardrail?.limit ? ` for the configured limit of ${data.guardrail.limit}` : ''}. Narrow the regex or raise the max checks value deliberately.`,
+      sampleTitles: blockedPrograms.map(program => program.title).filter(Boolean).slice(0, 4),
+      channels: blockedPrograms.map(program => ({
+        id: program.channel_id,
+        name: program.channel_name,
+      })).filter(channel => channel.id || channel.name).slice(0, 5),
+    })
+  }
 
   if (dueNowMatches > 0) {
     diagnostics.push({

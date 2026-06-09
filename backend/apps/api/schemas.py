@@ -622,6 +622,7 @@ class AutoCreateRuleTestSchema:
     channel_group_ids: List[Any]
     regex_pattern: str
     minutes_before: int
+    max_events_per_run: Optional[int]
 
     @classmethod
     def from_payload(cls, payload: Any) -> "AutoCreateRuleTestSchema":
@@ -660,12 +661,22 @@ class AutoCreateRuleTestSchema:
         if minutes_before < 0:
             raise ValidationError("minutes_before must be 0 or greater")
 
+        max_events_per_run = None
+        if "max_events_per_run" in data:
+            try:
+                max_events_per_run = int(data.get("max_events_per_run"))
+            except (TypeError, ValueError):
+                raise ValidationError("max_events_per_run must be an integer") from None
+            if max_events_per_run < 1:
+                raise ValidationError("max_events_per_run must be 1 or greater")
+
         return cls(
             channel_id=channel_id,
             channel_ids=channel_ids,
             channel_group_ids=channel_group_ids,
             regex_pattern=str(data["regex_pattern"]),
             minutes_before=minutes_before,
+            max_events_per_run=max_events_per_run,
         )
 
 
