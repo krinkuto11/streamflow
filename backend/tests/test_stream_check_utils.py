@@ -9,6 +9,7 @@ essential quality metrics using ffmpeg/ffprobe.
 import unittest
 from unittest.mock import patch, MagicMock
 import json
+import subprocess
 import sys
 import os
 
@@ -18,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from apps.stream.stream_check_utils import (
     check_ffmpeg_installed,
     get_stream_info,
+    get_stream_info_and_bitrate,
     get_stream_bitrate,
     analyze_stream
 )
@@ -129,6 +131,74 @@ class TestGetStreamBitrate(unittest.TestCase):
         
         self.assertIsNone(bitrate)
         self.assertEqual(status, "Timeout")
+
+
+class TestGetStreamInfoAndBitrate(unittest.TestCase):
+    """Test combined ffmpeg analysis with ffprobe safety fallbacks."""
+
+    @patch('subprocess.run')
+    def test_ffprobe_fallback_accepts_valid_media_after_ffmpeg_timeout(self, mock_run):
+        """KPTV-style streams should not be marked dead when ffprobe proves media."""
+        ffprobe_payload = {
+            'programs': [
+                {
+                    'streams': [
+                        {
+                            'index': 0,
+                            'codec_name': 'h264',
+                            'codec_type': 'video',
+                            'width': 1216,
+                            'height': 684,
+                            'r_frame_rate': '30/1',
+                            'avg_frame_rate': '30/1',
+                        },
+                        {
+                            'index': 1,
+                            'codec_name': 'aac',
+                            'codec_type': 'audio',
+                            'bit_rate': '98800',
+                        },
+                    ],
+                },
+            ],
+            'streams': [
+                {
+                    'index': 0,
+                    'codec_name': 'h264',
+                    'codec_type': 'video',
+                    'width': 1216,
+                    'height': 684,
+                    'r_frame_rate': '30/1',
+                    'avg_frame_rate': '30/1',
+                },
+                {
+                    'index': 1,
+                    'codec_name': 'aac',
+                    'codec_type': 'audio',
+                    'bit_rate': '98800',
+                },
+            ],
+        }
+        mock_run.side_effect = [
+            subprocess.TimeoutExpired(cmd='ffmpeg', timeout=70),
+            MagicMock(returncode=0, stdout=json.dumps(ffprobe_payload), stderr=''),
+        ]
+
+        result = get_stream_info_and_bitrate(
+            'http://test.com/kptv-proxy-stream',
+            duration=30,
+            timeout=30,
+            stream_startup_buffer=10,
+        )
+
+        self.assertEqual(result['status'], 'OK')
+        self.assertEqual(result['resolution'], '1216x684')
+        self.assertEqual(result['fps'], 30)
+        self.assertEqual(result['video_codec'], 'h264')
+        self.assertEqual(result['audio_codec'], 'aac')
+        self.assertTrue(result['ffprobe_fallback_ran'])
+        self.assertEqual(result['ffprobe_fallback_reason'], 'ffmpeg_timeout')
+        self.assertEqual(result['bitrate_source'], 'ffprobe_media_fallback_no_bitrate')
 
 
 class TestAnalyzeStream(unittest.TestCase):
