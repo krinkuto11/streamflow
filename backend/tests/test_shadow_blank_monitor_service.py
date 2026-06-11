@@ -731,6 +731,9 @@ def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):
     assert detection["measurements"]["blank_duration_secs"] == 8.0
     assert detection["thresholds"]["blank_ratio_threshold"] == 0.8
     assert status["cooldowns"][0]["channel_ref"] == status["recent_events"][0]["channel_ref"]
+    assert status["switch_summary"]["dry_run_switches"] == 1
+    assert status["switch_summary"]["successful_switches"] == 0
+    assert status["switch_summary"]["last_switch_reason"] == "blank"
 
 
 def test_disabling_monitor_clears_watched_snapshot(tmp_path):
@@ -773,6 +776,9 @@ def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
     assert status["recent_events"][0]["trigger_reason"] == "blank"
     assert status["recent_events"][0]["details"]["post_switch_verification"] is True
     assert status["cooldowns"] == []
+    assert status["switch_summary"]["successful_switches"] == 1
+    assert status["switch_summary"]["last_switch_reason"] == "blank"
+    assert status["switch_summary"]["prevented_false_switches"] == 0
 
 
 def test_next_stream_pre_probe_disabled_preserves_direct_switch(tmp_path):
@@ -1010,6 +1016,8 @@ def test_next_stream_pre_probe_timeout_prevents_switch(tmp_path):
     assert status["pre_probe"]["metrics"]["preprobe_timeout"] == 1
     assert status["pre_probe"]["metrics"]["switch_prevented_by_preprobe"] == 1
     assert status["pre_probe"]["last"]["metric"] == "switch_prevented_by_preprobe"
+    assert status["switch_summary"]["pre_probe_prevented_switches"] == 1
+    assert status["switch_summary"]["prevented_false_switches"] == 1
 
 
 def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):

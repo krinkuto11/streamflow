@@ -96,6 +96,7 @@ export default function ShadowBlankMonitor() {
   const lastPreProbe = status?.pre_probe?.last || null
   const offlineImageStatus = status?.offline_image || {}
   const offlineImageWarnings = offlineImageStatus.warnings || []
+  const switchSummary = status?.switch_summary || {}
   const cooldownCount = status?.cooldowns?.length || 0
 
   const lastEvent = useMemo(() => recentEvents[0] || null, [recentEvents])
@@ -351,9 +352,10 @@ export default function ShadowBlankMonitor() {
             <p className="mt-2 truncate text-xs text-muted-foreground">
               {lastSwitchEvent ? `${formatEvent(lastSwitchEvent)}: ${lastSwitchReason}` : `${cooldownCount} channel cooldowns`}
             </p>
-            {lastSwitchEvent && (
-              <p className="mt-1 text-xs text-muted-foreground">{cooldownCount} channel cooldowns</p>
-            )}
+            <p className="mt-1 text-xs text-muted-foreground">
+              {switchSummary.successful_switches || 0} switches / {switchSummary.prevented_false_switches || 0} prevented risk
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">{cooldownCount} channel cooldowns</p>
           </CardContent>
         </Card>
 

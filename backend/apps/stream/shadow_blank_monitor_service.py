@@ -583,6 +583,7 @@ class ShadowBlankMonitorService:
                     "channel_ref": target.get("channel_ref"),
                     "cooldown_seconds": max(0, int(until - now)),
                 })
+            recent_events = list(self._events)
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
@@ -595,8 +596,9 @@ class ShadowBlankMonitorService:
                 "watched_count": len(watched_channels),
                 "watched_channels": watched_channels,
                 "cooldowns": cooldowns,
-                "recent_events": list(self._events),
-                "decision_history": list(self._events),
+                "recent_events": recent_events,
+                "decision_history": recent_events,
+                "switch_summary": self._switch_summary(recent_events, active_cooldowns=len(cooldowns)),
                 "pre_probe": {
                     "metrics": dict(self._pre_probe_metrics),
                     "last": dict(self._last_pre_probe) if self._last_pre_probe else None,
@@ -2720,6 +2722,75 @@ class ShadowBlankMonitorService:
         if event_type == "no_alternative":
             return "skip"
         return "other"
+
+    @staticmethod
+    def _switch_summary(events: Iterable[Dict[str, Any]], *, active_cooldowns: int = 0) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "window_events": 0,
+            "successful_switches": 0,
+            "failed_switches": 0,
+            "dry_run_switches": 0,
+            "skipped_switches": 0,
+            "pre_probe_prevented_switches": 0,
+            "recovery_guard_prevented_switches": 0,
+            "stale_stream_guard_skips": 0,
+            "cooldown_skips": 0,
+            "rate_limited_skips": 0,
+            "quality_guard_skips": 0,
+            "active_cooldowns": int(active_cooldowns),
+            "prevented_false_switches": 0,
+            "last_switch_reason": None,
+            "last_switch_at": None,
+            "last_switch_result": None,
+        }
+        for event in events or []:
+            if not isinstance(event, dict):
+                continue
+            summary["window_events"] += 1
+            event_type = event.get("type")
+            details = event.get("details") if isinstance(event.get("details"), dict) else {}
+            reason = (
+                details.get("trigger_reason")
+                or event.get("trigger_reason")
+                or details.get("reason")
+            )
+
+            if event_type == "switch_success":
+                summary["successful_switches"] += 1
+            elif event_type == "switch_failed":
+                summary["failed_switches"] += 1
+            elif event_type == "dry_run_switch":
+                summary["dry_run_switches"] += 1
+            elif event_type == "no_alternative":
+                summary["skipped_switches"] += 1
+                if isinstance(details.get("pre_probe"), dict):
+                    summary["pre_probe_prevented_switches"] += 1
+            elif event_type == "watcher_recovery_guard":
+                summary["skipped_switches"] += 1
+                summary["recovery_guard_prevented_switches"] += 1
+            elif event_type == "stale_stream_guard":
+                summary["skipped_switches"] += 1
+                summary["stale_stream_guard_skips"] += 1
+            elif event_type == "cooldown":
+                summary["cooldown_skips"] += 1
+            elif event_type == "switch_rate_limited":
+                summary["skipped_switches"] += 1
+                summary["rate_limited_skips"] += 1
+            elif event_type == "quality_check_active":
+                summary["quality_guard_skips"] += 1
+
+            if event_type in SWITCH_EVENT_TYPES and summary["last_switch_result"] is None:
+                summary["last_switch_result"] = event_type
+                summary["last_switch_reason"] = reason
+                summary["last_switch_at"] = event.get("timestamp")
+
+        summary["prevented_false_switches"] = (
+            summary["pre_probe_prevented_switches"]
+            + summary["recovery_guard_prevented_switches"]
+            + summary["stale_stream_guard_skips"]
+            + summary["rate_limited_skips"]
+        )
+        return summary
 
     @staticmethod
     def _compact_probe_context(
