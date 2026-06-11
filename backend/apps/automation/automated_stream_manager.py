@@ -89,7 +89,10 @@ from apps.core.api_utils import (
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
 from apps.automation.automation_config_manager import get_automation_config_manager
-from apps.automation.channel_visibility_automation import ChannelVisibilityAutomation
+from apps.automation.channel_visibility_automation import (
+    ChannelVisibilityAutomation,
+    resolve_channel_visibility_config,
+)
 
 # Import channel settings manager
 # Import channel settings manager - DEPRECATED/REMOVED
@@ -2585,12 +2588,13 @@ class AutomatedStreamManager:
             logger.error(f"Error reading stream checker config from DB: {e}")
             return True
 
-    def _get_channel_visibility_config(self) -> Dict[str, Any]:
+    def _get_channel_visibility_config(self, profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         try:
             from apps.database.manager import get_db_manager
 
             config = get_db_manager().get_system_setting('stream_checker_config', {}) or {}
-            return config.get('channel_visibility_automation', {}) if isinstance(config, dict) else {}
+            global_config = config.get('channel_visibility_automation', {}) if isinstance(config, dict) else {}
+            return resolve_channel_visibility_config(global_config, profile)
         except Exception as e:
             logger.error(f"Error reading channel visibility automation config from DB: {e}")
             return {}
@@ -3486,11 +3490,6 @@ class AutomatedStreamManager:
             channel_to_match_priorities = {}
             channel_to_group_map = {}
             channel_name_map = {}
-            channel_visibility_config = self._get_channel_visibility_config()
-            no_regex_visibility_enabled = bool(
-                channel_visibility_config.get("enabled")
-                and channel_visibility_config.get("hide_on_no_regex")
-            )
             channel_visibility_events = []
             
             
@@ -3554,18 +3553,24 @@ class AutomatedStreamManager:
                         matching_enabled_channel_ids.append(channel_id)
                         # Store match priority order
                         channel_to_match_priorities[str(channel_id)] = profile.get('stream_matching', {}).get('match_priority_order', ['tvg', 'regex'])
-                    elif no_regex_visibility_enabled:
-                        channel_visibility_events.append(
-                            self.channel_visibility_automation.handle_no_regex(
-                                channel,
-                                config=channel_visibility_config,
-                                details={
-                                    "source": "stream_matching",
-                                    "has_regex_patterns": False,
-                                    "match_by_tvg_id": False,
-                                },
-                            )
+                    else:
+                        channel_visibility_config = self._get_channel_visibility_config(profile)
+                        no_regex_visibility_enabled = bool(
+                            channel_visibility_config.get("enabled")
+                            and channel_visibility_config.get("hide_on_no_regex")
                         )
+                        if no_regex_visibility_enabled:
+                            channel_visibility_events.append(
+                                self.channel_visibility_automation.handle_no_regex(
+                                    channel,
+                                    config=channel_visibility_config,
+                                    details={
+                                        "source": "stream_matching",
+                                        "has_regex_patterns": False,
+                                        "match_by_tvg_id": False,
+                                    },
+                                )
+                            )
                     
                 # Check if revive is enabled
                 if profile and profile.get('stream_checking', {}).get('allow_revive', False):

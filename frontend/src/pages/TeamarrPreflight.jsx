@@ -95,6 +95,14 @@ const DEFAULT_PREFLIGHT_STREAM_CHECKING = {
   treat_freeze_as_dead: false,
   loop_check_enabled: false,
 }
+const DEFAULT_PREFLIGHT_VISIBILITY = {
+  inherit_global: false,
+  enabled: false,
+  hide_on_no_regex: false,
+  hide_on_no_streams: false,
+  hide_on_all_failed: false,
+  unhide_on_recovered: false,
+}
 
 const parseCsv = (value) => (
   String(value || '')
@@ -519,10 +527,19 @@ export default function TeamarrPreflight() {
   const selectedProfileUsesDefaultRules = selectedProfileValue === String(editedConfig?.default_profile_id || '')
   const selectedStreamChecking = selectedQualityProfile?.stream_checking
     || (selectedProfileUsesDefaultRules ? DEFAULT_PREFLIGHT_STREAM_CHECKING : null)
+  const selectedVisibility = selectedQualityProfile?.channel_visibility_automation
+    || (selectedProfileUsesDefaultRules ? DEFAULT_PREFLIGHT_VISIBILITY : null)
   const qualityRuleSummary = useMemo(() => {
     if (!selectedStreamChecking) return []
     const blankEnabled = Boolean(selectedStreamChecking.blank_check_enabled)
     const freezeEnabled = Boolean(selectedStreamChecking.freeze_check_enabled)
+    const visibilityInherits = selectedVisibility?.inherit_global !== false
+    const visibilityEnabled = selectedVisibility?.enabled === true
+    const visibilityHideRulesEnabled = Boolean(
+      selectedVisibility?.hide_on_no_regex
+      || selectedVisibility?.hide_on_no_streams
+      || selectedVisibility?.hide_on_all_failed
+    )
     return [
       {
         label: 'Quality check',
@@ -568,8 +585,20 @@ export default function TeamarrPreflight() {
           : 'Loop detection is skipped.',
         variant: selectedStreamChecking.loop_check_enabled ? 'destructive' : 'secondary',
       },
+      {
+        label: 'Visibility',
+        value: visibilityInherits ? 'Global' : (visibilityEnabled ? 'Profile' : 'Off'),
+        description: visibilityInherits
+          ? 'Uses global Stream Checker visibility settings.'
+          : (visibilityEnabled
+            ? (visibilityHideRulesEnabled
+              ? 'Profile-specific hide/recover rules apply.'
+              : 'Profile can recover managed channels without hide rules.')
+            : 'This profile does not hide or unhide channels.'),
+        variant: visibilityInherits ? 'outline' : (visibilityEnabled && visibilityHideRulesEnabled ? 'destructive' : 'secondary'),
+      },
     ]
-  }, [selectedStreamChecking])
+  }, [selectedStreamChecking, selectedVisibility])
 
   const hydrateInputs = (nextConfig) => {
     setRetryOffsets((nextConfig.retry_offsets_minutes || []).join(', '))

@@ -51,7 +51,10 @@ from apps.stream.queue_start import order_channels_for_queue_start
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
 from apps.stream.stream_session_manager import get_session_manager
 from apps.automation.automation_config_manager import get_automation_config_manager
-from apps.automation.channel_visibility_automation import ChannelVisibilityAutomation
+from apps.automation.channel_visibility_automation import (
+    ChannelVisibilityAutomation,
+    resolve_channel_visibility_config,
+)
 from apps.core.auth import _refresh_token
 
 # Import channel settings manager
@@ -2027,6 +2030,7 @@ class StreamCheckerService:
         # Initialised here; built from the resolved profile below so every
         # _is_stream_dead() call uses the correct profile including forced_profile_id.
         _threshold_config: Dict[str, Any] = {}
+        profile: Optional[Dict[str, Any]] = None
 
         try:
             automation_config = get_automation_config_manager()
@@ -2092,6 +2096,10 @@ class StreamCheckerService:
         except Exception as e:
             logger.warning(f"Failed to load profile settings for channel {channel_id}: {e}")
             _threshold_config = {}
+        profile_progress_context = self._automation_profile_progress_context(
+            profile,
+            forced_profile_id=forced_profile_id,
+        )
         
         try:
             # Get channel information from UDI
@@ -2103,7 +2111,8 @@ class StreamCheckerService:
                 total=0,
                 status='initializing',
                 step='Fetching channel info',
-                step_detail='Retrieving channel data from UDI'
+                step_detail='Retrieving channel data from UDI',
+                **profile_progress_context,
             )
             
             udi = get_udi_manager()
@@ -2143,6 +2152,7 @@ class StreamCheckerService:
                     dead_streams_count=0,
                     revived_streams_count=0,
                     total_streams=0,
+                    profile=profile,
                 )
                 if self.changelog and not skip_batch_changelog:
                     batch_entry = {
@@ -3090,6 +3100,7 @@ class StreamCheckerService:
                 dead_streams_count=len(dead_stream_ids),
                 revived_streams_count=len(revived_stream_ids),
                 total_streams=len(streams),
+                profile=profile,
             )
 
             # Add to batch changelog instead of creating individual entry
@@ -3288,6 +3299,7 @@ class StreamCheckerService:
         scoring_weights = None
         # Initialised here; built from the resolved profile below.
         _threshold_config: Dict[str, Any] = {}
+        profile: Optional[Dict[str, Any]] = None
 
         try:
             automation_config = get_automation_config_manager()
@@ -3351,6 +3363,10 @@ class StreamCheckerService:
         except Exception as e:
             logger.warning(f"Failed to load profile settings for channel {channel_id}: {e}")
             _threshold_config = {}
+        profile_progress_context = self._automation_profile_progress_context(
+            profile,
+            forced_profile_id=forced_profile_id,
+        )
         
         try:
             # Get channel information from UDI
@@ -3362,7 +3378,8 @@ class StreamCheckerService:
                 total=0,
                 status='initializing',
                 step='Fetching channel info',
-                step_detail='Retrieving channel data from UDI'
+                step_detail='Retrieving channel data from UDI',
+                **profile_progress_context,
             )
             
             udi = get_udi_manager()
@@ -3402,6 +3419,7 @@ class StreamCheckerService:
                     dead_streams_count=0,
                     revived_streams_count=0,
                     total_streams=0,
+                    profile=profile,
                 )
                 if self.changelog and not skip_batch_changelog:
                     batch_entry = {
@@ -4184,6 +4202,7 @@ class StreamCheckerService:
                 dead_streams_count=len(dead_stream_ids),
                 revived_streams_count=len(revived_stream_ids),
                 total_streams=len(streams),
+                profile=profile,
             )
 
             # Add changelog entry with stream stats
@@ -5061,6 +5080,24 @@ class StreamCheckerService:
             return None
         return result
 
+    @staticmethod
+    def _automation_profile_progress_context(
+        profile: Optional[Dict[str, Any]],
+        *,
+        forced_profile_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        if not isinstance(profile, dict):
+            return {}
+        profile_id = profile.get('id') or forced_profile_id
+        profile_name = profile.get('name')
+        context: Dict[str, str] = {}
+        if profile_id not in (None, ''):
+            context['automation_profile_id'] = str(profile_id)
+        if profile_name:
+            context['automation_profile_name'] = str(profile_name)
+        context['automation_profile_source'] = 'forced' if forced_profile_id else 'resolved'
+        return context
+
     def _apply_channel_visibility_after_check(
         self,
         channel_data: Dict[str, Any],
@@ -5069,9 +5106,16 @@ class StreamCheckerService:
         dead_streams_count: int,
         revived_streams_count: int,
         total_streams: int,
+        profile: Optional[Dict[str, Any]] = None,
+        visibility_config: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         try:
-            config = self.config.get('channel_visibility_automation', {})
+            config = visibility_config
+            if config is None:
+                config = resolve_channel_visibility_config(
+                    self.config.get('channel_visibility_automation', {}),
+                    profile,
+                )
             result = self.channel_visibility_automation.handle_quality_result(
                 channel_data,
                 good_streams_count=good_streams_count,
@@ -5583,6 +5627,11 @@ class StreamCheckerService:
             m3u_update_enabled = profile.get('m3u_update', {}).get('enabled', False)
             matching_enabled   = profile.get('stream_matching', {}).get('enabled', False)
             checking_enabled   = profile.get('stream_checking', {}).get('enabled', False)
+            _effective_profile_id_for_context = forced_profile_id or (profile.get('id') if profile else None)
+            profile_progress_context = self._automation_profile_progress_context(
+                profile,
+                forced_profile_id=_effective_profile_id_for_context if forced_profile_id else None,
+            )
             m3u_refresh_scope = "disabled"
             m3u_refresh_account_ids: List[int] = []
 
@@ -5618,6 +5667,7 @@ class StreamCheckerService:
                 step='Starting single channel check',
                 step_detail=f'Preparing check for {channel_name}',
                 is_single_channel_check=True,
+                **profile_progress_context,
             )
 
             def update_single_channel_progress(
@@ -5636,6 +5686,7 @@ class StreamCheckerService:
                     step=step,
                     step_detail=detail or step,
                     is_single_channel_check=True,
+                    **profile_progress_context,
                 )
 
             # Check if channel has active viewers or if its playlist has reached max concurrent streams
@@ -6090,6 +6141,9 @@ class StreamCheckerService:
                 'avg_resolution': channel_averages['avg_resolution'],
                 'avg_bitrate': channel_averages['avg_bitrate'],
                 'avg_fps': channel_averages['avg_fps'],
+                'automation_profile_id': profile_progress_context.get('automation_profile_id'),
+                'automation_profile_name': profile_progress_context.get('automation_profile_name'),
+                'automation_profile_source': profile_progress_context.get('automation_profile_source'),
                 'm3u_refresh_scope': m3u_refresh_scope,
                 'm3u_refresh_account_count': len(m3u_refresh_account_ids),
                 'stream_details': [],
@@ -6289,6 +6343,9 @@ class StreamCheckerService:
                 'success': True,
                 'channel_id': channel_id,
                 'channel_name': channel_name,
+                'automation_profile_id': profile_progress_context.get('automation_profile_id'),
+                'automation_profile_name': profile_progress_context.get('automation_profile_name'),
+                'automation_profile_source': profile_progress_context.get('automation_profile_source'),
                 'stats': check_stats
             }
             

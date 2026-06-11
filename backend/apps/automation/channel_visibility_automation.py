@@ -15,6 +15,31 @@ DEFAULT_VISIBILITY_CONFIG = {
     "hide_on_all_failed": False,
     "unhide_on_recovered": True,
 }
+PROFILE_VISIBILITY_KEY = "channel_visibility_automation"
+
+
+def resolve_channel_visibility_config(
+    global_config: Optional[Dict[str, Any]],
+    profile: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Resolve profile-level channel visibility settings with global fallback."""
+    global_merged = dict(DEFAULT_VISIBILITY_CONFIG)
+    if isinstance(global_config, dict):
+        global_merged.update(global_config)
+
+    if not isinstance(profile, dict) or PROFILE_VISIBILITY_KEY not in profile:
+        return global_merged
+
+    profile_config = profile.get(PROFILE_VISIBILITY_KEY)
+    if not isinstance(profile_config, dict):
+        return global_merged
+    if profile_config.get("inherit_global") is True:
+        return global_merged
+
+    profile_merged = dict(DEFAULT_VISIBILITY_CONFIG)
+    profile_merged.update(profile_config)
+    profile_merged["inherit_global"] = False
+    return profile_merged
 
 
 class ChannelVisibilityAutomation:

@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.stream.teamarr_preflight_service import (
     DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
+    DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY,
     TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
     TeamarrPreflightService,
     normalize_config,
@@ -153,6 +154,7 @@ class FakeAutomationConfig:
         self.profiles = [dict(profile) for profile in (profiles or [])]
         self.next_id = str(next_id)
         self.created_profiles = []
+        self.updated_profiles = []
 
     def get_all_profiles(self, *args, **kwargs):
         return [dict(profile) for profile in self.profiles]
@@ -170,6 +172,14 @@ class FakeAutomationConfig:
         profile["id"] = self.next_id
         self.profiles.append(profile)
         return self.next_id
+
+    def update_profile(self, profile_id, profile_data):
+        self.updated_profiles.append((str(profile_id), dict(profile_data)))
+        for profile in self.profiles:
+            if str(profile.get("id")) == str(profile_id):
+                profile.update(dict(profile_data))
+                return True
+        return False
 
 
 def make_event(**overrides):
@@ -484,6 +494,28 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertFalse(created_profile["stream_matching"]["enabled"])
         self.assertTrue(created_profile["stream_checking"]["enabled"])
         self.assertFalse(created_profile["stream_checking"]["remove_dead_streams"])
+        self.assertEqual(
+            created_profile["channel_visibility_automation"],
+            DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY,
+        )
+
+    def test_existing_default_profile_is_updated_with_visibility_policy(self):
+        automation_config = FakeAutomationConfig(
+            profiles=[{"id": "42", "name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME}]
+        )
+        service, _, _ = self.make_service([], automation_config=automation_config)
+
+        config = service.get_config()
+
+        self.assertEqual(config["default_profile_id"], "42")
+        self.assertEqual(len(automation_config.created_profiles), 0)
+        self.assertEqual(len(automation_config.updated_profiles), 1)
+        profile_id, payload = automation_config.updated_profiles[0]
+        self.assertEqual(profile_id, "42")
+        self.assertEqual(
+            payload["channel_visibility_automation"],
+            DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY,
+        )
 
     def test_existing_forced_profile_is_preserved(self):
         automation_config = FakeAutomationConfig(
@@ -543,6 +575,8 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(public_stats["total_streams"], 2)
         self.assertEqual(public_stats["duration_seconds"], 12)
         self.assertNotIn("stream_details", public_stats)
+        self.assertEqual(recent[0]["details"]["quality_profile_id"], "42")
+        self.assertEqual(recent[0]["details"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
 
     def test_status_keeps_large_managed_event_lists_visible(self):
         events = [
@@ -1006,14 +1040,20 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(kwargs["metadata"]["match_evidence"]["source"], "teamarr_managed_event")
         self.assertFalse(kwargs["metadata"]["match_evidence"]["may_start_full_run"])
         self.assertEqual(kwargs["metadata"]["forced_profile_id"], "42")
+        self.assertEqual(kwargs["metadata"]["quality_profile_id"], "42")
+        self.assertEqual(kwargs["metadata"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
         self.assertEqual(kwargs["metadata"]["event"]["identity"], "id:100:2026-05-28T22:10:00+00:00")
         self.assertEqual(kwargs["metadata"]["event"]["event_name"], "Home vs Away")
+        self.assertEqual(kwargs["metadata"]["event"]["quality_profile_id"], "42")
+        self.assertEqual(kwargs["metadata"]["event"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
         self.assertFalse(kwargs["metadata"]["event"]["may_start_full_run"])
 
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["type"], "preflight_queued")
         self.assertEqual(recent[0]["details"]["priority"], TEAMARR_PREFLIGHT_QUEUE_PRIORITY)
         self.assertEqual(recent[0]["details"]["match_evidence"]["source"], "teamarr_managed_event")
+        self.assertEqual(recent[0]["details"]["quality_profile_id"], "42")
+        self.assertEqual(recent[0]["details"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
 
         service.record_queued_check_result(
             kwargs["metadata"],
@@ -1025,6 +1065,8 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 2)
         self.assertNotIn("priority", recent[0]["details"])
         self.assertFalse(recent[0]["details"]["may_start_full_run"])
+        self.assertEqual(recent[0]["details"]["quality_profile_id"], "42")
+        self.assertEqual(recent[0]["details"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
 
     def test_duplicate_due_events_are_deduped_before_queueing(self):
         checker = BusyChecker()

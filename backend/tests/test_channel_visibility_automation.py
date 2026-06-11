@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 from apps.automation.channel_visibility_automation import (
     STATE_KEY,
     ChannelVisibilityAutomation,
+    resolve_channel_visibility_config,
 )
 
 
@@ -193,6 +194,55 @@ def test_disabled_visibility_automation_is_read_only():
     patch.assert_not_called()
 
 
+def test_profile_visibility_override_can_disable_global_hides():
+    global_config = {
+        "enabled": True,
+        "hide_on_no_streams": True,
+        "hide_on_all_failed": True,
+        "unhide_on_recovered": True,
+    }
+    profile = {
+        "name": "Teamarr Event Preflight",
+        "channel_visibility_automation": {
+            "inherit_global": False,
+            "enabled": False,
+            "hide_on_no_streams": False,
+            "hide_on_all_failed": False,
+            "unhide_on_recovered": False,
+        },
+    }
+
+    resolved = resolve_channel_visibility_config(global_config, profile)
+
+    assert resolved["enabled"] is False
+    assert resolved["hide_on_no_streams"] is False
+    assert resolved["hide_on_all_failed"] is False
+    assert resolved["unhide_on_recovered"] is False
+
+
+def test_profile_visibility_inherits_global_when_requested():
+    global_config = {
+        "enabled": True,
+        "hide_on_no_streams": True,
+        "hide_on_all_failed": True,
+    }
+    profile = {
+        "name": "Full Run",
+        "channel_visibility_automation": {
+            "inherit_global": True,
+            "enabled": False,
+            "hide_on_no_streams": False,
+            "hide_on_all_failed": False,
+        },
+    }
+
+    resolved = resolve_channel_visibility_config(global_config, profile)
+
+    assert resolved["enabled"] is True
+    assert resolved["hide_on_no_streams"] is True
+    assert resolved["hide_on_all_failed"] is True
+
+
 def test_stream_checker_visibility_hook_uses_quality_counts():
     from apps.stream.stream_checker_service import StreamCheckerService
 
@@ -226,6 +276,45 @@ def test_stream_checker_visibility_hook_uses_quality_counts():
     assert kwargs["good_streams_count"] == 0
     assert kwargs["dead_streams_count"] == 4
     assert kwargs["details"]["total_streams"] == 4
+
+
+def test_stream_checker_visibility_hook_uses_profile_override():
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    service = StreamCheckerService.__new__(StreamCheckerService)
+    service.config = {
+        "channel_visibility_automation": {
+            "enabled": True,
+            "hide_on_all_failed": True,
+        }
+    }
+    service.channel_visibility_automation = Mock()
+    service.channel_visibility_automation.handle_quality_result.return_value = {
+        "action": "disabled",
+        "changed": False,
+        "reason": "quality_result",
+        "channel_id": 16,
+    }
+
+    result = service._apply_channel_visibility_after_check(
+        {"id": 16, "hidden_from_output": False},
+        good_streams_count=0,
+        dead_streams_count=4,
+        revived_streams_count=0,
+        total_streams=4,
+        profile={
+            "channel_visibility_automation": {
+                "inherit_global": False,
+                "enabled": False,
+                "hide_on_all_failed": False,
+            }
+        },
+    )
+
+    assert result["action"] == "disabled"
+    kwargs = service.channel_visibility_automation.handle_quality_result.call_args.kwargs
+    assert kwargs["config"]["enabled"] is False
+    assert kwargs["config"]["hide_on_all_failed"] is False
 
 
 def test_discovery_no_regex_visibility_event_does_not_queue_as_checking_only():

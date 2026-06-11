@@ -599,6 +599,11 @@ export default function StreamChecker() {
 
             <div className="flex items-center gap-2 text-sm pb-2 border-b">
               <Badge variant="outline">{progress.status}</Badge>
+              {progress.automation_profile_name && (
+                <Badge variant={progress.automation_profile_source === 'forced' ? 'default' : 'outline'}>
+                  Quality Profile: {progress.automation_profile_name}
+                </Badge>
+              )}
               {parallelProgressBadgeText && (
                 <Badge variant="secondary">
                   {parallelProgressBadgeText}

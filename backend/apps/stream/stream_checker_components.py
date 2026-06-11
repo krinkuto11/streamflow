@@ -1194,7 +1194,10 @@ class StreamCheckerProgress:
                current_stream: str = '', status: str = 'checking', step: str = '', step_detail: str = '',
                streams_detail: Optional[List[Dict[str, Any]]] = None, stream_duration: Optional[int] = None,
                is_single_channel_check: bool = False,
-               provider_profile_slots: Optional[Dict[str, List[Dict[str, Any]]]] = None):
+               provider_profile_slots: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+               automation_profile_id: Optional[str] = None,
+               automation_profile_name: Optional[str] = None,
+               automation_profile_source: Optional[str] = None):
         """Update progress information."""
         from apps.database.manager import get_db_manager
         with self.lock:
@@ -1212,6 +1215,13 @@ class StreamCheckerProgress:
                 'is_single_channel_check': is_single_channel_check,
                 'timestamp': datetime.now().isoformat()
             }
+            for key, value in {
+                'automation_profile_id': automation_profile_id,
+                'automation_profile_name': automation_profile_name,
+                'automation_profile_source': automation_profile_source,
+            }.items():
+                if value not in (None, ''):
+                    progress_data[key] = value
             if streams_detail is not None:
                 progress_data['streams_detail'] = streams_detail
                 provider_progress = self._build_provider_progress(streams_detail, provider_profile_slots)
@@ -1221,6 +1231,16 @@ class StreamCheckerProgress:
             
             try:
                 db = get_db_manager()
+                existing = db.get_system_setting('stream_checker_progress', {}) or {}
+                same_channel = str(existing.get('channel_id')) == str(channel_id)
+                if same_channel:
+                    for key in (
+                        'automation_profile_id',
+                        'automation_profile_name',
+                        'automation_profile_source',
+                    ):
+                        if key not in progress_data and existing.get(key) not in (None, ''):
+                            progress_data[key] = existing.get(key)
                 db.set_system_setting('stream_checker_progress', progress_data)
             except Exception as e:
                 logger.warning(f"Failed to write progress to database: {e}")

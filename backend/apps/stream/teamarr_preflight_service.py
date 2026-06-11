@@ -50,6 +50,14 @@ DISPATCHARR_CHANNEL_ID_KEYS = (
     "channelId",
 )
 DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME = "Teamarr Event Preflight"
+DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY: Dict[str, Any] = {
+    "inherit_global": False,
+    "enabled": False,
+    "hide_on_no_regex": False,
+    "hide_on_no_streams": False,
+    "hide_on_all_failed": False,
+    "unhide_on_recovered": False,
+}
 CONTROLLED_CHECK_DEFERRAL_REASONS = {
     "active_viewers",
     "max_streams_reached",
@@ -109,6 +117,7 @@ DEFAULT_TEAMARR_PREFLIGHT_PROFILE: Dict[str, Any] = {
         "prefer_h265": True,
         "loop_penalty": 0,
     },
+    "channel_visibility_automation": deepcopy(DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY),
 }
 
 DEFAULT_CONFIG: Dict[str, Any] = {
@@ -381,6 +390,34 @@ class TeamarrPreflightService:
             "default_profile_error": self._default_profile_error,
         }
 
+    @staticmethod
+    def _default_profile_visibility_needs_update(profile: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(profile, dict):
+            return False
+        current = profile.get("channel_visibility_automation")
+        if not isinstance(current, dict):
+            return True
+        for key, value in DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY.items():
+            if current.get(key) != value:
+                return True
+        return False
+
+    def _quality_profile_details(self, profile_id: Any) -> Dict[str, Any]:
+        resolved_id = self._resolve_profile_id(profile_id)
+        if not resolved_id:
+            return {}
+        details: Dict[str, Any] = {"quality_profile_id": str(resolved_id)}
+        try:
+            automation_config = self.automation_config_provider()
+            profile = automation_config.get_profile(resolved_id)
+            if isinstance(profile, dict) and profile.get("name"):
+                details["quality_profile_name"] = str(profile.get("name"))
+        except Exception as exc:
+            logger.debug("Could not resolve Teamarr preflight quality profile details: %s", exc)
+        if not details.get("quality_profile_name") and str(resolved_id) == str(self._default_profile_id):
+            details["quality_profile_name"] = DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME
+        return details
+
     def _ensure_default_profile(self) -> None:
         try:
             automation_config = self.automation_config_provider()
@@ -400,6 +437,21 @@ class TeamarrPreflightService:
                 if not profile_id:
                     raise RuntimeError("default profile could not be created")
                 logger.info("Created default Teamarr preflight automation profile id=%s", profile_id)
+            elif self._default_profile_visibility_needs_update(default_profile):
+                update_profile = getattr(automation_config, "update_profile", None)
+                if callable(update_profile):
+                    update_profile(
+                        profile_id,
+                        {
+                            "channel_visibility_automation": deepcopy(
+                                DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY
+                            )
+                        },
+                    )
+                    logger.info(
+                        "Updated Teamarr preflight profile id=%s with profile-level channel visibility policy",
+                        profile_id,
+                    )
 
             with self._lock:
                 self._default_profile_id = profile_id
@@ -1534,6 +1586,7 @@ class TeamarrPreflightService:
             return False
 
         forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
+        quality_profile_details = self._quality_profile_details(forced_profile_id)
         checker = self.stream_checker_provider()
         attempted_key = self._attempted_key(event)
         preflight_kind = event.get("preflight_kind") or "event"
@@ -1546,6 +1599,7 @@ class TeamarrPreflightService:
             "trigger_bucket": event.get("trigger_bucket"),
             "attempted_key": attempted_key,
             "may_start_full_run": False,
+            **quality_profile_details,
             "match_evidence": event.get("match_evidence") or self._match_evidence(event),
             "event": {
                 "identity": event.get("identity"),
@@ -1566,6 +1620,7 @@ class TeamarrPreflightService:
                 "trigger_bucket": event.get("trigger_bucket"),
                 "match_evidence": event.get("match_evidence") or self._match_evidence(event),
                 "may_start_full_run": False,
+                **quality_profile_details,
             },
         }
         queued = bool(checker.queue_channel(
@@ -1582,6 +1637,7 @@ class TeamarrPreflightService:
                 {
                     "bucket": event.get("trigger_bucket"),
                     "priority": TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
+                    **quality_profile_details,
                 },
             )
         return queued
@@ -1614,6 +1670,20 @@ class TeamarrPreflightService:
         event["may_start_full_run"] = False
 
         result = result if isinstance(result, dict) else {}
+        quality_profile_details = {
+            "quality_profile_id": (
+                result.get("automation_profile_id")
+                or metadata.get("quality_profile_id")
+                or metadata.get("forced_profile_id")
+            ),
+            "quality_profile_name": (
+                result.get("automation_profile_name")
+                or metadata.get("quality_profile_name")
+            ),
+        }
+        quality_profile_details = {
+            key: value for key, value in quality_profile_details.items() if value not in (None, "")
+        }
         deferral_reason = self._controlled_deferral_reason(result)
         if deferral_reason:
             attempted_key = str(metadata.get("attempted_key") or "").strip()
@@ -1626,6 +1696,7 @@ class TeamarrPreflightService:
                     "bucket": metadata.get("trigger_bucket"),
                     "reason": deferral_reason,
                     "stats": self._public_check_stats(result.get("stats")),
+                    **quality_profile_details,
                 },
             )
             return
@@ -1639,6 +1710,7 @@ class TeamarrPreflightService:
                 "error": "Preflight check failed" if result.get("error") else None,
                 "reason": result.get("reason"),
                 "stats": self._public_check_stats(result.get("stats")),
+                **quality_profile_details,
             },
         )
 
@@ -1646,6 +1718,7 @@ class TeamarrPreflightService:
         try:
             checker = self.stream_checker_provider()
             forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
+            quality_profile_details = self._quality_profile_details(forced_profile_id)
             result = checker.check_single_channel(
                 int(event["dispatcharr_channel_id"]),
                 program_name=event.get("event_name"),
@@ -1664,6 +1737,7 @@ class TeamarrPreflightService:
                         "bucket": event.get("trigger_bucket"),
                         "reason": deferral_reason,
                         "stats": self._public_check_stats(result.get("stats")),
+                        **quality_profile_details,
                     },
                 )
                 return
@@ -1678,6 +1752,7 @@ class TeamarrPreflightService:
                     "error": "Preflight check failed" if result.get("error") else None,
                     "reason": result.get("reason"),
                     "stats": self._public_check_stats(result.get("stats")),
+                    **quality_profile_details,
                 },
             )
         except Exception as exc:
