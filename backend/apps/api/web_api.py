@@ -112,6 +112,7 @@ from apps.api.channel_order_handlers import (
 )
 from apps.api.telemetry_handlers import (
     clear_all_dead_streams_response,
+    export_dead_streams_response,
     get_changelog_response,
     get_dead_streams_response,
     revive_dead_stream_response,
@@ -1034,6 +1035,11 @@ def get_dead_streams():
         default_per_page=DEAD_STREAMS_DEFAULT_PER_PAGE,
         max_per_page=DEAD_STREAMS_MAX_PER_PAGE,
     )
+
+@app.route('/api/dead-streams/export', methods=['GET'])
+def export_dead_streams():
+    """Export dead streams as TXT, CSV, TSV or JSON."""
+    return export_dead_streams_response(request_args=request.args)
 
 @app.route('/api/dead-streams/revive', methods=['POST'])
 def revive_dead_stream():
