@@ -277,6 +277,10 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["events_seen"], 1)
         self.assertEqual(result["launched"], 1)
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["match_evidence"]["source"], "teamarr_managed_event")
+        self.assertFalse(upcoming[0]["match_evidence"]["may_start_full_run"])
+        self.assertFalse(upcoming[0]["may_start_full_run"])
 
         deadline = time.time() + 2
         while time.time() < deadline and not checker.calls:
@@ -300,6 +304,10 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertEqual(recent[0]["type"], "preflight_completed")
+        self.assertFalse(recent[0]["may_start_full_run"])
+        self.assertFalse(recent[0]["details"]["may_start_full_run"])
+        self.assertEqual(recent[0]["details"]["match_evidence"]["source"], "teamarr_managed_event")
+        self.assertFalse(recent[0]["details"]["match_evidence"]["may_start_full_run"])
         public_stats = recent[0]["details"]["stats"]
         self.assertEqual(public_stats["total_streams"], 2)
         self.assertEqual(public_stats["duration_seconds"], 12)
@@ -763,13 +771,18 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(kwargs["metadata"]["source"], "teamarr_preflight")
         self.assertEqual(kwargs["metadata"]["program_name"], "Home vs Away")
         self.assertTrue(kwargs["metadata"]["is_epg_scheduled"])
+        self.assertFalse(kwargs["metadata"]["may_start_full_run"])
+        self.assertEqual(kwargs["metadata"]["match_evidence"]["source"], "teamarr_managed_event")
+        self.assertFalse(kwargs["metadata"]["match_evidence"]["may_start_full_run"])
         self.assertEqual(kwargs["metadata"]["forced_profile_id"], "42")
         self.assertEqual(kwargs["metadata"]["event"]["identity"], "id:100:2026-05-28T22:10:00+00:00")
         self.assertEqual(kwargs["metadata"]["event"]["event_name"], "Home vs Away")
+        self.assertFalse(kwargs["metadata"]["event"]["may_start_full_run"])
 
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["type"], "preflight_queued")
         self.assertEqual(recent[0]["details"]["priority"], TEAMARR_PREFLIGHT_QUEUE_PRIORITY)
+        self.assertEqual(recent[0]["details"]["match_evidence"]["source"], "teamarr_managed_event")
 
         service.record_queued_check_result(
             kwargs["metadata"],
@@ -780,6 +793,23 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["event_name"], "Home vs Away")
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 2)
         self.assertNotIn("priority", recent[0]["details"])
+        self.assertFalse(recent[0]["details"]["may_start_full_run"])
+
+    def test_duplicate_due_events_are_deduped_before_queueing(self):
+        checker = BusyChecker()
+        service, _, _ = self.make_service([make_event(), make_event()], checker=checker)
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(len(checker.queued), 1)
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["type"], "duplicate_preflight_skipped")
+        self.assertEqual(recent[1]["type"], "preflight_queued")
+        self.assertFalse(recent[0]["details"]["may_start_full_run"])
+        self.assertEqual(recent[0]["details"]["match_evidence"]["source"], "teamarr_managed_event")
 
     def test_status_exposes_teamarr_stream_checker_queue(self):
         checker = QueueBackedChecker()

@@ -955,6 +955,8 @@ class TeamarrPreflightService:
             state, bucket = self._classify_event(candidate, config, now)
             candidate["state"] = state
             candidate["trigger_bucket"] = bucket
+            candidate["match_evidence"] = self._match_evidence(candidate, state=state, bucket=bucket)
+            candidate["may_start_full_run"] = False
             candidate["next_automatic_check"] = self._next_automatic_check(
                 candidate,
                 config,
@@ -1003,6 +1005,33 @@ class TeamarrPreflightService:
             "sync_status": event.get("sync_status"),
             "event_date": event_at.isoformat(),
             "seconds_to_start": seconds_to_start,
+        }
+
+    @staticmethod
+    def _match_evidence(
+        event: Dict[str, Any],
+        *,
+        state: Optional[str] = None,
+        bucket: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        evidence = {
+            "source": "teamarr_managed_event",
+            "identity": event.get("identity"),
+            "teamarr_id_present": event.get("teamarr_id") not in (None, ""),
+            "event_id_present": event.get("event_id") not in (None, ""),
+            "event_date": event.get("event_date"),
+            "dispatcharr_channel_id": event.get("dispatcharr_channel_id"),
+            "sync_status": event.get("sync_status"),
+            "sport": event.get("sport"),
+            "league": event.get("league"),
+            "state": state or event.get("state"),
+            "trigger_bucket": bucket if bucket is not None else event.get("trigger_bucket"),
+            "may_start_full_run": False,
+        }
+        return {
+            key: value
+            for key, value in evidence.items()
+            if value not in (None, "")
         }
 
     def _classify_event(
@@ -1166,6 +1195,15 @@ class TeamarrPreflightService:
         if not channel_id:
             self._record_event("no_dispatcharr_channel", event, {})
             return False
+        attempted_key = self._attempted_key(event)
+        allow_manual_retry = force and event.get("trigger_bucket") == "manual"
+        if not allow_manual_retry and self._is_attempted(attempted_key):
+            self._record_event(
+                "duplicate_preflight_skipped",
+                event,
+                {"bucket": event.get("trigger_bucket"), "reason": "already_attempted"},
+            )
+            return False
         defer_reason = self._active_work_defer_reason(config)
         if defer_reason:
             self._record_event(
@@ -1189,7 +1227,7 @@ class TeamarrPreflightService:
             if len(self._active_checks) >= int(config["max_concurrent_checks"]):
                 queue_due_to_capacity = True
             else:
-                key = f"{event['identity']}:{event.get('trigger_bucket') or 'manual'}"
+                key = attempted_key
                 if key in self._active_checks:
                     return False
                 self._mark_attempted(event, key=key)
@@ -1199,6 +1237,8 @@ class TeamarrPreflightService:
                     "channel_name": event.get("channel_name"),
                     "dispatcharr_channel_id": channel_id,
                     "bucket": event.get("trigger_bucket"),
+                    "match_evidence": event.get("match_evidence"),
+                    "may_start_full_run": False,
                     "started_at": self.clock(),
                 }
                 self._set_stream_checker_event_gate(True)
@@ -1231,8 +1271,7 @@ class TeamarrPreflightService:
 
         forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
         checker = self.stream_checker_provider()
-        bucket = event.get("trigger_bucket") or "manual"
-        attempted_key = f"{event['identity']}:{bucket}"
+        attempted_key = self._attempted_key(event)
         metadata = {
             "source": "teamarr_preflight",
             "program_name": event.get("event_name"),
@@ -1240,6 +1279,8 @@ class TeamarrPreflightService:
             "forced_profile_id": forced_profile_id,
             "trigger_bucket": event.get("trigger_bucket"),
             "attempted_key": attempted_key,
+            "may_start_full_run": False,
+            "match_evidence": event.get("match_evidence") or self._match_evidence(event),
             "event": {
                 "identity": event.get("identity"),
                 "teamarr_id": event.get("teamarr_id"),
@@ -1252,6 +1293,8 @@ class TeamarrPreflightService:
                 "league": event.get("league"),
                 "seconds_to_start": event.get("seconds_to_start"),
                 "trigger_bucket": event.get("trigger_bucket"),
+                "match_evidence": event.get("match_evidence") or self._match_evidence(event),
+                "may_start_full_run": False,
             },
         }
         queued = bool(checker.queue_channel(
@@ -1289,6 +1332,9 @@ class TeamarrPreflightService:
                 "seconds_to_start": metadata.get("seconds_to_start"),
             }
         event["trigger_bucket"] = metadata.get("trigger_bucket")
+        if not event.get("match_evidence"):
+            event["match_evidence"] = metadata.get("match_evidence") or self._match_evidence(event)
+        event["may_start_full_run"] = False
 
         result = result if isinstance(result, dict) else {}
         deferral_reason = self._controlled_deferral_reason(result)
@@ -1483,8 +1529,16 @@ class TeamarrPreflightService:
             logger.warning(f"Teamarr preflight could not read streams for channel {channel_id}: {exc}")
             return False
 
+    @staticmethod
+    def _attempted_key(event: Dict[str, Any]) -> str:
+        return f"{event['identity']}:{event.get('trigger_bucket') or 'manual'}"
+
+    def _is_attempted(self, key: str) -> bool:
+        with self._lock:
+            return key in self._attempted_buckets
+
     def _mark_attempted(self, event: Dict[str, Any], *, key: Optional[str] = None) -> None:
-        attempted_key = key or f"{event['identity']}:{event.get('trigger_bucket') or 'manual'}"
+        attempted_key = key or self._attempted_key(event)
         with self._lock:
             self._attempted_buckets[attempted_key] = self.clock()
 
@@ -1499,6 +1553,10 @@ class TeamarrPreflightService:
                 self._attempted_buckets.pop(key, None)
 
     def _record_event(self, event_type: str, event: Dict[str, Any], details: Dict[str, Any]) -> None:
+        details = dict(details or {})
+        match_evidence = event.get("match_evidence") or details.get("match_evidence") or self._match_evidence(event)
+        details.setdefault("match_evidence", match_evidence)
+        details.setdefault("may_start_full_run", False)
         payload = {
             "timestamp": self.clock(),
             "type": event_type,
@@ -1512,6 +1570,8 @@ class TeamarrPreflightService:
             "sport": event.get("sport"),
             "league": event.get("league"),
             "seconds_to_start": event.get("seconds_to_start"),
+            "match_evidence": match_evidence,
+            "may_start_full_run": False,
             "details": details,
         }
         with self._lock:
