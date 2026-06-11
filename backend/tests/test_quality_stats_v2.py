@@ -33,6 +33,7 @@ def test_stream_quality_stats_marks_measured_uhd_over_name_hint():
             "id": 10,
             "name": "Provider 4K Label",
             "m3u_account": 7,
+            "channel_group_id": 3,
             "stream_stats": {
                 "resolution": "3840x2160",
                 "source_fps": 50,
@@ -50,6 +51,36 @@ def test_stream_quality_stats_marks_measured_uhd_over_name_hint():
     assert result["markers"]["name_uhd_hint"] is True
     assert result["markers"]["uhd_confidence"] == "measured"
     assert result["markers"]["hdr"] is True
+    selectors = {item["selector"] for item in result["uhd_identity_selectors"]}
+    assert "stream:10:measured_uhd" in selectors
+    assert "provider:7:measured_uhd" in selectors
+    assert "group:3:measured_uhd" in selectors
+    assert "quality:measured_uhd:3840x2160" in selectors
+
+
+def test_name_only_uhd_hint_is_not_a_safe_identity_selector():
+    result = build_stream_quality_stats(
+        {
+            "id": 11,
+            "name": "Provider 4K Label",
+            "m3u_account": 7,
+            "stream_stats": {
+                "resolution": "1920x1080",
+            },
+        }
+    )
+
+    assert result["markers"]["measured_uhd"] is False
+    assert result["markers"]["name_uhd_hint"] is True
+    assert result["markers"]["uhd_confidence"] == "name_hint"
+    assert result["uhd_identity_selectors"] == [
+        {
+            "scope": "name_hint",
+            "selector": "name_hint:stream:11",
+            "safe": False,
+            "reason": "name_hint_without_measured_uhd",
+        }
+    ]
 
 
 def test_provider_quality_stats_aggregates_buckets():

@@ -67,6 +67,63 @@ def build_quality_markers(stream: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _group_id(stream: Dict[str, Any]) -> Optional[int]:
+    for key in ("group_id", "channel_group_id", "m3u_group_id"):
+        value = _coerce_int(stream.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def build_uhd_identity_selectors(stream: Dict[str, Any], markers: Dict[str, Any]) -> List[Dict[str, Any]]:
+    stream_id = _coerce_int(stream.get("id"))
+    provider_id = _provider_id(stream)
+    group_id = _group_id(stream)
+    raw_stats = stream.get("stream_stats")
+    resolution = stream.get("resolution")
+    if not resolution and isinstance(raw_stats, dict):
+        resolution = raw_stats.get("resolution")
+    measured_uhd = bool(markers.get("measured_uhd"))
+
+    if not measured_uhd:
+        if markers.get("name_uhd_hint"):
+            return [
+                {
+                    "scope": "name_hint",
+                    "selector": f"name_hint:stream:{stream_id}",
+                    "safe": False,
+                    "reason": "name_hint_without_measured_uhd",
+                }
+            ]
+        return []
+
+    selectors = []
+    if stream_id is not None:
+        selectors.append({
+            "scope": "stream",
+            "selector": f"stream:{stream_id}:measured_uhd",
+            "safe": True,
+        })
+    if provider_id is not None:
+        selectors.append({
+            "scope": "provider",
+            "selector": f"provider:{provider_id}:measured_uhd",
+            "safe": True,
+        })
+    if group_id is not None:
+        selectors.append({
+            "scope": "group",
+            "selector": f"group:{group_id}:measured_uhd",
+            "safe": True,
+        })
+    selectors.append({
+        "scope": "quality",
+        "selector": f"quality:measured_uhd:{resolution or 'unknown'}",
+        "safe": True,
+    })
+    return selectors
+
+
 def build_stream_quality_stats(stream: Dict[str, Any]) -> Dict[str, Any]:
     stats = extract_stream_stats(stream)
     markers = build_quality_markers(stream)
@@ -87,6 +144,7 @@ def build_stream_quality_stats(stream: Dict[str, Any]) -> Dict[str, Any]:
             "audio_bitrate": stats.get("audio_bitrate"),
         },
         "markers": markers,
+        "uhd_identity_selectors": build_uhd_identity_selectors(stream, markers),
     }
 
 
