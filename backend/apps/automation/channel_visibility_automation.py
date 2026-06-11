@@ -11,6 +11,7 @@ STATE_KEY = "streamflow_channel_visibility_state"
 DEFAULT_VISIBILITY_CONFIG = {
     "enabled": False,
     "hide_on_no_regex": False,
+    "hide_on_no_streams": False,
     "hide_on_all_failed": False,
     "unhide_on_recovered": True,
 }
@@ -83,6 +84,21 @@ class ChannelVisibilityAutomation:
         merged = self.merge_config(config)
         if not merged.get("enabled"):
             return self._skipped(channel, "disabled", "quality_result")
+
+        details = dict(details or {})
+        total_streams = details.get("total_streams")
+        try:
+            total_streams = int(total_streams)
+        except (TypeError, ValueError):
+            total_streams = None
+
+        if total_streams == 0 and merged.get("hide_on_no_streams"):
+            return self.hide_channel(channel, reason="no_streams", details=details)
+
+        if total_streams and total_streams > 0 and merged.get("unhide_on_recovered"):
+            state_entry = self._state_entry_for_channel(channel)
+            if state_entry and state_entry.get("reason") == "no_streams":
+                return self.unhide_channel(channel, reason="streams_recovered", details=details)
 
         if (good_streams_count > 0 or revived_streams_count > 0) and merged.get("unhide_on_recovered"):
             return self.unhide_channel(channel, reason="recovered", details=details)
@@ -168,6 +184,12 @@ class ChannelVisibilityAutomation:
         except Exception as exc:
             logger.warning("Could not load StreamFlow channel visibility state: %s", exc)
             return {}
+
+    def _state_entry_for_channel(self, channel: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        channel_id = self._channel_id(channel)
+        if channel_id is None:
+            return None
+        return self._load_state().get(str(channel_id))
 
     def _save_state(self, state: Dict[str, Dict[str, Any]]) -> None:
         self.db_provider().set_system_setting(STATE_KEY, state)

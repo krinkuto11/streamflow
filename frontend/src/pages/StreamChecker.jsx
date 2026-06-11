@@ -1494,6 +1494,84 @@ export default function StreamChecker() {
                         : 'Connectivity guard enabled'}
                     </span>
                   </div>
+
+                  <Separator />
+
+                  <div className="space-y-4">
+                    <div>
+                      <h4 className="font-medium">Channel Visibility Automation</h4>
+                      <p className="text-sm text-muted-foreground">
+                        StreamFlow-owned hide and recovery decisions for checked channels
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="channel_visibility_enabled">Enabled</Label>
+                          <p className="text-xs text-muted-foreground">Allow StreamFlow to manage channel output visibility</p>
+                        </div>
+                        <Switch
+                          id="channel_visibility_enabled"
+                          checked={editedConfig?.channel_visibility_automation?.enabled === true}
+                          onCheckedChange={(checked) => updateConfigValue('channel_visibility_automation.enabled', checked)}
+                          disabled={!configEditing}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="channel_visibility_no_regex">No Regex</Label>
+                          <p className="text-xs text-muted-foreground">Hide StreamFlow-owned channels without a matching rule</p>
+                        </div>
+                        <Switch
+                          id="channel_visibility_no_regex"
+                          checked={editedConfig?.channel_visibility_automation?.hide_on_no_regex === true}
+                          onCheckedChange={(checked) => updateConfigValue('channel_visibility_automation.hide_on_no_regex', checked)}
+                          disabled={!configEditing || editedConfig?.channel_visibility_automation?.enabled !== true}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="channel_visibility_no_streams">No Streams</Label>
+                          <p className="text-xs text-muted-foreground">Hide StreamFlow-owned channels when a check finds no streams</p>
+                        </div>
+                        <Switch
+                          id="channel_visibility_no_streams"
+                          checked={editedConfig?.channel_visibility_automation?.hide_on_no_streams === true}
+                          onCheckedChange={(checked) => updateConfigValue('channel_visibility_automation.hide_on_no_streams', checked)}
+                          disabled={!configEditing || editedConfig?.channel_visibility_automation?.enabled !== true}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="channel_visibility_all_failed">All Failed</Label>
+                          <p className="text-xs text-muted-foreground">Hide StreamFlow-owned channels when all checked streams fail</p>
+                        </div>
+                        <Switch
+                          id="channel_visibility_all_failed"
+                          checked={editedConfig?.channel_visibility_automation?.hide_on_all_failed === true}
+                          onCheckedChange={(checked) => updateConfigValue('channel_visibility_automation.hide_on_all_failed', checked)}
+                          disabled={!configEditing || editedConfig?.channel_visibility_automation?.enabled !== true}
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2 md:col-span-2">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="channel_visibility_recovered">Recover Visible</Label>
+                          <p className="text-xs text-muted-foreground">Unhide StreamFlow-owned channels when streams return or quality recovers</p>
+                        </div>
+                        <Switch
+                          id="channel_visibility_recovered"
+                          checked={editedConfig?.channel_visibility_automation?.unhide_on_recovered !== false}
+                          onCheckedChange={(checked) => updateConfigValue('channel_visibility_automation.unhide_on_recovered', checked)}
+                          disabled={!configEditing || editedConfig?.channel_visibility_automation?.enabled !== true}
+                        />
+                      </div>
+                    </div>
+                  </div>
                 </TabsContent>
 
 

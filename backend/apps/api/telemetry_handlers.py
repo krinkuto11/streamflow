@@ -22,6 +22,31 @@ DEAD_STREAM_EXPORT_FIELDS = [
     "stream_name",
     "url",
 ]
+RUN_STREAM_EXPORT_FIELDS = [
+    "run_id",
+    "run_timestamp",
+    "action",
+    "job_category",
+    "job_outcome",
+    "channel_id",
+    "channel_name",
+    "bucket",
+    "stream_id",
+    "stream_name",
+    "provider_id",
+    "provider_name",
+    "status",
+    "reason",
+    "reason_detail",
+    "quality_reason",
+    "quality_reason_detail",
+    "resolution",
+    "fps",
+    "bitrate",
+    "video_codec",
+    "audio_codec",
+    "score",
+]
 DEAD_STREAM_EXPORT_FORMATS = {
     "txt": ("|", "txt", "text/plain; charset=utf-8"),
     "pipe": ("|", "txt", "text/plain; charset=utf-8"),
@@ -72,6 +97,7 @@ def get_changelog_response(*, request_args: Any):
 
                 merged_changelog.append(
                     {
+                        "id": run.id,
                         "timestamp": run.timestamp.isoformat(),
                         "action": run.run_type,
                         "job_category": getattr(run, "job_category", None),
@@ -340,6 +366,224 @@ def _render_dead_stream_export(
                 + "\n"
             )
     return output.getvalue(), extension, mimetype
+
+
+def _run_stream_collection_specs() -> Dict[str, str]:
+    return {
+        "dead_streams": "dead",
+        "revived_streams": "revived",
+        "skipped_streams": "skipped",
+        "preempted_streams": "preempted",
+        "checked_streams": "checked",
+        "stream_details": "checked",
+        "stream_stats": "checked",
+    }
+
+
+def _run_stream_row(
+    item: Dict[str, Any],
+    *,
+    bucket: str,
+    run_context: Dict[str, Any],
+    channel_context: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(item, dict):
+        return None
+
+    stream_id = item.get("stream_id", item.get("id"))
+    stream_name = item.get("stream_name") or item.get("name")
+    if stream_id in (None, "") and not stream_name:
+        return None
+
+    provider_id = (
+        item.get("provider_id")
+        or item.get("m3u_account_id")
+        or item.get("m3u_account")
+    )
+    provider_name = (
+        item.get("provider_name")
+        or item.get("m3u_account_name")
+        or item.get("m3u_account")
+    )
+    reason = (
+        item.get("reason")
+        or item.get("skip_reason")
+        or item.get("dead_reason")
+        or item.get("quality_reason")
+        or item.get("status")
+    )
+
+    row = {
+        **run_context,
+        "channel_id": item.get("channel_id", channel_context.get("channel_id")),
+        "channel_name": item.get("channel_name", channel_context.get("channel_name")),
+        "bucket": bucket,
+        "stream_id": stream_id,
+        "stream_name": stream_name,
+        "provider_id": provider_id,
+        "provider_name": provider_name,
+        "status": item.get("status") or item.get("analysis_status"),
+        "reason": reason,
+        "reason_detail": item.get("reason_detail") or item.get("quality_reason_detail"),
+        "quality_reason": item.get("quality_reason"),
+        "quality_reason_detail": item.get("quality_reason_detail"),
+        "resolution": item.get("resolution"),
+        "fps": item.get("fps"),
+        "bitrate": item.get("bitrate") or item.get("bitrate_kbps"),
+        "video_codec": item.get("video_codec"),
+        "audio_codec": item.get("audio_codec"),
+        "score": item.get("score"),
+    }
+    if item.get("url") or item.get("stream_url"):
+        row["url"] = item.get("url") or item.get("stream_url")
+    return row
+
+
+def _extract_changelog_run_stream_rows(run: Any, details: Dict[str, Any], subentries: List[Any]) -> List[Dict[str, Any]]:
+    specs = _run_stream_collection_specs()
+    run_context = {
+        "run_id": getattr(run, "id", None),
+        "run_timestamp": getattr(run, "timestamp", None).isoformat() if getattr(run, "timestamp", None) else None,
+        "action": getattr(run, "run_type", None),
+        "job_category": getattr(run, "job_category", None),
+        "job_outcome": getattr(run, "job_outcome", None),
+    }
+    rows: List[Dict[str, Any]] = []
+
+    def walk(node: Any, channel_context: Optional[Dict[str, Any]] = None) -> None:
+        context = dict(channel_context or {})
+        if isinstance(node, list):
+            for item in node:
+                walk(item, context)
+            return
+        if not isinstance(node, dict):
+            return
+
+        if node.get("channel_id") is not None:
+            context["channel_id"] = node.get("channel_id")
+        if node.get("channel_name"):
+            context["channel_name"] = node.get("channel_name")
+
+        for key, bucket in specs.items():
+            collection = node.get(key)
+            if isinstance(collection, list):
+                for item in collection:
+                    row = _run_stream_row(
+                        item,
+                        bucket=bucket,
+                        run_context=run_context,
+                        channel_context=context,
+                    )
+                    if row:
+                        rows.append(row)
+
+        for key, value in node.items():
+            if key in specs:
+                continue
+            if isinstance(value, (dict, list)):
+                walk(value, context)
+
+    walk(details or {})
+    walk(subentries or [])
+
+    deduped: List[Dict[str, Any]] = []
+    seen = set()
+    for row in rows:
+        key = (
+            row.get("bucket"),
+            row.get("channel_id"),
+            row.get("stream_id"),
+            row.get("stream_name"),
+            row.get("reason"),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(row)
+    return deduped
+
+
+def _render_changelog_run_export(
+    rows: List[Dict[str, Any]],
+    *,
+    export_format: str,
+    include_url: bool = False,
+    generated_at: Optional[str] = None,
+) -> Tuple[str, str, str]:
+    delimiter, extension, mimetype = DEAD_STREAM_EXPORT_FORMATS[export_format]
+    fields = list(RUN_STREAM_EXPORT_FIELDS)
+    if include_url:
+        fields.append("url")
+    generated_at = generated_at or datetime.now(timezone.utc).isoformat()
+
+    if export_format == "json":
+        content = json.dumps(
+            {
+                "generated_at": generated_at,
+                "format": "json",
+                "total_stream_rows": len(rows),
+                "fields": fields,
+                "streams": [{field: row.get(field) for field in fields} for row in rows],
+            },
+            indent=2,
+        )
+        return content + "\n", extension, mimetype
+
+    output = io.StringIO()
+    if export_format == "csv":
+        writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field) for field in fields})
+    else:
+        output.write(delimiter.join(fields) + "\n")
+        for row in rows:
+            output.write(
+                delimiter.join(_clean_delimited_value(row.get(field), delimiter) for field in fields)
+                + "\n"
+            )
+    return output.getvalue(), extension, mimetype
+
+
+def export_changelog_run_response(*, run_id: int, request_args: Any):
+    """Export stream rows captured inside one changelog/telemetry run."""
+    try:
+        requested_format = str(_arg(request_args, "format", "json") or "json").strip().lower()
+        if requested_format not in DEAD_STREAM_EXPORT_FORMATS:
+            return jsonify({
+                "error": "Unsupported changelog run export format",
+                "supported_formats": sorted(DEAD_STREAM_EXPORT_FORMATS.keys()),
+            }), 400
+
+        from apps.telemetry.telemetry_db import Run, get_session
+
+        session = get_session()
+        try:
+            run = session.query(Run).filter(Run.id == run_id).first()
+            if not run:
+                return jsonify({"error": "Run not found"}), 404
+
+            details = json.loads(getattr(run, "raw_details", None) or "{}")
+            subentries = json.loads(getattr(run, "raw_subentries", None) or "[]")
+            rows = _extract_changelog_run_stream_rows(run, details, subentries)
+        finally:
+            session.close()
+
+        content, extension, mimetype = _render_changelog_run_export(
+            rows,
+            export_format=requested_format,
+            include_url=_as_bool(_arg(request_args, "include_url", False), default=False),
+        )
+        filename = f"changelog-run-{run_id}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.{extension}"
+        response = Response(content, content_type=mimetype)
+        response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        response.headers["X-Changelog-Run-Id"] = str(run_id)
+        response.headers["X-Changelog-Stream-Rows"] = str(len(rows))
+        response.headers["X-Changelog-Run-Format"] = extension
+        return response
+    except Exception as exc:
+        logger.error(f"Error exporting changelog run {run_id}: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
 
 
 def export_dead_streams_response(*, request_args: Any):

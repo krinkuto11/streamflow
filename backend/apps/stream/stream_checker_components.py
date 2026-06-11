@@ -96,6 +96,7 @@ class StreamCheckConfig:
         'channel_visibility_automation': {
             'enabled': False,
             'hide_on_no_regex': False,
+            'hide_on_no_streams': False,
             'hide_on_all_failed': False,
             'unhide_on_recovered': True
         },

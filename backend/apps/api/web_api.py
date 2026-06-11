@@ -112,6 +112,7 @@ from apps.api.channel_order_handlers import (
 )
 from apps.api.telemetry_handlers import (
     clear_all_dead_streams_response,
+    export_changelog_run_response,
     export_dead_streams_response,
     get_changelog_response,
     get_dead_streams_response,
@@ -1026,6 +1027,11 @@ def test_regex_pattern_live():
 def get_changelog():
     """Get recent changelog entries from the new telemetry database."""
     return get_changelog_response(request_args=request.args)
+
+@app.route('/api/changelog/<int:run_id>/export', methods=['GET'])
+def export_changelog_run(run_id):
+    """Export stream rows for one changelog run."""
+    return export_changelog_run_response(run_id=run_id, request_args=request.args)
 
 @app.route('/api/dead-streams', methods=['GET'])
 def get_dead_streams():

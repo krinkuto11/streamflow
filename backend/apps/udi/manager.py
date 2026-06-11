@@ -1964,6 +1964,82 @@ class UDIManager:
         
         logger.debug(f"Channel {channel_id} is not in proxy status, assuming inactive")
         return False
+
+    def get_active_stream_ids_for_channel(self, channel_id: int) -> Set[int]:
+        """Return stream IDs currently watched for a channel.
+
+        Dispatcharr proxy status has existed in numeric channel ID, channel UUID,
+        and list-like shapes. This mirrors ``is_channel_active`` matching but
+        returns the concrete stream IDs so quality checks can protect only the
+        watched stream while still checking the rest of the channel.
+        """
+        self._ensure_initialized()
+        proxy_status = self._get_proxy_status()
+
+        channel_id_str = str(channel_id)
+        channel = self._channels_by_id.get(channel_id)
+        channel_uuid = None
+        if isinstance(channel, dict):
+            channel_uuid = channel.get('uuid') or channel.get('channel_uuid')
+            if channel_uuid is not None:
+                channel_uuid = str(channel_uuid)
+
+        candidate_keys = {channel_id_str}
+        if channel_uuid:
+            candidate_keys.add(channel_uuid)
+
+        def status_matches_channel(status: Dict[str, Any]) -> bool:
+            status_identifiers = {
+                str(value)
+                for value in (
+                    status.get('channel_id'),
+                    status.get('channel_uuid'),
+                    status.get('uuid'),
+                    status.get('id'),
+                )
+                if value not in (None, '')
+            }
+            return channel_id_str in status_identifiers or bool(channel_uuid and channel_uuid in status_identifiers)
+
+        def collect_stream_ids(value: Any) -> Set[int]:
+            collected: Set[int] = set()
+            if value in (None, ''):
+                return collected
+            if isinstance(value, dict):
+                for item_key in ('stream_id', 'id'):
+                    collected.update(collect_stream_ids(value.get(item_key)))
+                return collected
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    collected.update(collect_stream_ids(item))
+                return collected
+            try:
+                collected.add(int(value))
+            except (TypeError, ValueError):
+                pass
+            return collected
+
+        active_stream_ids: Set[int] = set()
+        stream_keys = ('stream_id', 'stream', 'streams', 'active_streams')
+        for key in candidate_keys:
+            status = proxy_status.get(key)
+            if isinstance(status, dict) and self._is_channel_status_active(status):
+                for stream_key in stream_keys:
+                    active_stream_ids.update(collect_stream_ids(status.get(stream_key)))
+
+        for key, status in proxy_status.items():
+            if not isinstance(status, dict):
+                continue
+            if status_matches_channel(status) and self._is_channel_status_active(status):
+                for stream_key in stream_keys:
+                    active_stream_ids.update(collect_stream_ids(status.get(stream_key)))
+
+        logger.debug(
+            "Channel %s active stream IDs from proxy status: %s",
+            channel_id,
+            sorted(active_stream_ids),
+        )
+        return active_stream_ids
     
     def get_total_viewers_for_profile(self, profile_id: int) -> int:
         """Calculate the total number of viewers for a specific M3U account profile.

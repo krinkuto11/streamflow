@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
+import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table.jsx'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
@@ -7,7 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { useToast } from '@/hooks/use-toast.js'
 import { changelogAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
-import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown } from 'lucide-react'
+import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download } from 'lucide-react'
 
 function formatTimestamp(timestamp) {
   const date = new Date(timestamp)
@@ -560,14 +561,14 @@ function AutomationChannel({ channel, cIdx }) {
   )
 }
 
-function ChangelogEntry({ entry }) {
+function ChangelogEntry({ entry, onExport, exporting }) {
   const { timestamp, action, details, subentries } = entry
   const hasSubentries = subentries && subentries.length > 0
 
   return (
     <Card className={`overflow-hidden shadow-md transition-shadow hover:shadow-lg dark:bg-card/40 ${action === 'automation_run' ? 'border-2 border-blue-500 dark:border-green-500' : 'border-muted/60'}`}>
       <CardHeader className="pb-3 bg-muted/10">
-        <div className="flex items-start justify-between">
+        <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-2">
             <Badge variant="outline" className={`${getActionColor(action)} border-current font-bold px-2 py-0.5`}>
               <div className="bg-current/10 p-1 rounded-sm mr-2 inline-flex">
@@ -576,7 +577,26 @@ function ChangelogEntry({ entry }) {
               <span className="text-[11px] uppercase tracking-wider">{getActionLabel(action)}</span>
             </Badge>
           </div>
-          <span className="text-[11px] font-medium text-muted-foreground bg-muted/30 px-2 py-1 rounded-md">{formatTimestamp(timestamp)}</span>
+          <div className="flex items-center gap-2">
+            {entry.id !== undefined && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 px-2"
+                onClick={() => onExport?.(entry)}
+                disabled={exporting}
+                title="Export this run"
+              >
+                {exporting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Download className="h-4 w-4" />
+                )}
+              </Button>
+            )}
+            <span className="text-[11px] font-medium text-muted-foreground bg-muted/30 px-2 py-1 rounded-md">{formatTimestamp(timestamp)}</span>
+          </div>
         </div>
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3 pt-3 border-t">
@@ -823,6 +843,7 @@ export default function Changelog() {
   const [totalPages, setTotalPages] = useState(1)
   const [actionFilter, setActionFilter] = useState('all')
   const [sourceFilter, setSourceFilter] = useState('all')
+  const [exportingRunId, setExportingRunId] = useState(null)
   const { toast } = useToast()
 
   useEffect(() => {
@@ -869,6 +890,41 @@ export default function Changelog() {
       : entries.filter(entry => entry.action === actionFilter)
     return actionFiltered.filter(entry => entryMatchesSourceFilter(entry, sourceFilter))
   }, [entries, actionFilter, sourceFilter])
+
+  const handleExportRun = async (entry) => {
+    if (!entry?.id) return
+    try {
+      setExportingRunId(entry.id)
+      const response = await changelogAPI.exportRun(entry.id, { format: 'json', include_url: false })
+      const disposition = response.headers?.['content-disposition'] || ''
+      const match = disposition.match(/filename="?([^"]+)"?/i)
+      const filename = match?.[1] || `changelog-run-${entry.id}.json`
+      const blob = response.data instanceof Blob
+        ? response.data
+        : new Blob([response.data], { type: response.headers?.['content-type'] || 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      toast({
+        title: "Export ready",
+        description: `Downloaded ${filename}`
+      })
+    } catch (err) {
+      console.error('Failed to export changelog run:', err)
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to export changelog run",
+        variant: "destructive"
+      })
+    } finally {
+      setExportingRunId(null)
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -946,7 +1002,12 @@ export default function Changelog() {
       ) : (
         <div className="space-y-4">
           {filteredEntries.map((entry, index) => (
-            <ChangelogEntry key={index} entry={entry} />
+            <ChangelogEntry
+              key={entry.id ?? index}
+              entry={entry}
+              onExport={handleExportRun}
+              exporting={exportingRunId === entry.id}
+            />
           ))}
 
           {/* Pagination Controls */}

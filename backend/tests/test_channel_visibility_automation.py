@@ -139,6 +139,42 @@ def test_all_failed_hide_uses_quality_result_gate():
     assert db.settings[STATE_KEY]["14"]["reason"] == "all_failed"
 
 
+def test_no_streams_hide_uses_quality_result_total_streams_gate():
+    db = FakeDb()
+    patch = Mock(return_value=FakeResponse())
+    service = make_service(db, patch_request=patch)
+
+    result = service.handle_quality_result(
+        {"id": 18, "name": "No Streams", "hidden_from_output": False},
+        good_streams_count=0,
+        dead_streams_count=0,
+        config={"enabled": True, "hide_on_no_streams": True},
+        details={"total_streams": 0},
+    )
+
+    assert result["action"] == "hidden"
+    assert result["reason"] == "no_streams"
+    assert db.settings[STATE_KEY]["18"]["reason"] == "no_streams"
+
+
+def test_streams_recovered_unhides_only_no_streams_state():
+    db = FakeDb(state={"19": {"hidden_by": "streamflow", "reason": "no_streams"}})
+    patch = Mock(return_value=FakeResponse())
+    service = make_service(db, patch_request=patch)
+
+    result = service.handle_quality_result(
+        {"id": 19, "name": "Streams Back", "hidden_from_output": True},
+        good_streams_count=0,
+        dead_streams_count=0,
+        config={"enabled": True, "hide_on_no_streams": True, "unhide_on_recovered": True},
+        details={"total_streams": 2},
+    )
+
+    assert result["action"] == "unhidden"
+    assert result["reason"] == "streams_recovered"
+    assert "19" not in db.settings[STATE_KEY]
+
+
 def test_disabled_visibility_automation_is_read_only():
     db = FakeDb()
     patch = Mock(return_value=FakeResponse())

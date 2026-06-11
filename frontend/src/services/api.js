@@ -242,6 +242,13 @@ export const teamarrPreflightAPI = {
 
 export const changelogAPI = {
   getChangelog: (days = 7, page = 1, limit = 10, filters = {}) => api.get(`/changelog`, { params: { days, page, limit, ...filters } }),
+  exportRun: (runId, options = {}) => api.get(`/changelog/${runId}/export`, {
+    params: {
+      format: options.format || 'json',
+      include_url: options.include_url === true ? 'true' : 'false',
+    },
+    responseType: 'blob',
+  }),
 };
 
 export const deadStreamsAPI = {

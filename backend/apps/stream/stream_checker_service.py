@@ -1438,7 +1438,8 @@ class StreamCheckerService:
                                 "avg_resolution": entry.get('avg_resolution', 'N/A'),
                                 "avg_bitrate": entry.get('avg_bitrate', 'N/A'),
                                 "avg_fps": entry.get('avg_fps', 'N/A'),
-                                "stream_details": entry.get('stream_stats', [])
+                                "stream_details": entry.get('stream_stats', []),
+                                "skipped_streams": entry.get('skipped_streams', []),
                             }
                         }
                         for entry in self.batch_changelog_entries
@@ -1499,36 +1500,18 @@ class StreamCheckerService:
             channel_name: Name of the channel
             streams: List of streams for the channel
             provider_limit_override: If True, bypass provider/profile capacity
-                skips while still protecting channels with active viewers.
+                skips. Active viewer streams are protected by the channel
+                checker so other streams can still be analyzed.
             
         Returns:
             None if check can proceed, or a result dict if check should be skipped
         """
         udi = get_udi_manager()
         
-        # Check if channel has active viewers using real-time proxy status.
-        # Some tests stub UDI with generic mocks; treat non-boolean responses as "not active"
-        # for backward compatibility with legacy single-channel test setups.
-        has_active_viewers = False
-        try:
-            active_status = udi.is_channel_active(channel_id)
-            if isinstance(active_status, bool):
-                has_active_viewers = active_status
-        except Exception:
-            has_active_viewers = False
-        if has_active_viewers:
-            logger.warning(f"Channel {channel_name} has active viewers, skipping check to avoid disruption")
-            return {
-                'dead_streams_count': 0,
-                'revived_streams_count': 0,
-                'skipped': True,
-                'skip_reason': 'active_viewers'
-            }
-
         if provider_limit_override:
             logger.info(
                 "Provider/profile slot guard override enabled for channel %s; "
-                "active-viewer protection remains enforced",
+                "active-viewer stream protection is handled before analysis",
                 channel_name,
             )
             return None
@@ -1879,6 +1862,118 @@ class StreamCheckerService:
         if self.abort_current_check.is_set():
             return self._abort_channel_check(channel_id, channel_name)
         return None
+
+    def _get_active_viewer_protected_stream_ids(
+        self,
+        channel_id: int,
+        streams: List[Dict[str, Any]],
+        udi: Any,
+    ) -> set:
+        """Resolve watched stream IDs for this channel and intersect with assigned streams."""
+        assigned_ids = set()
+        for stream in streams:
+            if not isinstance(stream, dict) or stream.get('id') is None:
+                continue
+            try:
+                assigned_ids.add(int(stream.get('id')))
+            except (TypeError, ValueError):
+                continue
+        if not assigned_ids:
+            return set()
+
+        protected_ids = set()
+        try:
+            get_active = getattr(udi, 'get_active_stream_ids_for_channel', None)
+            if callable(get_active):
+                protected_ids.update(get_active(channel_id) or set())
+        except Exception as exc:
+            logger.debug("Could not resolve active stream IDs for channel %s: %s", channel_id, exc)
+
+        if not protected_ids:
+            try:
+                active_status = getattr(udi, 'is_channel_active', lambda *_args: False)(channel_id)
+                get_playing = getattr(udi, 'get_playing_stream_ids', None)
+                if active_status is True and callable(get_playing):
+                    protected_ids.update(get_playing() or set())
+            except Exception as exc:
+                logger.debug("Could not fall back to playing stream IDs for channel %s: %s", channel_id, exc)
+
+        coerced = set()
+        for stream_id in protected_ids:
+            try:
+                coerced.add(int(stream_id))
+            except (TypeError, ValueError):
+                continue
+        return coerced.intersection(assigned_ids)
+
+    @staticmethod
+    def _merge_protected_stream_order(
+        original_stream_ids: List[int],
+        reordered_ids: List[int],
+        protected_stream_ids: set,
+    ) -> List[int]:
+        """Keep protected stream IDs at their original indexes while reordering the rest."""
+        protected_stream_ids = set(protected_stream_ids or set())
+        if not protected_stream_ids:
+            return reordered_ids
+
+        remaining = [
+            stream_id
+            for stream_id in reordered_ids
+            if stream_id not in protected_stream_ids
+        ]
+        result: List[int] = []
+        used = set()
+
+        for original_id in original_stream_ids:
+            if original_id in protected_stream_ids:
+                if original_id not in used:
+                    result.append(original_id)
+                    used.add(original_id)
+                continue
+            while remaining and remaining[0] in used:
+                remaining.pop(0)
+            if remaining:
+                next_id = remaining.pop(0)
+                result.append(next_id)
+                used.add(next_id)
+
+        for stream_id in remaining:
+            if stream_id not in used:
+                result.append(stream_id)
+                used.add(stream_id)
+
+        for original_id in original_stream_ids:
+            if original_id in protected_stream_ids and original_id not in used:
+                result.append(original_id)
+                used.add(original_id)
+
+        return result
+
+    def _active_viewer_skipped_streams(
+        self,
+        streams: List[Dict[str, Any]],
+        protected_stream_ids: set,
+    ) -> List[Dict[str, Any]]:
+        skipped = []
+        for stream in streams:
+            stream_id = stream.get('id') if isinstance(stream, dict) else None
+            try:
+                protected_id = int(stream_id)
+            except (TypeError, ValueError):
+                continue
+            if protected_id not in protected_stream_ids:
+                continue
+            skipped.append({
+                'id': protected_id,
+                'stream_id': protected_id,
+                'name': stream.get('name', f"Stream {protected_id}"),
+                'stream_name': stream.get('name', f"Stream {protected_id}"),
+                'skip_reason': 'active_viewer_protected',
+                'reason_detail': 'active_viewer_protected',
+                'status': 'active_viewer_protected',
+            })
+        return skipped
     
     def _check_channel_concurrent(
         self,
@@ -2042,13 +2137,44 @@ class StreamCheckerService:
 
             if not streams or len(streams) == 0:
                 logger.info(f"No streams found for channel {channel_name}")
+                visibility_result = self._apply_channel_visibility_after_check(
+                    channel_data,
+                    good_streams_count=0,
+                    dead_streams_count=0,
+                    revived_streams_count=0,
+                    total_streams=0,
+                )
+                if self.changelog and not skip_batch_changelog:
+                    batch_entry = {
+                        'channel_id': channel_id,
+                        'channel_name': channel_name,
+                        'logo_url': f"/api/logos/{channel_data.get('logo_id')}" if channel_data.get('logo_id') else None,
+                        'total_streams': 0,
+                        'streams_analyzed': 0,
+                        'dead_streams_detected': 0,
+                        'streams_revived': 0,
+                        'avg_resolution': 'N/A',
+                        'avg_bitrate': 'N/A',
+                        'avg_fps': 'N/A',
+                        'success': True,
+                        'stream_stats': [],
+                    }
+                    visibility_changelog = self._visibility_changelog_result(visibility_result)
+                    if visibility_changelog:
+                        batch_entry['channel_visibility'] = visibility_changelog
+                    self._add_to_batch_changelog(batch_entry)
                 self._complete_channel_check(
                     channel_id,
-                    lambda: self.update_tracker.mark_channel_checked(channel_id)
+                    lambda: self.update_tracker.mark_channel_checked(
+                        channel_id,
+                        stream_count=0,
+                        checked_stream_ids=[],
+                    )
                 )
                 return {
                     'dead_streams_count': 0,
-                    'revived_streams_count': 0
+                    'revived_streams_count': 0,
+                    'channel_visibility': visibility_result,
                 }
             
             logger.info(f"Found {len(streams)} streams for channel {channel_name}")
@@ -2090,13 +2216,37 @@ class StreamCheckerService:
                     logger.warning(f"Failed to parse last_check timestamp for channel {channel_id}: {e}")
             
             current_stream_ids = [s['id'] for s in streams]
+            protected_active_stream_ids = self._get_active_viewer_protected_stream_ids(
+                channel_id,
+                streams,
+                udi,
+            )
+            active_viewer_skipped_streams = self._active_viewer_skipped_streams(
+                streams,
+                protected_active_stream_ids,
+            )
+            if protected_active_stream_ids:
+                logger.info(
+                    "Channel %s has %s active viewer-protected stream(s); "
+                    "their slots will be preserved while other streams are checked",
+                    channel_name,
+                    len(protected_active_stream_ids),
+                )
             
             # Identify which streams need analysis (new or unchecked)
             
             if target_stream_ids is not None:
                 # Targeted check mode: Evaluates newly assigned streams ONLY
-                streams_to_check = [s for s in streams if str(s['id']) in [str(ts) for ts in target_stream_ids]]
-                streams_already_checked = [s for s in streams if str(s['id']) not in [str(ts) for ts in target_stream_ids]]
+                streams_to_check = [
+                    s for s in streams
+                    if str(s['id']) in [str(ts) for ts in target_stream_ids]
+                    and s.get('id') not in protected_active_stream_ids
+                ]
+                streams_already_checked = [
+                    s for s in streams
+                    if str(s['id']) not in [str(ts) for ts in target_stream_ids]
+                    and s.get('id') not in protected_active_stream_ids
+                ]
                 logger.info(f"Targeted stream check: evaluating {len(streams_to_check)} specific newly assigned streams")
                 
             elif force_check or (grace_period and immunity_expired) or (not grace_period and not force_check):
@@ -2105,7 +2255,10 @@ class StreamCheckerService:
                 # However, we only get here if the worker picked up the channel.
                 # If it's a force check or immunity expired, check all.
                 # If grace period is OFF, we also check everything if we are running.
-                streams_to_check = streams
+                streams_to_check = [
+                    s for s in streams
+                    if s.get('id') not in protected_active_stream_ids
+                ]
                 streams_already_checked = []
                 
                 if force_check:
@@ -2117,8 +2270,16 @@ class StreamCheckerService:
                     logger.info(f"Grace period disabled for profile: analyzing all {len(streams)} streams")
             else:
                 # Normal incremental check: only analyze new streams
-                streams_to_check = [s for s in streams if s['id'] not in checked_stream_ids]
-                streams_already_checked = [s for s in streams if s['id'] in checked_stream_ids]
+                streams_to_check = [
+                    s for s in streams
+                    if s['id'] not in checked_stream_ids
+                    and s.get('id') not in protected_active_stream_ids
+                ]
+                streams_already_checked = [
+                    s for s in streams
+                    if s['id'] in checked_stream_ids
+                    and s.get('id') not in protected_active_stream_ids
+                ]
                 
                 if streams_to_check:
                     logger.info(f"Found {len(streams_to_check)} new/unchecked streams (out of {len(streams)} total)")
@@ -2146,7 +2307,7 @@ class StreamCheckerService:
                         )
                         # Best effort to reconstruct stats for skipped/cached streams
                         cached_stats = []
-                        for s in streams:
+                        for s in streams_already_checked:
                             # Try to find existing stats if available in stream object
                             # Otherwise use placeholders
                             extracted_stats = extract_stream_stats(s)
@@ -2184,8 +2345,11 @@ class StreamCheckerService:
                             'revived_streams_count': 0,
                             'dead_streams': [],
                             'revived_streams': [],
-                            'skipped_streams_count': len(streams),
-                            'skipped_streams': [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams],
+                            'skipped_streams_count': len(streams_already_checked) + len(active_viewer_skipped_streams),
+                            'skipped_streams': (
+                                [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked]
+                                + active_viewer_skipped_streams
+                            ),
                             'checked_streams': cached_stats
                         }
                     else:
@@ -2760,6 +2924,11 @@ class StreamCheckerService:
                 step_detail='Applying new stream order to channel'
             )
             reordered_ids = [s.get('stream_id') for s in analyzed_streams if s.get('stream_id') is not None]
+            reordered_ids = self._merge_protected_stream_order(
+                current_stream_ids,
+                reordered_ids,
+                protected_active_stream_ids,
+            )
             # Dead streams have already been filtered from analyzed_streams if removal is enabled
             # If removal is disabled, allow them to remain in the channel
             
@@ -2795,7 +2964,12 @@ class StreamCheckerService:
                         channel_name=channel_name,
                     )
 
-            update_channel_streams(channel_id, reordered_ids, allow_dead_streams=(not dead_stream_removal_enabled))
+            update_channel_streams(
+                channel_id,
+                reordered_ids,
+                allow_dead_streams=(not dead_stream_removal_enabled),
+                protected_stream_ids=protected_active_stream_ids,
+            )
             
             # Verify the update
             self.progress.update(
@@ -2906,7 +3080,10 @@ class StreamCheckerService:
                 averages = {'avg_resolution': 'N/A', 'avg_bitrate': 'N/A', 'avg_fps': 'N/A'}
                 logo_url = None
 
-            visibility_good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
+            visibility_good_streams_count = (
+                self._count_good_checked_streams({'checked_streams': stream_stats})
+                + len(protected_active_stream_ids)
+            )
             visibility_result = self._apply_channel_visibility_after_check(
                 channel_data,
                 good_streams_count=visibility_good_streams_count,
@@ -2936,7 +3113,8 @@ class StreamCheckerService:
                             'avg_bitrate': averages['avg_bitrate'],
                             'avg_fps': averages['avg_fps'],
                             'success': True,
-                            'stream_stats': stream_stats
+                            'stream_stats': stream_stats,
+                            'skipped_streams': active_viewer_skipped_streams,
                         }
                         visibility_changelog = self._visibility_changelog_result(visibility_result)
                         if visibility_changelog:
@@ -2956,6 +3134,18 @@ class StreamCheckerService:
                 final_stream_ids = current_stream_ids  # Keep all streams if removal is disabled
             if preempted_stream_ids:
                 final_stream_ids = [sid for sid in final_stream_ids if sid not in preempted_stream_ids]
+            if protected_active_stream_ids:
+                final_stream_ids = [
+                    sid
+                    for sid in current_stream_ids
+                    if (
+                        sid in protected_active_stream_ids
+                        or (
+                            (not dead_stream_removal_enabled or sid not in dead_stream_ids)
+                            and sid not in preempted_stream_ids
+                        )
+                    )
+                ]
             self._complete_channel_check(
                 channel_id,
                 lambda: self.update_tracker.mark_channel_checked(
@@ -2973,7 +3163,10 @@ class StreamCheckerService:
                 {'checked_streams': stream_stats},
                 'freeze',
             )
-            good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
+            good_streams_count = (
+                self._count_good_checked_streams({'checked_streams': stream_stats})
+                + len(protected_active_stream_ids)
+            )
 
             # Return statistics for callers that need them
             return {
@@ -2997,7 +3190,10 @@ class StreamCheckerService:
                     'name': next((st.get('name') for st in streams if st['id'] == s), f'Stream {s}'),
                     'm3u_account': next((self._get_stream_m3u_account_id(st) for st in streams if st['id'] == s), None)
                 } for s in preempted_stream_ids],
-                'skipped_streams': [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked],
+                'skipped_streams': (
+                    [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked]
+                    + active_viewer_skipped_streams
+                ),
                 'checked_streams': stream_stats,
                 'channel_visibility': visibility_result,
                 # In-memory analyzed_streams: authoritative source for loop results
@@ -3200,13 +3396,44 @@ class StreamCheckerService:
 
             if not streams or len(streams) == 0:
                 logger.info(f"No streams found for channel {channel_name}")
+                visibility_result = self._apply_channel_visibility_after_check(
+                    channel_data,
+                    good_streams_count=0,
+                    dead_streams_count=0,
+                    revived_streams_count=0,
+                    total_streams=0,
+                )
+                if self.changelog and not skip_batch_changelog:
+                    batch_entry = {
+                        'channel_id': channel_id,
+                        'channel_name': channel_name,
+                        'logo_url': f"/api/logos/{channel_data.get('logo_id')}" if channel_data.get('logo_id') else None,
+                        'total_streams': 0,
+                        'streams_analyzed': 0,
+                        'dead_streams_detected': 0,
+                        'streams_revived': 0,
+                        'avg_resolution': 'N/A',
+                        'avg_bitrate': 'N/A',
+                        'avg_fps': 'N/A',
+                        'success': True,
+                        'stream_stats': [],
+                    }
+                    visibility_changelog = self._visibility_changelog_result(visibility_result)
+                    if visibility_changelog:
+                        batch_entry['channel_visibility'] = visibility_changelog
+                    self._add_to_batch_changelog(batch_entry)
                 self._complete_channel_check(
                     channel_id,
-                    lambda: self.update_tracker.mark_channel_checked(channel_id)
+                    lambda: self.update_tracker.mark_channel_checked(
+                        channel_id,
+                        stream_count=0,
+                        checked_stream_ids=[],
+                    )
                 )
                 return {
                     'dead_streams_count': 0,
-                    'revived_streams_count': 0
+                    'revived_streams_count': 0,
+                    'channel_visibility': visibility_result,
                 }
             
             logger.info(f"Found {len(streams)} streams for channel {channel_name}")
@@ -3248,17 +3475,44 @@ class StreamCheckerService:
                     logger.warning(f"Failed to parse last_check timestamp for channel {channel_id}: {e}")
             
             current_stream_ids = [s['id'] for s in streams]
+            protected_active_stream_ids = self._get_active_viewer_protected_stream_ids(
+                channel_id,
+                streams,
+                udi,
+            )
+            active_viewer_skipped_streams = self._active_viewer_skipped_streams(
+                streams,
+                protected_active_stream_ids,
+            )
+            if protected_active_stream_ids:
+                logger.info(
+                    "Channel %s has %s active viewer-protected stream(s); "
+                    "their slots will be preserved while other streams are checked",
+                    channel_name,
+                    len(protected_active_stream_ids),
+                )
             
             # Identify which streams need analysis (new or unchecked)
             
             if target_stream_ids is not None:
                 # Targeted check mode: Evaluates newly assigned streams ONLY
-                streams_to_check = [s for s in streams if str(s['id']) in [str(ts) for ts in target_stream_ids]]
-                streams_already_checked = [s for s in streams if str(s['id']) not in [str(ts) for ts in target_stream_ids]]
+                streams_to_check = [
+                    s for s in streams
+                    if str(s['id']) in [str(ts) for ts in target_stream_ids]
+                    and s.get('id') not in protected_active_stream_ids
+                ]
+                streams_already_checked = [
+                    s for s in streams
+                    if str(s['id']) not in [str(ts) for ts in target_stream_ids]
+                    and s.get('id') not in protected_active_stream_ids
+                ]
                 logger.info(f"Targeted stream check: evaluating {len(streams_to_check)} specific newly assigned streams")
                 
             elif force_check or (grace_period and immunity_expired) or (not grace_period and not force_check):
-                streams_to_check = streams
+                streams_to_check = [
+                    s for s in streams
+                    if s.get('id') not in protected_active_stream_ids
+                ]
                 streams_already_checked = []
                 
                 if force_check:
@@ -3270,8 +3524,16 @@ class StreamCheckerService:
                     logger.info(f"Grace period disabled for profile: analyzing all {len(streams)} streams")
             else:
                 # Normal incremental check: only analyze new streams
-                streams_to_check = [s for s in streams if s['id'] not in checked_stream_ids]
-                streams_already_checked = [s for s in streams if s['id'] in checked_stream_ids]
+                streams_to_check = [
+                    s for s in streams
+                    if s['id'] not in checked_stream_ids
+                    and s.get('id') not in protected_active_stream_ids
+                ]
+                streams_already_checked = [
+                    s for s in streams
+                    if s['id'] in checked_stream_ids
+                    and s.get('id') not in protected_active_stream_ids
+                ]
                 
                 if streams_to_check:
                     logger.info(f"Found {len(streams_to_check)} new/unchecked streams (out of {len(streams)} total)")
@@ -3297,7 +3559,18 @@ class StreamCheckerService:
                                 checked_stream_ids=checked_stream_ids
                             )
                         )
-                        return
+                        return {
+                            'dead_streams_count': 0,
+                            'revived_streams_count': 0,
+                            'dead_streams': [],
+                            'revived_streams': [],
+                            'skipped_streams_count': len(streams_already_checked) + len(active_viewer_skipped_streams),
+                            'skipped_streams': (
+                                [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked]
+                                + active_viewer_skipped_streams
+                            ),
+                            'checked_streams': [],
+                        }
                     else:
                         logger.info(f"Channel composition changed (prev: {previous_stream_count}, curr: {current_stream_count}) - will reorder")
             
@@ -3749,6 +4022,11 @@ class StreamCheckerService:
                 step_detail='Applying new stream order to channel'
             )
             reordered_ids = [s.get('stream_id') for s in analyzed_streams if s.get('stream_id') is not None]
+            reordered_ids = self._merge_protected_stream_order(
+                current_stream_ids,
+                reordered_ids,
+                protected_active_stream_ids,
+            )
             # Dead streams have already been filtered from analyzed_streams if removal is enabled
             # If removal is disabled, allow them to remain in the channel
 
@@ -3784,7 +4062,12 @@ class StreamCheckerService:
                         channel_name=channel_name,
                     )
 
-            update_channel_streams(channel_id, reordered_ids, allow_dead_streams=(not dead_stream_removal_enabled))
+            update_channel_streams(
+                channel_id,
+                reordered_ids,
+                allow_dead_streams=(not dead_stream_removal_enabled),
+                protected_stream_ids=protected_active_stream_ids,
+            )
             
             # Verify the update was applied correctly
             self.progress.update(
@@ -3891,7 +4174,10 @@ class StreamCheckerService:
                 logger.warning(f"Failed to build stream_stats for sequential return: {e}")
                 averages = {'avg_resolution': 'N/A', 'avg_bitrate': 'N/A', 'avg_fps': 'N/A'}
 
-            visibility_good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
+            visibility_good_streams_count = (
+                self._count_good_checked_streams({'checked_streams': stream_stats})
+                + len(protected_active_stream_ids)
+            )
             visibility_result = self._apply_channel_visibility_after_check(
                 channel_data,
                 good_streams_count=visibility_good_streams_count,
@@ -3924,7 +4210,8 @@ class StreamCheckerService:
                             'avg_bitrate': averages['avg_bitrate'],
                             'avg_fps': averages['avg_fps'],
                             'success': True,
-                            'stream_details': stream_stats[:10]  # Limit to top 10 for brevity
+                            'stream_details': stream_stats[:10],  # Limit to top 10 for brevity
+                            'skipped_streams': active_viewer_skipped_streams,
                         }
                         visibility_changelog = self._visibility_changelog_result(visibility_result)
                         if visibility_changelog:
@@ -3943,6 +4230,15 @@ class StreamCheckerService:
                 final_stream_ids = [sid for sid in current_stream_ids if sid not in dead_stream_ids]
             else:
                 final_stream_ids = current_stream_ids  # Keep all streams if removal is disabled
+            if protected_active_stream_ids:
+                final_stream_ids = [
+                    sid
+                    for sid in current_stream_ids
+                    if (
+                        sid in protected_active_stream_ids
+                        or (not dead_stream_removal_enabled or sid not in dead_stream_ids)
+                    )
+                ]
             self._complete_channel_check(
                 channel_id,
                 lambda: self.update_tracker.mark_channel_checked(
@@ -3960,7 +4256,10 @@ class StreamCheckerService:
                 {'checked_streams': stream_stats},
                 'freeze',
             )
-            good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
+            good_streams_count = (
+                self._count_good_checked_streams({'checked_streams': stream_stats})
+                + len(protected_active_stream_ids)
+            )
 
             # Return statistics for callers that need them
             return {
@@ -3979,7 +4278,10 @@ class StreamCheckerService:
                     'name': next((st.get('name') for st in streams if st['id'] == s), f'Stream {s}'),
                     'm3u_account': next((self._get_stream_m3u_account_id(st) for st in streams if st['id'] == s), None)
                 } for s in revived_stream_ids],
-                'skipped_streams': [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked],
+                'skipped_streams': (
+                    [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked]
+                    + active_viewer_skipped_streams
+                ),
                 'checked_streams': stream_stats,
                 'channel_visibility': visibility_result,
                 'analyzed_streams': analyzed_streams,
@@ -5790,7 +6092,8 @@ class StreamCheckerService:
                 'avg_fps': channel_averages['avg_fps'],
                 'm3u_refresh_scope': m3u_refresh_scope,
                 'm3u_refresh_account_count': len(m3u_refresh_account_ids),
-                'stream_details': []
+                'stream_details': [],
+                'skipped_streams': check_result.get('skipped_streams', []) if checking_enabled else [],
             }
             
             # Sort streams by persisted quality_score descending so the
