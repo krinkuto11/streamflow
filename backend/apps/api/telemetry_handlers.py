@@ -597,6 +597,8 @@ def _run_stream_row(
         "video_codec": item.get("video_codec"),
         "audio_codec": item.get("audio_codec"),
         "score": item.get("score"),
+        "blank_detected": item.get("blank_detected"),
+        "freeze_detected": item.get("freeze_detected"),
     }
     if item.get("url") or item.get("stream_url"):
         row["url"] = item.get("url") or item.get("stream_url")

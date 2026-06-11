@@ -203,6 +203,15 @@ def test_changelog_run_export_dead_scope_enriches_reasons_and_profiles():
                     "fps": 50,
                     "bitrate": "6000 kbps",
                 },
+                {
+                    "stream_id": 304,
+                    "stream_name": "Legacy Freeze Stream",
+                    "freeze_detected": True,
+                    "resolution": "1920x1080",
+                    "fps": 50,
+                    "bitrate": "6000 kbps",
+                    "score": 0.2,
+                },
             ],
         },
     )
@@ -223,12 +232,12 @@ def test_changelog_run_export_dead_scope_enriches_reasons_and_profiles():
 
     payload = response.get_json()
     assert payload["scope"] == "dead"
-    assert payload["total_stream_rows"] == 2
+    assert payload["total_stream_rows"] == 3
     assert "profile_id" in payload["fields"]
     assert "profile_name" in payload["fields"]
 
     rows = {row["stream_id"]: row for row in payload["streams"]}
-    assert set(rows) == {301, 302}
+    assert set(rows) == {301, 302, 304}
     assert rows[301]["profile_id"] == "7"
     assert rows[301]["profile_name"] == "Teamarr Event Preflight"
     assert rows[301]["provider_id"] is None
@@ -237,3 +246,5 @@ def test_changelog_run_export_dead_scope_enriches_reasons_and_profiles():
     assert rows[302]["status"] == "low_quality"
     assert rows[302]["reason"] == "low_quality"
     assert rows[302]["reason_detail"] == "inferred_from_run_metrics"
+    assert rows[304]["status"] == "freeze"
+    assert rows[304]["reason"] == "freeze"
