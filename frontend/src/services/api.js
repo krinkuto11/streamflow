@@ -210,6 +210,12 @@ export const streamCheckerAPI = {
   triggerGlobalAction: () => api.post('/stream-checker/global-action'),
 };
 
+export const qualityStatsV2API = {
+  getStream: (streamId) => api.get(`/quality-stats/v2/streams/${streamId}`),
+  getProvider: (providerId, params = {}) => api.get(`/quality-stats/v2/providers/${providerId}`, { params }),
+  bulk: (data) => api.post('/quality-stats/v2/bulk', data),
+};
+
 export const shadowBlankMonitorAPI = {
   getConfig: () => api.get('/shadow-blank-monitor/config'),
   updateConfig: (config) => api.put('/shadow-blank-monitor/config', config),

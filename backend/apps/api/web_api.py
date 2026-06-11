@@ -144,6 +144,11 @@ from apps.api.stream_checker_handlers import (
     start_stream_checker_response,
     stop_stream_checker_response,
 )
+from apps.api.quality_stats_v2_handlers import (
+    get_quality_stats_v2_provider_response,
+    get_quality_stats_v2_stream_response,
+    post_quality_stats_v2_bulk_response,
+)
 from apps.api.shadow_blank_monitor_handlers import (
     get_shadow_blank_monitor_config_response,
     get_shadow_blank_monitor_status_response,
@@ -1303,6 +1308,34 @@ def get_stream_last_quality_stats(stream_id):
     return get_stream_last_quality_stats_response(
         stream_id=stream_id,
         stale_after_hours=stale_after_hours,
+    )
+
+
+@app.route('/api/quality-stats/v2/streams/<int:stream_id>', methods=['GET'])
+def get_quality_stats_v2_stream(stream_id):
+    """Get normalized V2 quality stats and markers for one stream."""
+    return get_quality_stats_v2_stream_response(
+        stream_id=stream_id,
+        get_udi_manager=get_udi_manager,
+    )
+
+
+@app.route('/api/quality-stats/v2/providers/<int:provider_id>', methods=['GET'])
+def get_quality_stats_v2_provider(provider_id):
+    """Get normalized V2 quality stats for one provider."""
+    return get_quality_stats_v2_provider_response(
+        provider_id=provider_id,
+        request_args=request.args,
+        get_udi_manager=get_udi_manager,
+    )
+
+
+@app.route('/api/quality-stats/v2/bulk', methods=['POST'])
+def post_quality_stats_v2_bulk():
+    """Get normalized V2 quality stats for stream and provider batches."""
+    return post_quality_stats_v2_bulk_response(
+        payload=request.get_json(silent=True),
+        get_udi_manager=get_udi_manager,
     )
 
 
