@@ -4,6 +4,7 @@ import {
   filterShadowDecisionEvents,
   formatShadowEventReason,
   formatShadowEventType,
+  formatShadowPreProbeStatus,
   getShadowEventDecisionGroup,
   getShadowEventDetailParts,
 } from './shadow-monitor-decision-history.js'
@@ -80,9 +81,27 @@ describe('shadow monitor decision history helpers', () => {
       },
     })).toEqual([
       'Silent Audio',
-      'pre-probe rejected: Provider Capacity',
+      'pre-probe rejected: Provider Slot',
       'cooldown 1m 5s',
       '2 real viewers',
     ])
+  })
+
+  it('formats last pre-probe status for the Shadow switch', () => {
+    expect(formatShadowPreProbeStatus(null)).toBe('No pre-probe decisions')
+    expect(formatShadowPreProbeStatus({
+      metric: 'preprobe_skipped_provider_limit',
+    })).toBe('Last pre-probe skipped: provider slot unavailable')
+    expect(formatShadowPreProbeStatus({
+      metric: 'preprobe_skipped_profile_limit',
+    })).toBe('Last pre-probe skipped: profile slot unavailable')
+    expect(formatShadowPreProbeStatus({
+      metric: 'preprobe_rejected_media_fault',
+      rejection_reason: 'blank',
+    })).toBe('Last pre-probe rejected target: Blank')
+    expect(formatShadowPreProbeStatus({
+      metric: 'preprobe_success',
+      elapsed_ms: 124,
+    })).toBe('Last pre-probe passed in 124ms')
   })
 })

@@ -23,6 +23,17 @@ export const shadowEventLabels = {
   pre_probe_rejected: 'Pre-Probe Rejected',
 }
 
+const preProbeMetricLabels = {
+  preprobe_attempted: 'attempted',
+  preprobe_success: 'passed',
+  preprobe_rejected_media_fault: 'rejected target',
+  preprobe_skipped_provider_limit: 'skipped',
+  preprobe_skipped_profile_limit: 'skipped',
+  preprobe_skipped_missing_url: 'unavailable',
+  preprobe_timeout: 'timed out',
+  switch_prevented_by_preprobe: 'prevented switch',
+}
+
 const reasonLabels = {
   blank: 'Blank',
   freeze: 'Freeze',
@@ -32,6 +43,10 @@ const reasonLabels = {
   offline_image: 'Offline Image',
   manual: 'Manual',
   pre_probe: 'Pre-Probe',
+  provider_capacity: 'Provider Slot',
+  active_viewers: 'Provider Slot',
+  checking_capacity: 'Profile Slot',
+  timeout: 'Timeout',
   probe_ok: 'Probe OK',
   active_watcher_between_confirmations: 'Watcher Recovered',
 }
@@ -78,6 +93,32 @@ export const formatShadowEventType = (event = {}) => (
 export const formatShadowEventReason = (reason) => (
   reasonLabels[reason] || titleizeCode(reason) || 'Unknown'
 )
+
+export const formatShadowPreProbeStatus = (last = null) => {
+  if (!last?.metric) return 'No pre-probe decisions'
+  const metric = last.metric
+  const action = preProbeMetricLabels[metric] || titleizeCode(metric)
+  if (metric === 'preprobe_skipped_provider_limit') {
+    return 'Last pre-probe skipped: provider slot unavailable'
+  }
+  if (metric === 'preprobe_skipped_profile_limit') {
+    return 'Last pre-probe skipped: profile slot unavailable'
+  }
+  if (metric === 'preprobe_rejected_media_fault') {
+    return `Last pre-probe rejected target: ${formatShadowEventReason(last.rejection_reason)}`
+  }
+  if (metric === 'preprobe_timeout') {
+    return 'Last pre-probe timed out'
+  }
+  if (metric === 'preprobe_success') {
+    const elapsed = finiteNumber(last.elapsed_ms)
+    return elapsed === null ? 'Last pre-probe passed' : `Last pre-probe passed in ${Math.round(elapsed)}ms`
+  }
+  if (metric === 'switch_prevented_by_preprobe') {
+    return 'Last switch prevented by pre-probe'
+  }
+  return `Last pre-probe ${action}`
+}
 
 export const getShadowEventDecisionGroup = (event = {}) => {
   if (event?.decision_group) return event.decision_group
@@ -171,6 +212,10 @@ export const getShadowEventDetailParts = (event = {}) => {
   const reason = details.trigger_reason || event.trigger_reason || details.reason
   if (reason && reason !== 'probe_ok') {
     parts.push(formatShadowEventReason(reason))
+  }
+  if (details.pre_probe_metric && !details.pre_probe) {
+    const metricLabel = preProbeMetricLabels[details.pre_probe_metric] || titleizeCode(details.pre_probe_metric)
+    parts.push(`pre-probe ${metricLabel}`)
   }
 
   const detection = details.detection

@@ -167,6 +167,16 @@ DETECTION_THRESHOLD_KEYS = {
 }
 SWITCH_EVENT_TYPES = {"dry_run_switch", "switch_success", "switch_failed"}
 PRE_PROBE_EVENT_TYPES = {"pre_probe_unavailable", "pre_probe_rejected"}
+PRE_PROBE_METRICS = {
+    "preprobe_attempted",
+    "preprobe_success",
+    "preprobe_rejected_media_fault",
+    "preprobe_skipped_provider_limit",
+    "preprobe_skipped_profile_limit",
+    "preprobe_skipped_missing_url",
+    "preprobe_timeout",
+    "switch_prevented_by_preprobe",
+}
 GUARD_EVENT_TYPES = {
     "cooldown",
     "stale_stream_guard",
@@ -328,6 +338,8 @@ class ShadowBlankMonitorService:
         self._cooldowns: Dict[str, float] = {}
         self._switch_attempts: Dict[str, Dict[str, Any]] = {}
         self._switch_history: Dict[str, deque[float]] = defaultdict(deque)
+        self._pre_probe_metrics: Dict[str, int] = defaultdict(int)
+        self._last_pre_probe: Optional[Dict[str, Any]] = None
         self._active_probes: set[str] = set()
         self._last_scan_at: Optional[float] = None
         self._last_error: Optional[str] = None
@@ -443,6 +455,10 @@ class ShadowBlankMonitorService:
                 "cooldowns": cooldowns,
                 "recent_events": list(self._events),
                 "decision_history": list(self._events),
+                "pre_probe": {
+                    "metrics": dict(self._pre_probe_metrics),
+                    "last": dict(self._last_pre_probe) if self._last_pre_probe else None,
+                },
             }
 
     def _worker(self) -> None:
@@ -945,6 +961,11 @@ class ShadowBlankMonitorService:
             details = {"reason": reason}
             if pre_probe_details:
                 details["pre_probe"] = pre_probe_details
+                self._record_pre_probe_metric(
+                    "switch_prevented_by_preprobe",
+                    target,
+                    pre_probe_details,
+                )
             self._record_event("no_alternative", target, details)
             return
 
@@ -1064,6 +1085,7 @@ class ShadowBlankMonitorService:
             }
             if not candidate_url:
                 details["result"] = "missing_url"
+                self._record_pre_probe_metric("preprobe_skipped_missing_url", target, details)
                 last_details = details
                 self._record_event("pre_probe_unavailable", target, {**details, "reason": reason})
                 continue
@@ -1073,10 +1095,18 @@ class ShadowBlankMonitorService:
             if not provider_slot.get("acquired"):
                 details["result"] = "rejected"
                 details["rejection_reason"] = provider_slot.get("reason") or "provider_capacity"
+                details["slot_scope"] = self._pre_probe_slot_scope(details["rejection_reason"])
+                self._record_pre_probe_metric(
+                    self._pre_probe_slot_metric(details["rejection_reason"]),
+                    target,
+                    details,
+                )
                 last_details = details
                 self._record_event("pre_probe_rejected", target, {**details, "reason": reason})
                 continue
 
+            self._record_pre_probe_metric("preprobe_attempted", target, details)
+            probe_started = time.monotonic()
             try:
                 probe_result = self._run_next_stream_pre_probe(
                     str(provider_slot.get("url") or candidate_url),
@@ -1085,6 +1115,7 @@ class ShadowBlankMonitorService:
             finally:
                 self._release_pre_probe_provider_slot(provider_slot)
             rejection_reason = self._pre_probe_rejection_reason(probe_result)
+            details["elapsed_ms"] = max(0, int((time.monotonic() - probe_started) * 1000))
             details.update({
                 "result": "rejected" if rejection_reason else "ok",
                 "rejection_reason": rejection_reason,
@@ -1097,8 +1128,11 @@ class ShadowBlankMonitorService:
             })
             last_details = details
             if rejection_reason:
+                metric = "preprobe_timeout" if rejection_reason == "timeout" else "preprobe_rejected_media_fault"
+                self._record_pre_probe_metric(metric, target, details)
                 self._record_event("pre_probe_rejected", target, {**details, "reason": reason})
                 continue
+            self._record_pre_probe_metric("preprobe_success", target, details)
             return candidate_id, details
         return None, last_details
 
@@ -1232,6 +1266,50 @@ class ShadowBlankMonitorService:
         finally:
             limiter.release(slot.get("account_id"))
 
+    @staticmethod
+    def _pre_probe_slot_scope(reason: Any) -> str:
+        reason_text = str(reason or "")
+        if reason_text in {"checking_capacity"}:
+            return "profile"
+        return "provider"
+
+    @classmethod
+    def _pre_probe_slot_metric(cls, reason: Any) -> str:
+        if cls._pre_probe_slot_scope(reason) == "profile":
+            return "preprobe_skipped_profile_limit"
+        return "preprobe_skipped_provider_limit"
+
+    def _record_pre_probe_metric(
+        self,
+        metric: str,
+        target: Dict[str, Any],
+        details: Optional[Dict[str, Any]],
+    ) -> None:
+        if metric not in PRE_PROBE_METRICS:
+            return
+        if isinstance(details, dict):
+            details["pre_probe_metric"] = metric
+        payload = dict(details or {})
+        payload["metric"] = metric
+        summary = {
+            "timestamp": self.clock(),
+            "metric": metric,
+            "channel_ref": target.get("channel_ref"),
+            "origin_stream_ref": target.get("stream_ref"),
+            "target_stream_ref": payload.get("target_stream_ref"),
+            "result": payload.get("result"),
+            "rejection_reason": payload.get("rejection_reason"),
+            "slot_scope": payload.get("slot_scope"),
+            "elapsed_ms": payload.get("elapsed_ms"),
+            "provider_limited": payload.get("provider_limited"),
+            "provider_slot_acquired": payload.get("provider_slot_acquired"),
+            "trigger_reason": payload.get("trigger_reason") or payload.get("reason"),
+        }
+        summary = {key: value for key, value in summary.items() if value is not None}
+        with self._lock:
+            self._pre_probe_metrics[metric] += 1
+            self._last_pre_probe = summary
+
     def _run_next_stream_pre_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         pre_probe_config = dict(config)
         pre_probe_config["probe_duration_seconds"] = int(
@@ -1241,6 +1319,8 @@ class ShadowBlankMonitorService:
 
     @staticmethod
     def _pre_probe_rejection_reason(result: Dict[str, Any]) -> Optional[str]:
+        if result.get("timeout"):
+            return "timeout"
         for reason in (
             "blank",
             "offline_image",

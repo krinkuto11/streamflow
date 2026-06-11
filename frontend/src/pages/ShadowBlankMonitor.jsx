@@ -21,6 +21,7 @@ import {
   filterShadowDecisionEvents,
   formatShadowEventReason,
   formatShadowEventType,
+  formatShadowPreProbeStatus,
   getShadowEventDecisionGroup,
   getShadowEventDetailParts,
   shadowDecisionFilters,
@@ -85,6 +86,7 @@ export default function ShadowBlankMonitor() {
   const watchedChannels = status?.watched_channels || []
   const recentEvents = status?.recent_events || []
   const decisionHistory = status?.decision_history || recentEvents
+  const lastPreProbe = status?.pre_probe?.last || null
   const cooldownCount = status?.cooldowns?.length || 0
 
   const lastEvent = useMemo(() => recentEvents[0] || null, [recentEvents])
@@ -404,6 +406,9 @@ export default function ShadowBlankMonitor() {
                 <div>
                   <Label className="text-sm font-medium">Next Stream Pre-Probe</Label>
                   <p className="text-xs text-muted-foreground">Validate the next candidate before switching</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {formatShadowPreProbeStatus(lastPreProbe)}
+                  </p>
                 </div>
                 <Switch
                   checked={Boolean(editedConfig.next_stream_pre_probe_enabled)}

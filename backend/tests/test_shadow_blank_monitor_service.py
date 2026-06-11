@@ -743,10 +743,16 @@ def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
     assert switch_calls == [("uuid-1", 12, None)]
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["pre_probe"]["result"] == "ok"
+    assert status["recent_events"][0]["details"]["pre_probe"]["pre_probe_metric"] == "preprobe_success"
+    assert status["pre_probe"]["metrics"]["preprobe_attempted"] == 2
+    assert status["pre_probe"]["metrics"]["preprobe_rejected_media_fault"] == 1
+    assert status["pre_probe"]["metrics"]["preprobe_success"] == 1
+    assert status["pre_probe"]["last"]["metric"] == "preprobe_success"
     assert status["recent_events"][1]["type"] == "pre_probe_rejected"
     assert status["recent_events"][1]["decision_group"] == "pre_probe"
     assert status["recent_events"][1]["trigger_reason"] == "blank"
     assert status["recent_events"][1]["details"]["rejection_reason"] == "blank"
+    assert status["recent_events"][1]["details"]["pre_probe_metric"] == "preprobe_rejected_media_fault"
 
 
 def test_next_stream_pre_probe_respects_provider_capacity(tmp_path):
@@ -803,10 +809,46 @@ def test_next_stream_pre_probe_respects_provider_capacity(tmp_path):
     assert len(released) == 1
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["pre_probe"]["provider_slot_acquired"] is True
+    assert status["pre_probe"]["metrics"]["preprobe_skipped_provider_limit"] == 1
+    assert status["pre_probe"]["metrics"]["preprobe_success"] == 1
     assert status["recent_events"][1]["type"] == "pre_probe_rejected"
     assert status["recent_events"][1]["details"]["origin_stream_ref"].startswith("stream-")
     assert status["recent_events"][1]["details"]["viewer_context"]["real_client_count"] == 1
     assert status["recent_events"][1]["details"]["rejection_reason"] == "provider_capacity"
+    assert status["recent_events"][1]["details"]["slot_scope"] == "provider"
+
+
+def test_next_stream_pre_probe_timeout_prevents_switch(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/slow"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True},
+        switch_calls=switch_calls,
+    )
+    service._run_blank_probe = lambda url, config: {"timeout": True}
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+    })
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "no_alternative"
+    assert status["recent_events"][0]["details"]["pre_probe"]["rejection_reason"] == "timeout"
+    assert status["recent_events"][1]["type"] == "pre_probe_rejected"
+    assert status["pre_probe"]["metrics"]["preprobe_attempted"] == 1
+    assert status["pre_probe"]["metrics"]["preprobe_timeout"] == 1
+    assert status["pre_probe"]["metrics"]["switch_prevented_by_preprobe"] == 1
+    assert status["pre_probe"]["last"]["metric"] == "switch_prevented_by_preprobe"
 
 
 def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):
