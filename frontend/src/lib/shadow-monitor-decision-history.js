@@ -21,6 +21,7 @@ export const shadowEventLabels = {
   watcher_recovery_observed: 'Watcher Recovery Observed',
   pre_probe_unavailable: 'Pre-Probe Unavailable',
   pre_probe_rejected: 'Pre-Probe Rejected',
+  offline_image_learned: 'Offline Image Learned',
 }
 
 const preProbeMetricLabels = {
@@ -58,6 +59,7 @@ export const shadowDecisionFilters = [
   { key: 'pre_probe', label: 'Pre-Probes' },
   { key: 'guard', label: 'Guards' },
   { key: 'skip', label: 'Skips' },
+  { key: 'learn', label: 'Learns' },
 ]
 
 const titleizeCode = (value) => String(value || '')
@@ -126,6 +128,7 @@ export const getShadowEventDecisionGroup = (event = {}) => {
   if (['switch_success', 'switch_failed', 'dry_run_switch'].includes(type)) return 'switch'
   if (['pre_probe_unavailable', 'pre_probe_rejected'].includes(type)) return 'pre_probe'
   if (type.endsWith('_pending') || type === 'probe_ok') return 'probe'
+  if (type === 'offline_image_learned') return 'learn'
   if ([
     'cooldown',
     'stale_stream_guard',
@@ -216,6 +219,15 @@ export const getShadowEventDetailParts = (event = {}) => {
   if (details.pre_probe_metric && !details.pre_probe) {
     const metricLabel = preProbeMetricLabels[details.pre_probe_metric] || titleizeCode(details.pre_probe_metric)
     parts.push(`pre-probe ${metricLabel}`)
+  }
+  if (event.type === 'offline_image_learned') {
+    parts.push(details.deduplicated ? 'deduplicated' : 'reference added')
+    if (details.offline_image_distance !== undefined && details.offline_image_distance !== null) {
+      parts.push(`nearest pHash gap ${details.offline_image_distance}`)
+    }
+    if (details.reference_count !== undefined) {
+      parts.push(`${details.reference_count} references`)
+    }
   }
 
   const detection = details.detection

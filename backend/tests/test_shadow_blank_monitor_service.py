@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Flask
 
 from apps.api.shadow_blank_monitor_handlers import (
+    learn_shadow_offline_image_response,
     run_shadow_blank_monitor_once_response,
     start_shadow_blank_monitor_response,
 )
@@ -142,6 +143,108 @@ def test_watch_mode_controls_scan_delay():
     invalid = normalize_config({"watch_mode": "always-on", "watch_gap_seconds": 0})
     assert invalid["watch_mode"] == "continuous"
     assert invalid["watch_gap_seconds"] == 1
+
+
+def test_offline_image_status_warns_about_missing_or_invalid_hashes(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+
+    service.update_config({
+        "offline_image_detection_enabled": True,
+        "offline_image_reference_hashes": ["not-a-phash", "0123456789abcdef", "0123456789ABCDEF"],
+    })
+
+    status = service.get_status()
+    assert status["offline_image"]["enabled"] is True
+    assert status["offline_image"]["reference_count"] == 2
+    assert status["offline_image"]["valid_reference_count"] == 1
+    assert status["offline_image"]["invalid_reference_count"] == 1
+    assert "invalid_reference_hash" in status["offline_image"]["warnings"]
+
+
+def test_learn_offline_image_from_current_frame_adds_hash(tmp_path, monkeypatch):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    with service._lock:
+        service._watched["uuid-1"] = {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "channel_ref": "channel-safe",
+            "stream_id": 10,
+            "stream_ref": "stream-safe",
+            "real_client_count": 1,
+        }
+
+    monkeypatch.setattr(
+        service,
+        "_capture_offline_image_hash",
+        lambda url, config: {"success": True, "offline_image_hash": "0123456789abcdef"},
+    )
+
+    result = service.learn_offline_image_from_current_frame(channel_ref="channel-safe")
+
+    assert result["success"] is True
+    assert result["learned"] is True
+    assert result["deduplicated"] is False
+    assert result["offline_image_hash"] == "0123456789abcdef"
+    assert result["config"]["offline_image_reference_hashes"] == ["0123456789abcdef"]
+    assert result["status"]["recent_events"][0]["type"] == "offline_image_learned"
+
+
+def test_learn_offline_image_deduplicates_near_existing_hash(tmp_path, monkeypatch):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    service.update_config({
+        "offline_image_reference_hashes": ["0123456789abcdee"],
+        "offline_image_hash_threshold": 4,
+    })
+    with service._lock:
+        service._watched["uuid-1"] = {
+            "channel_uuid": "uuid-1",
+            "channel_ref": "channel-safe",
+            "stream_ref": "stream-safe",
+            "real_client_count": 1,
+        }
+
+    monkeypatch.setattr(
+        service,
+        "_capture_offline_image_hash",
+        lambda url, config: {"success": True, "offline_image_hash": "0123456789abcdef"},
+    )
+
+    result = service.learn_offline_image_from_current_frame()
+
+    assert result["success"] is True
+    assert result["learned"] is False
+    assert result["deduplicated"] is True
+    assert result["offline_image_distance"] == 1
+    assert result["config"]["offline_image_reference_hashes"] == ["0123456789abcdee"]
+
+
+def test_learn_offline_image_handler_reports_missing_watched_channel():
+    class EmptyService:
+        def learn_offline_image_from_current_frame(self, **_kwargs):
+            return {
+                "success": False,
+                "reason": "no_watched_channel",
+                "message": "No active Shadow-watched channel is available.",
+            }
+
+    app = Flask(__name__)
+    with app.app_context():
+        response, status_code = learn_shadow_offline_image_response(
+            payload={},
+            get_service=lambda: EmptyService(),
+        )
+
+    assert status_code == 400
+    assert response.get_json()["code"] == "no_watched_channel"
 
 
 def test_start_requires_watcher_api_key(tmp_path):

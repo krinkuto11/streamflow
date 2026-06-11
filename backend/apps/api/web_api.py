@@ -153,6 +153,7 @@ from apps.api.quality_stats_v2_handlers import (
 from apps.api.shadow_blank_monitor_handlers import (
     get_shadow_blank_monitor_config_response,
     get_shadow_blank_monitor_status_response,
+    learn_shadow_offline_image_response,
     run_shadow_blank_monitor_once_response,
     start_shadow_blank_monitor_response,
     stop_shadow_blank_monitor_response,
@@ -1422,6 +1423,14 @@ def stop_shadow_blank_monitor():
 def run_shadow_blank_monitor_once():
     """Run one active-viewer shadow blank monitor scan."""
     return run_shadow_blank_monitor_once_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/offline-image/learn', methods=['POST'])
+def learn_shadow_offline_image():
+    """Learn an offline-image pHash from the current Shadow-watched frame."""
+    return learn_shadow_offline_image_response(
+        payload=request.get_json(silent=True),
         get_service=get_shadow_blank_monitor_service,
     )
 

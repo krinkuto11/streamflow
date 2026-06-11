@@ -223,6 +223,7 @@ export const shadowBlankMonitorAPI = {
   start: () => api.post('/shadow-blank-monitor/start'),
   stop: () => api.post('/shadow-blank-monitor/stop'),
   runOnce: () => api.post('/shadow-blank-monitor/run-once'),
+  learnOfflineImage: (payload = {}) => api.post('/shadow-blank-monitor/offline-image/learn', payload),
 };
 
 export const viewerActivityAPI = {

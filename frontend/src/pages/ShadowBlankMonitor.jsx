@@ -29,6 +29,7 @@ import {
 import {
   Activity,
   AlertCircle,
+  Camera,
   CheckCircle2,
   Eye,
   Loader2,
@@ -65,6 +66,12 @@ const formatDuration = (seconds) => {
 
 const formatEvent = (event) => formatShadowEventType(event)
 
+const offlineImageWarningLabels = {
+  missing_reference_hash: 'Offline image detection has no reference pHash.',
+  invalid_reference_hash: 'One or more offline image pHashes are invalid.',
+  no_valid_reference_hash: 'Offline image detection has no valid reference pHash.',
+}
+
 export default function ShadowBlankMonitor() {
   const [config, setConfig] = useState(null)
   const [editedConfig, setEditedConfig] = useState(null)
@@ -87,6 +94,8 @@ export default function ShadowBlankMonitor() {
   const recentEvents = status?.recent_events || []
   const decisionHistory = status?.decision_history || recentEvents
   const lastPreProbe = status?.pre_probe?.last || null
+  const offlineImageStatus = status?.offline_image || {}
+  const offlineImageWarnings = offlineImageStatus.warnings || []
   const cooldownCount = status?.cooldowns?.length || 0
 
   const lastEvent = useMemo(() => recentEvents[0] || null, [recentEvents])
@@ -177,6 +186,37 @@ export default function ShadowBlankMonitor() {
     }
   }
 
+  const learnOfflineImage = async (channelRef = null) => {
+    try {
+      setActionLoading('learn-offline-image')
+      const response = await shadowBlankMonitorAPI.learnOfflineImage({
+        ...(channelRef ? { channel_ref: channelRef } : {}),
+      })
+      const result = response.data || {}
+      const nextConfig = result.config || config || {}
+      setConfig(nextConfig)
+      setEditedConfig(nextConfig)
+      setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
+      setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
+      setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
+      setStatus(result.status || status || {})
+      toast({
+        title: result.deduplicated ? 'Already learned' : 'Learned',
+        description: result.deduplicated
+          ? 'Current frame already matches an offline reference pHash'
+          : 'Current frame pHash added to offline image references',
+      })
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Failed to learn offline image from current frame',
+        variant: 'destructive',
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
   const runAction = async (name, action, success) => {
     try {
       setActionLoading(name)
@@ -211,6 +251,7 @@ export default function ShadowBlankMonitor() {
   const configurationMessage = status?.configuration_message || 'Save a Watcher API Key before starting the monitor.'
   const canUseWatcher = actionLoading === '' && !configurationRequired
   const continuousWatcherActive = running && watchMode === 'continuous'
+  const canLearnOfflineImage = actionLoading === '' && watchedChannels.length > 0
 
   return (
     <div className="space-y-6">
@@ -484,16 +525,44 @@ export default function ShadowBlankMonitor() {
             <Separator />
 
             <div className="space-y-2">
-              <Label htmlFor="offline_image_reference_hashes">Offline Image Reference pHashes</Label>
+              <div className="flex flex-wrap items-end justify-between gap-2">
+                <div className="space-y-1">
+                  <Label htmlFor="offline_image_reference_hashes">Offline Image Reference pHashes</Label>
+                  <p className="text-xs text-muted-foreground">
+                    {offlineImageStatus.valid_reference_count || 0}/{offlineImageStatus.reference_count || 0} valid references
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => learnOfflineImage()}
+                  disabled={!canLearnOfflineImage}
+                >
+                  {actionLoading === 'learn-offline-image' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Camera className="mr-2 h-4 w-4" />}
+                  Learn Current Frame
+                </Button>
+              </div>
               <Input
                 id="offline_image_reference_hashes"
                 placeholder="comma-separated pHash values"
                 value={offlineImageHashes}
                 onChange={(event) => setOfflineImageHashes(event.target.value)}
               />
-              <p className="text-xs text-muted-foreground">
-                Offline-image switching stays disabled unless at least one reference hash is configured.
-              </p>
+              {offlineImageWarnings.length > 0 ? (
+                <div className="space-y-1">
+                  {offlineImageWarnings.map(warning => (
+                    <p key={warning} className="flex items-center gap-2 text-xs font-medium text-amber-600 dark:text-amber-300">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span>{offlineImageWarningLabels[warning] || warning}</span>
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Offline-image switching stays disabled unless at least one reference hash is configured.
+                </p>
+              )}
             </div>
 
             <Separator />
@@ -580,6 +649,21 @@ export default function ShadowBlankMonitor() {
                             {(channel.watcher_client_count || 0) > 0 && (
                               <Badge variant="secondary">{formatWatcherClientCount(channel.watcher_client_count)}</Badge>
                             )}
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-2"
+                              onClick={() => learnOfflineImage(channel.channel_ref)}
+                              disabled={actionLoading !== ''}
+                            >
+                              {actionLoading === 'learn-offline-image' ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Camera className="h-3.5 w-3.5" />
+                              )}
+                              <span className="sr-only">Learn offline image from this channel</span>
+                            </Button>
                           </div>
                         </div>
                         {programLabel && (

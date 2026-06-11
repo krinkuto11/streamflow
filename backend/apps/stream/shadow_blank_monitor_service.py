@@ -55,6 +55,7 @@ NO_DECODABLE_FRAME_ERROR_PATTERNS = (
     "no frame could be decoded",
 )
 FFMPEG_FRAME_RE = re.compile(r"\bframe=\s*(?P<frames>\d+)")
+OFFLINE_IMAGE_PHASH_RE = re.compile(r"^[0-9a-f]{16}$")
 SILENCE_START_RE = re.compile(r"silence_start:\s*(?P<start>\d+(?:\.\d+)?)")
 SILENCE_END_RE = re.compile(r"silence_end:\s*(?P<end>\d+(?:\.\d+)?)")
 SILENCE_DURATION_RE = re.compile(r"silence_duration:\s*(?P<duration>\d+(?:\.\d+)?)")
@@ -244,6 +245,56 @@ def _coerce_list(value: Any) -> List[Any]:
     return [value]
 
 
+def _offline_image_hashes(value: Any) -> List[str]:
+    seen = set()
+    hashes: List[str] = []
+    for item in _coerce_list(value):
+        text = str(item).strip().lower()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        hashes.append(text)
+    return hashes
+
+
+def _valid_offline_image_hashes(value: Any) -> List[str]:
+    return [
+        item
+        for item in _offline_image_hashes(value)
+        if OFFLINE_IMAGE_PHASH_RE.match(item)
+    ]
+
+
+def _invalid_offline_image_hashes(value: Any) -> List[str]:
+    return [
+        item
+        for item in _offline_image_hashes(value)
+        if not OFFLINE_IMAGE_PHASH_RE.match(item)
+    ]
+
+
+def _offline_image_config_status(config: Dict[str, Any]) -> Dict[str, Any]:
+    reference_hashes = _offline_image_hashes(config.get("offline_image_reference_hashes"))
+    invalid_count = len(_invalid_offline_image_hashes(reference_hashes))
+    valid_count = len(reference_hashes) - invalid_count
+    warnings = []
+    if config.get("offline_image_detection_enabled") and not reference_hashes:
+        warnings.append("missing_reference_hash")
+    if invalid_count:
+        warnings.append("invalid_reference_hash")
+    if config.get("offline_image_detection_enabled") and reference_hashes and valid_count == 0:
+        warnings.append("no_valid_reference_hash")
+    return {
+        "enabled": bool(config.get("offline_image_detection_enabled")),
+        "reference_count": len(reference_hashes),
+        "valid_reference_count": valid_count,
+        "invalid_reference_count": invalid_count,
+        "hash_threshold": int(config.get("offline_image_hash_threshold", DEFAULT_CONFIG["offline_image_hash_threshold"])),
+        "capture_offset_seconds": int(config.get("offline_image_capture_offset_seconds", DEFAULT_CONFIG["offline_image_capture_offset_seconds"])),
+        "warnings": warnings,
+    }
+
+
 def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
     if current:
@@ -282,11 +333,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
         for item in _coerce_list(config.get("excluded_channel_uuids"))
         if str(item).strip()
     ]
-    config["offline_image_reference_hashes"] = [
-        str(item).strip().lower()
-        for item in _coerce_list(config.get("offline_image_reference_hashes"))
-        if str(item).strip()
-    ]
+    config["offline_image_reference_hashes"] = _offline_image_hashes(config.get("offline_image_reference_hashes"))
     return config
 
 
@@ -389,6 +436,101 @@ class ShadowBlankMonitorService:
             self.stop(persist=False)
         return self.get_config()
 
+    def learn_offline_image_from_current_frame(
+        self,
+        *,
+        channel_ref: Optional[str] = None,
+        enable_detection: bool = False,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            targets = list(self._watched.values())
+            if channel_ref:
+                targets = [
+                    target
+                    for target in targets
+                    if str(target.get("channel_ref")) == str(channel_ref)
+                ]
+            target = dict(targets[0]) if targets else {}
+            config = dict(self._config)
+
+        if not target:
+            return {
+                "success": False,
+                "learned": False,
+                "reason": "no_watched_channel",
+                "message": "No active Shadow-watched channel is available.",
+            }
+
+        channel_uuid = target.get("channel_uuid")
+        if not channel_uuid:
+            return {
+                "success": False,
+                "learned": False,
+                "reason": "missing_channel_uuid",
+                "channel_ref": target.get("channel_ref"),
+            }
+
+        capture = self._capture_offline_image_hash(self._channel_proxy_url(str(channel_uuid)), config)
+        if not capture.get("success"):
+            return {
+                "success": False,
+                "learned": False,
+                "reason": capture.get("reason") or "frame_capture_failed",
+                "channel_ref": target.get("channel_ref"),
+                "stream_ref": target.get("stream_ref"),
+            }
+
+        phash = str(capture.get("offline_image_hash") or "").lower()
+        if not OFFLINE_IMAGE_PHASH_RE.match(phash):
+            return {
+                "success": False,
+                "learned": False,
+                "reason": "invalid_captured_hash",
+                "channel_ref": target.get("channel_ref"),
+                "stream_ref": target.get("stream_ref"),
+            }
+
+        with self._lock:
+            existing_hashes = _offline_image_hashes(self._config.get("offline_image_reference_hashes"))
+            valid_existing = _valid_offline_image_hashes(existing_hashes)
+            threshold = int(self._config.get("offline_image_hash_threshold", 4))
+            distances = [
+                distance
+                for distance in (self._hash_distance(phash, candidate) for candidate in valid_existing)
+                if distance is not None
+            ]
+            nearest_distance = min(distances) if distances else None
+            already_covered = nearest_distance is not None and nearest_distance <= threshold
+            if enable_detection:
+                self._config["offline_image_detection_enabled"] = True
+            if not already_covered:
+                self._config["offline_image_reference_hashes"] = existing_hashes + [phash]
+                self._save_config()
+            elif enable_detection:
+                self._save_config()
+            reference_count = len(self._config.get("offline_image_reference_hashes") or [])
+
+        details = {
+            "reason": "offline_image",
+            "offline_image_hash": phash,
+            "offline_image_distance": nearest_distance,
+            "reference_count": reference_count,
+            "deduplicated": already_covered,
+        }
+        self._record_event("offline_image_learned", target, details)
+        return {
+            "success": True,
+            "learned": not already_covered,
+            "deduplicated": already_covered,
+            "channel_ref": target.get("channel_ref"),
+            "stream_ref": target.get("stream_ref"),
+            "offline_image_hash": phash,
+            "offline_image_distance": nearest_distance,
+            "reference_count": reference_count,
+            "config": self.get_config(),
+            "status": self.get_status(),
+        }
+
     def start(self, *, persist: bool = True) -> bool:
         with self._lock:
             issue = _watcher_configuration_issue(self._config)
@@ -459,6 +601,7 @@ class ShadowBlankMonitorService:
                     "metrics": dict(self._pre_probe_metrics),
                     "last": dict(self._last_pre_probe) if self._last_pre_probe else None,
                 },
+                "offline_image": _offline_image_config_status(self._config),
             }
 
     def _worker(self) -> None:
@@ -1718,25 +1861,15 @@ class ShadowBlankMonitorService:
         except (TypeError, ValueError):
             return None
 
-    def _run_offline_image_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
-        result = {
-            "offline_image_detected": False,
-            "offline_image_hash": None,
-            "offline_image_distance": None,
-            "offline_image_reference_count": len(config.get("offline_image_reference_hashes") or []),
-        }
-        if not config.get("offline_image_detection_enabled"):
-            return result
-        reference_hashes = list(config.get("offline_image_reference_hashes") or [])
-        if not reference_hashes:
-            return result
-
+    def _capture_offline_image_hash(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         try:
             from PIL import Image
             import imagehash
         except Exception as exc:
-            result["offline_image_error"] = f"image_hash_unavailable:{type(exc).__name__}"
-            return result
+            return {
+                "success": False,
+                "reason": f"image_hash_unavailable:{type(exc).__name__}",
+            }
 
         try:
             completed = subprocess.run(
@@ -1746,28 +1879,64 @@ class ShadowBlankMonitorService:
                 timeout=15,
             )
             if completed.returncode != 0 or not completed.stdout:
-                result["offline_image_error"] = "frame_capture_failed"
-                return result
+                return {
+                    "success": False,
+                    "reason": "frame_capture_failed",
+                }
 
             image = Image.open(io.BytesIO(completed.stdout))
-            phash = str(imagehash.phash(image)).lower()
-            result["offline_image_hash"] = phash
-            distances = [
-                distance
-                for distance in (self._hash_distance(phash, candidate) for candidate in reference_hashes)
-                if distance is not None
-            ]
-            if not distances:
-                return result
-            best_distance = min(distances)
-            result["offline_image_distance"] = best_distance
-            if best_distance <= int(config.get("offline_image_hash_threshold", 4)):
-                result["offline_image_detected"] = True
-            return result
+            return {
+                "success": True,
+                "offline_image_hash": str(imagehash.phash(image)).lower(),
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "reason": "frame_capture_timeout",
+            }
         except Exception as exc:
-            logger.debug("Shadow offline image probe failed: %s", exc)
-            result["offline_image_error"] = type(exc).__name__
+            logger.debug("Shadow offline image hash capture failed: %s", exc)
+            return {
+                "success": False,
+                "reason": type(exc).__name__,
+            }
+
+    def _run_offline_image_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        result = {
+            "offline_image_detected": False,
+            "offline_image_hash": None,
+            "offline_image_distance": None,
+            "offline_image_reference_count": len(config.get("offline_image_reference_hashes") or []),
+        }
+        if not config.get("offline_image_detection_enabled"):
             return result
+        invalid_hashes = _invalid_offline_image_hashes(config.get("offline_image_reference_hashes"))
+        reference_hashes = _valid_offline_image_hashes(config.get("offline_image_reference_hashes"))
+        result["offline_image_invalid_reference_count"] = len(invalid_hashes)
+        if not reference_hashes:
+            if invalid_hashes:
+                result["offline_image_error"] = "no_valid_reference_hashes"
+            return result
+
+        capture = self._capture_offline_image_hash(url, config)
+        if not capture.get("success"):
+            result["offline_image_error"] = capture.get("reason")
+            return result
+
+        phash = str(capture.get("offline_image_hash") or "").lower()
+        result["offline_image_hash"] = phash
+        distances = [
+            distance
+            for distance in (self._hash_distance(phash, candidate) for candidate in reference_hashes)
+            if distance is not None
+        ]
+        if not distances:
+            return result
+        best_distance = min(distances)
+        result["offline_image_distance"] = best_distance
+        if best_distance <= int(config.get("offline_image_hash_threshold", 4)):
+            result["offline_image_detected"] = True
+        return result
 
     @staticmethod
     def _parse_no_decodable_frames_detection(
@@ -2544,6 +2713,8 @@ class ShadowBlankMonitorService:
             return "guard"
         if event_type.endswith("_pending") or event_type == "probe_ok":
             return "probe"
+        if event_type == "offline_image_learned":
+            return "learn"
         if event_type in {"viewer_left", "watcher_reconnecting", "watcher_recovered"}:
             return "watcher"
         if event_type == "no_alternative":
