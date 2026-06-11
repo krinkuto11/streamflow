@@ -89,6 +89,7 @@ from apps.core.api_utils import (
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
 from apps.automation.automation_config_manager import get_automation_config_manager
+from apps.automation.channel_visibility_automation import ChannelVisibilityAutomation
 
 # Import channel settings manager
 # Import channel settings manager - DEPRECATED/REMOVED
@@ -1335,6 +1336,7 @@ class AutomatedStreamManager:
         self.config = self._load_config()
         self.changelog = ChangelogManager()
         self.regex_matcher = RegexChannelMatcher()
+        self.channel_visibility_automation = ChannelVisibilityAutomation()
         
         # Initialize dead streams tracker
         self.dead_streams_tracker = None
@@ -2582,6 +2584,49 @@ class AutomatedStreamManager:
         except Exception as e:
             logger.error(f"Error reading stream checker config from DB: {e}")
             return True
+
+    def _get_channel_visibility_config(self) -> Dict[str, Any]:
+        try:
+            from apps.database.manager import get_db_manager
+
+            config = get_db_manager().get_system_setting('stream_checker_config', {}) or {}
+            return config.get('channel_visibility_automation', {}) if isinstance(config, dict) else {}
+        except Exception as e:
+            logger.error(f"Error reading channel visibility automation config from DB: {e}")
+            return {}
+
+    @staticmethod
+    def _visibility_changelog_result(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not result:
+            return None
+        if result.get('action') in {'disabled', 'no_visibility_change', 'visible_unmanaged'}:
+            return None
+        return result
+
+    def _record_channel_visibility_events(
+        self,
+        events: List[Dict[str, Any]],
+        *,
+        skip_changelog: bool,
+        source: str,
+    ) -> None:
+        significant = [
+            event for event in (self._visibility_changelog_result(item) for item in events)
+            if event
+        ]
+        if not significant:
+            return
+        if skip_changelog or not self.config.get("enabled_features", {}).get("changelog_tracking", True):
+            return
+        try:
+            self.changelog.add_entry("channel_visibility", {
+                "source": source,
+                "events": significant,
+                "changed_count": sum(1 for event in significant if event.get("changed")),
+                "total_events": len(significant),
+            })
+        except Exception as exc:
+            logger.warning(f"Failed to write channel visibility changelog: {exc}")
     
     def _filter_channels_by_profile(self, all_channels: List[Dict], action_description: str) -> List[Dict]:
         """Filter channels by selected profile if one is configured.
@@ -3441,6 +3486,12 @@ class AutomatedStreamManager:
             channel_to_match_priorities = {}
             channel_to_group_map = {}
             channel_name_map = {}
+            channel_visibility_config = self._get_channel_visibility_config()
+            no_regex_visibility_enabled = bool(
+                channel_visibility_config.get("enabled")
+                and channel_visibility_config.get("hide_on_no_regex")
+            )
+            channel_visibility_events = []
             
             
             for channel in all_channels:
@@ -3497,9 +3548,24 @@ class AutomatedStreamManager:
                     matching_enabled = True
                 
                 if matching_enabled:
-                    matching_enabled_channel_ids.append(channel_id)
-                    # Store match priority order
-                    channel_to_match_priorities[str(channel_id)] = profile.get('stream_matching', {}).get('match_priority_order', ['tvg', 'regex'])
+                    has_regex_patterns = self.regex_matcher.has_regex_patterns(str(channel_id), effective_group_id)
+                    has_tvg_matching = self.regex_matcher.get_match_by_tvg_id(str(channel_id), effective_group_id)
+                    if has_regex_patterns or has_tvg_matching:
+                        matching_enabled_channel_ids.append(channel_id)
+                        # Store match priority order
+                        channel_to_match_priorities[str(channel_id)] = profile.get('stream_matching', {}).get('match_priority_order', ['tvg', 'regex'])
+                    elif no_regex_visibility_enabled:
+                        channel_visibility_events.append(
+                            self.channel_visibility_automation.handle_no_regex(
+                                channel,
+                                config=channel_visibility_config,
+                                details={
+                                    "source": "stream_matching",
+                                    "has_regex_patterns": False,
+                                    "match_by_tvg_id": False,
+                                },
+                            )
+                        )
                     
                 # Check if revive is enabled
                 if profile and profile.get('stream_checking', {}).get('allow_revive', False):
@@ -3545,7 +3611,15 @@ class AutomatedStreamManager:
                 else:
                     _period_profile = _config.get('profile')
 
-                if _period_profile and _period_profile.get('stream_checking', {}).get('enabled', False):
+                _matching_disabled = not bool(
+                    _period_profile
+                    and _period_profile.get('stream_matching', {}).get('enabled', False)
+                )
+                if (
+                    _period_profile
+                    and _matching_disabled
+                    and _period_profile.get('stream_checking', {}).get('enabled', False)
+                ):
                     checking_only_channel_ids.append(_ch_id)
 
             if checking_only_channel_ids:
@@ -3561,6 +3635,12 @@ class AutomatedStreamManager:
             excluded_count = len(all_channels) - len(filtered_channels)
             if excluded_count > 0:
                 logger.info(f"Excluding {excluded_count} channel(s) without automation periods or with matching disabled from stream assignment")
+
+            self._record_channel_visibility_events(
+                channel_visibility_events,
+                skip_changelog=skip_changelog,
+                source="stream_matching",
+            )
             
             # Use filtered channels for the rest of the logic
             all_channels = filtered_channels
@@ -3582,7 +3662,7 @@ class AutomatedStreamManager:
             if not all_channels:
                 logger.info("No channels available for stream assignment (all filtered or in monitoring)")
                 self._mark_checking_only_channels(checking_only_channel_ids, udi, skip_check_trigger)
-                return {}
+                return {"channel_visibility_events": channel_visibility_events}
             
 
 
@@ -3905,7 +3985,8 @@ class AutomatedStreamManager:
             return {
                 "assignment_count": accepted_assignment_count,
                 "assignment_details": detailed_assignments,
-                "assigned_stream_ids": dict(accepted_assigned_stream_ids)
+                "assigned_stream_ids": dict(accepted_assigned_stream_ids),
+                "channel_visibility_events": channel_visibility_events,
             }
             
         except Exception as e:

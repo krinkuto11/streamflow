@@ -93,6 +93,12 @@ class StreamCheckConfig:
             'min_bitrate_kbps': 0,  # Minimum bitrate in kbps (0 = no minimum)
             'min_score': 0  # Minimum score (0-100, 0 = no minimum)
         },
+        'channel_visibility_automation': {
+            'enabled': False,
+            'hide_on_no_regex': False,
+            'hide_on_all_failed': False,
+            'unhide_on_recovered': True
+        },
         'batch_operations': {
             'enabled': True,  # Enable batch stats updates to reduce API calls
             'batch_size': 10,  # Number of streams to update per batch

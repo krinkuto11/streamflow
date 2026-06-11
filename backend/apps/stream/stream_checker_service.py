@@ -51,6 +51,7 @@ from apps.stream.queue_start import order_channels_for_queue_start
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
 from apps.stream.stream_session_manager import get_session_manager
 from apps.automation.automation_config_manager import get_automation_config_manager
+from apps.automation.channel_visibility_automation import ChannelVisibilityAutomation
 from apps.core.auth import _refresh_token
 
 # Import channel settings manager
@@ -282,6 +283,9 @@ class StreamCheckerService:
         }
         self._last_connectivity_guard_recovery_probe_at = 0.0
         logger.debug("Connectivity guard initialized")
+
+        self.channel_visibility_automation = ChannelVisibilityAutomation()
+        logger.debug("Channel visibility automation initialized")
         
         # Initialize changelog manager
         self.changelog = None
@@ -2902,6 +2906,15 @@ class StreamCheckerService:
                 averages = {'avg_resolution': 'N/A', 'avg_bitrate': 'N/A', 'avg_fps': 'N/A'}
                 logo_url = None
 
+            visibility_good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
+            visibility_result = self._apply_channel_visibility_after_check(
+                channel_data,
+                good_streams_count=visibility_good_streams_count,
+                dead_streams_count=len(dead_stream_ids),
+                revived_streams_count=len(revived_stream_ids),
+                total_streams=len(streams),
+            )
+
             # Add to batch changelog instead of creating individual entry
             if self.changelog:
                 try:
@@ -2911,7 +2924,7 @@ class StreamCheckerService:
                     # Add to batch instead of creating individual changelog entry
                     # Only add to batch if not explicitly skipped (e.g., when called from check_single_channel)
                     if not skip_batch_changelog:
-                        self._add_to_batch_changelog({
+                        batch_entry = {
                             'channel_id': channel_id,
                             'channel_name': channel_name,
                             'logo_url': logo_url,
@@ -2924,7 +2937,11 @@ class StreamCheckerService:
                             'avg_fps': averages['avg_fps'],
                             'success': True,
                             'stream_stats': stream_stats
-                        })
+                        }
+                        visibility_changelog = self._visibility_changelog_result(visibility_result)
+                        if visibility_changelog:
+                            batch_entry['channel_visibility'] = visibility_changelog
+                        self._add_to_batch_changelog(batch_entry)
                 except Exception as e:
                     logger.warning(f"Failed to add to batch changelog: {e}")
             
@@ -2982,6 +2999,7 @@ class StreamCheckerService:
                 } for s in preempted_stream_ids],
                 'skipped_streams': [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked],
                 'checked_streams': stream_stats,
+                'channel_visibility': visibility_result,
                 # In-memory analyzed_streams: authoritative source for loop results
                 # and m3u_account names. Used by check_single_channel to build its
                 # changelog entry without depending on a potentially stale UDI refresh.
@@ -3873,6 +3891,15 @@ class StreamCheckerService:
                 logger.warning(f"Failed to build stream_stats for sequential return: {e}")
                 averages = {'avg_resolution': 'N/A', 'avg_bitrate': 'N/A', 'avg_fps': 'N/A'}
 
+            visibility_good_streams_count = self._count_good_checked_streams({'checked_streams': stream_stats})
+            visibility_result = self._apply_channel_visibility_after_check(
+                channel_data,
+                good_streams_count=visibility_good_streams_count,
+                dead_streams_count=len(dead_stream_ids),
+                revived_streams_count=len(revived_stream_ids),
+                total_streams=len(streams),
+            )
+
             # Add changelog entry with stream stats
             if self.changelog:
                 try:
@@ -3885,7 +3912,7 @@ class StreamCheckerService:
                     # Add to batch changelog instead of creating individual entry
                     # Only add to batch if not explicitly skipped (e.g., when called from check_single_channel)
                     if not skip_batch_changelog:
-                        self._add_to_batch_changelog({
+                        batch_entry = {
                             'channel_id': channel_id,
                             'channel_name': channel_name,
                             'logo_url': logo_url,
@@ -3898,7 +3925,11 @@ class StreamCheckerService:
                             'avg_fps': averages['avg_fps'],
                             'success': True,
                             'stream_details': stream_stats[:10]  # Limit to top 10 for brevity
-                        })
+                        }
+                        visibility_changelog = self._visibility_changelog_result(visibility_result)
+                        if visibility_changelog:
+                            batch_entry['channel_visibility'] = visibility_changelog
+                        self._add_to_batch_changelog(batch_entry)
                         logger.info(f"Added channel {channel_name} to batch changelog")
                 except Exception as e:
                     logger.warning(f"Failed to add to batch changelog: {e}")
@@ -3950,6 +3981,7 @@ class StreamCheckerService:
                 } for s in revived_stream_ids],
                 'skipped_streams': [{'id': s['id'], 'name': s.get('name', f"Stream {s['id']}")} for s in streams_already_checked],
                 'checked_streams': stream_stats,
+                'channel_visibility': visibility_result,
                 'analyzed_streams': analyzed_streams,
             }
         except Exception as e:
@@ -4715,9 +4747,58 @@ class StreamCheckerService:
                 'automation_controls': self.config.get('automation_controls', {}),
                 'check_interval': self.config.get('check_interval'),
                 'global_check_schedule': self.config.get('global_check_schedule'),
-                'queue_settings': self.config.get('queue')
+                'queue_settings': self.config.get('queue'),
+                'channel_visibility_automation': self.config.get('channel_visibility_automation', {})
             }
         }
+
+    def _visibility_changelog_result(self, result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not result:
+            return None
+        if result.get('action') in {'disabled', 'no_visibility_change', 'visible_unmanaged'}:
+            return None
+        return result
+
+    def _apply_channel_visibility_after_check(
+        self,
+        channel_data: Dict[str, Any],
+        *,
+        good_streams_count: int,
+        dead_streams_count: int,
+        revived_streams_count: int,
+        total_streams: int,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            config = self.config.get('channel_visibility_automation', {})
+            result = self.channel_visibility_automation.handle_quality_result(
+                channel_data,
+                good_streams_count=good_streams_count,
+                dead_streams_count=dead_streams_count,
+                revived_streams_count=revived_streams_count,
+                config=config,
+                details={
+                    'total_streams': total_streams,
+                    'good_streams_count': good_streams_count,
+                    'dead_streams_count': dead_streams_count,
+                    'revived_streams_count': revived_streams_count,
+                },
+            )
+            if self._visibility_changelog_result(result):
+                logger.info(
+                    "Channel visibility automation action=%s reason=%s channel_id=%s",
+                    result.get('action'),
+                    result.get('reason'),
+                    result.get('channel_id'),
+                )
+            return result
+        except Exception as exc:
+            logger.warning("Channel visibility automation failed after check: %s", exc)
+            return {
+                'action': 'visibility_error',
+                'changed': False,
+                'reason': 'quality_result',
+                'details': {'error': 'channel_visibility_failed'},
+            }
     
     def queue_channel(self, channel_id: int, priority: int = 10, force_check: bool = False, metadata: Optional[Dict[str, Any]] = None) -> bool:
         """Manually queue a channel for checking.
