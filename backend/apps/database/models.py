@@ -318,6 +318,10 @@ class Run(Base):
     global_dead_count = Column(Integer, nullable=False, default=0)
     global_revived_count = Column(Integer, nullable=False, default=0)
     run_type = Column(String(50), nullable=False, default='automation_run')
+    job_category = Column(String(50), nullable=True)
+    job_outcome = Column(String(50), nullable=True)
+    job_subject_ref = Column(String(100), nullable=True)
+    job_correlation_id = Column(String(100), nullable=True)
     raw_details = Column(String, nullable=True)
     raw_subentries = Column(String, nullable=True)
 

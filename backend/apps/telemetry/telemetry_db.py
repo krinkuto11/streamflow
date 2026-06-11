@@ -9,6 +9,7 @@ logger = setup_logging(__name__)
 # Re-exports from main database context
 from apps.database.connection import get_session
 from apps.database.models import Run, ChannelHealth, StreamTelemetry
+from apps.telemetry.run_classification import classify_run_metadata
 
 def _sanitize_bitrate(bitrate_str):
     if not bitrate_str:
@@ -69,6 +70,9 @@ def save_automation_run_telemetry(action, details, subentries=None, timestamp=No
             except:
                 pass
 
+        details = details or {}
+        job_metadata = classify_run_metadata(action, details, subentries)
+
         # Create Run record
         duration = details.get('duration_seconds', details.get('duration', 0.0))
         if isinstance(duration, str):
@@ -91,6 +95,10 @@ def save_automation_run_telemetry(action, details, subentries=None, timestamp=No
             global_dead_count=dead_count,
             global_revived_count=revived_count,
             run_type=action,
+            job_category=job_metadata["job_category"],
+            job_outcome=job_metadata["job_outcome"],
+            job_subject_ref=job_metadata["job_subject_ref"],
+            job_correlation_id=job_metadata["job_correlation_id"],
             raw_details=json.dumps(details) if details else None,
             raw_subentries=json.dumps(subentries) if subentries else None
         )
@@ -196,6 +204,9 @@ def save_generic_telemetry(action, details, subentries=None, timestamp=None):
                 run_ts = datetime.fromisoformat(timestamp)
             except: pass
 
+        details = details or {}
+        job_metadata = classify_run_metadata(action, details, subentries)
+
         run = Run(
             timestamp=run_ts,
             duration_seconds=details.get('duration_seconds', details.get('duration', 0.0)),
@@ -204,6 +215,10 @@ def save_generic_telemetry(action, details, subentries=None, timestamp=None):
             global_dead_count=details.get('total_dead_streams', 0) or details.get('dead_streams', 0),
             global_revived_count=details.get('total_revived_streams', 0),
             run_type=action,
+            job_category=job_metadata["job_category"],
+            job_outcome=job_metadata["job_outcome"],
+            job_subject_ref=job_metadata["job_subject_ref"],
+            job_correlation_id=job_metadata["job_correlation_id"],
             raw_details=json.dumps(details) if details else None,
             raw_subentries=json.dumps(subentries) if subentries else None
         )

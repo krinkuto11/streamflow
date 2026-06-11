@@ -17,6 +17,9 @@ def get_changelog_response(*, request_args: Any):
         days = request_args.get("days", 7, type=int)
         page = request_args.get("page", 1, type=int)
         limit = request_args.get("limit", 10, type=int)
+        job_category = (request_args.get("job_category") or request_args.get("category") or "").strip()
+        job_outcome = (request_args.get("job_outcome") or request_args.get("outcome") or "").strip()
+        action_filter = (request_args.get("action") or "").strip()
 
         from apps.telemetry.telemetry_db import Run, get_session
 
@@ -24,12 +27,15 @@ def get_changelog_response(*, request_args: Any):
         session = get_session()
 
         try:
-            runs = (
-                session.query(Run)
-                .filter(Run.timestamp >= cutoff)
-                .order_by(Run.timestamp.desc())
-                .all()
-            )
+            query = session.query(Run).filter(Run.timestamp >= cutoff)
+            if job_category:
+                query = query.filter(Run.job_category == job_category)
+            if job_outcome:
+                query = query.filter(Run.job_outcome == job_outcome)
+            if action_filter:
+                query = query.filter(Run.run_type == action_filter)
+
+            runs = query.order_by(Run.timestamp.desc()).all()
 
             merged_changelog = []
             for run in runs:
@@ -47,6 +53,10 @@ def get_changelog_response(*, request_args: Any):
                     {
                         "timestamp": run.timestamp.isoformat(),
                         "action": run.run_type,
+                        "job_category": getattr(run, "job_category", None),
+                        "job_outcome": getattr(run, "job_outcome", None),
+                        "job_subject_ref": getattr(run, "job_subject_ref", None),
+                        "job_correlation_id": getattr(run, "job_correlation_id", None),
                         "details": details,
                         "subentries": subentries,
                     }
