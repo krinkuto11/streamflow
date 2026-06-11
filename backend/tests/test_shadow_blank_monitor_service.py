@@ -617,6 +617,16 @@ def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):
     assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
     assert switch_calls == []
     assert status["recent_events"][0]["type"] == "dry_run_switch"
+    assert status["recent_events"][0]["decision_group"] == "switch"
+    assert status["recent_events"][0]["trigger_reason"] == "blank"
+    assert status["recent_events"][0]["details"]["origin_stream_ref"].startswith("stream-")
+    assert status["recent_events"][0]["details"]["target_stream_ref"].startswith("stream-")
+    assert status["recent_events"][0]["details"]["viewer_context"]["real_client_count"] == 1
+    detection = status["recent_events"][0]["details"]["detection"]
+    assert detection["reason"] == "blank"
+    assert detection["measurements"]["blank_ratio"] == 1.0
+    assert detection["measurements"]["blank_duration_secs"] == 8.0
+    assert detection["thresholds"]["blank_ratio_threshold"] == 0.8
     assert status["cooldowns"][0]["channel_ref"] == status["recent_events"][0]["channel_ref"]
 
 
@@ -655,6 +665,9 @@ def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
 
     assert switch_calls == [("uuid-1", 11, None)]
     assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0] == status["decision_history"][0]
+    assert status["recent_events"][0]["decision_group"] == "switch"
+    assert status["recent_events"][0]["trigger_reason"] == "blank"
     assert status["recent_events"][0]["details"]["post_switch_verification"] is True
     assert status["cooldowns"] == []
 
@@ -731,6 +744,8 @@ def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["pre_probe"]["result"] == "ok"
     assert status["recent_events"][1]["type"] == "pre_probe_rejected"
+    assert status["recent_events"][1]["decision_group"] == "pre_probe"
+    assert status["recent_events"][1]["trigger_reason"] == "blank"
     assert status["recent_events"][1]["details"]["rejection_reason"] == "blank"
 
 
@@ -789,6 +804,8 @@ def test_next_stream_pre_probe_respects_provider_capacity(tmp_path):
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["pre_probe"]["provider_slot_acquired"] is True
     assert status["recent_events"][1]["type"] == "pre_probe_rejected"
+    assert status["recent_events"][1]["details"]["origin_stream_ref"].startswith("stream-")
+    assert status["recent_events"][1]["details"]["viewer_context"]["real_client_count"] == 1
     assert status["recent_events"][1]["details"]["rejection_reason"] == "provider_capacity"
 
 
@@ -816,6 +833,8 @@ def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):
     assert switch_calls == [("uuid-1", 11, None)]
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["reason"] == "freeze"
+    assert status["recent_events"][0]["trigger_reason"] == "freeze"
+    assert status["recent_events"][0]["details"]["detection"]["reason"] == "freeze"
     assert status["cooldowns"] == []
 
 

@@ -18,6 +18,14 @@ import {
   shadowMonitorThresholdFields,
 } from '@/lib/shadow-monitor-config-fields.js'
 import {
+  filterShadowDecisionEvents,
+  formatShadowEventReason,
+  formatShadowEventType,
+  getShadowEventDecisionGroup,
+  getShadowEventDetailParts,
+  shadowDecisionFilters,
+} from '@/lib/shadow-monitor-decision-history.js'
+import {
   Activity,
   AlertCircle,
   CheckCircle2,
@@ -29,28 +37,6 @@ import {
   Shield,
   StopCircle,
 } from 'lucide-react'
-
-const eventLabels = {
-  probe_ok: 'Probe OK',
-  blank_pending: 'Blank Pending',
-  freeze_pending: 'Freeze Pending',
-  garbled_audio_pending: 'Garbled Audio Pending',
-  silent_audio_pending: 'Silent Audio Pending',
-  offline_image_pending: 'Offline Image Pending',
-  dry_run_switch: 'Dry Run Switch',
-  switch_success: 'Switch Success',
-  switch_failed: 'Switch Failed',
-  no_alternative: 'No Alternative',
-  cooldown: 'Cooldown',
-  stale_stream_guard: 'Stale Stream',
-  switch_rate_limited: 'Rate Limited',
-  viewer_left: 'Viewer Left',
-  quality_check_active: 'Quality Check Active',
-  watcher_reconnecting: 'Watcher Reconnecting',
-  watcher_recovered: 'Watcher Recovered',
-  pre_probe_unavailable: 'Pre-Probe Unavailable',
-  pre_probe_rejected: 'Pre-Probe Rejected',
-}
 
 const parseCsv = (value, numeric = false) => {
   return String(value || '')
@@ -76,7 +62,7 @@ const formatDuration = (seconds) => {
   return `${minutes}m`
 }
 
-const formatEvent = (event) => eventLabels[event?.type] || event?.type || 'Unknown'
+const formatEvent = (event) => formatShadowEventType(event)
 
 export default function ShadowBlankMonitor() {
   const [config, setConfig] = useState(null)
@@ -85,6 +71,7 @@ export default function ShadowBlankMonitor() {
   const [excludedIds, setExcludedIds] = useState('')
   const [excludedUuids, setExcludedUuids] = useState('')
   const [offlineImageHashes, setOfflineImageHashes] = useState('')
+  const [historyFilter, setHistoryFilter] = useState('all')
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
   const { toast } = useToast()
@@ -97,9 +84,25 @@ export default function ShadowBlankMonitor() {
 
   const watchedChannels = status?.watched_channels || []
   const recentEvents = status?.recent_events || []
+  const decisionHistory = status?.decision_history || recentEvents
   const cooldownCount = status?.cooldowns?.length || 0
 
   const lastEvent = useMemo(() => recentEvents[0] || null, [recentEvents])
+  const filteredDecisionHistory = useMemo(
+    () => filterShadowDecisionEvents(decisionHistory, historyFilter),
+    [decisionHistory, historyFilter],
+  )
+  const lastSwitchEvent = useMemo(
+    () => decisionHistory.find(event => getShadowEventDecisionGroup(event) === 'switch') || null,
+    [decisionHistory],
+  )
+  const lastSwitchReason = lastSwitchEvent
+    ? formatShadowEventReason(
+      lastSwitchEvent.details?.trigger_reason
+      || lastSwitchEvent.trigger_reason
+      || lastSwitchEvent.details?.reason,
+    )
+    : null
 
   const loadData = async () => {
     try {
@@ -302,7 +305,12 @@ export default function ShadowBlankMonitor() {
           </CardHeader>
           <CardContent>
             <Badge variant={dryRun ? 'outline' : 'default'}>{dryRun ? 'Dry Run' : 'Live'}</Badge>
-            <p className="mt-2 text-xs text-muted-foreground">{cooldownCount} channel cooldowns</p>
+            <p className="mt-2 truncate text-xs text-muted-foreground">
+              {lastSwitchEvent ? `${formatEvent(lastSwitchEvent)}: ${lastSwitchReason}` : `${cooldownCount} channel cooldowns`}
+            </p>
+            {lastSwitchEvent && (
+              <p className="mt-1 text-xs text-muted-foreground">{cooldownCount} channel cooldowns</p>
+            )}
           </CardContent>
         </Card>
 
@@ -611,30 +619,59 @@ export default function ShadowBlankMonitor() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Recent Events</CardTitle>
-              <CardDescription>Latest monitor decisions</CardDescription>
+              <CardTitle>Decision History</CardTitle>
+              <CardDescription>Latest monitor decisions and switch reasons</CardDescription>
             </CardHeader>
-            <CardContent>
-              {recentEvents.length === 0 ? (
+            <CardContent className="space-y-3">
+              <div className="flex flex-wrap gap-2">
+                {shadowDecisionFilters.map(filter => (
+                  <Button
+                    key={filter.key}
+                    type="button"
+                    size="sm"
+                    variant={historyFilter === filter.key ? 'default' : 'outline'}
+                    onClick={() => setHistoryFilter(filter.key)}
+                  >
+                    {filter.label}
+                  </Button>
+                ))}
+              </div>
+
+              {filteredDecisionHistory.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No events recorded</p>
               ) : (
                 <div className="space-y-3">
-                  {recentEvents.slice(0, 8).map((event, index) => (
-                    <div key={`${event.timestamp}-${index}`} className="flex items-start justify-between gap-3 rounded-md border p-3">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <Badge variant={event.type === 'switch_success' ? 'default' : 'secondary'}>
-                            {formatEvent(event)}
-                          </Badge>
-                          <span className="text-xs text-muted-foreground">{formatTime(event.timestamp)}</span>
+                  {filteredDecisionHistory.slice(0, 12).map((event, index) => {
+                    const detailParts = getShadowEventDetailParts(event)
+                    const isSwitch = getShadowEventDecisionGroup(event) === 'switch'
+                    return (
+                      <div key={`${event.timestamp}-${index}`} className="rounded-md border p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={isSwitch ? 'default' : 'secondary'}>
+                                {formatEvent(event)}
+                              </Badge>
+                              <span className="text-xs text-muted-foreground">{formatTime(event.timestamp)}</span>
+                            </div>
+                            <p className="mt-2 truncate font-mono text-xs text-muted-foreground">
+                              {event.channel_ref} / {event.stream_ref}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-xs text-muted-foreground">{formatViewerClientCount(event.real_client_count)}</span>
                         </div>
-                        <p className="mt-2 truncate font-mono text-xs text-muted-foreground">
-                          {event.channel_ref} / {event.stream_ref}
-                        </p>
+                        {detailParts.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {detailParts.slice(0, 5).map((part, partIndex) => (
+                              <Badge key={`${part}-${partIndex}`} variant="outline" className="max-w-full truncate">
+                                {part}
+                              </Badge>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      <span className="shrink-0 text-xs text-muted-foreground">{formatViewerClientCount(event.real_client_count)}</span>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </CardContent>

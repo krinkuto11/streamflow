@@ -123,6 +123,58 @@ MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
     "garbled_audio",
     "silent_audio",
 }
+DETECTION_REASONS = {
+    "blank",
+    "freeze",
+    "no_decodable_frames",
+    "garbled_audio",
+    "silent_audio",
+    "offline_image",
+}
+PENDING_EVENT_REASONS = {
+    f"{reason}_pending": reason
+    for reason in DETECTION_REASONS
+}
+DETECTION_MEASUREMENT_KEYS = {
+    "blank": ("blank_ratio", "blank_duration_secs"),
+    "freeze": ("freeze_ratio", "freeze_duration_secs"),
+    "no_decodable_frames": (
+        "no_decodable_frames_duration_secs",
+        "no_decodable_frames_error",
+    ),
+    "garbled_audio": ("garbled_audio_error_count", "garbled_audio_error"),
+    "silent_audio": ("silent_audio_duration_secs", "silent_audio_noise_db"),
+    "offline_image": ("offline_image_distance", "offline_image_hash"),
+}
+DETECTION_THRESHOLD_KEYS = {
+    "blank": (
+        "blank_min_duration_seconds",
+        "blank_ratio_threshold",
+        "blank_pixel_threshold",
+    ),
+    "freeze": (
+        "freeze_min_duration_seconds",
+        "freeze_ratio_threshold",
+        "freeze_noise_threshold",
+    ),
+    "no_decodable_frames": ("no_decodable_frames_min_duration_seconds",),
+    "garbled_audio": ("garbled_audio_error_threshold",),
+    "silent_audio": (
+        "silent_audio_min_duration_seconds",
+        "silent_audio_noise_db",
+    ),
+    "offline_image": ("offline_image_hash_threshold",),
+}
+SWITCH_EVENT_TYPES = {"dry_run_switch", "switch_success", "switch_failed"}
+PRE_PROBE_EVENT_TYPES = {"pre_probe_unavailable", "pre_probe_rejected"}
+GUARD_EVENT_TYPES = {
+    "cooldown",
+    "stale_stream_guard",
+    "switch_rate_limited",
+    "quality_check_active",
+    "watcher_recovery_guard",
+    "watcher_recovery_observed",
+}
 
 INT_BOUNDS = {
     "poll_interval_seconds": (5, 3600),
@@ -390,6 +442,7 @@ class ShadowBlankMonitorService:
                 "watched_channels": watched_channels,
                 "cooldowns": cooldowns,
                 "recent_events": list(self._events),
+                "decision_history": list(self._events),
             }
 
     def _worker(self) -> None:
@@ -727,6 +780,7 @@ class ShadowBlankMonitorService:
                 "offline_image_hash": result.get("offline_image_hash"),
                 "offline_image_distance": result.get("offline_image_distance"),
             }
+            target["last_probe_thresholds"] = self._detection_thresholds(config)
 
             if result.get("viewer_left"):
                 fresh_status = {}
@@ -2374,10 +2428,133 @@ class ShadowBlankMonitorService:
                 history.popleft()
             return len(history) < int(config["max_switches_per_hour"])
 
+    @staticmethod
+    def _detection_thresholds(config: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: config.get(key)
+            for keys in DETECTION_THRESHOLD_KEYS.values()
+            for key in keys
+            if key in config
+        }
+
+    @staticmethod
+    def _event_trigger_reason(event_type: str, details: Dict[str, Any]) -> Optional[str]:
+        explicit = (
+            details.get("trigger_reason")
+            or details.get("reason")
+            or PENDING_EVENT_REASONS.get(event_type)
+        )
+        if explicit:
+            return str(explicit)
+        if event_type == "probe_ok":
+            return "probe_ok"
+        if event_type in PRE_PROBE_EVENT_TYPES:
+            return "pre_probe"
+        if event_type in GUARD_EVENT_TYPES:
+            return event_type
+        return None
+
+    @staticmethod
+    def _event_decision_group(event_type: str) -> str:
+        if event_type in SWITCH_EVENT_TYPES:
+            return "switch"
+        if event_type in PRE_PROBE_EVENT_TYPES:
+            return "pre_probe"
+        if event_type in GUARD_EVENT_TYPES:
+            return "guard"
+        if event_type.endswith("_pending") or event_type == "probe_ok":
+            return "probe"
+        if event_type in {"viewer_left", "watcher_reconnecting", "watcher_recovered"}:
+            return "watcher"
+        if event_type == "no_alternative":
+            return "skip"
+        return "other"
+
+    @staticmethod
+    def _compact_probe_context(
+        reason: Optional[str],
+        probe: Optional[Dict[str, Any]],
+        thresholds: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not reason or reason not in DETECTION_REASONS or not isinstance(probe, dict):
+            return None
+
+        measurements = {
+            key: probe.get(key)
+            for key in DETECTION_MEASUREMENT_KEYS.get(reason, ())
+            if probe.get(key) is not None
+        }
+        threshold_values = {
+            key: (thresholds or {}).get(key)
+            for key in DETECTION_THRESHOLD_KEYS.get(reason, ())
+            if (thresholds or {}).get(key) is not None
+        }
+        if not measurements and not threshold_values:
+            return {"reason": reason}
+        context: Dict[str, Any] = {"reason": reason}
+        if measurements:
+            context["measurements"] = measurements
+        if threshold_values:
+            context["thresholds"] = threshold_values
+        return context
+
+    @staticmethod
+    def _viewer_context(target: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = (
+            "real_client_count",
+            "watcher_client_count",
+            "watcher_state",
+            "watcher_client_ref",
+            "watcher_uptime_seconds",
+            "watcher_absent_seconds",
+            "watcher_recovered_after_seconds",
+        )
+        return {
+            key: target.get(key)
+            for key in allowed
+            if target.get(key) is not None
+        }
+
+    def _event_details_with_context(
+        self,
+        event_type: str,
+        target: Dict[str, Any],
+        details: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        enriched = dict(details or {})
+        reason = self._event_trigger_reason(event_type, enriched)
+        if reason:
+            enriched.setdefault("trigger_reason", reason)
+        if target.get("stream_ref"):
+            enriched.setdefault("origin_stream_ref", target.get("stream_ref"))
+
+        viewer_context = self._viewer_context(target)
+        if viewer_context:
+            enriched.setdefault("viewer_context", viewer_context)
+
+        detection_context = self._compact_probe_context(
+            reason,
+            target.get("last_probe"),
+            target.get("last_probe_thresholds"),
+        )
+        if detection_context:
+            if "confirmations" in enriched:
+                detection_context["confirmations"] = enriched.get("confirmations")
+            if "required" in enriched:
+                detection_context["required"] = enriched.get("required")
+            enriched.setdefault("detection", detection_context)
+
+        if event_type in SWITCH_EVENT_TYPES:
+            enriched.setdefault("switch_result", event_type)
+        return enriched
+
     def _record_event(self, event_type: str, target: Dict[str, Any], details: Dict[str, Any]) -> None:
+        details = self._event_details_with_context(event_type, target, details)
         event = {
             "timestamp": self.clock(),
             "type": event_type,
+            "decision_group": self._event_decision_group(event_type),
+            "trigger_reason": details.get("trigger_reason"),
             "channel_ref": target.get("channel_ref"),
             "stream_ref": target.get("stream_ref"),
             "real_client_count": target.get("real_client_count"),
