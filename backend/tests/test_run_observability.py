@@ -153,6 +153,25 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["stage_label"], "Failed")
         self.assertEqual(status["last_error"], "Quality check stage failed: boom")
 
+    def test_cycle_provider_partial_finishes_as_completed_degraded(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=True, forced_period_id="period-1")
+        manager._update_run_status(stage="finalizing", stage_label="Finalizing")
+        outcome = manager._finish_cycle_outcome(
+            refresh_success=True,
+            refresh_degraded=True,
+            cycle_abort_message=None,
+        )
+
+        status = manager.get_run_status()
+        stages = {stage["key"]: stage for stage in status["stages"]}
+        self.assertEqual(outcome, "completed_degraded")
+        self.assertEqual(status["state"], "completed_degraded")
+        self.assertEqual(status["stage"], "completed_degraded")
+        self.assertEqual(status["stage_label"], "Completed with Warnings")
+        self.assertEqual(stages["finalizing"]["status"], "completed")
+
     def test_manual_stop_request_finishes_cycle_as_aborted(self):
         manager = self._manager()
 
@@ -363,12 +382,16 @@ class AutomationRunStatusTests(unittest.TestCase):
             "apps.automation.scheduling_service.get_scheduling_service",
             return_value=scheduling_service,
         ):
-            success, accounts = manager.refresh_playlists(
+            result = manager.refresh_playlists(
                 skip_changelog=True,
                 progress_callback=events.append,
             )
+            success, accounts = result
 
         self.assertTrue(success)
+        self.assertTrue(result.degraded)
+        self.assertEqual(result.outcome, "completed_degraded")
+        self.assertEqual(result.failed_refresh_request_count, 1)
         self.assertEqual([account["id"] for account in accounts], [1])
         self.assertEqual(events[-1]["state"], "partial")
         self.assertEqual(events[-1]["failed_refresh_requests"], 1)

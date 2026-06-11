@@ -39,6 +39,18 @@ def test_classify_degraded_provider_refresh():
     assert metadata["job_subject_ref"] == "provider:7"
 
 
+def test_successful_refresh_with_failed_requests_is_degraded():
+    metadata = classify_run_metadata(
+        "playlist_refresh",
+        {
+            "success": True,
+            "failed_refresh_requests": 1,
+        },
+    )
+
+    assert metadata["job_outcome"] == "completed_degraded"
+
+
 def test_save_generic_telemetry_persists_v6_job_fields():
     save_generic_telemetry(
         "single_channel_check",

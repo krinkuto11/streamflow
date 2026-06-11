@@ -76,12 +76,12 @@ def classify_job_outcome(action: str, details: Optional[Dict[str, Any]] = None) 
     if raw_value in {"failed", "failure", "error", "fatal"}:
         return "failed"
 
+    if details.get("failed_refresh_requests") or details.get("degraded_count"):
+        return "completed_degraded"
     if details.get("success") is False:
         return "failed"
     if details.get("success") is True:
         return "completed"
-    if details.get("failed_refresh_requests") or details.get("degraded_count"):
-        return "completed_degraded"
     if details.get("error") or details.get("last_error"):
         return "failed"
 
