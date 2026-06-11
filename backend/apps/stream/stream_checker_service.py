@@ -156,6 +156,97 @@ def _wait_for_udi_stream_count_stabilise(
     return False
 
 
+def _coerce_m3u_account_id(value: Any) -> Optional[int]:
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dedupe_m3u_account_ids(values: List[Any]) -> List[int]:
+    account_ids: List[int] = []
+    seen: Set[int] = set()
+    for value in values:
+        account_id = _coerce_m3u_account_id(value)
+        if account_id is None or account_id in seen:
+            continue
+        seen.add(account_id)
+        account_ids.append(account_id)
+    return account_ids
+
+
+def _is_active_non_custom_m3u_account(account: Dict[str, Any]) -> bool:
+    name = str(account.get("name") or "").strip().lower()
+    raw_id = str(account.get("id") or "").strip().lower()
+    if name == "custom" or raw_id == "custom":
+        return False
+
+    for key in ("is_active", "active", "enabled"):
+        if key in account:
+            return bool(account.get(key))
+    return True
+
+
+def _sort_m3u_account_ids(values: Set[int]) -> List[int]:
+    return sorted(values, key=lambda value: (str(type(value)), value))
+
+
+def _resolve_single_channel_m3u_refresh_scope(
+    *,
+    profile: Dict[str, Any],
+    channel_account_ids: Set[int],
+    udi: Any,
+) -> Tuple[List[int], str]:
+    """Resolve the provider-fetch scope for a single-channel check.
+
+    V6 semantics:
+      - explicit profile m3u_update.playlists: refresh exactly those accounts
+      - empty profile playlist list: refresh every active, non-custom account
+
+    If account discovery is unavailable, fall back to the current channel
+    accounts to preserve the pre-V6 behavior instead of silently doing nothing.
+    """
+    m3u_update = profile.get("m3u_update") if isinstance(profile, dict) else {}
+    if not isinstance(m3u_update, dict):
+        m3u_update = {}
+
+    explicit_playlist_ids = _dedupe_m3u_account_ids(m3u_update.get("playlists") or [])
+    if explicit_playlist_ids:
+        return explicit_playlist_ids, "profile_playlists"
+
+    all_accounts = []
+    try:
+        get_accounts = getattr(udi, "get_m3u_accounts", None)
+        if callable(get_accounts):
+            fetched_accounts = get_accounts()
+            if isinstance(fetched_accounts, list):
+                all_accounts = fetched_accounts
+    except Exception as exc:
+        logger.warning("Could not resolve active M3U accounts for single-channel refresh: %s", exc)
+
+    active_account_ids = _dedupe_m3u_account_ids(
+        [
+            account.get("id")
+            for account in all_accounts
+            if isinstance(account, dict) and _is_active_non_custom_m3u_account(account)
+        ]
+    )
+    if active_account_ids:
+        return active_account_ids, "all_active_non_custom"
+
+    fallback_ids = _sort_m3u_account_ids(channel_account_ids)
+    if fallback_ids:
+        logger.warning(
+            "Falling back to channel-attached M3U accounts for single-channel refresh "
+            "because active account discovery returned no usable accounts"
+        )
+        return fallback_ids, "channel_accounts_fallback"
+
+    return [], "none"
+
+
 class StreamCheckerService:
     """Main service for managing stream checking operations."""
     
@@ -5109,6 +5200,8 @@ class StreamCheckerService:
             m3u_update_enabled = profile.get('m3u_update', {}).get('enabled', False)
             matching_enabled   = profile.get('stream_matching', {}).get('enabled', False)
             checking_enabled   = profile.get('stream_checking', {}).get('enabled', False)
+            m3u_refresh_scope = "disabled"
+            m3u_refresh_account_ids: List[int] = []
 
             logger.info(
                 f"Channel {channel_name} profile flags: "
@@ -5223,6 +5316,20 @@ class StreamCheckerService:
             
             # Step 2a: Provider fetch — only if m3u_update is enabled in the profile.
             #
+            if m3u_update_enabled:
+                m3u_refresh_account_ids, m3u_refresh_scope = _resolve_single_channel_m3u_refresh_scope(
+                    profile=profile,
+                    channel_account_ids=account_ids,
+                    udi=udi,
+                )
+                logger.info(
+                    "Single-channel M3U refresh scope resolved: %s account(s), scope=%s, "
+                    "channel_attached_accounts=%s",
+                    len(m3u_refresh_account_ids),
+                    m3u_refresh_scope,
+                    len(account_ids),
+                )
+
             if legacy_default_profile:
                 logger.info(
                     f"Step 1b/6: Legacy single-channel mode - clearing dead tracker "
@@ -5242,9 +5349,9 @@ class StreamCheckerService:
             # Dispatcharr processes M3U refreshes asynchronously. After triggering the
             # refresh we poll the UDI stream count until it changes (confirming Dispatcharr
             # has finished processing) before proceeding.
-            if m3u_update_enabled and account_ids:
+            if m3u_update_enabled and m3u_refresh_account_ids:
                 logger.info(
-                    f"Step 2a/6: Refreshing playlists for {len(account_ids)} M3U account(s) "
+                    f"Step 2a/6: Refreshing playlists for {len(m3u_refresh_account_ids)} M3U account(s) "
                     f"(m3u_update enabled in profile)..."
                 )
                 update_single_channel_progress(
@@ -5252,14 +5359,14 @@ class StreamCheckerService:
                     6,
                     "m3u_refresh",
                     "Refreshing M3U playlists",
-                    f"Refreshing {len(account_ids)} provider playlist(s)",
+                    f"Refreshing {len(m3u_refresh_account_ids)} provider playlist(s)",
                 )
                 # Capture stream count before triggering refresh so we can detect completion.
                 pre_refresh_stream_count = udi.get_stream_count()
 
                 # Import here to allow better test mocking
                 from apps.core.api_utils import refresh_m3u_playlists
-                for account_id in account_ids:
+                for account_id in m3u_refresh_account_ids:
                     logger.info(f"Refreshing M3U account {account_id}")
                     refresh_m3u_playlists(account_id=account_id)
 
@@ -5303,10 +5410,10 @@ class StreamCheckerService:
                 udi.refresh_streams()
                 udi.refresh_channels()
                 logger.info("✓ UDI cache synced — Steps 3-6 will use current stream IDs")
-            elif m3u_update_enabled and not account_ids:
+            elif m3u_update_enabled and not m3u_refresh_account_ids:
                 logger.info(
-                    "Step 2a/6: m3u_update enabled but no M3U accounts found for this "
-                    "channel — skipping provider fetch."
+                    "Step 2a/6: m3u_update enabled but no M3U accounts matched "
+                    "the profile refresh scope; skipping provider fetch."
                 )
                 update_single_channel_progress(
                     2,
@@ -5600,6 +5707,8 @@ class StreamCheckerService:
                 'avg_resolution': channel_averages['avg_resolution'],
                 'avg_bitrate': channel_averages['avg_bitrate'],
                 'avg_fps': channel_averages['avg_fps'],
+                'm3u_refresh_scope': m3u_refresh_scope,
+                'm3u_refresh_account_count': len(m3u_refresh_account_ids),
                 'stream_details': []
             }
             

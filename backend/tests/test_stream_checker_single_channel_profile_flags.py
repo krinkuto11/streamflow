@@ -32,10 +32,11 @@ def _make_profile(
     m3u_update_enabled=False,
     matching_enabled=False,
     checking_enabled=False,
+    playlists=None,
 ):
     return {
         'name': 'Test Profile',
-        'm3u_update': {'enabled': m3u_update_enabled, 'playlists': []},
+        'm3u_update': {'enabled': m3u_update_enabled, 'playlists': list(playlists or [])},
         'stream_matching': {'enabled': matching_enabled},
         'stream_checking': {
             'enabled': checking_enabled,
@@ -60,7 +61,7 @@ def _make_mock_config():
     return cfg
 
 
-def _make_mock_udi(channel_id, channel_name, streams):
+def _make_mock_udi(channel_id, channel_name, streams, m3u_accounts=None):
     udi = Mock()
     udi.get_channel_by_id.return_value = {
         'id': channel_id,
@@ -80,6 +81,7 @@ def _make_mock_udi(channel_id, channel_name, streams):
     udi.refresh_m3u_accounts = Mock()
     udi.refresh_channel_groups = Mock()
     udi.refresh_channel_by_id = Mock()
+    udi.get_m3u_accounts.return_value = list(m3u_accounts or [])
     return udi
 
 
@@ -271,19 +273,25 @@ class TestSingleChannelM3uUpdateFlagEnabled(unittest.TestCase):
     @patch('stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_session_manager.get_session_manager')
     @patch('stream_checker_service.fetch_channel_streams')
-    def test_m3u_update_enabled_calls_refresh_then_syncs_udi(
+    def test_empty_profile_playlists_refresh_all_active_non_custom_accounts_then_syncs_udi(
         self, mock_fetch, mock_session_mgr, mock_acm_factory,
         mock_config_class, mock_get_udi,
     ):
-        """When m3u_update=True: provider fetch fires, poll helper fires, then UDI sync fires."""
+        """Empty m3u_update.playlists means all active non-custom accounts, not just attached accounts."""
         from apps.stream.stream_checker_service import StreamCheckerService
 
         profile = _make_profile(m3u_update_enabled=True, matching_enabled=False, checking_enabled=True)
         channel_id = 46
         streams = [{'id': 5, 'url': 'http://x/5', 'm3u_account': 7, 'stream_stats': {}}]
+        m3u_accounts = [
+            {'id': 7, 'name': 'Provider 7', 'is_active': True},
+            {'id': 8, 'name': 'Provider 8', 'is_active': True},
+            {'id': 9, 'name': 'Provider 9', 'is_active': False},
+            {'id': 10, 'name': 'custom', 'is_active': True},
+        ]
 
         mock_config_class.return_value = _make_mock_config()
-        mock_udi = _make_mock_udi(channel_id, 'Test Channel', streams)
+        mock_udi = _make_mock_udi(channel_id, 'Test Channel', streams, m3u_accounts=m3u_accounts)
         mock_get_udi.return_value = mock_udi
         mock_session_mgr.return_value.get_channels_in_active_sessions.return_value = []
         mock_acm_factory.return_value = _make_mock_acm(profile)
@@ -304,21 +312,77 @@ class TestSingleChannelM3uUpdateFlagEnabled(unittest.TestCase):
                    side_effect=lambda *a, **kw: call_order.append('poll') or True) as mock_poll:
 
             # Patch UDI sync methods to record order
-            original_refresh_streams = mock_udi.refresh_streams
             mock_udi.refresh_streams.side_effect = lambda: call_order.append('udi_sync')
 
-            service.check_single_channel(channel_id=channel_id)
+            result = service.check_single_channel(channel_id=channel_id)
 
-        mock_refresh.assert_called_once_with(account_id=7)
+        self.assertEqual(
+            mock_refresh.call_args_list,
+            [call(account_id=7), call(account_id=8)],
+        )
         mock_poll.assert_called_once()
+        self.assertEqual(result['stats']['m3u_refresh_scope'], 'all_active_non_custom')
+        self.assertEqual(result['stats']['m3u_refresh_account_count'], 2)
 
-        # Verify order: refresh -> poll -> udi_sync
-        refresh_idx = next((i for i, v in enumerate(call_order) if v == 'refresh'), -1)
+        # Verify order: all refreshes -> poll -> UDI sync.
+        refresh_indices = [i for i, v in enumerate(call_order) if v == 'refresh']
         poll_idx = next((i for i, v in enumerate(call_order) if v == 'poll'), -1)
         udi_idx = next((i for i, v in enumerate(call_order) if v == 'udi_sync'), -1)
 
-        self.assertGreater(poll_idx, refresh_idx, "Poll must happen after provider refresh")
+        self.assertTrue(refresh_indices)
+        self.assertTrue(all(poll_idx > idx for idx in refresh_indices), "Poll must happen after provider refreshes")
         self.assertGreater(udi_idx, poll_idx, "UDI sync must happen after poll confirms completion")
+
+    @patch('stream_checker_service.get_udi_manager')
+    @patch('stream_checker_service.StreamCheckConfig')
+    @patch('stream_checker_service.get_automation_config_manager')
+    @patch('apps.stream.stream_session_manager.get_session_manager')
+    @patch('stream_checker_service.fetch_channel_streams')
+    def test_explicit_profile_playlists_refresh_exact_scope_not_channel_accounts(
+        self, mock_fetch, mock_session_mgr, mock_acm_factory,
+        mock_config_class, mock_get_udi,
+    ):
+        """Explicit m3u_update.playlists is authoritative for provider fetch scope."""
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        profile = _make_profile(
+            m3u_update_enabled=True,
+            matching_enabled=False,
+            checking_enabled=True,
+            playlists=[11, '12', 11],
+        )
+        channel_id = 49
+        streams = [{'id': 8, 'url': 'http://x/8', 'm3u_account': 7, 'stream_stats': {}}]
+        m3u_accounts = [
+            {'id': 7, 'name': 'Provider 7', 'is_active': True},
+            {'id': 8, 'name': 'Provider 8', 'is_active': True},
+        ]
+
+        mock_config_class.return_value = _make_mock_config()
+        mock_udi = _make_mock_udi(channel_id, 'Test Channel', streams, m3u_accounts=m3u_accounts)
+        mock_get_udi.return_value = mock_udi
+        mock_session_mgr.return_value.get_channels_in_active_sessions.return_value = []
+        mock_acm_factory.return_value = _make_mock_acm(profile)
+        mock_fetch.return_value = streams
+
+        service = StreamCheckerService()
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel = Mock(return_value={'dead_streams_count': 0, 'revived_streams_count': 0, 'analyzed_streams': []})
+        service.dead_streams_tracker = Mock()
+        service.dead_streams_tracker.get_dead_streams_for_channel.return_value = {}
+        service.dead_streams_tracker.cleanup_removed_streams.return_value = 0
+
+        with patch('apps.core.api_utils.refresh_m3u_playlists') as mock_refresh, \
+             patch('apps.stream.stream_checker_service._wait_for_udi_stream_count_stabilise',
+                   return_value=True):
+            result = service.check_single_channel(channel_id=channel_id)
+
+        self.assertEqual(
+            mock_refresh.call_args_list,
+            [call(account_id=11), call(account_id=12)],
+        )
+        self.assertEqual(result['stats']['m3u_refresh_scope'], 'profile_playlists')
+        self.assertEqual(result['stats']['m3u_refresh_account_count'], 2)
 
 
 class TestStep3DeadStreamClearIsUnconditional(unittest.TestCase):
