@@ -996,11 +996,12 @@ export default function StreamChecker() {
 
               {/* Tabs for Configuration Sections */}
               <Tabs defaultValue="analysis" className="w-full">
-                <TabsList className="grid h-auto min-h-10 w-full grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-5">
+                <TabsList className="grid h-auto min-h-10 w-full grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-6">
                   <TabsTrigger value="analysis">Stream Analysis</TabsTrigger>
                   <TabsTrigger value="queue">Queue</TabsTrigger>
                   <TabsTrigger value="concurrent">Concurrent Checking</TabsTrigger>
                   <TabsTrigger value="safety">Safety</TabsTrigger>
+                  <TabsTrigger value="visibility">Channel Visibility</TabsTrigger>
                   <TabsTrigger value="dead-streams">Dead Streams</TabsTrigger>
                 </TabsList>
 
@@ -1495,8 +1496,10 @@ export default function StreamChecker() {
                     </span>
                   </div>
 
-                  <Separator />
+                </TabsContent>
 
+                {/* Channel Visibility Tab */}
+                <TabsContent value="visibility" className="mt-4 space-y-4">
                   <div className="space-y-4">
                     <div>
                       <h4 className="font-medium">Channel Visibility Automation</h4>
@@ -1573,7 +1576,6 @@ export default function StreamChecker() {
                     </div>
                   </div>
                 </TabsContent>
-
 
                 {/* Dead Streams Tab */}
                 <TabsContent value="dead-streams" className="mt-4 space-y-4">

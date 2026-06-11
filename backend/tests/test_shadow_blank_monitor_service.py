@@ -1253,6 +1253,8 @@ def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp
     assert should_continue is False
     assert switch_calls == []
     assert status["recent_events"][0]["type"] == "watcher_recovery_guard"
+    assert status["cooldowns"][0]["channel_ref"] == "channel-test"
+    assert status["cooldowns"][0]["cooldown_seconds"] == 300
     with service._lock:
         assert service._blank_counts[service._detection_count_key("uuid-1", "blank")] == 0
         assert "uuid-1" not in service._switch_attempts

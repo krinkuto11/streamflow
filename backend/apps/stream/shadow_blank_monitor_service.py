@@ -875,7 +875,7 @@ class ShadowBlankMonitorService:
                     }
                     if target.get("watcher_client_ref"):
                         guard_details["watcher_client_ref"] = target.get("watcher_client_ref")
-                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
                     break
         finally:
             with self._lock:
@@ -986,7 +986,7 @@ class ShadowBlankMonitorService:
                     require_confirmed=False,
                 )
                 if recovery_guard_bypass is None:
-                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
                     return False
                 target["media_recovery_guard_reason"] = detection_reason
                 target["media_recovery_guard_bypass"] = recovery_guard_bypass
@@ -1048,7 +1048,7 @@ class ShadowBlankMonitorService:
                 require_confirmed=True,
             )
             if recovery_guard_bypass is None:
-                self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+                self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
                 return
         else:
             observed_guard = target.get("media_recovery_guard_observed")
@@ -1656,7 +1656,7 @@ class ShadowBlankMonitorService:
         if guard_details is None:
             return False
 
-        self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+        self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
         return True
 
     def _record_watcher_recovery_guard(
@@ -1664,8 +1664,11 @@ class ShadowBlankMonitorService:
         channel_uuid: str,
         target: Dict[str, Any],
         guard_details: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._reset_detection_state(channel_uuid)
+        if config is not None:
+            self._set_cooldown(channel_uuid, config)
         self._record_event("watcher_recovery_guard", target, guard_details)
 
     def _channel_proxy_url(self, channel_uuid: str) -> str:
