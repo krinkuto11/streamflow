@@ -921,6 +921,64 @@ def test_next_stream_pre_probe_respects_provider_capacity(tmp_path):
     assert status["recent_events"][1]["details"]["slot_scope"] == "provider"
 
 
+def test_next_stream_pre_probe_reports_profile_slot_capacity(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={
+            11: {"id": 11, "url": "http://candidate.local/profile-full", "m3u_account": 7},
+            12: {"id": 12, "url": "http://candidate.local/good", "m3u_account": 8},
+        },
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True},
+        switch_calls=switch_calls,
+    )
+    pre_probe_calls = []
+
+    def acquire_slot(_udi, stream):
+        if stream["id"] == 11:
+            return {
+                "acquired": False,
+                "reason": "checking_capacity",
+                "details": {"provider_limited": True, "provider_limit_reason": "checking_capacity"},
+            }
+        return {
+            "acquired": True,
+            "reason": "acquired",
+            "url": stream["url"],
+            "details": {"provider_limited": True, "provider_slot_acquired": True},
+        }
+
+    def pre_probe(url, config):
+        pre_probe_calls.append(url)
+        return {"blank_detected": False}
+
+    released = []
+    service._acquire_pre_probe_provider_slot = acquire_slot
+    service._release_pre_probe_provider_slot = lambda slot: released.append(slot)
+    service._run_blank_probe = pre_probe
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+    })
+
+    status = service.run_once(force=True)
+
+    assert pre_probe_calls == ["http://candidate.local/good"]
+    assert switch_calls == [("uuid-1", 12, None)]
+    assert len(released) == 1
+    assert status["pre_probe"]["metrics"]["preprobe_skipped_profile_limit"] == 1
+    assert status["recent_events"][1]["type"] == "pre_probe_rejected"
+    assert status["recent_events"][1]["details"]["rejection_reason"] == "checking_capacity"
+    assert status["recent_events"][1]["details"]["slot_scope"] == "profile"
+
+
 def test_next_stream_pre_probe_timeout_prevents_switch(tmp_path):
     switch_calls = []
     udi = FakeUdi(
