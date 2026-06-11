@@ -161,6 +161,7 @@ from apps.api.teamarr_preflight_handlers import (
     stop_teamarr_preflight_response,
     update_teamarr_preflight_config_response,
 )
+from apps.api.job_arbiter_handlers import get_job_arbiter_status_response
 from apps.api.viewer_activity_handlers import get_viewer_activity_status_response
 from apps.api.scheduling_handlers import (
     create_auto_create_rule_response,
@@ -1723,6 +1724,18 @@ def get_automation_status():
     return get_automation_status_response(
         get_automation_manager=get_automation_manager,
         get_automation_config_manager=get_automation_config_manager,
+    )
+
+
+@app.route('/api/job-arbiter/status', methods=['GET'])
+@log_function_call
+def get_job_arbiter_status():
+    """Get the V6 runtime job arbiter snapshot."""
+    return get_job_arbiter_status_response(
+        get_automation_manager=get_automation_manager,
+        get_stream_checker_service=get_stream_checker_service,
+        get_shadow_monitor_service=get_shadow_blank_monitor_service,
+        get_teamarr_preflight_service=get_teamarr_preflight_service,
     )
 
 

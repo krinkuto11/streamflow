@@ -106,6 +106,10 @@ export const automationAPI = {
   invalidateEventsCache: () => api.post('/automation/events/invalidate-cache'),
 };
 
+export const jobArbiterAPI = {
+  getStatus: () => api.get('/job-arbiter/status'),
+};
+
 export const channelsAPI = {
   /**
    * Fetch channels with optional filtering, sorting, and pagination.
@@ -230,7 +234,7 @@ export const teamarrPreflightAPI = {
 };
 
 export const changelogAPI = {
-  getChangelog: (days = 7, page = 1, limit = 10) => api.get(`/changelog`, { params: { days, page, limit } }),
+  getChangelog: (days = 7, page = 1, limit = 10, filters = {}) => api.get(`/changelog`, { params: { days, page, limit, ...filters } }),
 };
 
 export const deadStreamsAPI = {
