@@ -57,12 +57,15 @@ CONTROLLED_CHECK_DEFERRAL_REASONS = {
 }
 MANUAL_FORCE_ALLOWED_STATES = {"due", "scheduled", "already_attempted", "past"}
 MANUAL_FORCE_ERROR_MESSAGES = {
-    "event_not_found": "Managed event was not found",
+    "event_not_found": "Preflight item was not found",
     "filtered": "Managed event is filtered by the current preflight configuration",
     "no_dispatcharr_channel": "Managed event has no Dispatcharr channel yet",
+    "no_live_window": "Static team has no live window yet",
+    "no_streams_yet": "Static team channel has no streams yet",
+    "incomplete_team": "Static team channel status is incomplete",
     "past": "Managed event is outside the post-start grace window",
     "waiting_for_channel_sync": "Managed event channel is still syncing",
-    "unavailable": "Managed event is not available for manual preflight",
+    "unavailable": "Preflight item is not available for manual preflight",
 }
 DEFAULT_TEAMARR_PREFLIGHT_PROFILE: Dict[str, Any] = {
     "name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
@@ -110,6 +113,8 @@ DEFAULT_TEAMARR_PREFLIGHT_PROFILE: Dict[str, Any] = {
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
+    "managed_event_preflight_enabled": True,
+    "static_team_preflight_enabled": False,
     "teamarr_base_url": "",
     "api_key": "",
     "api_key_header": "X-API-Key",
@@ -205,6 +210,8 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
         config[key] = _coerce_int(config.get(key), DEFAULT_CONFIG[key], bounds)
 
     config["enabled"] = bool(config.get("enabled"))
+    config["managed_event_preflight_enabled"] = bool(config.get("managed_event_preflight_enabled", True))
+    config["static_team_preflight_enabled"] = bool(config.get("static_team_preflight_enabled"))
     config["queue_during_active_checks"] = bool(config.get("queue_during_active_checks"))
     config["teamarr_base_url"] = str(config.get("teamarr_base_url") or "").strip().rstrip("/")
     config["api_key"] = str(config.get("api_key") or "").strip()
@@ -314,13 +321,26 @@ class TeamarrPreflightService:
         self._ensure_default_profile()
         self._events: deque[Dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._upcoming: List[Dict[str, Any]] = []
+        self._upcoming_teams: List[Dict[str, Any]] = []
+        self._preflight_items: List[Dict[str, Any]] = []
         self._filter_options: Dict[str, Any] = {"sports": [], "leagues": [], "source": "events"}
         self._attempted_buckets: Dict[str, float] = {}
         self._active_checks: Dict[str, Dict[str, Any]] = {}
         self._last_scan_at: Optional[float] = None
         self._last_error: Optional[str] = None
+        self._last_team_error: Optional[str] = None
         self._last_events_seen = 0
         self._last_candidates_count = 0
+        self._last_teams_seen = 0
+        self._last_team_candidates_count = 0
+        self._last_team_status: Dict[str, Any] = {
+            "enabled": False,
+            "seen": 0,
+            "ready": 0,
+            "incomplete": 0,
+            "queueable": 0,
+            "last_error": None,
+        }
         self._upcoming_truncated = False
 
     def _load_config(self) -> Dict[str, Any]:
@@ -462,20 +482,29 @@ class TeamarrPreflightService:
             all_events = list(self._events)
             recent_events = all_events[:25]
             upcoming_events = self._attach_recent_events_to_upcoming(self._upcoming, all_events)
+            upcoming_teams = self._attach_recent_events_to_upcoming(self._upcoming_teams, all_events)
+            preflight_items = self._attach_recent_events_to_upcoming(self._preflight_items, all_events)
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
                 "last_scan_at": self._last_scan_at,
                 "last_error": self._last_error,
+                "last_team_error": self._last_team_error,
                 "active_checks": list(self._active_checks.values()),
                 "queued_checks": queue_snapshot["queued_checks"],
                 "queued_checks_count": len(queue_snapshot["queued_checks"]),
                 "queue_active_checks": queue_snapshot["queue_active_checks"],
                 "queue_active_checks_count": len(queue_snapshot["queue_active_checks"]),
                 "upcoming_events": upcoming_events,
+                "upcoming_teams": upcoming_teams,
+                "preflight_items": preflight_items,
+                "team_status": dict(self._last_team_status),
                 "managed_events_seen": self._last_events_seen,
                 "managed_candidates": self._last_candidates_count,
                 "managed_events_returned": len(upcoming_events),
+                "static_teams_seen": self._last_teams_seen,
+                "static_team_candidates": self._last_team_candidates_count,
+                "preflight_candidates": len(preflight_items),
                 "managed_events_truncated": self._upcoming_truncated,
                 "managed_events_limit": MAX_UPCOMING_EVENTS,
                 "recent_events": recent_events,
@@ -512,12 +541,17 @@ class TeamarrPreflightService:
                 dispatcharr_channel_id = event.get("dispatcharr_channel_id") or raw_channel_id
                 item = {
                     "identity": event.get("identity"),
+                    "preflight_kind": event.get("preflight_kind") or metadata.get("preflight_kind") or "event",
                     "teamarr_id": event.get("teamarr_id"),
+                    "teamarr_team_id": event.get("teamarr_team_id"),
                     "event_id": event.get("event_id"),
                     "event_name": event.get("event_name") or metadata.get("program_name"),
+                    "team_name": event.get("team_name"),
+                    "team_abbrev": event.get("team_abbrev"),
                     "event_date": event.get("event_date"),
                     "channel_name": event.get("channel_name"),
                     "dispatcharr_channel_id": dispatcharr_channel_id,
+                    "dispatcharr_uuid": event.get("dispatcharr_uuid"),
                     "sport": event.get("sport"),
                     "league": event.get("league"),
                     "seconds_to_start": event.get("seconds_to_start"),
@@ -632,6 +666,66 @@ class TeamarrPreflightService:
 
         return keys
 
+    def _collect_preflight_scan(self, config: Dict[str, Any], now: datetime) -> Dict[str, Any]:
+        raw_events: List[Dict[str, Any]] = []
+        event_candidates: List[Dict[str, Any]] = []
+        team_statuses: List[Dict[str, Any]] = []
+        team_candidates: List[Dict[str, Any]] = []
+        team_error: Optional[str] = None
+
+        if config.get("managed_event_preflight_enabled", True):
+            raw_events = self._fetch_managed_events(config)
+            event_candidates = self._build_candidates(raw_events, config, now)
+
+        if config.get("static_team_preflight_enabled"):
+            try:
+                team_statuses = self._fetch_static_team_statuses(config)
+                team_candidates = self._build_team_candidates(team_statuses, config, now)
+            except Exception as exc:
+                logger.warning("Teamarr static team preflight source degraded: %s", exc)
+                team_error = "Teamarr static team endpoint did not complete the last scan"
+
+        combined_items = sorted(
+            [*event_candidates, *team_candidates],
+            key=self._candidate_sort_key,
+        )
+        filter_options = self._build_filter_options(config, [*raw_events, *team_candidates])
+        team_status = self._team_status_summary(
+            enabled=bool(config.get("static_team_preflight_enabled")),
+            seen=len(team_statuses),
+            candidates=team_candidates,
+            error=team_error,
+        )
+        return {
+            "raw_events": raw_events,
+            "event_candidates": event_candidates,
+            "team_statuses": team_statuses,
+            "team_candidates": team_candidates,
+            "combined_items": combined_items,
+            "filter_options": filter_options,
+            "team_status": team_status,
+            "team_error": team_error,
+        }
+
+    def _store_preflight_scan(self, scan: Dict[str, Any], *, scan_error: Optional[str] = None) -> None:
+        event_candidates = list(scan.get("event_candidates") or [])
+        team_candidates = list(scan.get("team_candidates") or [])
+        combined_items = list(scan.get("combined_items") or [])
+        with self._lock:
+            self._last_scan_at = self.clock()
+            self._last_error = scan_error
+            self._last_team_error = scan.get("team_error")
+            self._upcoming = event_candidates[:MAX_UPCOMING_EVENTS]
+            self._upcoming_teams = team_candidates[:MAX_UPCOMING_EVENTS]
+            self._preflight_items = combined_items[:MAX_UPCOMING_EVENTS]
+            self._last_events_seen = len(scan.get("raw_events") or [])
+            self._last_candidates_count = len(event_candidates)
+            self._last_teams_seen = len(scan.get("team_statuses") or [])
+            self._last_team_candidates_count = len(team_candidates)
+            self._last_team_status = dict(scan.get("team_status") or {})
+            self._upcoming_truncated = len(event_candidates) > len(self._upcoming)
+            self._filter_options = dict(scan.get("filter_options") or {})
+
     def run_once(self, *, force: bool = False) -> Dict[str, Any]:
         config = self.get_config(include_secret=True)
         if not config.get("enabled") and not force:
@@ -640,10 +734,9 @@ class TeamarrPreflightService:
 
         try:
             self._sync_automation_queue_gate(config)
-            raw_events = self._fetch_managed_events(config)
             now = datetime.fromtimestamp(self.clock(), tz=timezone.utc)
-            candidates = self._build_candidates(raw_events, config, now)
-            filter_options = self._build_filter_options(config, raw_events)
+            scan = self._collect_preflight_scan(config, now)
+            candidates = list(scan["combined_items"])
             launched = 0
             skipped = 0
             for event in candidates:
@@ -655,19 +748,16 @@ class TeamarrPreflightService:
                 else:
                     skipped += 1
 
-            with self._lock:
-                self._last_scan_at = self.clock()
-                self._last_error = None
-                self._upcoming = candidates[:MAX_UPCOMING_EVENTS]
-                self._last_events_seen = len(raw_events)
-                self._last_candidates_count = len(candidates)
-                self._upcoming_truncated = len(candidates) > len(self._upcoming)
-                self._filter_options = filter_options
+            self._store_preflight_scan(scan, scan_error=None)
 
             return {
                 "success": True,
-                "events_seen": len(raw_events),
+                "events_seen": len(scan["raw_events"]),
+                "teams_seen": len(scan["team_statuses"]),
                 "candidates": len(candidates),
+                "event_candidates": len(scan["event_candidates"]),
+                "team_candidates": len(scan["team_candidates"]),
+                "team_error": scan.get("team_error"),
                 "launched": launched,
                 "skipped": skipped,
             }
@@ -691,10 +781,9 @@ class TeamarrPreflightService:
 
         config = self.get_config(include_secret=True)
         try:
-            raw_events = self._fetch_managed_events(config)
             now = datetime.fromtimestamp(self.clock(), tz=timezone.utc)
-            candidates = self._build_candidates(raw_events, config, now)
-            filter_options = self._build_filter_options(config, raw_events)
+            scan = self._collect_preflight_scan(config, now)
+            candidates = list(scan["combined_items"])
             target = next(
                 (
                     event
@@ -704,14 +793,7 @@ class TeamarrPreflightService:
                 None,
             )
 
-            with self._lock:
-                self._last_scan_at = self.clock()
-                self._last_error = None
-                self._upcoming = candidates[:MAX_UPCOMING_EVENTS]
-                self._last_events_seen = len(raw_events)
-                self._last_candidates_count = len(candidates)
-                self._upcoming_truncated = len(candidates) > len(self._upcoming)
-                self._filter_options = filter_options
+            self._store_preflight_scan(scan, scan_error=None)
 
             if target is None:
                 return {
@@ -780,6 +862,44 @@ class TeamarrPreflightService:
         if isinstance(payload, list):
             return [item for item in payload if isinstance(item, dict)]
         return []
+
+    @staticmethod
+    def _extract_teamarr_items(payload: Any) -> List[Dict[str, Any]]:
+        if isinstance(payload, dict):
+            for key in ("items", "teams", "data", "results"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+            return []
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        return []
+
+    def _fetch_static_team_statuses(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        teams = self._extract_teamarr_items(
+            self._fetch_teamarr_json(config, "/api/v1/teams?active_only=true")
+        )
+        statuses: List[Dict[str, Any]] = []
+        for team in teams:
+            team_id = team.get("id")
+            if team_id in (None, ""):
+                continue
+            try:
+                status = self._fetch_teamarr_json(config, f"/api/v1/teams/{team_id}/channel-status")
+                if isinstance(status, dict):
+                    statuses.append(status)
+                    continue
+            except Exception as exc:
+                logger.warning("Teamarr team channel status degraded for team id=%s: %s", team_id, exc)
+            statuses.append({
+                "team": dict(team),
+                "dispatcharr_channel": {"found": False, "error": "Team channel status unavailable"},
+                "next_live_window": {"found": False, "is_live": False, "source": "team_epg_xmltv"},
+                "status": "incomplete",
+                "missing": ["channel_status"],
+                "error": "Team channel status unavailable",
+            })
+        return statuses
 
     def _fetch_teamarr_json(self, config: Dict[str, Any], path: str) -> Any:
         base_url = str(config.get("teamarr_base_url") or "").rstrip("/")
@@ -968,6 +1088,64 @@ class TeamarrPreflightService:
         candidates.sort(key=self._candidate_sort_key)
         return candidates
 
+    def _build_team_candidates(
+        self,
+        team_statuses: Iterable[Dict[str, Any]],
+        config: Dict[str, Any],
+        now: datetime,
+    ) -> List[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+        for status in team_statuses:
+            candidate = self._public_team(status, now)
+            if not candidate:
+                continue
+
+            if not self._passes_filters(candidate, config):
+                state, bucket = "filtered", None
+            elif not candidate.get("dispatcharr_channel_id"):
+                state, bucket = "no_dispatcharr_channel", None
+            elif int(candidate.get("stream_count") or 0) <= 0:
+                state, bucket = "no_streams_yet", None
+            elif not candidate.get("event_date"):
+                state, bucket = "no_live_window", None
+            elif str(candidate.get("team_status") or "") != "ready":
+                state, bucket = "incomplete_team", None
+            else:
+                state, bucket = self._classify_event(candidate, config, now)
+
+            candidate["state"] = state
+            candidate["trigger_bucket"] = bucket
+            candidate["match_evidence"] = self._match_evidence(candidate, state=state, bucket=bucket)
+            candidate["may_start_full_run"] = False
+            candidate["next_automatic_check"] = self._next_automatic_check(
+                candidate,
+                config,
+                state,
+                bucket,
+            )
+            candidates.append(candidate)
+
+        candidates.sort(key=self._candidate_sort_key)
+        return candidates
+
+    @staticmethod
+    def _team_status_summary(
+        *,
+        enabled: bool,
+        seen: int,
+        candidates: Iterable[Dict[str, Any]],
+        error: Optional[str],
+    ) -> Dict[str, Any]:
+        candidate_list = list(candidates)
+        return {
+            "enabled": bool(enabled),
+            "seen": int(seen),
+            "ready": sum(1 for item in candidate_list if item.get("team_status") == "ready"),
+            "incomplete": sum(1 for item in candidate_list if item.get("team_status") != "ready"),
+            "queueable": sum(1 for item in candidate_list if item.get("state") in MANUAL_FORCE_ALLOWED_STATES),
+            "last_error": error,
+        }
+
     @staticmethod
     def _candidate_sort_key(event: Dict[str, Any]) -> tuple[int, int, str]:
         try:
@@ -993,6 +1171,7 @@ class TeamarrPreflightService:
 
         seconds_to_start = int((event_at - now).total_seconds())
         return {
+            "preflight_kind": "event",
             "identity": _event_identity(event),
             "teamarr_id": event.get("id"),
             "event_id": event.get("event_id"),
@@ -1008,22 +1187,101 @@ class TeamarrPreflightService:
         }
 
     @staticmethod
+    def _team_league(team: Dict[str, Any]) -> Any:
+        primary = team.get("primary_league")
+        if primary not in (None, ""):
+            return primary
+        leagues = team.get("leagues")
+        if isinstance(leagues, list) and leagues:
+            return leagues[0]
+        return None
+
+    @staticmethod
+    def _team_identity(team: Dict[str, Any], event_date: Any, dispatcharr_channel: Dict[str, Any]) -> str:
+        team_id = team.get("id")
+        channel_ref = (
+            dispatcharr_channel.get("uuid")
+            or dispatcharr_channel.get("id")
+            or team.get("channel_id")
+            or ""
+        )
+        return f"team:{team_id}:{event_date or 'no-window'}:{channel_ref}"
+
+    def _public_team(self, status: Dict[str, Any], now: datetime) -> Optional[Dict[str, Any]]:
+        team = status.get("team") if isinstance(status.get("team"), dict) else {}
+        if not team:
+            return None
+        dispatcharr_channel = (
+            status.get("dispatcharr_channel")
+            if isinstance(status.get("dispatcharr_channel"), dict)
+            else {}
+        )
+        next_live_window = (
+            status.get("next_live_window")
+            if isinstance(status.get("next_live_window"), dict)
+            else {}
+        )
+        event_at = _parse_event_datetime(next_live_window.get("start"))
+        event_date = event_at.isoformat() if event_at else None
+        seconds_to_start = int((event_at - now).total_seconds()) if event_at else None
+        channel_id = dispatcharr_channel.get("id")
+        try:
+            dispatcharr_channel_id = int(channel_id)
+        except (TypeError, ValueError):
+            dispatcharr_channel_id = None
+
+        team_name = team.get("team_name") or team.get("name") or "Static Team"
+        league = self._team_league(team)
+        return {
+            "preflight_kind": "team",
+            "identity": self._team_identity(team, event_date, dispatcharr_channel),
+            "teamarr_team_id": team.get("id"),
+            "team_name": team_name,
+            "team_abbrev": team.get("team_abbrev"),
+            "team_channel_id": team.get("channel_id"),
+            "event_name": team_name,
+            "channel_name": dispatcharr_channel.get("name") or team.get("channel_id"),
+            "dispatcharr_channel_id": dispatcharr_channel_id,
+            "dispatcharr_uuid": dispatcharr_channel.get("uuid"),
+            "dispatcharr_tvg_id": dispatcharr_channel.get("tvg_id"),
+            "stream_count": int(dispatcharr_channel.get("stream_count") or 0),
+            "sport": team.get("sport"),
+            "league": league,
+            "sync_status": "ready" if str(status.get("status") or "") == "ready" else None,
+            "event_date": event_date,
+            "seconds_to_start": seconds_to_start,
+            "team_status": status.get("status") or "incomplete",
+            "missing": list(status.get("missing") or []),
+            "next_live_window": {
+                key: value
+                for key, value in next_live_window.items()
+                if key in {"found", "start", "stop", "title", "sub_title", "is_live", "source"}
+            },
+            "xmltv_updated_at": status.get("xmltv_updated_at"),
+        }
+
+    @staticmethod
     def _match_evidence(
         event: Dict[str, Any],
         *,
         state: Optional[str] = None,
         bucket: Optional[str] = None,
     ) -> Dict[str, Any]:
+        preflight_kind = event.get("preflight_kind") or "event"
         evidence = {
-            "source": "teamarr_managed_event",
+            "source": "teamarr_static_team" if preflight_kind == "team" else "teamarr_managed_event",
+            "preflight_kind": preflight_kind,
             "identity": event.get("identity"),
             "teamarr_id_present": event.get("teamarr_id") not in (None, ""),
+            "teamarr_team_id_present": event.get("teamarr_team_id") not in (None, ""),
             "event_id_present": event.get("event_id") not in (None, ""),
             "event_date": event.get("event_date"),
             "dispatcharr_channel_id": event.get("dispatcharr_channel_id"),
+            "dispatcharr_uuid": event.get("dispatcharr_uuid"),
             "sync_status": event.get("sync_status"),
             "sport": event.get("sport"),
             "league": event.get("league"),
+            "team_status": event.get("team_status"),
             "state": state or event.get("state"),
             "trigger_bucket": bucket if bucket is not None else event.get("trigger_bucket"),
             "may_start_full_run": False,
@@ -1184,6 +1442,8 @@ class TeamarrPreflightService:
             return "no_dispatcharr_channel"
 
         state = str(event.get("state") or "").strip()
+        if state in {"no_live_window", "no_streams_yet", "incomplete_team"}:
+            return state
         if state in MANUAL_FORCE_ALLOWED_STATES:
             return None
         if state in MANUAL_FORCE_ERROR_MESSAGES:
@@ -1233,9 +1493,13 @@ class TeamarrPreflightService:
                 self._mark_attempted(event, key=key)
                 self._active_checks[key] = {
                     "identity": event["identity"],
+                    "preflight_kind": event.get("preflight_kind") or "event",
                     "event_name": event.get("event_name"),
+                    "team_name": event.get("team_name"),
+                    "team_abbrev": event.get("team_abbrev"),
                     "channel_name": event.get("channel_name"),
                     "dispatcharr_channel_id": channel_id,
+                    "dispatcharr_uuid": event.get("dispatcharr_uuid"),
                     "bucket": event.get("trigger_bucket"),
                     "match_evidence": event.get("match_evidence"),
                     "may_start_full_run": False,
@@ -1272,8 +1536,10 @@ class TeamarrPreflightService:
         forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
         checker = self.stream_checker_provider()
         attempted_key = self._attempted_key(event)
+        preflight_kind = event.get("preflight_kind") or "event"
         metadata = {
             "source": "teamarr_preflight",
+            "preflight_kind": preflight_kind,
             "program_name": event.get("event_name"),
             "is_epg_scheduled": True,
             "forced_profile_id": forced_profile_id,
@@ -1283,12 +1549,17 @@ class TeamarrPreflightService:
             "match_evidence": event.get("match_evidence") or self._match_evidence(event),
             "event": {
                 "identity": event.get("identity"),
+                "preflight_kind": preflight_kind,
                 "teamarr_id": event.get("teamarr_id"),
+                "teamarr_team_id": event.get("teamarr_team_id"),
                 "event_id": event.get("event_id"),
                 "event_name": event.get("event_name"),
+                "team_name": event.get("team_name"),
+                "team_abbrev": event.get("team_abbrev"),
                 "event_date": event.get("event_date"),
                 "channel_name": event.get("channel_name"),
                 "dispatcharr_channel_id": event.get("dispatcharr_channel_id"),
+                "dispatcharr_uuid": event.get("dispatcharr_uuid"),
                 "sport": event.get("sport"),
                 "league": event.get("league"),
                 "seconds_to_start": event.get("seconds_to_start"),
@@ -1321,16 +1592,22 @@ class TeamarrPreflightService:
         if not event:
             event = {
                 "identity": metadata.get("identity"),
+                "preflight_kind": metadata.get("preflight_kind") or "event",
                 "teamarr_id": metadata.get("teamarr_id"),
+                "teamarr_team_id": metadata.get("teamarr_team_id"),
                 "event_id": metadata.get("event_id"),
                 "event_name": metadata.get("program_name"),
+                "team_name": metadata.get("team_name"),
+                "team_abbrev": metadata.get("team_abbrev"),
                 "event_date": metadata.get("event_date"),
                 "channel_name": metadata.get("channel_name"),
                 "dispatcharr_channel_id": metadata.get("dispatcharr_channel_id"),
+                "dispatcharr_uuid": metadata.get("dispatcharr_uuid"),
                 "sport": metadata.get("sport"),
                 "league": metadata.get("league"),
                 "seconds_to_start": metadata.get("seconds_to_start"),
             }
+        event.setdefault("preflight_kind", metadata.get("preflight_kind") or "event")
         event["trigger_bucket"] = metadata.get("trigger_bucket")
         if not event.get("match_evidence"):
             event["match_evidence"] = metadata.get("match_evidence") or self._match_evidence(event)
@@ -1560,13 +1837,18 @@ class TeamarrPreflightService:
         payload = {
             "timestamp": self.clock(),
             "type": event_type,
+            "preflight_kind": event.get("preflight_kind") or "event",
             "identity": event.get("identity"),
             "teamarr_id": event.get("teamarr_id"),
+            "teamarr_team_id": event.get("teamarr_team_id"),
             "event_id": event.get("event_id"),
             "event_name": event.get("event_name"),
+            "team_name": event.get("team_name"),
+            "team_abbrev": event.get("team_abbrev"),
             "event_date": event.get("event_date"),
             "channel_name": event.get("channel_name"),
             "dispatcharr_channel_id": event.get("dispatcharr_channel_id"),
+            "dispatcharr_uuid": event.get("dispatcharr_uuid"),
             "sport": event.get("sport"),
             "league": event.get("league"),
             "seconds_to_start": event.get("seconds_to_start"),
