@@ -561,7 +561,7 @@ function AutomationChannel({ channel, cIdx }) {
   )
 }
 
-function ChangelogEntry({ entry, onExport, exporting }) {
+function ChangelogEntry({ entry, onExport, exportingScope }) {
   const { timestamp, action, details, subentries } = entry
   const hasSubentries = subentries && subentries.length > 0
 
@@ -579,21 +579,40 @@ function ChangelogEntry({ entry, onExport, exporting }) {
           </div>
           <div className="flex items-center gap-2">
             {entry.id !== undefined && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-8 px-2"
-                onClick={() => onExport?.(entry)}
-                disabled={exporting}
-                title="Export this run"
-              >
-                {exporting ? (
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                ) : (
-                  <Download className="h-4 w-4" />
-                )}
-              </Button>
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-2 gap-1"
+                  onClick={() => onExport?.(entry, 'all')}
+                  disabled={Boolean(exportingScope)}
+                  title="Export full run"
+                >
+                  {exportingScope === 'all' ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4" />
+                  )}
+                  <span className="text-xs">Run</span>
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-2 gap-1"
+                  onClick={() => onExport?.(entry, 'dead')}
+                  disabled={Boolean(exportingScope)}
+                  title="Export dead, blank, freeze, and failed streams"
+                >
+                  {exportingScope === 'dead' ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4" />
+                  )}
+                  <span className="text-xs">Dead</span>
+                </Button>
+              </>
             )}
             <span className="text-[11px] font-medium text-muted-foreground bg-muted/30 px-2 py-1 rounded-md">{formatTimestamp(timestamp)}</span>
           </div>
@@ -843,7 +862,7 @@ export default function Changelog() {
   const [totalPages, setTotalPages] = useState(1)
   const [actionFilter, setActionFilter] = useState('all')
   const [sourceFilter, setSourceFilter] = useState('all')
-  const [exportingRunId, setExportingRunId] = useState(null)
+  const [exportingRunKey, setExportingRunKey] = useState(null)
   const { toast } = useToast()
 
   useEffect(() => {
@@ -891,11 +910,12 @@ export default function Changelog() {
     return actionFiltered.filter(entry => entryMatchesSourceFilter(entry, sourceFilter))
   }, [entries, actionFilter, sourceFilter])
 
-  const handleExportRun = async (entry) => {
+  const handleExportRun = async (entry, scope = 'all') => {
     if (!entry?.id) return
+    const exportKey = `${entry.id}:${scope}`
     try {
-      setExportingRunId(entry.id)
-      const response = await changelogAPI.exportRun(entry.id, { format: 'json', include_url: false })
+      setExportingRunKey(exportKey)
+      const response = await changelogAPI.exportRun(entry.id, { format: 'json', include_url: false, scope })
       const disposition = response.headers?.['content-disposition'] || ''
       const match = disposition.match(/filename="?([^"]+)"?/i)
       const filename = match?.[1] || `changelog-run-${entry.id}.json`
@@ -922,7 +942,7 @@ export default function Changelog() {
         variant: "destructive"
       })
     } finally {
-      setExportingRunId(null)
+      setExportingRunKey(null)
     }
   }
 
@@ -1006,7 +1026,11 @@ export default function Changelog() {
               key={entry.id ?? index}
               entry={entry}
               onExport={handleExportRun}
-              exporting={exportingRunId === entry.id}
+              exportingScope={
+                exportingRunKey?.startsWith(`${entry.id}:`)
+                  ? exportingRunKey.split(':')[1]
+                  : null
+              }
             />
           ))}
 

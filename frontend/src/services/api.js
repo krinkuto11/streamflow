@@ -246,6 +246,7 @@ export const changelogAPI = {
     params: {
       format: options.format || 'json',
       include_url: options.include_url === true ? 'true' : 'false',
+      scope: options.scope || 'all',
     },
     responseType: 'blob',
   }),

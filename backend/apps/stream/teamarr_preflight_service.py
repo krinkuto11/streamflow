@@ -51,7 +51,6 @@ DISPATCHARR_CHANNEL_ID_KEYS = (
 )
 DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME = "Teamarr Event Preflight"
 DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY: Dict[str, Any] = {
-    "inherit_global": False,
     "enabled": False,
     "hide_on_no_regex": False,
     "hide_on_no_streams": False,
@@ -397,6 +396,8 @@ class TeamarrPreflightService:
         current = profile.get("channel_visibility_automation")
         if not isinstance(current, dict):
             return True
+        if "inherit_global" in current:
+            return True
         for key, value in DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY.items():
             if current.get(key) != value:
                 return True
@@ -608,6 +609,9 @@ class TeamarrPreflightService:
                     "league": event.get("league"),
                     "seconds_to_start": event.get("seconds_to_start"),
                     "bucket": event.get("trigger_bucket") or metadata.get("trigger_bucket"),
+                    "forced_profile_id": metadata.get("forced_profile_id"),
+                    "quality_profile_id": event.get("quality_profile_id") or metadata.get("quality_profile_id"),
+                    "quality_profile_name": event.get("quality_profile_name") or metadata.get("quality_profile_name"),
                 }
                 if mapping_name == "queued_metadata":
                     item["priority"] = priorities.get(raw_channel_id)
@@ -1528,6 +1532,8 @@ class TeamarrPreflightService:
             self._mark_attempted(event)
             self._record_event("no_streams_yet", event, {"bucket": event.get("trigger_bucket")})
             return False
+        forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
+        quality_profile_details = self._quality_profile_details(forced_profile_id)
         if config.get("queue_during_active_checks", True) and self._automation_active():
             self._set_stream_checker_event_gate(True, gate_name="teamarr_preflight_automation")
             return self._queue_check(event, config)
@@ -1555,6 +1561,8 @@ class TeamarrPreflightService:
                     "bucket": event.get("trigger_bucket"),
                     "match_evidence": event.get("match_evidence"),
                     "may_start_full_run": False,
+                    "forced_profile_id": forced_profile_id,
+                    **quality_profile_details,
                     "started_at": self.clock(),
                 }
                 self._set_stream_checker_event_gate(True)
@@ -1576,7 +1584,15 @@ class TeamarrPreflightService:
             daemon=True,
             name=f"TeamarrPreflight-{channel_id}",
         )
-        self._record_event("preflight_started", event, {"bucket": event.get("trigger_bucket")})
+        self._record_event(
+            "preflight_started",
+            event,
+            {
+                "bucket": event.get("trigger_bucket"),
+                "forced_profile_id": forced_profile_id,
+                **quality_profile_details,
+            },
+        )
         thread.start()
         return True
 

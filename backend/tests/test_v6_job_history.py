@@ -156,3 +156,84 @@ def test_changelog_run_export_is_scoped_to_single_run():
     skipped = next(row for row in payload["streams"] if row["stream_id"] == 101)
     assert skipped["bucket"] == "skipped"
     assert skipped["reason"] == "active_viewer_protected"
+
+
+def test_changelog_run_export_dead_scope_enriches_reasons_and_profiles():
+    save_generic_telemetry(
+        "single_channel_check",
+        {
+            "channel_id": 30,
+            "channel_name": "Fixture C",
+            "success": True,
+            "profile_id": "7",
+            "profile_name": "Teamarr Event Preflight",
+            "stream_details": [
+                {
+                    "stream_id": 300,
+                    "stream_name": "Good Stream",
+                    "status": "completed",
+                    "resolution": "1920x1080",
+                    "fps": 50,
+                    "bitrate": "6000 kbps",
+                    "score": 0.91,
+                },
+                {
+                    "stream_id": 301,
+                    "stream_name": "Blank Stream",
+                    "status": "blank",
+                    "quality_reason": "blank",
+                    "blank_detected": True,
+                    "m3u_account": "Provider One",
+                },
+                {
+                    "stream_id": 302,
+                    "stream_name": "Zero Metrics Stream",
+                    "resolution": "0x0",
+                    "fps": "N/A",
+                    "bitrate": "N/A",
+                    "score": 0,
+                    "m3u_account": "Provider One",
+                },
+                {
+                    "stream_id": 303,
+                    "stream_name": "Protected Viewer Stream",
+                    "status": "viewer_preempted",
+                    "reason": "viewer_preempted",
+                    "resolution": "1920x1080",
+                    "fps": 50,
+                    "bitrate": "6000 kbps",
+                },
+            ],
+        },
+    )
+
+    session = get_session()
+    try:
+        run = session.query(Run).filter(Run.job_subject_ref == "channel:30").one()
+        run_id = run.id
+    finally:
+        session.close()
+
+    app = Flask(__name__)
+    with app.app_context():
+        response = export_changelog_run_response(
+            run_id=run_id,
+            request_args=MultiDict({"format": "json", "scope": "dead", "include_url": "false"}),
+        )
+
+    payload = response.get_json()
+    assert payload["scope"] == "dead"
+    assert payload["total_stream_rows"] == 2
+    assert "profile_id" in payload["fields"]
+    assert "profile_name" in payload["fields"]
+
+    rows = {row["stream_id"]: row for row in payload["streams"]}
+    assert set(rows) == {301, 302}
+    assert rows[301]["profile_id"] == "7"
+    assert rows[301]["profile_name"] == "Teamarr Event Preflight"
+    assert rows[301]["provider_id"] is None
+    assert rows[301]["provider_name"] == "Provider One"
+    assert rows[301]["reason"] == "blank"
+    assert rows[302]["status"] == "low_quality"
+    assert rows[302]["reason"] == "low_quality"
+    assert rows[302]["reason_detail"] == "inferred_from_run_metrics"

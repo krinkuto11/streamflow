@@ -6067,6 +6067,7 @@ class StreamCheckerService:
             _effective_profile_id = forced_profile_id or (profile.get('id') if profile else None)
 
             dead_count = 0
+            dead_stream_lookup = {}
             if checking_enabled:
                 logger.info(
                     f"Step 6/6: Checking streams for channel {channel_name} "
@@ -6111,6 +6112,12 @@ class StreamCheckerService:
                     for a in check_result.get('analyzed_streams', [])
                     if a.get('stream_id') is not None
                 }
+                for dead_entry in check_result.get('dead_streams', []) or []:
+                    if not isinstance(dead_entry, dict):
+                        continue
+                    dead_stream_id = dead_entry.get('stream_id', dead_entry.get('id'))
+                    if dead_stream_id is not None:
+                        dead_stream_lookup[dead_stream_id] = dead_entry
             else:
                 logger.info(f"Step 6/6: Skipping stream checking (checking is disabled for this channel)")
                 update_single_channel_progress(
@@ -6141,6 +6148,8 @@ class StreamCheckerService:
                 'avg_resolution': channel_averages['avg_resolution'],
                 'avg_bitrate': channel_averages['avg_bitrate'],
                 'avg_fps': channel_averages['avg_fps'],
+                'profile_id': profile_progress_context.get('automation_profile_id'),
+                'profile_name': profile_progress_context.get('automation_profile_name'),
                 'automation_profile_id': profile_progress_context.get('automation_profile_id'),
                 'automation_profile_name': profile_progress_context.get('automation_profile_name'),
                 'automation_profile_source': profile_progress_context.get('automation_profile_source'),
@@ -6225,6 +6234,26 @@ class StreamCheckerService:
                     'hdr_format': extracted_stats.get('hdr_format')
                 }
 
+                quality_reason = None
+                quality_reason_detail = None
+                if analyzed:
+                    quality_reason = analyzed.get('quality_reason')
+                    if quality_reason == 'none':
+                        quality_reason = None
+                    quality_reason_detail = analyzed.get('quality_reason_detail')
+                    if quality_reason_detail == 'none':
+                        quality_reason_detail = None
+
+                dead_reason = None
+                dead_reason_detail = None
+                if analyzed:
+                    dead_reason = analyzed.get('dead_reason') or None
+                    dead_reason_detail = analyzed.get('dead_reason_detail') or quality_reason_detail
+                dead_entry = dead_stream_lookup.get(stream.get('id'))
+                if dead_entry:
+                    dead_reason = dead_reason or dead_entry.get('reason') or dead_entry.get('dead_reason')
+                    dead_reason_detail = dead_reason_detail or dead_entry.get('reason_detail') or dead_entry.get('dead_reason_detail')
+
                 # Loop detection: prefer in-memory analyzed dict (authoritative, always
                 # current) over Dispatcharr stream_stats (may lag UDI refresh timing).
                 if analyzed and analyzed.get('loop_probe_ran'):
@@ -6256,6 +6285,41 @@ class StreamCheckerService:
                     stream_detail['freeze_detected']      = stream_stats.get('freeze_detected')
                     stream_detail['freeze_duration_secs'] = stream_stats.get('freeze_duration_secs')
                     stream_detail['freeze_ratio']         = stream_stats.get('freeze_ratio')
+
+                bad_quality_reasons = {'blank', 'freeze', 'low_quality', 'offline', 'error', 'failed', 'timeout'}
+                if analyzed and analyzed.get('reason_detail') == 'viewer_preempted':
+                    stream_detail['status'] = 'viewer_preempted'
+                    stream_detail['reason'] = 'viewer_preempted'
+                    stream_detail['reason_detail'] = analyzed.get('reason_detail')
+                elif dead_reason:
+                    stream_detail['status'] = dead_reason if dead_reason in {'blank', 'freeze', 'low_quality'} else 'dead'
+                    stream_detail['reason'] = dead_reason
+                    stream_detail['reason_detail'] = dead_reason_detail or dead_reason
+                    stream_detail['quality_reason'] = quality_reason or dead_reason
+                    stream_detail['quality_reason_detail'] = quality_reason_detail or dead_reason_detail or dead_reason
+                elif quality_reason in bad_quality_reasons:
+                    stream_detail['status'] = quality_reason if quality_reason in {'blank', 'freeze', 'low_quality'} else 'dead'
+                    stream_detail['reason'] = quality_reason
+                    stream_detail['reason_detail'] = quality_reason_detail or quality_reason
+                    stream_detail['quality_reason'] = quality_reason
+                    stream_detail['quality_reason_detail'] = quality_reason_detail or quality_reason
+                elif stream_detail.get('blank_detected') is True:
+                    stream_detail['status'] = 'blank'
+                    stream_detail['reason'] = 'blank'
+                    stream_detail['reason_detail'] = 'blank'
+                    stream_detail['quality_reason'] = 'blank'
+                    stream_detail['quality_reason_detail'] = 'blank'
+                elif stream_detail.get('freeze_detected') is True:
+                    stream_detail['status'] = 'freeze'
+                    stream_detail['reason'] = 'freeze'
+                    stream_detail['reason_detail'] = 'freeze'
+                    stream_detail['quality_reason'] = 'freeze'
+                    stream_detail['quality_reason_detail'] = 'freeze'
+                else:
+                    stream_detail['status'] = 'completed'
+                    if quality_reason:
+                        stream_detail['quality_reason'] = quality_reason
+                        stream_detail['quality_reason_detail'] = quality_reason_detail
 
                 check_stats['stream_details'].append(stream_detail)
             

@@ -22,23 +22,21 @@ def resolve_channel_visibility_config(
     global_config: Optional[Dict[str, Any]],
     profile: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Resolve profile-level channel visibility settings with global fallback."""
-    global_merged = dict(DEFAULT_VISIBILITY_CONFIG)
-    if isinstance(global_config, dict):
-        global_merged.update(global_config)
+    """Resolve profile-level channel visibility settings.
 
+    ``global_config`` is accepted for legacy callers but does not control the
+    result for V6 profiles. Channel visibility is intentionally profile-owned.
+    """
     if not isinstance(profile, dict) or PROFILE_VISIBILITY_KEY not in profile:
-        return global_merged
+        return dict(DEFAULT_VISIBILITY_CONFIG)
 
     profile_config = profile.get(PROFILE_VISIBILITY_KEY)
     if not isinstance(profile_config, dict):
-        return global_merged
-    if profile_config.get("inherit_global") is True:
-        return global_merged
+        return dict(DEFAULT_VISIBILITY_CONFIG)
 
     profile_merged = dict(DEFAULT_VISIBILITY_CONFIG)
     profile_merged.update(profile_config)
-    profile_merged["inherit_global"] = False
+    profile_merged.pop("inherit_global", None)
     return profile_merged
 
 

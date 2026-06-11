@@ -28,6 +28,7 @@ export const operatorHelpSections = [
       'Catch-up cap and Maintenance window are global automatic-run policies; manual forced runs remain available.',
       'Teamarr event window can pause automatic runs around cached event starts; manual forced runs remain available.',
       'Teamarr post-start checks can intentionally run after event start when event channels appear at kickoff or a few minutes later.',
+      'Channel Visibility is profile-specific and only toggles Dispatcharr Hidden from output; it does not delete channels.',
     ],
     links: [
       { label: 'Detailed Guide', to: '/help/automation-periods' },
@@ -55,7 +56,7 @@ export const operatorHelpSections = [
     title: 'Teamarr Preflight',
     summary: 'Event checks protect channels that appear near kickoff and keep selected profile rules visible.',
     items: [
-      'The selected quality profile defines the actual check rules for event channels.',
+      'The selected quality profile defines the actual check rules for event channels and static team channels.',
       'Post-start checks intentionally run after kickoff when event streams appear late.',
       'Busy stream-checker work is queued instead of silently dropping the event check.',
       'Event priority only sorts waiting checks; it does not interrupt the channel currently being checked.',
@@ -218,6 +219,15 @@ export const operatorHelpDetailTopics = [
         effect: 'Controls whether streams are analyzed for dead, blank, freeze, loop, or quality outcomes.',
         useWhen: 'Enable for maintenance and event-preflight profiles that should score or protect streams.',
         risk: 'Disabling it skips stream analysis and leaves quality state unchanged.',
+      },
+      {
+        name: 'Channel Visibility',
+        controlType: 'Visible UI setting',
+        defaultValue: 'Profile disabled',
+        location: 'Settings -> Profiles tab -> Edit profile -> Channel Visibility',
+        effect: 'Lets that profile manage Dispatcharr Hidden from output for no-regex or no-usable-stream outcomes, and unhide StreamFlow-managed channels when recovery is detected.',
+        useWhen: 'Enable for full-run or maintenance profiles that should hide failed output, and leave off for preflight profiles that must not hide event channels.',
+        risk: 'It never deletes channels, but enabling it on the wrong profile can hide channels from output until recovery or manual review makes them visible again.',
       },
       {
         name: 'M3U Refresh',
@@ -405,6 +415,15 @@ export const operatorHelpDetailTopics = [
     ],
     settings: [
       {
+        name: 'Quality Profile',
+        controlType: 'Visible UI setting',
+        defaultValue: 'Teamarr Event Preflight',
+        location: 'Teamarr Preflight -> Configuration card -> Quality Profile',
+        effect: 'Selects the automation profile used by Teamarr managed-event checks and static-team preflight checks, including profile queue capacity and channel visibility behavior.',
+        useWhen: 'Use a dedicated preflight profile when event/team checks should score streams without hiding channels.',
+        risk: 'Selecting a full-run profile here can apply full-run visibility and capacity rules to event or static-team checks.',
+      },
+      {
         name: 'Teamarr Poll Interval',
         controlType: 'Visible UI setting',
         defaultValue: '60 seconds',
@@ -503,6 +522,7 @@ export const operatorHelpDetailTopics = [
       'A busy Stream Checker state shows queued or deferred event-check context instead of losing the event check.',
       'Queued event checks appear in Active Event Checks or Stream Checker queue context and run after the active channel, before lower-priority waiting work.',
       'The default event profile keeps dead-stream removal off; enable destructive removal only after a dry event run proves the timing is reliable.',
+      'Event and static-team checks show the selected quality profile in queue or active-check context.',
     ],
     links: [
       { label: 'Teamarr Preflight', to: '/teamarr-preflight' },
@@ -763,9 +783,9 @@ export const operatorHelpDetailTopics = [
         defaultValue: 'Read after updating',
         location: 'Changelog page and container logs',
         locationTo: '/changelog',
-        effect: 'Connects visible behavior changes to the shipped image and catches backend errors that status panels may summarize.',
-        useWhen: 'Use after image updates, unexpected page behavior, or any failed smoke check.',
-        risk: 'Skipping the changelog can make an intentional label or timing change look like a regression.',
+        effect: 'Connects visible behavior changes to the shipped image, catches backend errors that status panels may summarize, and exports either the full run or only dead/blank/freeze/failed stream rows with reason and profile fields.',
+        useWhen: 'Use after image updates, unexpected page behavior, failed smoke checks, or when a dead-only run export is needed for review.',
+        risk: 'Skipping the changelog can make an intentional label, timing, profile, or reason change look like a regression.',
       },
     ],
     smokeChecks: [

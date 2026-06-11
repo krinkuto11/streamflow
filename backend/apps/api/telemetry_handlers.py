@@ -28,6 +28,8 @@ RUN_STREAM_EXPORT_FIELDS = [
     "action",
     "job_category",
     "job_outcome",
+    "profile_id",
+    "profile_name",
     "channel_id",
     "channel_name",
     "bucket",
@@ -55,6 +57,26 @@ DEAD_STREAM_EXPORT_FORMATS = {
     "json": (None, "json", "application/json; charset=utf-8"),
 }
 _FALSE_VALUES = {"0", "false", "no", "off"}
+_RUN_DEAD_STATUSES = {
+    "dead",
+    "blank",
+    "freeze",
+    "low_quality",
+    "offline",
+    "error",
+    "failed",
+    "timeout",
+}
+_RUN_DEAD_REASONS = _RUN_DEAD_STATUSES | {
+    "no_streams",
+    "all_failed",
+    "quality_failed",
+    "probe_failed",
+    "connection_failed",
+    "black_screen",
+    "frozen_video",
+}
+_RUN_EMPTY_VALUES = {"", "none", "null", "n/a", "na", "unknown", "-"}
 
 
 def get_changelog_response(*, request_args: Any):
@@ -368,6 +390,131 @@ def _render_dead_stream_export(
     return output.getvalue(), extension, mimetype
 
 
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return _text(value) in {"1", "true", "yes", "on"}
+
+
+def _zero_or_empty_metric(value: Any) -> bool:
+    text = _text(value)
+    if text in _RUN_EMPTY_VALUES:
+        return True
+    try:
+        return float(text.replace(",", ".")) <= 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _zero_or_empty_resolution(value: Any) -> bool:
+    text = _text(value).replace(" ", "")
+    if text in _RUN_EMPTY_VALUES or text == "0x0":
+        return True
+    parts = text.split("x", 1)
+    if len(parts) != 2:
+        return False
+    try:
+        return int(float(parts[0])) <= 0 or int(float(parts[1])) <= 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _score_is_zero_or_worse(value: Any) -> bool:
+    if value in (None, ""):
+        return False
+    try:
+        return float(str(value).replace(",", ".")) <= 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _normalise_run_profile_fields(row: Dict[str, Any]) -> None:
+    row["profile_id"] = _first_present(
+        row.get("profile_id"),
+        row.get("automation_profile_id"),
+        row.get("quality_profile_id"),
+        row.get("forced_profile_id"),
+    )
+    row["profile_name"] = _first_present(
+        row.get("profile_name"),
+        row.get("automation_profile_name"),
+        row.get("quality_profile_name"),
+    )
+
+
+def _infer_run_stream_dead_reason(row: Dict[str, Any]) -> Optional[str]:
+    for key in ("status", "reason", "quality_reason"):
+        value = _text(row.get(key))
+        if value in _RUN_DEAD_REASONS:
+            return value
+
+    if _truthy(row.get("blank_detected")):
+        return "blank"
+    if _truthy(row.get("freeze_detected")):
+        return "freeze"
+    if row.get("bucket") == "dead":
+        reason = _text(row.get("reason"))
+        return reason if reason and reason not in _RUN_EMPTY_VALUES else "dead"
+
+    has_dead_metrics = (
+        _zero_or_empty_resolution(row.get("resolution"))
+        and _zero_or_empty_metric(row.get("fps"))
+        and _zero_or_empty_metric(row.get("bitrate"))
+    )
+    if has_dead_metrics and _score_is_zero_or_worse(row.get("score")):
+        return "low_quality"
+    return None
+
+
+def _enrich_run_stream_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    enriched = dict(row)
+    _normalise_run_profile_fields(enriched)
+    dead_reason = _infer_run_stream_dead_reason(enriched)
+    if not dead_reason:
+        return enriched
+
+    current_status = _text(enriched.get("status"))
+    if not current_status or current_status == "completed":
+        enriched["status"] = dead_reason if dead_reason in {"blank", "freeze", "low_quality"} else "dead"
+    if not enriched.get("reason") or _text(enriched.get("reason")) in {"completed", "none"}:
+        enriched["reason"] = dead_reason
+    if not enriched.get("reason_detail") or _text(enriched.get("reason_detail")) == "none":
+        enriched["reason_detail"] = (
+            "inferred_from_run_metrics"
+            if dead_reason == "low_quality" and _has_zero_score_or_metrics(enriched)
+            else dead_reason
+        )
+    if not enriched.get("quality_reason") or _text(enriched.get("quality_reason")) == "none":
+        enriched["quality_reason"] = dead_reason
+    if not enriched.get("quality_reason_detail") or _text(enriched.get("quality_reason_detail")) == "none":
+        enriched["quality_reason_detail"] = enriched.get("reason_detail") or dead_reason
+    return enriched
+
+
+def _has_zero_score_or_metrics(row: Dict[str, Any]) -> bool:
+    return (
+        _score_is_zero_or_worse(row.get("score"))
+        or _zero_or_empty_resolution(row.get("resolution"))
+        or _zero_or_empty_metric(row.get("fps"))
+        or _zero_or_empty_metric(row.get("bitrate"))
+    )
+
+
+def _is_dead_run_stream_row(row: Dict[str, Any]) -> bool:
+    return _infer_run_stream_dead_reason(row) is not None
+
+
 def _run_stream_collection_specs() -> Dict[str, str]:
     return {
         "dead_streams": "dead",
@@ -395,16 +542,13 @@ def _run_stream_row(
     if stream_id in (None, "") and not stream_name:
         return None
 
-    provider_id = (
-        item.get("provider_id")
-        or item.get("m3u_account_id")
-        or item.get("m3u_account")
-    )
-    provider_name = (
-        item.get("provider_name")
-        or item.get("m3u_account_name")
-        or item.get("m3u_account")
-    )
+    m3u_account = item.get("m3u_account")
+    provider_id = item.get("provider_id") or item.get("m3u_account_id")
+    if provider_id in (None, "") and _text(m3u_account).isdigit():
+        provider_id = m3u_account
+    provider_name = item.get("provider_name") or item.get("m3u_account_name")
+    if provider_name in (None, "") and not _text(m3u_account).isdigit():
+        provider_name = m3u_account
     reason = (
         item.get("reason")
         or item.get("skip_reason")
@@ -412,9 +556,29 @@ def _run_stream_row(
         or item.get("quality_reason")
         or item.get("status")
     )
+    profile_id = _first_present(
+        item.get("profile_id"),
+        item.get("automation_profile_id"),
+        item.get("quality_profile_id"),
+        item.get("forced_profile_id"),
+        channel_context.get("profile_id"),
+        channel_context.get("automation_profile_id"),
+        channel_context.get("quality_profile_id"),
+        channel_context.get("forced_profile_id"),
+    )
+    profile_name = _first_present(
+        item.get("profile_name"),
+        item.get("automation_profile_name"),
+        item.get("quality_profile_name"),
+        channel_context.get("profile_name"),
+        channel_context.get("automation_profile_name"),
+        channel_context.get("quality_profile_name"),
+    )
 
     row = {
         **run_context,
+        "profile_id": profile_id,
+        "profile_name": profile_name,
         "channel_id": item.get("channel_id", channel_context.get("channel_id")),
         "channel_name": item.get("channel_name", channel_context.get("channel_name")),
         "bucket": bucket,
@@ -463,6 +627,17 @@ def _extract_changelog_run_stream_rows(run: Any, details: Dict[str, Any], subent
             context["channel_id"] = node.get("channel_id")
         if node.get("channel_name"):
             context["channel_name"] = node.get("channel_name")
+        for field in (
+            "profile_id",
+            "profile_name",
+            "automation_profile_id",
+            "automation_profile_name",
+            "quality_profile_id",
+            "quality_profile_name",
+            "forced_profile_id",
+        ):
+            if node.get(field) not in (None, ""):
+                context[field] = node.get(field)
 
         for key, bucket in specs.items():
             collection = node.get(key)
@@ -488,7 +663,8 @@ def _extract_changelog_run_stream_rows(run: Any, details: Dict[str, Any], subent
 
     deduped: List[Dict[str, Any]] = []
     seen = set()
-    for row in rows:
+    for raw_row in rows:
+        row = _enrich_run_stream_row(raw_row)
         key = (
             row.get("bucket"),
             row.get("channel_id"),
@@ -507,6 +683,7 @@ def _render_changelog_run_export(
     rows: List[Dict[str, Any]],
     *,
     export_format: str,
+    scope: str = "all",
     include_url: bool = False,
     generated_at: Optional[str] = None,
 ) -> Tuple[str, str, str]:
@@ -521,6 +698,7 @@ def _render_changelog_run_export(
             {
                 "generated_at": generated_at,
                 "format": "json",
+                "scope": scope,
                 "total_stream_rows": len(rows),
                 "fields": fields,
                 "streams": [{field: row.get(field) for field in fields} for row in rows],
@@ -554,6 +732,16 @@ def export_changelog_run_response(*, run_id: int, request_args: Any):
                 "error": "Unsupported changelog run export format",
                 "supported_formats": sorted(DEAD_STREAM_EXPORT_FORMATS.keys()),
             }), 400
+        requested_scope = str(
+            _arg(request_args, "scope", None)
+            or _arg(request_args, "stream_scope", None)
+            or "all"
+        ).strip().lower()
+        if requested_scope not in {"all", "dead"}:
+            return jsonify({
+                "error": "Unsupported changelog run export scope",
+                "supported_scopes": ["all", "dead"],
+            }), 400
 
         from apps.telemetry.telemetry_db import Run, get_session
 
@@ -566,18 +754,23 @@ def export_changelog_run_response(*, run_id: int, request_args: Any):
             details = json.loads(getattr(run, "raw_details", None) or "{}")
             subentries = json.loads(getattr(run, "raw_subentries", None) or "[]")
             rows = _extract_changelog_run_stream_rows(run, details, subentries)
+            if requested_scope == "dead":
+                rows = [row for row in rows if _is_dead_run_stream_row(row)]
         finally:
             session.close()
 
         content, extension, mimetype = _render_changelog_run_export(
             rows,
             export_format=requested_format,
+            scope=requested_scope,
             include_url=_as_bool(_arg(request_args, "include_url", False), default=False),
         )
-        filename = f"changelog-run-{run_id}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.{extension}"
+        suffix = "-dead" if requested_scope == "dead" else ""
+        filename = f"changelog-run-{run_id}{suffix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.{extension}"
         response = Response(content, content_type=mimetype)
         response.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
         response.headers["X-Changelog-Run-Id"] = str(run_id)
+        response.headers["X-Changelog-Run-Scope"] = requested_scope
         response.headers["X-Changelog-Stream-Rows"] = str(len(rows))
         response.headers["X-Changelog-Run-Format"] = extension
         return response

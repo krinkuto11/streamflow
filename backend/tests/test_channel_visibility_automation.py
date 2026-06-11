@@ -220,7 +220,7 @@ def test_profile_visibility_override_can_disable_global_hides():
     assert resolved["unhide_on_recovered"] is False
 
 
-def test_profile_visibility_inherits_global_when_requested():
+def test_profile_visibility_ignores_legacy_global_inheritance_flag():
     global_config = {
         "enabled": True,
         "hide_on_no_streams": True,
@@ -238,9 +238,10 @@ def test_profile_visibility_inherits_global_when_requested():
 
     resolved = resolve_channel_visibility_config(global_config, profile)
 
-    assert resolved["enabled"] is True
-    assert resolved["hide_on_no_streams"] is True
-    assert resolved["hide_on_all_failed"] is True
+    assert resolved["enabled"] is False
+    assert resolved["hide_on_no_streams"] is False
+    assert resolved["hide_on_all_failed"] is False
+    assert "inherit_global" not in resolved
 
 
 def test_stream_checker_visibility_hook_uses_quality_counts():

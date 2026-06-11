@@ -407,12 +407,69 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         metadata = kwargs["metadata"]
         self.assertEqual(metadata["source"], "teamarr_preflight")
         self.assertEqual(metadata["preflight_kind"], "team")
+        self.assertEqual(metadata["forced_profile_id"], "42")
+        self.assertEqual(metadata["quality_profile_id"], "42")
+        self.assertEqual(metadata["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
         self.assertEqual(metadata["event"]["preflight_kind"], "team")
         self.assertEqual(metadata["event"]["teamarr_team_id"], 501)
+        self.assertEqual(metadata["event"]["quality_profile_id"], "42")
+        self.assertEqual(metadata["event"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
         self.assertFalse(metadata["event"]["may_start_full_run"])
 
         service.run_once(force=True)
         self.assertEqual(len(checker.queued), 1)
+
+    def test_static_team_queue_uses_selected_preflight_profile(self):
+        team_status = make_team_status()
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [team_status["team"]],
+            "/api/v1/teams/501/channel-status": team_status,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = BusyChecker()
+        automation_config = FakeAutomationConfig(
+            profiles=[
+                {"id": "7", "name": "Custom Team Preflight"},
+                {"id": "8", "name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME},
+            ]
+        )
+        service, _, _ = self.make_service(
+            [],
+            checker=checker,
+            automation_config=automation_config,
+            http_get=http_get,
+        )
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+            "forced_profile_id": "7",
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(len(checker.queued), 1)
+        _, kwargs = checker.queued[0]
+        metadata = kwargs["metadata"]
+        self.assertEqual(metadata["preflight_kind"], "team")
+        self.assertEqual(metadata["forced_profile_id"], "7")
+        self.assertEqual(metadata["quality_profile_id"], "7")
+        self.assertEqual(metadata["quality_profile_name"], "Custom Team Preflight")
+        self.assertEqual(metadata["event"]["preflight_kind"], "team")
+        self.assertEqual(metadata["event"]["quality_profile_id"], "7")
+        self.assertEqual(metadata["event"]["quality_profile_name"], "Custom Team Preflight")
+        checker.check_queue = type("FakeQueue", (), {})()
+        checker.check_queue.queued_priorities = {77: TEAMARR_PREFLIGHT_QUEUE_PRIORITY}
+        checker.check_queue.queued_metadata = {77: metadata}
+        checker.check_queue.in_progress_metadata = {}
+        queued = service.get_status()["queued_checks"]
+        self.assertEqual(queued[0]["preflight_kind"], "team")
+        self.assertEqual(queued[0]["forced_profile_id"], "7")
+        self.assertEqual(queued[0]["quality_profile_id"], "7")
+        self.assertEqual(queued[0]["quality_profile_name"], "Custom Team Preflight")
 
     def test_manual_force_static_team_identity_runs_single_channel_check(self):
         team_status = make_team_status(
@@ -452,6 +509,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(args[0], 77)
         self.assertEqual(kwargs["program_name"], "Static Test Team")
         self.assertTrue(kwargs["is_epg_scheduled"])
+        self.assertEqual(kwargs["forced_profile_id"], "42")
 
     def test_static_team_endpoint_error_degrades_without_blocking_events(self):
         http_get = RouteHttpGet({

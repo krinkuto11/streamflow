@@ -53,7 +53,6 @@ const DEFAULT_PROFILE = {
         loop_penalty: 0
     },
     channel_visibility_automation: {
-        inherit_global: true,
         enabled: false,
         hide_on_no_regex: false,
         hide_on_no_streams: false,
@@ -210,11 +209,12 @@ export default function AutomationProfileEditor() {
     }
 
     const channelVisibilityConfig = profile?.channel_visibility_automation || DEFAULT_PROFILE.channel_visibility_automation
-    const channelVisibilityInherits = channelVisibilityConfig.inherit_global !== false
+    const noUsableStreamsVisibilityEnabled = channelVisibilityConfig.hide_on_no_streams === true
+        || channelVisibilityConfig.hide_on_all_failed === true
 
     const isStepEnabled = (stepId) => {
         if (stepId === 'channel_visibility_automation') {
-            return !channelVisibilityInherits && channelVisibilityConfig.enabled === true
+            return channelVisibilityConfig.enabled === true
         }
         return profile?.[stepId]?.enabled
     }
@@ -237,7 +237,6 @@ export default function AutomationProfileEditor() {
                 channel_visibility_automation: {
                     ...DEFAULT_PROFILE.channel_visibility_automation,
                     ...(prev.channel_visibility_automation || {}),
-                    inherit_global: false,
                     enabled: checked
                 }
             }))
@@ -346,9 +345,7 @@ export default function AutomationProfileEditor() {
                         <div className="flex items-center gap-2">
                             <span className="text-sm font-medium">
                                 {activeStep === 'channel_visibility_automation'
-                                    ? (channelVisibilityInherits
-                                        ? 'Global Defaults'
-                                        : (isStepEnabled(activeStep) ? 'Profile Enabled' : 'Profile Disabled'))
+                                    ? (isStepEnabled(activeStep) ? 'Profile Enabled' : 'Profile Disabled')
                                     : (isStepEnabled(activeStep) ? 'Step Enabled' : 'Step Disabled')}
                             </span>
                             <Switch
@@ -766,92 +763,74 @@ export default function AutomationProfileEditor() {
 
                     {activeStep === 'channel_visibility_automation' && (
                         <div className="space-y-4">
-                            <div className="flex items-center justify-between rounded-md border p-4">
-                                <div className="space-y-0.5">
-                                    <Label htmlFor="visibility_inherit_global" className="font-medium">Use Global Defaults</Label>
-                                    <p className="text-xs text-muted-foreground">Follow Stream Checker channel visibility settings.</p>
-                                </div>
-                                <Switch
-                                    id="visibility_inherit_global"
-                                    checked={channelVisibilityInherits}
-                                    onCheckedChange={(checked) => {
-                                        setProfile(prev => ({
-                                            ...prev,
-                                            channel_visibility_automation: {
-                                                ...DEFAULT_PROFILE.channel_visibility_automation,
-                                                ...(prev.channel_visibility_automation || {}),
-                                                inherit_global: checked
-                                            }
-                                        }))
-                                    }}
-                                />
-                            </div>
-
-                            {!channelVisibilityInherits && (
-                                <div className="space-y-4">
-                                    <div className="grid gap-3 md:grid-cols-2">
-                                        <div className="flex items-center justify-between rounded-md border p-4">
-                                            <div className="space-y-0.5">
-                                                <Label htmlFor="visibility_enabled" className="font-medium">Enabled</Label>
-                                                <p className="text-xs text-muted-foreground">Allow this profile to manage output visibility.</p>
-                                            </div>
-                                            <Switch
-                                                id="visibility_enabled"
-                                                checked={channelVisibilityConfig.enabled === true}
-                                                onCheckedChange={(checked) => updateProfile('channel_visibility_automation.enabled', checked)}
-                                            />
+                            <div className="space-y-4">
+                                <Alert>
+                                    <AlertCircle className="h-4 w-4" />
+                                    <AlertTitle>Channels stay in Dispatcharr</AlertTitle>
+                                    <AlertDescription>
+                                        StreamFlow never deletes channels here. This profile only toggles Dispatcharr&apos;s Hidden from output flag (<code className="rounded bg-muted px-1 py-0.5">hidden_from_output</code>); recovery turns that flag off again.
+                                    </AlertDescription>
+                                </Alert>
+                                <div className="grid gap-3 md:grid-cols-2">
+                                    <div className="flex items-center justify-between rounded-md border p-4">
+                                        <div className="space-y-0.5">
+                                            <Label htmlFor="visibility_enabled" className="font-medium">Enabled</Label>
+                                            <p className="text-xs text-muted-foreground">Allow this profile to manage output visibility.</p>
                                         </div>
-                                        <div className="flex items-center justify-between rounded-md border p-4">
-                                            <div className="space-y-0.5">
-                                                <Label htmlFor="visibility_no_regex" className="font-medium">No Regex</Label>
-                                                <p className="text-xs text-muted-foreground">Hide channels without matching rules.</p>
-                                            </div>
-                                            <Switch
-                                                id="visibility_no_regex"
-                                                checked={channelVisibilityConfig.hide_on_no_regex === true}
-                                                onCheckedChange={(checked) => updateProfile('channel_visibility_automation.hide_on_no_regex', checked)}
-                                                disabled={channelVisibilityConfig.enabled !== true}
-                                            />
-                                        </div>
-                                        <div className="flex items-center justify-between rounded-md border p-4">
-                                            <div className="space-y-0.5">
-                                                <Label htmlFor="visibility_no_streams" className="font-medium">No Streams</Label>
-                                                <p className="text-xs text-muted-foreground">Hide channels when no streams are present.</p>
-                                            </div>
-                                            <Switch
-                                                id="visibility_no_streams"
-                                                checked={channelVisibilityConfig.hide_on_no_streams === true}
-                                                onCheckedChange={(checked) => updateProfile('channel_visibility_automation.hide_on_no_streams', checked)}
-                                                disabled={channelVisibilityConfig.enabled !== true}
-                                            />
-                                        </div>
-                                        <div className="flex items-center justify-between rounded-md border p-4">
-                                            <div className="space-y-0.5">
-                                                <Label htmlFor="visibility_all_failed" className="font-medium">All Failed</Label>
-                                                <p className="text-xs text-muted-foreground">Hide channels when every checked stream fails.</p>
-                                            </div>
-                                            <Switch
-                                                id="visibility_all_failed"
-                                                checked={channelVisibilityConfig.hide_on_all_failed === true}
-                                                onCheckedChange={(checked) => updateProfile('channel_visibility_automation.hide_on_all_failed', checked)}
-                                                disabled={channelVisibilityConfig.enabled !== true}
-                                            />
-                                        </div>
+                                        <Switch
+                                            id="visibility_enabled"
+                                            checked={channelVisibilityConfig.enabled === true}
+                                            onCheckedChange={(checked) => updateProfile('channel_visibility_automation.enabled', checked)}
+                                        />
                                     </div>
                                     <div className="flex items-center justify-between rounded-md border p-4">
                                         <div className="space-y-0.5">
-                                            <Label htmlFor="visibility_recovered" className="font-medium">Recover Visible</Label>
-                                            <p className="text-xs text-muted-foreground">Unhide StreamFlow-managed channels after recovery.</p>
+                                            <Label htmlFor="visibility_no_regex" className="font-medium">No Regex</Label>
+                                            <p className="text-xs text-muted-foreground">Hide channels without matching rules.</p>
                                         </div>
                                         <Switch
-                                            id="visibility_recovered"
-                                            checked={channelVisibilityConfig.unhide_on_recovered !== false}
-                                            onCheckedChange={(checked) => updateProfile('channel_visibility_automation.unhide_on_recovered', checked)}
+                                            id="visibility_no_regex"
+                                            checked={channelVisibilityConfig.hide_on_no_regex === true}
+                                            onCheckedChange={(checked) => updateProfile('channel_visibility_automation.hide_on_no_regex', checked)}
+                                            disabled={channelVisibilityConfig.enabled !== true}
+                                        />
+                                    </div>
+                                    <div className="flex items-center justify-between rounded-md border p-4">
+                                        <div className="space-y-0.5">
+                                            <Label htmlFor="visibility_no_usable_streams" className="font-medium">No Usable Streams</Label>
+                                            <p className="text-xs text-muted-foreground">Hide channels when no streams are present or every checked stream fails.</p>
+                                        </div>
+                                        <Switch
+                                            id="visibility_no_usable_streams"
+                                            checked={noUsableStreamsVisibilityEnabled}
+                                            onCheckedChange={(checked) => {
+                                                setProfile(prev => ({
+                                                    ...prev,
+                                                    channel_visibility_automation: {
+                                                        ...DEFAULT_PROFILE.channel_visibility_automation,
+                                                        ...(prev.channel_visibility_automation || {}),
+                                                        hide_on_no_streams: checked,
+                                                        hide_on_all_failed: checked
+                                                    }
+                                                }))
+                                            }}
                                             disabled={channelVisibilityConfig.enabled !== true}
                                         />
                                     </div>
                                 </div>
-                            )}
+                                <div className="flex items-center justify-between rounded-md border p-4">
+                                    <div className="space-y-0.5">
+                                        <Label htmlFor="visibility_recovered" className="font-medium">Recover Visible</Label>
+                                        <p className="text-xs text-muted-foreground">Unhide StreamFlow-managed channels after recovery.</p>
+                                    </div>
+                                    <Switch
+                                        id="visibility_recovered"
+                                        checked={channelVisibilityConfig.unhide_on_recovered !== false}
+                                        onCheckedChange={(checked) => updateProfile('channel_visibility_automation.unhide_on_recovered', checked)}
+                                        disabled={channelVisibilityConfig.enabled !== true}
+                                    />
+                                </div>
+                            </div>
                         </div>
                     )}
                 </CardContent>
