@@ -795,8 +795,13 @@ class ShadowBlankMonitorService:
             channel_uuid = target["channel_uuid"]
             if int(target.get("watcher_client_count") or 0) > 0:
                 continue
-            if self._cooldown_remaining(channel_uuid) > 0:
-                self._record_event("cooldown", target, {"cooldown_seconds": self._cooldown_remaining(channel_uuid)})
+            cooldown_remaining = self._cooldown_remaining(channel_uuid)
+            reconnecting_watcher = (
+                config.get("watch_mode") == "continuous"
+                and target.get("watcher_state") == "reconnecting"
+            )
+            if cooldown_remaining > 0 and not reconnecting_watcher:
+                self._record_event("cooldown", target, {"cooldown_seconds": cooldown_remaining})
                 continue
             if self._quality_checker_conflicts(target, config):
                 self._record_event("quality_check_active", target, {})
@@ -963,6 +968,19 @@ class ShadowBlankMonitorService:
                 self._clear_switch_attempts(channel_uuid)
                 target.pop("media_recovery_guard_observed", None)
                 self._record_event("probe_ok", target, target["last_probe"])
+                return True
+
+            cooldown_remaining = self._cooldown_remaining(channel_uuid)
+            if cooldown_remaining > 0:
+                self._reset_blank_count(channel_uuid)
+                self._record_event(
+                    "cooldown",
+                    target,
+                    {
+                        "cooldown_seconds": cooldown_remaining,
+                        "reason": detection_reason,
+                    },
+                )
                 return True
 
             guard_details = self._watcher_recovery_guard_details(

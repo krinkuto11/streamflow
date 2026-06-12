@@ -2014,7 +2014,7 @@ def test_continuous_watcher_ref_change_is_recorded_as_recovery(tmp_path):
     assert "raw-new-watcher" not in repr(status)
 
 
-def test_watcher_recovery_sets_cooldown_before_next_reconnect_probe(tmp_path):
+def test_watcher_recovery_cooldown_does_not_block_reconnect_probe(tmp_path):
     now = {"value": 1000.0}
     probe_calls = []
     watcher_old = {
@@ -2062,8 +2062,78 @@ def test_watcher_recovery_sets_cooldown_before_next_reconnect_probe(tmp_path):
 
     now["value"] = 1015.0
     cooldown_status = service.run_once(force=True)
+    assert len(probe_calls) == 2
+    assert cooldown_status["recent_events"][0]["type"] == "probe_ok"
+    assert cooldown_status["recent_events"][1]["type"] == "watcher_reconnecting"
+    assert cooldown_status["cooldowns"][0]["cooldown_seconds"] == 295
+
+
+def test_reconnect_probe_blocks_fault_actions_during_cooldown(tmp_path):
+    now = {"value": 1000.0}
+    probe_calls = []
+    switch_calls = []
+    probe_results = [
+        {"blank_detected": False},
+        {"blank_detected": True, "blank_ratio": 1.0, "blank_duration_secs": 60},
+    ]
+    watcher_old = {
+        "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+        "client_id": "raw-old-watcher",
+        "connected_at": 990.0,
+    }
+    watcher_new = {
+        "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+        "client_id": "raw-new-watcher",
+        "connected_at": 1008.0,
+    }
+    real_viewer = {"user_agent": "VLC"}
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer, watcher_old])},
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer])},
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer])},
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer, watcher_new])},
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer])},
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+
+    def blank_probe(url, _config):
+        index = min(len(probe_calls), len(probe_results) - 1)
+        probe_calls.append(url)
+        return probe_results[index]
+
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=blank_probe,
+        switch_calls=switch_calls,
+        clock=lambda: now["value"],
+    )
+    service.update_config({
+        "enabled": False,
+        "watch_mode": "continuous",
+        "channel_cooldown_seconds": 300,
+        "confirmation_count": 1,
+    })
+
+    service.run_once(force=True)
+    now["value"] = 1005.0
+    service.run_once(force=True)
     assert len(probe_calls) == 1
+
+    now["value"] = 1010.0
+    recovery_status = service.run_once(force=True)
+    assert recovery_status["recent_events"][0]["type"] == "watcher_recovered"
+    assert recovery_status["cooldowns"][0]["cooldown_seconds"] == 300
+
+    now["value"] = 1015.0
+    cooldown_status = service.run_once(force=True)
+    assert len(probe_calls) == 2
+    assert switch_calls == []
     assert cooldown_status["recent_events"][0]["type"] == "cooldown"
+    assert cooldown_status["recent_events"][0]["details"]["reason"] == "blank"
     assert cooldown_status["cooldowns"][0]["cooldown_seconds"] == 295
 
 
