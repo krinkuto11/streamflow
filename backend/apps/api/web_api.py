@@ -112,6 +112,8 @@ from apps.api.channel_order_handlers import (
 )
 from apps.api.telemetry_handlers import (
     clear_all_dead_streams_response,
+    export_changelog_run_response,
+    export_dead_streams_response,
     get_changelog_response,
     get_dead_streams_response,
     revive_dead_stream_response,
@@ -144,9 +146,15 @@ from apps.api.stream_checker_handlers import (
     start_stream_checker_response,
     stop_stream_checker_response,
 )
+from apps.api.quality_stats_v2_handlers import (
+    get_quality_stats_v2_provider_response,
+    get_quality_stats_v2_stream_response,
+    post_quality_stats_v2_bulk_response,
+)
 from apps.api.shadow_blank_monitor_handlers import (
     get_shadow_blank_monitor_config_response,
     get_shadow_blank_monitor_status_response,
+    learn_shadow_offline_image_response,
     run_shadow_blank_monitor_once_response,
     start_shadow_blank_monitor_response,
     stop_shadow_blank_monitor_response,
@@ -161,6 +169,7 @@ from apps.api.teamarr_preflight_handlers import (
     stop_teamarr_preflight_response,
     update_teamarr_preflight_config_response,
 )
+from apps.api.job_arbiter_handlers import get_job_arbiter_status_response
 from apps.api.viewer_activity_handlers import get_viewer_activity_status_response
 from apps.api.scheduling_handlers import (
     create_auto_create_rule_response,
@@ -1019,6 +1028,11 @@ def get_changelog():
     """Get recent changelog entries from the new telemetry database."""
     return get_changelog_response(request_args=request.args)
 
+@app.route('/api/changelog/<int:run_id>/export', methods=['GET'])
+def export_changelog_run(run_id):
+    """Export stream rows for one changelog run."""
+    return export_changelog_run_response(run_id=run_id, request_args=request.args)
+
 @app.route('/api/dead-streams', methods=['GET'])
 def get_dead_streams():
     """Get dead streams statistics and list with SQL-native pagination, sorting, and filtering."""
@@ -1028,6 +1042,11 @@ def get_dead_streams():
         default_per_page=DEAD_STREAMS_DEFAULT_PER_PAGE,
         max_per_page=DEAD_STREAMS_MAX_PER_PAGE,
     )
+
+@app.route('/api/dead-streams/export', methods=['GET'])
+def export_dead_streams():
+    """Export dead streams as TXT, CSV, TSV or JSON."""
+    return export_dead_streams_response(request_args=request.args)
 
 @app.route('/api/dead-streams/revive', methods=['POST'])
 def revive_dead_stream():
@@ -1305,6 +1324,34 @@ def get_stream_last_quality_stats(stream_id):
     )
 
 
+@app.route('/api/quality-stats/v2/streams/<int:stream_id>', methods=['GET'])
+def get_quality_stats_v2_stream(stream_id):
+    """Get normalized V2 quality stats and markers for one stream."""
+    return get_quality_stats_v2_stream_response(
+        stream_id=stream_id,
+        get_udi_manager=get_udi_manager,
+    )
+
+
+@app.route('/api/quality-stats/v2/providers/<int:provider_id>', methods=['GET'])
+def get_quality_stats_v2_provider(provider_id):
+    """Get normalized V2 quality stats for one provider."""
+    return get_quality_stats_v2_provider_response(
+        provider_id=provider_id,
+        request_args=request.args,
+        get_udi_manager=get_udi_manager,
+    )
+
+
+@app.route('/api/quality-stats/v2/bulk', methods=['POST'])
+def post_quality_stats_v2_bulk():
+    """Get normalized V2 quality stats for stream and provider batches."""
+    return post_quality_stats_v2_bulk_response(
+        payload=request.get_json(silent=True),
+        get_udi_manager=get_udi_manager,
+    )
+
+
 @app.route('/api/stream-checker/check-channel', methods=['POST'])
 def check_specific_channel():
     """Manually check a specific channel immediately (add to queue with high priority)."""
@@ -1382,6 +1429,14 @@ def stop_shadow_blank_monitor():
 def run_shadow_blank_monitor_once():
     """Run one active-viewer shadow blank monitor scan."""
     return run_shadow_blank_monitor_once_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/offline-image/learn', methods=['POST'])
+def learn_shadow_offline_image():
+    """Learn an offline-image pHash from the current Shadow-watched frame."""
+    return learn_shadow_offline_image_response(
+        payload=request.get_json(silent=True),
         get_service=get_shadow_blank_monitor_service,
     )
 
@@ -1723,6 +1778,18 @@ def get_automation_status():
     return get_automation_status_response(
         get_automation_manager=get_automation_manager,
         get_automation_config_manager=get_automation_config_manager,
+    )
+
+
+@app.route('/api/job-arbiter/status', methods=['GET'])
+@log_function_call
+def get_job_arbiter_status():
+    """Get the V6 runtime job arbiter snapshot."""
+    return get_job_arbiter_status_response(
+        get_automation_manager=get_automation_manager,
+        get_stream_checker_service=get_stream_checker_service,
+        get_shadow_monitor_service=get_shadow_blank_monitor_service,
+        get_teamarr_preflight_service=get_teamarr_preflight_service,
     )
 
 

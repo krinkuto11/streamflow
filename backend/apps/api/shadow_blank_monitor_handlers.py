@@ -92,3 +92,27 @@ def run_shadow_blank_monitor_once_response(*, get_service: Callable[[], Any]):
     except Exception as exc:
         logger.error(f"Error running shadow blank monitor scan: {exc}", exc_info=True)
         return error_response("Internal Server Error", status_code=500, code="internal_error")
+
+
+def learn_shadow_offline_image_response(
+    *,
+    payload: Optional[Dict[str, Any]],
+    get_service: Callable[[], Any],
+):
+    try:
+        payload = payload or {}
+        result = get_service().learn_offline_image_from_current_frame(
+            channel_ref=payload.get("channel_ref"),
+            enable_detection=bool(payload.get("enable_detection")),
+        )
+        if not result.get("success"):
+            return error_response(
+                result.get("message") or "Could not learn offline image from current frame",
+                status_code=400,
+                code=result.get("reason") or "offline_image_learn_failed",
+                details={"result": result},
+            )
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.error(f"Error learning shadow offline image: {exc}", exc_info=True)
+        return error_response("Internal Server Error", status_code=500, code="internal_error")

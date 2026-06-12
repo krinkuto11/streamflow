@@ -270,6 +270,12 @@ Recommended template-managed flow:
 6. Run a short targeted quality check, then review Stream Checker hardware
    status before using hardware decode for larger checks.
 
+For Unraid-style templates, the icon field can point at the repository PNG
+asset, for example `frontend/public/streamflow-icon-512.png` from the release
+branch or tag. The built web UI also serves `/favicon.png`,
+`/streamflow-icon-192.png`, `/streamflow-icon-512.png`, and
+`/site.webmanifest` from the container.
+
 The Stream Checker page should show the effective analysis path. The hardware
 status API is also useful for remote checks: it reports the configured mode,
 fallback setting, detected ffmpeg methods, GPU visibility, and whether

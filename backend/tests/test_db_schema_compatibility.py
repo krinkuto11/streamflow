@@ -41,3 +41,40 @@ def test_init_db_accepts_legacy_automation_periods_schema(clean_test_db):
         }
     )
     assert period_id is not None
+
+
+def test_init_db_adds_v6_run_history_columns_to_legacy_runs_schema(clean_test_db):
+    """Existing SQLite DBs should gain V6 job-history columns on startup."""
+    with clean_test_db.begin() as conn:
+        conn.exec_driver_sql("DROP TABLE stream_telemetry")
+        conn.exec_driver_sql("DROP TABLE channel_health")
+        conn.exec_driver_sql("DROP TABLE runs")
+        conn.exec_driver_sql(
+            """
+            CREATE TABLE runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME,
+                duration_seconds FLOAT NOT NULL DEFAULT 0.0,
+                total_channels INTEGER NOT NULL DEFAULT 0,
+                total_streams INTEGER NOT NULL DEFAULT 0,
+                global_dead_count INTEGER NOT NULL DEFAULT 0,
+                global_revived_count INTEGER NOT NULL DEFAULT 0,
+                run_type VARCHAR(50) NOT NULL DEFAULT 'automation_run',
+                raw_details VARCHAR,
+                raw_subentries VARCHAR
+            )
+            """
+        )
+
+    init_db()
+
+    with clean_test_db.connect() as conn:
+        columns = {
+            row[1]
+            for row in conn.exec_driver_sql('PRAGMA table_info("runs")').fetchall()
+        }
+
+    assert "job_category" in columns
+    assert "job_outcome" in columns
+    assert "job_subject_ref" in columns
+    assert "job_correlation_id" in columns

@@ -106,6 +106,10 @@ export const automationAPI = {
   invalidateEventsCache: () => api.post('/automation/events/invalidate-cache'),
 };
 
+export const jobArbiterAPI = {
+  getStatus: () => api.get('/job-arbiter/status'),
+};
+
 export const channelsAPI = {
   /**
    * Fetch channels with optional filtering, sorting, and pagination.
@@ -206,6 +210,12 @@ export const streamCheckerAPI = {
   triggerGlobalAction: () => api.post('/stream-checker/global-action'),
 };
 
+export const qualityStatsV2API = {
+  getStream: (streamId) => api.get(`/quality-stats/v2/streams/${streamId}`),
+  getProvider: (providerId, params = {}) => api.get(`/quality-stats/v2/providers/${providerId}`, { params }),
+  bulk: (data) => api.post('/quality-stats/v2/bulk', data),
+};
+
 export const shadowBlankMonitorAPI = {
   getConfig: () => api.get('/shadow-blank-monitor/config'),
   updateConfig: (config) => api.put('/shadow-blank-monitor/config', config),
@@ -213,6 +223,7 @@ export const shadowBlankMonitorAPI = {
   start: () => api.post('/shadow-blank-monitor/start'),
   stop: () => api.post('/shadow-blank-monitor/stop'),
   runOnce: () => api.post('/shadow-blank-monitor/run-once'),
+  learnOfflineImage: (payload = {}) => api.post('/shadow-blank-monitor/offline-image/learn', payload),
 };
 
 export const viewerActivityAPI = {
@@ -230,7 +241,15 @@ export const teamarrPreflightAPI = {
 };
 
 export const changelogAPI = {
-  getChangelog: (days = 7, page = 1, limit = 10) => api.get(`/changelog`, { params: { days, page, limit } }),
+  getChangelog: (days = 7, page = 1, limit = 10, filters = {}) => api.get(`/changelog`, { params: { days, page, limit, ...filters } }),
+  exportRun: (runId, options = {}) => api.get(`/changelog/${runId}/export`, {
+    params: {
+      format: options.format || 'json',
+      include_url: options.include_url === true ? 'true' : 'false',
+      scope: options.scope || 'all',
+    },
+    responseType: 'blob',
+  }),
 };
 
 export const deadStreamsAPI = {

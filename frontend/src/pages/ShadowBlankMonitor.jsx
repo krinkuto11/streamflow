@@ -18,8 +18,18 @@ import {
   shadowMonitorThresholdFields,
 } from '@/lib/shadow-monitor-config-fields.js'
 import {
+  filterShadowDecisionEvents,
+  formatShadowEventReason,
+  formatShadowEventType,
+  formatShadowPreProbeStatus,
+  getShadowEventDecisionGroup,
+  getShadowEventDetailParts,
+  shadowDecisionFilters,
+} from '@/lib/shadow-monitor-decision-history.js'
+import {
   Activity,
   AlertCircle,
+  Camera,
   CheckCircle2,
   Eye,
   Loader2,
@@ -29,28 +39,6 @@ import {
   Shield,
   StopCircle,
 } from 'lucide-react'
-
-const eventLabels = {
-  probe_ok: 'Probe OK',
-  blank_pending: 'Blank Pending',
-  freeze_pending: 'Freeze Pending',
-  garbled_audio_pending: 'Garbled Audio Pending',
-  silent_audio_pending: 'Silent Audio Pending',
-  offline_image_pending: 'Offline Image Pending',
-  dry_run_switch: 'Dry Run Switch',
-  switch_success: 'Switch Success',
-  switch_failed: 'Switch Failed',
-  no_alternative: 'No Alternative',
-  cooldown: 'Cooldown',
-  stale_stream_guard: 'Stale Stream',
-  switch_rate_limited: 'Rate Limited',
-  viewer_left: 'Viewer Left',
-  quality_check_active: 'Quality Check Active',
-  watcher_reconnecting: 'Watcher Reconnecting',
-  watcher_recovered: 'Watcher Recovered',
-  pre_probe_unavailable: 'Pre-Probe Unavailable',
-  pre_probe_rejected: 'Pre-Probe Rejected',
-}
 
 const parseCsv = (value, numeric = false) => {
   return String(value || '')
@@ -76,7 +64,13 @@ const formatDuration = (seconds) => {
   return `${minutes}m`
 }
 
-const formatEvent = (event) => eventLabels[event?.type] || event?.type || 'Unknown'
+const formatEvent = (event) => formatShadowEventType(event)
+
+const offlineImageWarningLabels = {
+  missing_reference_hash: 'Offline image detection has no reference pHash.',
+  invalid_reference_hash: 'One or more offline image pHashes are invalid.',
+  no_valid_reference_hash: 'Offline image detection has no valid reference pHash.',
+}
 
 export default function ShadowBlankMonitor() {
   const [config, setConfig] = useState(null)
@@ -85,6 +79,7 @@ export default function ShadowBlankMonitor() {
   const [excludedIds, setExcludedIds] = useState('')
   const [excludedUuids, setExcludedUuids] = useState('')
   const [offlineImageHashes, setOfflineImageHashes] = useState('')
+  const [historyFilter, setHistoryFilter] = useState('all')
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
   const { toast } = useToast()
@@ -97,9 +92,29 @@ export default function ShadowBlankMonitor() {
 
   const watchedChannels = status?.watched_channels || []
   const recentEvents = status?.recent_events || []
+  const decisionHistory = status?.decision_history || recentEvents
+  const lastPreProbe = status?.pre_probe?.last || null
+  const offlineImageStatus = status?.offline_image || {}
+  const offlineImageWarnings = offlineImageStatus.warnings || []
+  const switchSummary = status?.switch_summary || {}
   const cooldownCount = status?.cooldowns?.length || 0
 
   const lastEvent = useMemo(() => recentEvents[0] || null, [recentEvents])
+  const filteredDecisionHistory = useMemo(
+    () => filterShadowDecisionEvents(decisionHistory, historyFilter),
+    [decisionHistory, historyFilter],
+  )
+  const lastSwitchEvent = useMemo(
+    () => decisionHistory.find(event => getShadowEventDecisionGroup(event) === 'switch') || null,
+    [decisionHistory],
+  )
+  const lastSwitchReason = lastSwitchEvent
+    ? formatShadowEventReason(
+      lastSwitchEvent.details?.trigger_reason
+      || lastSwitchEvent.trigger_reason
+      || lastSwitchEvent.details?.reason,
+    )
+    : null
 
   const loadData = async () => {
     try {
@@ -172,6 +187,37 @@ export default function ShadowBlankMonitor() {
     }
   }
 
+  const learnOfflineImage = async (channelRef = null) => {
+    try {
+      setActionLoading('learn-offline-image')
+      const response = await shadowBlankMonitorAPI.learnOfflineImage({
+        ...(channelRef ? { channel_ref: channelRef } : {}),
+      })
+      const result = response.data || {}
+      const nextConfig = result.config || config || {}
+      setConfig(nextConfig)
+      setEditedConfig(nextConfig)
+      setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
+      setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
+      setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
+      setStatus(result.status || status || {})
+      toast({
+        title: result.deduplicated ? 'Already learned' : 'Learned',
+        description: result.deduplicated
+          ? 'Current frame already matches an offline reference pHash'
+          : 'Current frame pHash added to offline image references',
+      })
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Failed to learn offline image from current frame',
+        variant: 'destructive',
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
   const runAction = async (name, action, success) => {
     try {
       setActionLoading(name)
@@ -206,6 +252,7 @@ export default function ShadowBlankMonitor() {
   const configurationMessage = status?.configuration_message || 'Save a Watcher API Key before starting the monitor.'
   const canUseWatcher = actionLoading === '' && !configurationRequired
   const continuousWatcherActive = running && watchMode === 'continuous'
+  const canLearnOfflineImage = actionLoading === '' && watchedChannels.length > 0
 
   return (
     <div className="space-y-6">
@@ -302,7 +349,13 @@ export default function ShadowBlankMonitor() {
           </CardHeader>
           <CardContent>
             <Badge variant={dryRun ? 'outline' : 'default'}>{dryRun ? 'Dry Run' : 'Live'}</Badge>
-            <p className="mt-2 text-xs text-muted-foreground">{cooldownCount} channel cooldowns</p>
+            <p className="mt-2 truncate text-xs text-muted-foreground">
+              {lastSwitchEvent ? `${formatEvent(lastSwitchEvent)}: ${lastSwitchReason}` : `${cooldownCount} channel cooldowns`}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {switchSummary.successful_switches || 0} switches / {switchSummary.prevented_false_switches || 0} prevented risk
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">{cooldownCount} channel cooldowns</p>
           </CardContent>
         </Card>
 
@@ -396,6 +449,9 @@ export default function ShadowBlankMonitor() {
                 <div>
                   <Label className="text-sm font-medium">Next Stream Pre-Probe</Label>
                   <p className="text-xs text-muted-foreground">Validate the next candidate before switching</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {formatShadowPreProbeStatus(lastPreProbe)}
+                  </p>
                 </div>
                 <Switch
                   checked={Boolean(editedConfig.next_stream_pre_probe_enabled)}
@@ -471,16 +527,44 @@ export default function ShadowBlankMonitor() {
             <Separator />
 
             <div className="space-y-2">
-              <Label htmlFor="offline_image_reference_hashes">Offline Image Reference pHashes</Label>
+              <div className="flex flex-wrap items-end justify-between gap-2">
+                <div className="space-y-1">
+                  <Label htmlFor="offline_image_reference_hashes">Offline Image Reference pHashes</Label>
+                  <p className="text-xs text-muted-foreground">
+                    {offlineImageStatus.valid_reference_count || 0}/{offlineImageStatus.reference_count || 0} valid references
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => learnOfflineImage()}
+                  disabled={!canLearnOfflineImage}
+                >
+                  {actionLoading === 'learn-offline-image' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Camera className="mr-2 h-4 w-4" />}
+                  Learn Current Frame
+                </Button>
+              </div>
               <Input
                 id="offline_image_reference_hashes"
                 placeholder="comma-separated pHash values"
                 value={offlineImageHashes}
                 onChange={(event) => setOfflineImageHashes(event.target.value)}
               />
-              <p className="text-xs text-muted-foreground">
-                Offline-image switching stays disabled unless at least one reference hash is configured.
-              </p>
+              {offlineImageWarnings.length > 0 ? (
+                <div className="space-y-1">
+                  {offlineImageWarnings.map(warning => (
+                    <p key={warning} className="flex items-center gap-2 text-xs font-medium text-amber-600 dark:text-amber-300">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span>{offlineImageWarningLabels[warning] || warning}</span>
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Offline-image switching stays disabled unless at least one reference hash is configured.
+                </p>
+              )}
             </div>
 
             <Separator />
@@ -567,6 +651,21 @@ export default function ShadowBlankMonitor() {
                             {(channel.watcher_client_count || 0) > 0 && (
                               <Badge variant="secondary">{formatWatcherClientCount(channel.watcher_client_count)}</Badge>
                             )}
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-2"
+                              onClick={() => learnOfflineImage(channel.channel_ref)}
+                              disabled={actionLoading !== ''}
+                            >
+                              {actionLoading === 'learn-offline-image' ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Camera className="h-3.5 w-3.5" />
+                              )}
+                              <span className="sr-only">Learn offline image from this channel</span>
+                            </Button>
                           </div>
                         </div>
                         {programLabel && (
@@ -611,30 +710,59 @@ export default function ShadowBlankMonitor() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Recent Events</CardTitle>
-              <CardDescription>Latest monitor decisions</CardDescription>
+              <CardTitle>Decision History</CardTitle>
+              <CardDescription>Latest monitor decisions and switch reasons</CardDescription>
             </CardHeader>
-            <CardContent>
-              {recentEvents.length === 0 ? (
+            <CardContent className="space-y-3">
+              <div className="flex flex-wrap gap-2">
+                {shadowDecisionFilters.map(filter => (
+                  <Button
+                    key={filter.key}
+                    type="button"
+                    size="sm"
+                    variant={historyFilter === filter.key ? 'default' : 'outline'}
+                    onClick={() => setHistoryFilter(filter.key)}
+                  >
+                    {filter.label}
+                  </Button>
+                ))}
+              </div>
+
+              {filteredDecisionHistory.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No events recorded</p>
               ) : (
                 <div className="space-y-3">
-                  {recentEvents.slice(0, 8).map((event, index) => (
-                    <div key={`${event.timestamp}-${index}`} className="flex items-start justify-between gap-3 rounded-md border p-3">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <Badge variant={event.type === 'switch_success' ? 'default' : 'secondary'}>
-                            {formatEvent(event)}
-                          </Badge>
-                          <span className="text-xs text-muted-foreground">{formatTime(event.timestamp)}</span>
+                  {filteredDecisionHistory.slice(0, 12).map((event, index) => {
+                    const detailParts = getShadowEventDetailParts(event)
+                    const isSwitch = getShadowEventDecisionGroup(event) === 'switch'
+                    return (
+                      <div key={`${event.timestamp}-${index}`} className="rounded-md border p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={isSwitch ? 'default' : 'secondary'}>
+                                {formatEvent(event)}
+                              </Badge>
+                              <span className="text-xs text-muted-foreground">{formatTime(event.timestamp)}</span>
+                            </div>
+                            <p className="mt-2 truncate font-mono text-xs text-muted-foreground">
+                              {event.channel_ref} / {event.stream_ref}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-xs text-muted-foreground">{formatViewerClientCount(event.real_client_count)}</span>
                         </div>
-                        <p className="mt-2 truncate font-mono text-xs text-muted-foreground">
-                          {event.channel_ref} / {event.stream_ref}
-                        </p>
+                        {detailParts.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {detailParts.slice(0, 5).map((part, partIndex) => (
+                              <Badge key={`${part}-${partIndex}`} variant="outline" className="max-w-full truncate">
+                                {part}
+                              </Badge>
+                            ))}
+                          </div>
+                        )}
                       </div>
-                      <span className="shrink-0 text-xs text-muted-foreground">{formatViewerClientCount(event.real_client_count)}</span>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               )}
             </CardContent>

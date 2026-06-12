@@ -26,6 +26,17 @@ describe('Teamarr preflight event search helpers', () => {
       bucket: 'manual',
       details: { reason: 'active_viewers' },
     },
+    {
+      preflight_kind: 'team',
+      event_name: 'Static Team Row',
+      team_name: 'San Jose Sharks',
+      team_abbrev: 'SJS',
+      channel_name: 'Team Channel',
+      sport: 'hockey',
+      league: 'nhl',
+      team_status: 'ready',
+      state: 'due',
+    },
   ]
 
   it('returns all events when search is empty', () => {
@@ -38,6 +49,9 @@ describe('Teamarr preflight event search helpers', () => {
     expect(filterTeamarrEventsBySearch(events, 'baseball')).toEqual([events[1]])
     expect(filterTeamarrEventsBySearch(events, 'past')).toEqual([events[1]])
     expect(filterTeamarrEventsBySearch(events, 'manual')).toEqual([events[1]])
+    expect(filterTeamarrEventsBySearch(events, 'sharks')).toEqual([events[2]])
+    expect(filterTeamarrEventsBySearch(events, 'sjs')).toEqual([events[2]])
+    expect(filterTeamarrEventsBySearch(events, 'hockey')).toEqual([events[2]])
   })
 
   it('matches latest preflight and decision detail fields', () => {
@@ -62,9 +76,9 @@ describe('Teamarr preflight event search helpers', () => {
   })
 
   it('filters managed events by operator view', () => {
-    expect(filterTeamarrEventsByView(events, 'upcoming')).toEqual([events[0]])
+    expect(filterTeamarrEventsByView(events, 'upcoming')).toEqual([events[0], events[2]])
     expect(filterTeamarrEventsByView(events, 'past')).toEqual([events[1]])
-    expect(filterTeamarrEventsByView(events, 'no_check')).toEqual([events[1]])
+    expect(filterTeamarrEventsByView(events, 'no_check')).toEqual([events[1], events[2]])
     expect(filterTeamarrEventsByView(events, 'all')).toEqual(events)
   })
 

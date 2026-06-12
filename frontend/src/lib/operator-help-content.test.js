@@ -58,6 +58,7 @@ describe('operatorHelpSections', () => {
     expect(profilesPeriods.items.join(' ')).toMatch(/Maintenance window/)
     expect(profilesPeriods.items.join(' ')).toMatch(/Teamarr event window/)
     expect(profilesPeriods.items.join(' ')).toMatch(/post-start checks/)
+    expect(profilesPeriods.items.join(' ')).toMatch(/does not delete channels/)
 
     const startupCache = operatorHelpSections.find(section => section.id === 'startup-cache')
     expect(startupCache.items.join(' ')).toMatch(/refresh requests are accepted by Dispatcharr/i)
@@ -69,6 +70,7 @@ describe('operatorHelpSections', () => {
 
     const teamarr = operatorHelpSections.find(section => section.id === 'teamarr-preflight')
     expect(teamarr.items.join(' ')).toMatch(/Post-start checks/)
+    expect(teamarr.items.join(' ')).toMatch(/static team channels/)
     expect(teamarr.links.map(link => link.to)).toContain('/help/teamarr-preflight')
 
     const shadowMonitor = operatorHelpSections.find(section => section.id === 'shadow-monitor')
@@ -142,6 +144,7 @@ describe('operatorHelpSections', () => {
 
     expect(getOperatorHelpDetailTopic('teamarr-preflight').settings.map(setting => setting.name)).toContain('Post-Start Checks')
     const teamarr = getOperatorHelpDetailTopic('teamarr-preflight')
+    expect(teamarr.settings.find(setting => setting.name === 'Quality Profile').effect).toMatch(/static-team preflight checks/i)
     const preStartRetries = teamarr.settings.find(setting => setting.name === 'Pre-Start Retries')
     const postStartGrace = teamarr.settings.find(setting => setting.name === 'Post-Start Grace')
     expect(teamarr.settings.find(setting => setting.name === 'Teamarr Poll Interval').effect).toMatch(/reads Teamarr internal managed-event endpoints/i)
@@ -171,6 +174,8 @@ describe('operatorHelpSections', () => {
     ]))
     expect(automation.settings.find(setting => setting.name === 'Maintenance window').location).toBe('Settings -> Scheduling tab -> Automation Run Policy -> Maintenance window/start/end')
     expect(automation.settings.find(setting => setting.name === 'Retry failed M3U providers').effect).toMatch(/only providers/i)
+    expect(automation.settings.find(setting => setting.name === 'Channel Visibility').location).toBe('Settings -> Profiles tab -> Edit profile -> Channel Visibility')
+    expect(automation.settings.find(setting => setting.name === 'Channel Visibility').risk).toMatch(/never deletes channels/i)
     const streamChecker = getOperatorHelpDetailTopic('stream-checker')
     expect(streamChecker.settings.find(setting => setting.name === 'Check on update').controlType).toBe('Status/API')
     expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Concurrent Checking tab -> Global Concurrent Limit')
@@ -204,6 +209,7 @@ describe('operatorHelpSections', () => {
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').effect).toMatch(/timeout, connectivity, endpoint/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').effect).toMatch(/elapsed\/limit/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').useWhen).toMatch(/timeout values/)
+    expect(troubleshooting.settings.find(setting => setting.name === 'Changelog and logs').effect).toMatch(/full run or only dead\/blank\/freeze\/failed/i)
     expect(troubleshooting.steps.join(' ')).toMatch(/smallest manual check/i)
     expect(troubleshooting.steps.join(' ')).toMatch(/reason-detail fields/i)
     expect(troubleshooting.smokeChecks.join(' ')).toMatch(/post-start buckets/i)

@@ -599,6 +599,11 @@ export default function StreamChecker() {
 
             <div className="flex items-center gap-2 text-sm pb-2 border-b">
               <Badge variant="outline">{progress.status}</Badge>
+              {progress.automation_profile_name && (
+                <Badge variant={progress.automation_profile_source === 'forced' ? 'default' : 'outline'}>
+                  Quality Profile: {progress.automation_profile_name}
+                </Badge>
+              )}
               {parallelProgressBadgeText && (
                 <Badge variant="secondary">
                   {parallelProgressBadgeText}
@@ -1494,8 +1499,8 @@ export default function StreamChecker() {
                         : 'Connectivity guard enabled'}
                     </span>
                   </div>
-                </TabsContent>
 
+                </TabsContent>
 
                 {/* Dead Streams Tab */}
                 <TabsContent value="dead-streams" className="mt-4 space-y-4">

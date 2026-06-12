@@ -267,7 +267,8 @@ def _dedupe_stream_ids(stream_ids: List[int]) -> List[int]:
 
 def update_channel_streams(
     channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
-    allow_dead_streams: bool = False
+    allow_dead_streams: bool = False,
+    protected_stream_ids: Optional[set] = None,
 ) -> bool:
     """
     Update the streams for a given channel ID.
@@ -283,6 +284,8 @@ def update_channel_streams(
             updating multiple channels.
         allow_dead_streams (bool): If True, allows dead streams (used during
             global checks to give dead streams a second chance). Default False.
+        protected_stream_ids (Optional[set]): Stream IDs that must survive the
+            dead-stream filter because an active viewer is currently using them.
         
     Returns:
         bool: True if update successful, False otherwise.
@@ -309,9 +312,21 @@ def update_channel_streams(
             f"Filtered out {duplicate_count} duplicate stream assignment(s) for channel {channel_id}"
         )
     
+    protected_stream_ids = set(protected_stream_ids or set())
+
     # Filter out dead streams unless allow_dead_streams is True (e.g., during global checks)
     if not allow_dead_streams:
-        filtered_stream_ids, dead_count = filter_dead_streams(filtered_stream_ids)
+        if protected_stream_ids:
+            filter_candidates = [sid for sid in filtered_stream_ids if sid not in protected_stream_ids]
+            filtered_candidates, dead_count = filter_dead_streams(filter_candidates)
+            filtered_candidate_set = set(filtered_candidates)
+            filtered_stream_ids = [
+                sid
+                for sid in filtered_stream_ids
+                if sid in protected_stream_ids or sid in filtered_candidate_set
+            ]
+        else:
+            filtered_stream_ids, dead_count = filter_dead_streams(filtered_stream_ids)
         if dead_count > 0:
             logger.warning(
                 f"Filtered out {dead_count} dead stream(s) for channel {channel_id}"

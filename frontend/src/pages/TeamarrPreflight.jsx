@@ -74,6 +74,9 @@ const stateLabels = {
   scheduled: 'Scheduled',
   already_attempted: 'Attempted',
   no_dispatcharr_channel: 'No Channel',
+  no_live_window: 'No Window',
+  no_streams_yet: 'No Streams',
+  incomplete_team: 'Incomplete',
   waiting_for_channel_sync: 'Syncing',
   filtered: 'Filtered',
   past: 'Past',
@@ -91,6 +94,13 @@ const DEFAULT_PREFLIGHT_STREAM_CHECKING = {
   freeze_check_enabled: false,
   treat_freeze_as_dead: false,
   loop_check_enabled: false,
+}
+const DEFAULT_PREFLIGHT_VISIBILITY = {
+  enabled: false,
+  hide_on_no_regex: false,
+  hide_on_no_streams: false,
+  hide_on_all_failed: false,
+  unhide_on_recovered: false,
 }
 
 const parseCsv = (value) => (
@@ -140,6 +150,10 @@ const formatElapsedSince = (timestamp) => {
 const eventLabel = (type) => eventLabels[type] || type || 'Unknown'
 const stateLabel = (state) => stateLabels[state] || state || 'Unknown'
 const forceableStates = new Set(['due', 'scheduled', 'already_attempted', 'past'])
+const preflightKindLabel = (item) => (item?.preflight_kind === 'team' ? 'Teamarr Team' : 'Teamarr Event')
+const preflightKindShortLabel = (item) => (item?.preflight_kind === 'team' ? 'Team' : 'Event')
+const preflightItemTitle = (item) => item?.team_name || item?.event_name || item?.channel_name || 'Preflight Item'
+const preflightItemChannel = (item) => item?.channel_name || `Channel ${item?.dispatcharr_channel_id || 'N/A'}`
 
 const titleizeCode = (value) => (
   String(value || '')
@@ -254,11 +268,14 @@ const eventScheduleDiagnosticParts = (event, automaticCheckSummary, config) => {
 
 const forceEventTooltip = (event) => {
   if (!event?.dispatcharr_channel_id) return 'No Dispatcharr channel'
+  if (event?.state === 'no_live_window') return 'No live window'
+  if (event?.state === 'no_streams_yet') return 'No channel streams'
+  if (event?.state === 'incomplete_team') return 'Incomplete team status'
   if (event?.state === 'waiting_for_channel_sync') return 'Channel syncing'
   if (event?.state === 'filtered') return 'Filtered'
   if (event?.state === 'past') return 'Run manual check'
   if (!forceableStates.has(String(event?.state || ''))) return 'Unavailable'
-  return 'Run event check'
+  return event?.preflight_kind === 'team' ? 'Run team check' : 'Run event check'
 }
 
 const normalizeFilterOption = (option) => {
@@ -317,6 +334,7 @@ export default function TeamarrPreflight() {
   const [actionLoading, setActionLoading] = useState('')
   const [forceEvent, setForceEvent] = useState(null)
   const [eventSearch, setEventSearch] = useState('')
+  const [sourceView, setSourceView] = useState('all')
   const [managedEventView, setManagedEventView] = useState('upcoming')
   const [managedEventPage, setManagedEventPage] = useState(1)
   const [recentEventPage, setRecentEventPage] = useState(1)
@@ -331,9 +349,13 @@ export default function TeamarrPreflight() {
   useEffect(() => {
     setManagedEventPage(1)
     setRecentEventPage(1)
-  }, [eventSearch, managedEventView])
+  }, [eventSearch, managedEventView, sourceView])
 
   const upcomingEvents = status?.upcoming_events || []
+  const upcomingTeams = status?.upcoming_teams || []
+  const preflightItems = status?.preflight_items?.length
+    ? status.preflight_items
+    : [...upcomingEvents, ...upcomingTeams]
   const recentEvents = status?.recent_events || []
   const activeChecks = status?.active_checks || []
   const queuedChecks = status?.queued_checks || []
@@ -347,9 +369,33 @@ export default function TeamarrPreflight() {
     ],
     [activeChecks, queueActiveChecks]
   )
+  const sourceFilteredPreflightItems = useMemo(
+    () => preflightItems.filter(item => (
+      sourceView === 'all'
+      || (sourceView === 'events' && item?.preflight_kind !== 'team')
+      || (sourceView === 'teams' && item?.preflight_kind === 'team')
+    )),
+    [preflightItems, sourceView]
+  )
+  const sourceFilteredRecentEvents = useMemo(
+    () => recentEvents.filter(item => (
+      sourceView === 'all'
+      || (sourceView === 'events' && item?.preflight_kind !== 'team')
+      || (sourceView === 'teams' && item?.preflight_kind === 'team')
+    )),
+    [recentEvents, sourceView]
+  )
+  const sourceFilteredActiveChecks = useMemo(
+    () => allActiveChecks.filter(item => (
+      sourceView === 'all'
+      || (sourceView === 'events' && item?.preflight_kind !== 'team')
+      || (sourceView === 'teams' && item?.preflight_kind === 'team')
+    )),
+    [allActiveChecks, sourceView]
+  )
   const sortedUpcomingEvents = useMemo(
-    () => sortTeamarrManagedEvents(upcomingEvents),
-    [upcomingEvents]
+    () => sortTeamarrManagedEvents(sourceFilteredPreflightItems),
+    [sourceFilteredPreflightItems]
   )
   const upcomingViewEvents = useMemo(
     () => filterTeamarrEventsByView(sortedUpcomingEvents, 'upcoming'),
@@ -364,12 +410,12 @@ export default function TeamarrPreflight() {
     [viewFilteredUpcomingEvents, eventSearch]
   )
   const filteredRecentEvents = useMemo(
-    () => filterTeamarrEventsBySearch(recentEvents, eventSearch),
-    [recentEvents, eventSearch]
+    () => filterTeamarrEventsBySearch(sourceFilteredRecentEvents, eventSearch),
+    [sourceFilteredRecentEvents, eventSearch]
   )
   const filteredActiveChecks = useMemo(
-    () => filterTeamarrEventsBySearch(allActiveChecks, eventSearch),
-    [allActiveChecks, eventSearch]
+    () => filterTeamarrEventsBySearch(sourceFilteredActiveChecks, eventSearch),
+    [sourceFilteredActiveChecks, eventSearch]
   )
   const managedEventPageCount = Math.max(1, Math.ceil(filteredUpcomingEvents.length / MANAGED_EVENT_PAGE_SIZE))
   const safeManagedEventPage = Math.min(managedEventPage, managedEventPageCount)
@@ -387,15 +433,19 @@ export default function TeamarrPreflight() {
   )
   const displayedActiveChecks = filteredActiveChecks.slice(0, ACTIVE_CHECK_DISPLAY_LIMIT)
   const activeChecksCount = allActiveChecks.length
+  const sourceActiveChecksCount = sourceFilteredActiveChecks.length
   const directActiveChecksCount = activeChecks.length
   const upcomingViewCount = upcomingViewEvents.length
   const allManagedEventsCount = upcomingEvents.length
-  const pastEventsCount = allManagedEventsCount - upcomingViewCount
+  const allStaticTeamsCount = upcomingTeams.length
+  const allPreflightItemsCount = preflightItems.length
+  const pastEventsCount = allPreflightItemsCount - upcomingViewCount
+  const teamStatus = status?.team_status || {}
   const managedCandidates = Number(status?.managed_candidates ?? upcomingEvents.length)
   const managedEventsSeen = Number(status?.managed_events_seen ?? managedCandidates)
   const managedEventsReturned = Number(status?.managed_events_returned ?? upcomingEvents.length)
   const managedEventsTruncated = Boolean(status?.managed_events_truncated)
-  const nextEvent = useMemo(() => upcomingEvents.find(event => event.state !== 'past') || null, [upcomingEvents])
+  const nextEvent = useMemo(() => preflightItems.find(event => event.state !== 'past') || null, [preflightItems])
   const connectorDisplay = connectorStatusDisplay(status?.teamarr_connector || {})
   const ConnectorIcon = connectorDisplay.icon
   const queuedChecksDetail = queuedChecksCount > 0
@@ -417,8 +467,8 @@ export default function TeamarrPreflight() {
   }
   const managedViewLabel = managedEventViewLabels[managedEventView] || 'managed'
   const managedEventSummary = eventSearch.trim()
-    ? `${filteredUpcomingEvents.length} of ${viewFilteredUpcomingEvents.length} ${managedViewLabel} events (${managedCandidates} all)`
-    : `${viewFilteredUpcomingEvents.length} ${managedViewLabel} events (${managedCandidates} all)`
+    ? `${filteredUpcomingEvents.length} of ${viewFilteredUpcomingEvents.length} ${managedViewLabel} items (${allPreflightItemsCount} all)`
+    : `${viewFilteredUpcomingEvents.length} ${managedViewLabel} items (${allPreflightItemsCount} all)`
   const previewConfig = useMemo(() => ({
     ...(editedConfig || {}),
     retry_offsets_minutes: parseCsv(retryOffsets).map(item => Number(item)).filter(Number.isFinite),
@@ -435,8 +485,8 @@ export default function TeamarrPreflight() {
     [previewEvent, previewConfig]
   )
   const eventFilterOptions = useMemo(
-    () => collectTeamarrFilterOptions([...upcomingEvents, ...recentEvents]),
-    [upcomingEvents, recentEvents]
+    () => collectTeamarrFilterOptions([...preflightItems, ...recentEvents]),
+    [preflightItems, recentEvents]
   )
   const filterOptions = useMemo(() => {
     const serverOptions = status?.filter_options || {}
@@ -476,10 +526,18 @@ export default function TeamarrPreflight() {
   const selectedProfileUsesDefaultRules = selectedProfileValue === String(editedConfig?.default_profile_id || '')
   const selectedStreamChecking = selectedQualityProfile?.stream_checking
     || (selectedProfileUsesDefaultRules ? DEFAULT_PREFLIGHT_STREAM_CHECKING : null)
+  const selectedVisibility = selectedQualityProfile?.channel_visibility_automation
+    || (selectedProfileUsesDefaultRules ? DEFAULT_PREFLIGHT_VISIBILITY : null)
   const qualityRuleSummary = useMemo(() => {
     if (!selectedStreamChecking) return []
     const blankEnabled = Boolean(selectedStreamChecking.blank_check_enabled)
     const freezeEnabled = Boolean(selectedStreamChecking.freeze_check_enabled)
+    const visibilityEnabled = selectedVisibility?.enabled === true
+    const visibilityHideRulesEnabled = Boolean(
+      selectedVisibility?.hide_on_no_regex
+      || selectedVisibility?.hide_on_no_streams
+      || selectedVisibility?.hide_on_all_failed
+    )
     return [
       {
         label: 'Quality check',
@@ -525,8 +583,18 @@ export default function TeamarrPreflight() {
           : 'Loop detection is skipped.',
         variant: selectedStreamChecking.loop_check_enabled ? 'destructive' : 'secondary',
       },
+      {
+        label: 'Visibility',
+        value: visibilityEnabled ? 'Profile' : 'Off',
+        description: visibilityEnabled
+          ? (visibilityHideRulesEnabled
+            ? 'Profile-specific hide/recover rules apply.'
+            : 'Profile can recover managed channels without hide rules.')
+          : 'This profile does not hide or unhide channels.',
+        variant: visibilityEnabled && visibilityHideRulesEnabled ? 'destructive' : 'secondary',
+      },
     ]
-  }, [selectedStreamChecking])
+  }, [selectedStreamChecking, selectedVisibility])
 
   const hydrateInputs = (nextConfig) => {
     setRetryOffsets((nextConfig.retry_offsets_minutes || []).join(', '))
@@ -642,8 +710,8 @@ export default function TeamarrPreflight() {
       toast({
         title: response.data?.launched ? 'Started' : 'Requested',
         description: response.data?.launched
-          ? 'Manual event check started'
-          : 'Manual event check request was recorded',
+          ? 'Manual preflight check started'
+          : 'Manual preflight check request was recorded',
       })
     } catch (err) {
       toast({
@@ -725,7 +793,7 @@ export default function TeamarrPreflight() {
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Teamarr Preflight</h1>
-          <p className="text-muted-foreground">Managed event quality checks</p>
+          <p className="text-muted-foreground">Managed event and static team quality checks</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
@@ -765,7 +833,7 @@ export default function TeamarrPreflight() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-7">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Service</CardTitle>
@@ -795,7 +863,7 @@ export default function TeamarrPreflight() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Upcoming</CardTitle>
+            <CardTitle className="text-sm font-medium">Upcoming Items</CardTitle>
             <CalendarCheck className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
@@ -804,7 +872,23 @@ export default function TeamarrPreflight() {
               {nextEvent ? formatOffset(nextEvent.seconds_to_start) : 'No upcoming'}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              {allManagedEventsCount} all events{pastEventsCount > 0 ? `, ${pastEventsCount} past` : ''}
+              {allManagedEventsCount} events, {allStaticTeamsCount} teams{pastEventsCount > 0 ? `, ${pastEventsCount} past` : ''}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Static Teams</CardTitle>
+            <ListChecks className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{Number(teamStatus.ready || 0)}</div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {teamStatus.enabled ? `${Number(teamStatus.seen || 0)} seen, ${Number(teamStatus.queueable || 0)} queueable` : 'Disabled'}
+            </p>
+            <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
+              {teamStatus.last_error || `${Number(teamStatus.incomplete || 0)} incomplete`}
             </p>
           </CardContent>
         </Card>
@@ -847,16 +931,16 @@ export default function TeamarrPreflight() {
         <div className="space-y-6">
           <Card>
             <CardHeader>
-              <CardTitle>Active Event Checks</CardTitle>
+              <CardTitle>Active Preflight Checks</CardTitle>
               <CardDescription>
                 {eventSearch.trim()
-                  ? `${filteredActiveChecks.length} of ${activeChecksCount} running checks`
-                  : `${activeChecksCount} running checks`}
+                  ? `${filteredActiveChecks.length} of ${sourceActiveChecksCount} running checks`
+                  : `${sourceActiveChecksCount} running checks`}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {activeChecksCount === 0 ? (
-                <p className="text-sm text-muted-foreground">No active event checks</p>
+              {sourceActiveChecksCount === 0 ? (
+                <p className="text-sm text-muted-foreground">No active preflight checks</p>
               ) : filteredActiveChecks.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No active checks match this search</p>
               ) : (
@@ -865,11 +949,12 @@ export default function TeamarrPreflight() {
                     <div key={`${check.identity || check.dispatcharr_channel_id || index}-${check.bucket || 'active'}`} className="rounded-md border border-border p-3">
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="min-w-0">
-                          <p className="truncate font-medium">{check.event_name || 'Managed Event'}</p>
-                          <p className="text-sm text-muted-foreground">{check.channel_name || `Channel ${check.dispatcharr_channel_id || 'N/A'}`}</p>
+                          <p className="truncate font-medium">{preflightItemTitle(check)}</p>
+                          <p className="text-sm text-muted-foreground">{preflightItemChannel(check)}</p>
                         </div>
                         <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
                           {check.run_source === 'queue' ? <Badge variant="outline">Queued Runner</Badge> : null}
+                          <Badge variant="outline">{preflightKindShortLabel(check)}</Badge>
                           <Badge variant="secondary">{check.bucket || check.trigger_bucket || 'manual'}</Badge>
                         </div>
                       </div>
@@ -903,6 +988,28 @@ export default function TeamarrPreflight() {
                   <p className="max-w-[22rem] text-sm leading-snug text-muted-foreground">Auto-starts with the backend</p>
                 </div>
                 <Switch className="mt-1 shrink-0" checked={enabled} onCheckedChange={(value) => updateConfigValue('enabled', value)} />
+              </div>
+              <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
+                <div className="min-w-0 space-y-1">
+                  <Label className="text-base">Managed Events</Label>
+                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">Reads Teamarr managed event channels and queues targeted event checks</p>
+                </div>
+                <Switch
+                  className="mt-1 shrink-0"
+                  checked={editedConfig.managed_event_preflight_enabled !== false}
+                  onCheckedChange={(value) => updateConfigValue('managed_event_preflight_enabled', value)}
+                />
+              </div>
+              <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
+                <div className="min-w-0 space-y-1">
+                  <Label className="text-base">Static Teams</Label>
+                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">Reads active Teamarr teams and queues only ready single-channel team checks</p>
+                </div>
+                <Switch
+                  className="mt-1 shrink-0"
+                  checked={editedConfig.static_team_preflight_enabled === true}
+                  onCheckedChange={(value) => updateConfigValue('static_team_preflight_enabled', value)}
+                />
               </div>
               <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
                 <div className="min-w-0 space-y-1">
@@ -1114,16 +1221,26 @@ export default function TeamarrPreflight() {
         </div>
 
         <div className="space-y-6">
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_12rem]">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_10rem_12rem]">
             <div className="relative">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
                 value={eventSearch}
                 onChange={(event) => setEventSearch(event.target.value)}
                 className="pl-9"
-                placeholder="Search events"
+                placeholder="Search preflight items"
               />
             </div>
+            <Select value={sourceView} onValueChange={setSourceView}>
+              <SelectTrigger>
+                <SelectValue placeholder="Source" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All</SelectItem>
+                <SelectItem value="events">Events</SelectItem>
+                <SelectItem value="teams">Teams</SelectItem>
+              </SelectContent>
+            </Select>
             <Select value={managedEventView} onValueChange={setManagedEventView}>
               <SelectTrigger>
                 <SelectValue placeholder="Event view" />
@@ -1140,17 +1257,17 @@ export default function TeamarrPreflight() {
 
           <Card>
             <CardHeader>
-              <CardTitle>Managed Events</CardTitle>
+              <CardTitle>Preflight Items</CardTitle>
               <CardDescription>
                 {managedEventSummary}
                 {managedEventsSeen !== managedCandidates ? ` from ${managedEventsSeen} managed records` : ''}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              {upcomingEvents.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No events found</p>
+              {preflightItems.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No preflight items found</p>
               ) : filteredUpcomingEvents.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No managed events match this search</p>
+                <p className="text-sm text-muted-foreground">No preflight items match this search</p>
               ) : (
                 <TooltipProvider delayDuration={200}>
                   <div className="space-y-3">
@@ -1165,10 +1282,13 @@ export default function TeamarrPreflight() {
                       <div key={`${event.identity}-${event.trigger_bucket || 'none'}`} className="rounded-md border border-border p-3">
                         <div className="flex flex-wrap items-start justify-between gap-2">
                           <div className="min-w-0">
-                            <p className="truncate font-medium">{event.event_name}</p>
-                            <p className="text-sm text-muted-foreground">{formatDateTime(event.event_date)}</p>
+                            <p className="truncate font-medium">{preflightItemTitle(event)}</p>
+                            <p className="text-sm text-muted-foreground">{event.event_date ? formatDateTime(event.event_date) : 'No live window'}</p>
                           </div>
                           <div className="flex shrink-0 items-center gap-2">
+                            <Badge variant="outline">
+                              {preflightKindShortLabel(event)}
+                            </Badge>
                             <Badge variant={event.state === 'due' ? 'default' : 'secondary'}>
                               {stateLabel(event.state)}
                             </Badge>
@@ -1189,7 +1309,7 @@ export default function TeamarrPreflight() {
                                     className="h-8 gap-1.5 px-2"
                                     disabled={!canForceEvent(event) || actionLoading !== ''}
                                     onClick={() => setForceEvent(event)}
-                                    aria-label={`Run event check for ${event.event_name || 'managed event'}`}
+                                    aria-label={`Run preflight check for ${preflightItemTitle(event)}`}
                                   >
                                     {actionLoading === `force:${event.identity}` ? (
                                       <Loader2 className="h-4 w-4 animate-spin" />
@@ -1205,7 +1325,7 @@ export default function TeamarrPreflight() {
                           </div>
                         </div>
                         <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-3">
-                          <span>{event.channel_name || `Channel ${event.dispatcharr_channel_id || 'N/A'}`}</span>
+                          <span>{preflightItemChannel(event)}</span>
                           <span>{event.sport || 'Sport N/A'}</span>
                           <span>{event.league || 'League N/A'}</span>
                         </div>
@@ -1264,7 +1384,7 @@ export default function TeamarrPreflight() {
                   {filteredUpcomingEvents.length > MANAGED_EVENT_PAGE_SIZE ? (
                     <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
                       <span>
-                        Page {safeManagedEventPage} of {managedEventPageCount} - showing {displayedUpcomingEvents.length} of {filteredUpcomingEvents.length} matching managed events
+                        Page {safeManagedEventPage} of {managedEventPageCount} - showing {displayedUpcomingEvents.length} of {filteredUpcomingEvents.length} matching preflight items
                       </span>
                       <div className="flex items-center gap-2">
                         <Button
@@ -1292,7 +1412,7 @@ export default function TeamarrPreflight() {
                   ) : null}
                   {managedEventsTruncated ? (
                     <p className="text-xs text-muted-foreground">
-                      Teamarr returned {managedEventsSeen} managed records; StreamFlow kept the first {managedEventsReturned} by start time.
+                      Teamarr returned {managedEventsSeen} managed records; StreamFlow kept the first {managedEventsReturned} event records by start time.
                     </p>
                   ) : null}
                   </div>
@@ -1306,18 +1426,18 @@ export default function TeamarrPreflight() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Recent Events</CardTitle>
+          <CardTitle>Recent Activity</CardTitle>
           <CardDescription>
             {eventSearch.trim()
-              ? `${filteredRecentEvents.length} of ${recentEvents.length} latest connector decisions`
-              : `${recentEvents.length} latest connector decisions`}
+              ? `${filteredRecentEvents.length} of ${sourceFilteredRecentEvents.length} latest connector decisions`
+              : `${sourceFilteredRecentEvents.length} latest connector decisions`}
           </CardDescription>
         </CardHeader>
         <CardContent>
-          {recentEvents.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No events recorded</p>
+          {sourceFilteredRecentEvents.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No activity recorded</p>
           ) : filteredRecentEvents.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No recent events match this search</p>
+            <p className="text-sm text-muted-foreground">No recent activity matches this search</p>
           ) : (
             <div className="space-y-3">
               {displayedRecentEvents.map((event, index) => {
@@ -1326,14 +1446,17 @@ export default function TeamarrPreflight() {
                   <div key={`${event.timestamp}-${index}`} className="grid gap-3 border-b border-border pb-3 last:border-b-0 last:pb-0 sm:grid-cols-[minmax(0,1fr)_4.75rem]">
                     <div className="min-w-0 space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline" className="shrink-0">
+                          {preflightKindLabel(event)}
+                        </Badge>
                         <Badge variant={recentEventBadgeVariant(event.type)} className="shrink-0">
                           {eventLabel(event.type)}
                         </Badge>
-                        <p className="min-w-0 truncate font-medium">{event.event_name || event.channel_name || 'Managed Event'}</p>
+                        <p className="min-w-0 truncate font-medium">{preflightItemTitle(event)}</p>
                       </div>
                       <div className="grid gap-1 text-sm text-muted-foreground sm:grid-cols-2">
-                        <span className="truncate">{event.channel_name || `Channel ${event.dispatcharr_channel_id || 'N/A'}`}</span>
-                        <span className="truncate">{[event.sport, event.league].filter(Boolean).join(' / ') || 'Event metadata N/A'}</span>
+                        <span className="truncate">{preflightItemChannel(event)}</span>
+                        <span className="truncate">{[event.sport, event.league].filter(Boolean).join(' / ') || 'Metadata N/A'}</span>
                       </div>
                       {detailParts.length > 0 ? (
                         <div className="flex flex-wrap gap-1.5">
@@ -1388,9 +1511,9 @@ export default function TeamarrPreflight() {
       }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Run Event Check</AlertDialogTitle>
+            <AlertDialogTitle>Run Preflight Check</AlertDialogTitle>
             <AlertDialogDescription>
-              Run the Teamarr event profile now for {forceEvent?.event_name || 'this managed event'}. Automation,
+              Run the Teamarr profile now for {preflightItemTitle(forceEvent)}. Automation,
               Stream Checker activity, concurrency, and stream availability guards still apply.
             </AlertDialogDescription>
           </AlertDialogHeader>

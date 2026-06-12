@@ -555,6 +555,12 @@ class SmartStreamScheduler:
         if reason == 'timeout':
             # AccountStreamLimiter uses "timeout" when checker-owned slots are full.
             return 'checking_capacity'
+        if isinstance(reason, str):
+            reason_lower = reason.lower()
+            if 'profile' in reason_lower and 'capacity' in reason_lower:
+                # UDI profile capacity only counts real proxy viewers. StreamFlow-owned
+                # checker reservations are classified by AccountStreamLimiter.
+                return 'active_viewers'
         return reason or 'provider_capacity'
 
     @staticmethod
@@ -701,7 +707,7 @@ class SmartStreamScheduler:
 
                     return (True, None)
 
-                def wrapped_check():
+                def wrapped_check(preempted_for_viewer: bool = False):
                     """Wrapper that waits for provider capacity without consuming probe slots."""
                     result = None
                     acquired_account = False
@@ -709,6 +715,24 @@ class SmartStreamScheduler:
                     acquired_global = False
                     wait_started = time.time()
                     wait_reason = None
+                    retrying_after_preempt = False
+
+                    def release_current_reservation():
+                        nonlocal acquired_global, acquired_profile, acquired_account
+                        if acquired_global:
+                            global_probe_slots.release()
+                            acquired_global = False
+                        if acquired_profile:
+                            self.account_limiter.release_profile(acquired_profile)
+                            acquired_profile = None
+                        if acquired_account:
+                            self.account_limiter.release(account_id)
+                            acquired_account = False
+
+                    def final_wait_reason(reason: str) -> str:
+                        if preempted_for_viewer and reason == 'active_viewers':
+                            return 'viewer_preempted'
+                        return reason
 
                     try:
                         while True:
@@ -746,7 +770,7 @@ class SmartStreamScheduler:
                                                     f"Provider capacity wait timed out for stream {stream['id']} "
                                                     f"after {elapsed:.1f}s: {wait_reason}"
                                                 )
-                                                result = provider_wait_result(wait_reason)
+                                                result = provider_wait_result(final_wait_reason(wait_reason))
                                                 return result
 
                                         time.sleep(0.5)
@@ -779,7 +803,7 @@ class SmartStreamScheduler:
                                         f"Provider capacity wait timed out for stream {stream['id']} "
                                         f"after {elapsed:.1f}s: {wait_reason}"
                                     )
-                                    result = provider_wait_result(wait_reason)
+                                    result = provider_wait_result(final_wait_reason(wait_reason))
                                     return result
 
                             time.sleep(0.5)
@@ -827,16 +851,25 @@ class SmartStreamScheduler:
                             **runtime_params
                         )
                         if isinstance(result, dict) and result.get('preempted'):
-                            result = provider_wait_result('viewer_preempted')
+                            logger.info(
+                                "Retrying stream check for stream %s after viewer preemption",
+                                stream.get('id'),
+                            )
+                            result = None
+                            release_current_reservation()
+                            wait_reason = 'viewer_preempted'
+                            if defer_callback:
+                                try:
+                                    with lock:
+                                        defer_callback(stream, wait_reason)
+                                except Exception as e:
+                                    logger.error(f"Error in defer_callback for stream {stream['id']}: {e}")
+                            retrying_after_preempt = True
+                            return wrapped_check(preempted_for_viewer=True)
                         return result
                     finally:
                         # Release account slot immediately when stream finishes
-                        if acquired_global:
-                            global_probe_slots.release()
-                        if acquired_profile:
-                            self.account_limiter.release_profile(acquired_profile)
-                        if acquired_account:
-                            self.account_limiter.release(account_id)
+                        release_current_reservation()
 
                         # Fire progress callback from the worker thread the instant the
                         # stream completes — before the submission loop has finished
@@ -845,7 +878,7 @@ class SmartStreamScheduler:
                         with lock:
                             if result is not None:
                                 results.append(result)
-                            elif not (abort_event and abort_event.is_set()):
+                            elif not retrying_after_preempt and not (abort_event and abort_event.is_set()):
                                 results.append({
                                     'stream_id': stream['id'],
                                     'stream_name': stream.get('name', 'Unknown'),
@@ -863,17 +896,21 @@ class SmartStreamScheduler:
                                         'message': 'Stream analysis worker returned no result',
                                     },
                                 })
-                            if result is not None or not (abort_event and abort_event.is_set()):
+                            if result is not None or (
+                                not retrying_after_preempt
+                                and not (abort_event and abort_event.is_set())
+                            ):
                                 nonlocal completed_count
                                 completed_count += 1
                                 current_completed = completed_count
                             else:
                                 current_completed = completed_count
 
-                        logger.debug(
-                            f"Completed {current_completed}/{total_streams}: "
-                            f"Stream {stream['id']} - {stream.get('name', 'Unknown')}"
-                        )
+                        if not retrying_after_preempt:
+                            logger.debug(
+                                f"Completed {current_completed}/{total_streams}: "
+                                f"Stream {stream['id']} - {stream.get('name', 'Unknown')}"
+                            )
 
                         if progress_callback and result is not None:
                             try:

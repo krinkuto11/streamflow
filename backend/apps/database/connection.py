@@ -26,7 +26,14 @@ def _reconcile_sqlite_schema(engine) -> None:
         return
 
     # Keep this map explicit so startup upgrades are predictable and safe.
-    required_columns = {}
+    required_columns = {
+        'runs': {
+            'job_category': "VARCHAR(50)",
+            'job_outcome': "VARCHAR(50)",
+            'job_subject_ref': "VARCHAR(100)",
+            'job_correlation_id': "VARCHAR(100)",
+        },
+    }
 
     with engine.begin() as conn:
         existing_tables = {

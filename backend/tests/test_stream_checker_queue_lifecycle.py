@@ -738,7 +738,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         )
         service.check_queue.mark_completed.assert_called_once_with(8441)
 
-    def test_provider_limit_override_bypasses_capacity_but_not_active_viewers(self):
+    def test_provider_limit_override_bypasses_capacity_and_active_viewers_are_stream_protected(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         streams = [{'id': 1, 'name': 'Event stream', 'm3u_account': 7}]
         udi = Mock()
@@ -767,7 +767,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
                 provider_limit_override=True,
             )
 
-        self.assertEqual(active_skip['skip_reason'], 'active_viewers')
+        self.assertIsNone(active_skip)
 
     def test_clear_queue_resets_active_sync_batch_state(self):
         service = StreamCheckerService.__new__(StreamCheckerService)

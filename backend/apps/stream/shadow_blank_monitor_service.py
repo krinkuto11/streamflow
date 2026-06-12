@@ -55,6 +55,7 @@ NO_DECODABLE_FRAME_ERROR_PATTERNS = (
     "no frame could be decoded",
 )
 FFMPEG_FRAME_RE = re.compile(r"\bframe=\s*(?P<frames>\d+)")
+OFFLINE_IMAGE_PHASH_RE = re.compile(r"^[0-9a-f]{16}$")
 SILENCE_START_RE = re.compile(r"silence_start:\s*(?P<start>\d+(?:\.\d+)?)")
 SILENCE_END_RE = re.compile(r"silence_end:\s*(?P<end>\d+(?:\.\d+)?)")
 SILENCE_DURATION_RE = re.compile(r"silence_duration:\s*(?P<duration>\d+(?:\.\d+)?)")
@@ -123,6 +124,68 @@ MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
     "garbled_audio",
     "silent_audio",
 }
+DETECTION_REASONS = {
+    "blank",
+    "freeze",
+    "no_decodable_frames",
+    "garbled_audio",
+    "silent_audio",
+    "offline_image",
+}
+PENDING_EVENT_REASONS = {
+    f"{reason}_pending": reason
+    for reason in DETECTION_REASONS
+}
+DETECTION_MEASUREMENT_KEYS = {
+    "blank": ("blank_ratio", "blank_duration_secs"),
+    "freeze": ("freeze_ratio", "freeze_duration_secs"),
+    "no_decodable_frames": (
+        "no_decodable_frames_duration_secs",
+        "no_decodable_frames_error",
+    ),
+    "garbled_audio": ("garbled_audio_error_count", "garbled_audio_error"),
+    "silent_audio": ("silent_audio_duration_secs", "silent_audio_noise_db"),
+    "offline_image": ("offline_image_distance", "offline_image_hash"),
+}
+DETECTION_THRESHOLD_KEYS = {
+    "blank": (
+        "blank_min_duration_seconds",
+        "blank_ratio_threshold",
+        "blank_pixel_threshold",
+    ),
+    "freeze": (
+        "freeze_min_duration_seconds",
+        "freeze_ratio_threshold",
+        "freeze_noise_threshold",
+    ),
+    "no_decodable_frames": ("no_decodable_frames_min_duration_seconds",),
+    "garbled_audio": ("garbled_audio_error_threshold",),
+    "silent_audio": (
+        "silent_audio_min_duration_seconds",
+        "silent_audio_noise_db",
+    ),
+    "offline_image": ("offline_image_hash_threshold",),
+}
+SWITCH_EVENT_TYPES = {"dry_run_switch", "switch_success", "switch_failed"}
+PRE_PROBE_EVENT_TYPES = {"pre_probe_unavailable", "pre_probe_rejected"}
+PRE_PROBE_METRICS = {
+    "preprobe_attempted",
+    "preprobe_success",
+    "preprobe_rejected_media_fault",
+    "preprobe_skipped_provider_limit",
+    "preprobe_skipped_profile_limit",
+    "preprobe_skipped_missing_url",
+    "preprobe_timeout",
+    "switch_prevented_by_preprobe",
+}
+GUARD_EVENT_TYPES = {
+    "cooldown",
+    "stale_stream_guard",
+    "switch_rate_limited",
+    "quality_check_active",
+    "watcher_recovery_guard",
+    "watcher_recovery_observed",
+}
 
 INT_BOUNDS = {
     "poll_interval_seconds": (5, 3600),
@@ -182,6 +245,56 @@ def _coerce_list(value: Any) -> List[Any]:
     return [value]
 
 
+def _offline_image_hashes(value: Any) -> List[str]:
+    seen = set()
+    hashes: List[str] = []
+    for item in _coerce_list(value):
+        text = str(item).strip().lower()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        hashes.append(text)
+    return hashes
+
+
+def _valid_offline_image_hashes(value: Any) -> List[str]:
+    return [
+        item
+        for item in _offline_image_hashes(value)
+        if OFFLINE_IMAGE_PHASH_RE.match(item)
+    ]
+
+
+def _invalid_offline_image_hashes(value: Any) -> List[str]:
+    return [
+        item
+        for item in _offline_image_hashes(value)
+        if not OFFLINE_IMAGE_PHASH_RE.match(item)
+    ]
+
+
+def _offline_image_config_status(config: Dict[str, Any]) -> Dict[str, Any]:
+    reference_hashes = _offline_image_hashes(config.get("offline_image_reference_hashes"))
+    invalid_count = len(_invalid_offline_image_hashes(reference_hashes))
+    valid_count = len(reference_hashes) - invalid_count
+    warnings = []
+    if config.get("offline_image_detection_enabled") and not reference_hashes:
+        warnings.append("missing_reference_hash")
+    if invalid_count:
+        warnings.append("invalid_reference_hash")
+    if config.get("offline_image_detection_enabled") and reference_hashes and valid_count == 0:
+        warnings.append("no_valid_reference_hash")
+    return {
+        "enabled": bool(config.get("offline_image_detection_enabled")),
+        "reference_count": len(reference_hashes),
+        "valid_reference_count": valid_count,
+        "invalid_reference_count": invalid_count,
+        "hash_threshold": int(config.get("offline_image_hash_threshold", DEFAULT_CONFIG["offline_image_hash_threshold"])),
+        "capture_offset_seconds": int(config.get("offline_image_capture_offset_seconds", DEFAULT_CONFIG["offline_image_capture_offset_seconds"])),
+        "warnings": warnings,
+    }
+
+
 def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     config = dict(DEFAULT_CONFIG)
     if current:
@@ -220,11 +333,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
         for item in _coerce_list(config.get("excluded_channel_uuids"))
         if str(item).strip()
     ]
-    config["offline_image_reference_hashes"] = [
-        str(item).strip().lower()
-        for item in _coerce_list(config.get("offline_image_reference_hashes"))
-        if str(item).strip()
-    ]
+    config["offline_image_reference_hashes"] = _offline_image_hashes(config.get("offline_image_reference_hashes"))
     return config
 
 
@@ -276,6 +385,8 @@ class ShadowBlankMonitorService:
         self._cooldowns: Dict[str, float] = {}
         self._switch_attempts: Dict[str, Dict[str, Any]] = {}
         self._switch_history: Dict[str, deque[float]] = defaultdict(deque)
+        self._pre_probe_metrics: Dict[str, int] = defaultdict(int)
+        self._last_pre_probe: Optional[Dict[str, Any]] = None
         self._active_probes: set[str] = set()
         self._last_scan_at: Optional[float] = None
         self._last_error: Optional[str] = None
@@ -324,6 +435,101 @@ class ShadowBlankMonitorService:
         else:
             self.stop(persist=False)
         return self.get_config()
+
+    def learn_offline_image_from_current_frame(
+        self,
+        *,
+        channel_ref: Optional[str] = None,
+        enable_detection: bool = False,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            targets = list(self._watched.values())
+            if channel_ref:
+                targets = [
+                    target
+                    for target in targets
+                    if str(target.get("channel_ref")) == str(channel_ref)
+                ]
+            target = dict(targets[0]) if targets else {}
+            config = dict(self._config)
+
+        if not target:
+            return {
+                "success": False,
+                "learned": False,
+                "reason": "no_watched_channel",
+                "message": "No active Shadow-watched channel is available.",
+            }
+
+        channel_uuid = target.get("channel_uuid")
+        if not channel_uuid:
+            return {
+                "success": False,
+                "learned": False,
+                "reason": "missing_channel_uuid",
+                "channel_ref": target.get("channel_ref"),
+            }
+
+        capture = self._capture_offline_image_hash(self._channel_proxy_url(str(channel_uuid)), config)
+        if not capture.get("success"):
+            return {
+                "success": False,
+                "learned": False,
+                "reason": capture.get("reason") or "frame_capture_failed",
+                "channel_ref": target.get("channel_ref"),
+                "stream_ref": target.get("stream_ref"),
+            }
+
+        phash = str(capture.get("offline_image_hash") or "").lower()
+        if not OFFLINE_IMAGE_PHASH_RE.match(phash):
+            return {
+                "success": False,
+                "learned": False,
+                "reason": "invalid_captured_hash",
+                "channel_ref": target.get("channel_ref"),
+                "stream_ref": target.get("stream_ref"),
+            }
+
+        with self._lock:
+            existing_hashes = _offline_image_hashes(self._config.get("offline_image_reference_hashes"))
+            valid_existing = _valid_offline_image_hashes(existing_hashes)
+            threshold = int(self._config.get("offline_image_hash_threshold", 4))
+            distances = [
+                distance
+                for distance in (self._hash_distance(phash, candidate) for candidate in valid_existing)
+                if distance is not None
+            ]
+            nearest_distance = min(distances) if distances else None
+            already_covered = nearest_distance is not None and nearest_distance <= threshold
+            if enable_detection:
+                self._config["offline_image_detection_enabled"] = True
+            if not already_covered:
+                self._config["offline_image_reference_hashes"] = existing_hashes + [phash]
+                self._save_config()
+            elif enable_detection:
+                self._save_config()
+            reference_count = len(self._config.get("offline_image_reference_hashes") or [])
+
+        details = {
+            "reason": "offline_image",
+            "offline_image_hash": phash,
+            "offline_image_distance": nearest_distance,
+            "reference_count": reference_count,
+            "deduplicated": already_covered,
+        }
+        self._record_event("offline_image_learned", target, details)
+        return {
+            "success": True,
+            "learned": not already_covered,
+            "deduplicated": already_covered,
+            "channel_ref": target.get("channel_ref"),
+            "stream_ref": target.get("stream_ref"),
+            "offline_image_hash": phash,
+            "offline_image_distance": nearest_distance,
+            "reference_count": reference_count,
+            "config": self.get_config(),
+            "status": self.get_status(),
+        }
 
     def start(self, *, persist: bool = True) -> bool:
         with self._lock:
@@ -377,6 +583,7 @@ class ShadowBlankMonitorService:
                     "channel_ref": target.get("channel_ref"),
                     "cooldown_seconds": max(0, int(until - now)),
                 })
+            recent_events = list(self._events)
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
@@ -389,7 +596,14 @@ class ShadowBlankMonitorService:
                 "watched_count": len(watched_channels),
                 "watched_channels": watched_channels,
                 "cooldowns": cooldowns,
-                "recent_events": list(self._events),
+                "recent_events": recent_events,
+                "decision_history": recent_events,
+                "switch_summary": self._switch_summary(recent_events, active_cooldowns=len(cooldowns)),
+                "pre_probe": {
+                    "metrics": dict(self._pre_probe_metrics),
+                    "last": dict(self._last_pre_probe) if self._last_pre_probe else None,
+                },
+                "offline_image": _offline_image_config_status(self._config),
             }
 
     def _worker(self) -> None:
@@ -567,6 +781,7 @@ class ShadowBlankMonitorService:
         for event_type, event_target, details in continuity_events:
             if event_type == "watcher_recovered":
                 self._reset_detection_state(event_target["channel_uuid"])
+                self._set_cooldown(event_target["channel_uuid"], config)
             self._record_event(event_type, event_target, details)
         return targets
 
@@ -578,13 +793,18 @@ class ShadowBlankMonitorService:
         )
         for target in targets:
             channel_uuid = target["channel_uuid"]
-            if self._cooldown_remaining(channel_uuid) > 0:
-                self._record_event("cooldown", target, {"cooldown_seconds": self._cooldown_remaining(channel_uuid)})
+            if int(target.get("watcher_client_count") or 0) > 0:
+                continue
+            cooldown_remaining = self._cooldown_remaining(channel_uuid)
+            reconnecting_watcher = (
+                config.get("watch_mode") == "continuous"
+                and target.get("watcher_state") == "reconnecting"
+            )
+            if cooldown_remaining > 0 and not reconnecting_watcher:
+                self._record_event("cooldown", target, {"cooldown_seconds": cooldown_remaining})
                 continue
             if self._quality_checker_conflicts(target, config):
                 self._record_event("quality_check_active", target, {})
-                continue
-            if int(target.get("watcher_client_count") or 0) > 0:
                 continue
 
             with self._lock:
@@ -661,7 +881,7 @@ class ShadowBlankMonitorService:
                     }
                     if target.get("watcher_client_ref"):
                         guard_details["watcher_client_ref"] = target.get("watcher_client_ref")
-                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
                     break
         finally:
             with self._lock:
@@ -727,6 +947,7 @@ class ShadowBlankMonitorService:
                 "offline_image_hash": result.get("offline_image_hash"),
                 "offline_image_distance": result.get("offline_image_distance"),
             }
+            target["last_probe_thresholds"] = self._detection_thresholds(config)
 
             if result.get("viewer_left"):
                 fresh_status = {}
@@ -747,6 +968,19 @@ class ShadowBlankMonitorService:
                 self._clear_switch_attempts(channel_uuid)
                 target.pop("media_recovery_guard_observed", None)
                 self._record_event("probe_ok", target, target["last_probe"])
+                return True
+
+            cooldown_remaining = self._cooldown_remaining(channel_uuid)
+            if cooldown_remaining > 0:
+                self._reset_blank_count(channel_uuid)
+                self._record_event(
+                    "cooldown",
+                    target,
+                    {
+                        "cooldown_seconds": cooldown_remaining,
+                        "reason": detection_reason,
+                    },
+                )
                 return True
 
             guard_details = self._watcher_recovery_guard_details(
@@ -771,7 +1005,7 @@ class ShadowBlankMonitorService:
                     require_confirmed=False,
                 )
                 if recovery_guard_bypass is None:
-                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
                     return False
                 target["media_recovery_guard_reason"] = detection_reason
                 target["media_recovery_guard_bypass"] = recovery_guard_bypass
@@ -833,7 +1067,7 @@ class ShadowBlankMonitorService:
                 require_confirmed=True,
             )
             if recovery_guard_bypass is None:
-                self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+                self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
                 return
         else:
             observed_guard = target.get("media_recovery_guard_observed")
@@ -891,6 +1125,11 @@ class ShadowBlankMonitorService:
             details = {"reason": reason}
             if pre_probe_details:
                 details["pre_probe"] = pre_probe_details
+                self._record_pre_probe_metric(
+                    "switch_prevented_by_preprobe",
+                    target,
+                    pre_probe_details,
+                )
             self._record_event("no_alternative", target, details)
             return
 
@@ -1010,6 +1249,7 @@ class ShadowBlankMonitorService:
             }
             if not candidate_url:
                 details["result"] = "missing_url"
+                self._record_pre_probe_metric("preprobe_skipped_missing_url", target, details)
                 last_details = details
                 self._record_event("pre_probe_unavailable", target, {**details, "reason": reason})
                 continue
@@ -1019,10 +1259,18 @@ class ShadowBlankMonitorService:
             if not provider_slot.get("acquired"):
                 details["result"] = "rejected"
                 details["rejection_reason"] = provider_slot.get("reason") or "provider_capacity"
+                details["slot_scope"] = self._pre_probe_slot_scope(details["rejection_reason"])
+                self._record_pre_probe_metric(
+                    self._pre_probe_slot_metric(details["rejection_reason"]),
+                    target,
+                    details,
+                )
                 last_details = details
                 self._record_event("pre_probe_rejected", target, {**details, "reason": reason})
                 continue
 
+            self._record_pre_probe_metric("preprobe_attempted", target, details)
+            probe_started = time.monotonic()
             try:
                 probe_result = self._run_next_stream_pre_probe(
                     str(provider_slot.get("url") or candidate_url),
@@ -1031,6 +1279,7 @@ class ShadowBlankMonitorService:
             finally:
                 self._release_pre_probe_provider_slot(provider_slot)
             rejection_reason = self._pre_probe_rejection_reason(probe_result)
+            details["elapsed_ms"] = max(0, int((time.monotonic() - probe_started) * 1000))
             details.update({
                 "result": "rejected" if rejection_reason else "ok",
                 "rejection_reason": rejection_reason,
@@ -1043,8 +1292,11 @@ class ShadowBlankMonitorService:
             })
             last_details = details
             if rejection_reason:
+                metric = "preprobe_timeout" if rejection_reason == "timeout" else "preprobe_rejected_media_fault"
+                self._record_pre_probe_metric(metric, target, details)
                 self._record_event("pre_probe_rejected", target, {**details, "reason": reason})
                 continue
+            self._record_pre_probe_metric("preprobe_success", target, details)
             return candidate_id, details
         return None, last_details
 
@@ -1178,6 +1430,50 @@ class ShadowBlankMonitorService:
         finally:
             limiter.release(slot.get("account_id"))
 
+    @staticmethod
+    def _pre_probe_slot_scope(reason: Any) -> str:
+        reason_text = str(reason or "")
+        if reason_text in {"checking_capacity"}:
+            return "profile"
+        return "provider"
+
+    @classmethod
+    def _pre_probe_slot_metric(cls, reason: Any) -> str:
+        if cls._pre_probe_slot_scope(reason) == "profile":
+            return "preprobe_skipped_profile_limit"
+        return "preprobe_skipped_provider_limit"
+
+    def _record_pre_probe_metric(
+        self,
+        metric: str,
+        target: Dict[str, Any],
+        details: Optional[Dict[str, Any]],
+    ) -> None:
+        if metric not in PRE_PROBE_METRICS:
+            return
+        if isinstance(details, dict):
+            details["pre_probe_metric"] = metric
+        payload = dict(details or {})
+        payload["metric"] = metric
+        summary = {
+            "timestamp": self.clock(),
+            "metric": metric,
+            "channel_ref": target.get("channel_ref"),
+            "origin_stream_ref": target.get("stream_ref"),
+            "target_stream_ref": payload.get("target_stream_ref"),
+            "result": payload.get("result"),
+            "rejection_reason": payload.get("rejection_reason"),
+            "slot_scope": payload.get("slot_scope"),
+            "elapsed_ms": payload.get("elapsed_ms"),
+            "provider_limited": payload.get("provider_limited"),
+            "provider_slot_acquired": payload.get("provider_slot_acquired"),
+            "trigger_reason": payload.get("trigger_reason") or payload.get("reason"),
+        }
+        summary = {key: value for key, value in summary.items() if value is not None}
+        with self._lock:
+            self._pre_probe_metrics[metric] += 1
+            self._last_pre_probe = summary
+
     def _run_next_stream_pre_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         pre_probe_config = dict(config)
         pre_probe_config["probe_duration_seconds"] = int(
@@ -1187,6 +1483,8 @@ class ShadowBlankMonitorService:
 
     @staticmethod
     def _pre_probe_rejection_reason(result: Dict[str, Any]) -> Optional[str]:
+        if result.get("timeout"):
+            return "timeout"
         for reason in (
             "blank",
             "offline_image",
@@ -1377,7 +1675,7 @@ class ShadowBlankMonitorService:
         if guard_details is None:
             return False
 
-        self._record_watcher_recovery_guard(channel_uuid, target, guard_details)
+        self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
         return True
 
     def _record_watcher_recovery_guard(
@@ -1385,8 +1683,11 @@ class ShadowBlankMonitorService:
         channel_uuid: str,
         target: Dict[str, Any],
         guard_details: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._reset_detection_state(channel_uuid)
+        if config is not None:
+            self._set_cooldown(channel_uuid, config)
         self._record_event("watcher_recovery_guard", target, guard_details)
 
     def _channel_proxy_url(self, channel_uuid: str) -> str:
@@ -1584,25 +1885,15 @@ class ShadowBlankMonitorService:
         except (TypeError, ValueError):
             return None
 
-    def _run_offline_image_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
-        result = {
-            "offline_image_detected": False,
-            "offline_image_hash": None,
-            "offline_image_distance": None,
-            "offline_image_reference_count": len(config.get("offline_image_reference_hashes") or []),
-        }
-        if not config.get("offline_image_detection_enabled"):
-            return result
-        reference_hashes = list(config.get("offline_image_reference_hashes") or [])
-        if not reference_hashes:
-            return result
-
+    def _capture_offline_image_hash(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         try:
             from PIL import Image
             import imagehash
         except Exception as exc:
-            result["offline_image_error"] = f"image_hash_unavailable:{type(exc).__name__}"
-            return result
+            return {
+                "success": False,
+                "reason": f"image_hash_unavailable:{type(exc).__name__}",
+            }
 
         try:
             completed = subprocess.run(
@@ -1612,28 +1903,64 @@ class ShadowBlankMonitorService:
                 timeout=15,
             )
             if completed.returncode != 0 or not completed.stdout:
-                result["offline_image_error"] = "frame_capture_failed"
-                return result
+                return {
+                    "success": False,
+                    "reason": "frame_capture_failed",
+                }
 
             image = Image.open(io.BytesIO(completed.stdout))
-            phash = str(imagehash.phash(image)).lower()
-            result["offline_image_hash"] = phash
-            distances = [
-                distance
-                for distance in (self._hash_distance(phash, candidate) for candidate in reference_hashes)
-                if distance is not None
-            ]
-            if not distances:
-                return result
-            best_distance = min(distances)
-            result["offline_image_distance"] = best_distance
-            if best_distance <= int(config.get("offline_image_hash_threshold", 4)):
-                result["offline_image_detected"] = True
-            return result
+            return {
+                "success": True,
+                "offline_image_hash": str(imagehash.phash(image)).lower(),
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "reason": "frame_capture_timeout",
+            }
         except Exception as exc:
-            logger.debug("Shadow offline image probe failed: %s", exc)
-            result["offline_image_error"] = type(exc).__name__
+            logger.debug("Shadow offline image hash capture failed: %s", exc)
+            return {
+                "success": False,
+                "reason": type(exc).__name__,
+            }
+
+    def _run_offline_image_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        result = {
+            "offline_image_detected": False,
+            "offline_image_hash": None,
+            "offline_image_distance": None,
+            "offline_image_reference_count": len(config.get("offline_image_reference_hashes") or []),
+        }
+        if not config.get("offline_image_detection_enabled"):
             return result
+        invalid_hashes = _invalid_offline_image_hashes(config.get("offline_image_reference_hashes"))
+        reference_hashes = _valid_offline_image_hashes(config.get("offline_image_reference_hashes"))
+        result["offline_image_invalid_reference_count"] = len(invalid_hashes)
+        if not reference_hashes:
+            if invalid_hashes:
+                result["offline_image_error"] = "no_valid_reference_hashes"
+            return result
+
+        capture = self._capture_offline_image_hash(url, config)
+        if not capture.get("success"):
+            result["offline_image_error"] = capture.get("reason")
+            return result
+
+        phash = str(capture.get("offline_image_hash") or "").lower()
+        result["offline_image_hash"] = phash
+        distances = [
+            distance
+            for distance in (self._hash_distance(phash, candidate) for candidate in reference_hashes)
+            if distance is not None
+        ]
+        if not distances:
+            return result
+        best_distance = min(distances)
+        result["offline_image_distance"] = best_distance
+        if best_distance <= int(config.get("offline_image_hash_threshold", 4)):
+            result["offline_image_detected"] = True
+        return result
 
     @staticmethod
     def _parse_no_decodable_frames_detection(
@@ -2374,10 +2701,204 @@ class ShadowBlankMonitorService:
                 history.popleft()
             return len(history) < int(config["max_switches_per_hour"])
 
+    @staticmethod
+    def _detection_thresholds(config: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: config.get(key)
+            for keys in DETECTION_THRESHOLD_KEYS.values()
+            for key in keys
+            if key in config
+        }
+
+    @staticmethod
+    def _event_trigger_reason(event_type: str, details: Dict[str, Any]) -> Optional[str]:
+        explicit = (
+            details.get("trigger_reason")
+            or details.get("reason")
+            or PENDING_EVENT_REASONS.get(event_type)
+        )
+        if explicit:
+            return str(explicit)
+        if event_type == "probe_ok":
+            return "probe_ok"
+        if event_type in PRE_PROBE_EVENT_TYPES:
+            return "pre_probe"
+        if event_type in GUARD_EVENT_TYPES:
+            return event_type
+        return None
+
+    @staticmethod
+    def _event_decision_group(event_type: str) -> str:
+        if event_type in SWITCH_EVENT_TYPES:
+            return "switch"
+        if event_type in PRE_PROBE_EVENT_TYPES:
+            return "pre_probe"
+        if event_type in GUARD_EVENT_TYPES:
+            return "guard"
+        if event_type.endswith("_pending") or event_type == "probe_ok":
+            return "probe"
+        if event_type == "offline_image_learned":
+            return "learn"
+        if event_type in {"viewer_left", "watcher_reconnecting", "watcher_recovered"}:
+            return "watcher"
+        if event_type == "no_alternative":
+            return "skip"
+        return "other"
+
+    @staticmethod
+    def _switch_summary(events: Iterable[Dict[str, Any]], *, active_cooldowns: int = 0) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "window_events": 0,
+            "successful_switches": 0,
+            "failed_switches": 0,
+            "dry_run_switches": 0,
+            "skipped_switches": 0,
+            "pre_probe_prevented_switches": 0,
+            "recovery_guard_prevented_switches": 0,
+            "stale_stream_guard_skips": 0,
+            "cooldown_skips": 0,
+            "rate_limited_skips": 0,
+            "quality_guard_skips": 0,
+            "active_cooldowns": int(active_cooldowns),
+            "prevented_false_switches": 0,
+            "last_switch_reason": None,
+            "last_switch_at": None,
+            "last_switch_result": None,
+        }
+        for event in events or []:
+            if not isinstance(event, dict):
+                continue
+            summary["window_events"] += 1
+            event_type = event.get("type")
+            details = event.get("details") if isinstance(event.get("details"), dict) else {}
+            reason = (
+                details.get("trigger_reason")
+                or event.get("trigger_reason")
+                or details.get("reason")
+            )
+
+            if event_type == "switch_success":
+                summary["successful_switches"] += 1
+            elif event_type == "switch_failed":
+                summary["failed_switches"] += 1
+            elif event_type == "dry_run_switch":
+                summary["dry_run_switches"] += 1
+            elif event_type == "no_alternative":
+                summary["skipped_switches"] += 1
+                if isinstance(details.get("pre_probe"), dict):
+                    summary["pre_probe_prevented_switches"] += 1
+            elif event_type == "watcher_recovery_guard":
+                summary["skipped_switches"] += 1
+                summary["recovery_guard_prevented_switches"] += 1
+            elif event_type == "stale_stream_guard":
+                summary["skipped_switches"] += 1
+                summary["stale_stream_guard_skips"] += 1
+            elif event_type == "cooldown":
+                summary["cooldown_skips"] += 1
+            elif event_type == "switch_rate_limited":
+                summary["skipped_switches"] += 1
+                summary["rate_limited_skips"] += 1
+            elif event_type == "quality_check_active":
+                summary["quality_guard_skips"] += 1
+
+            if event_type in SWITCH_EVENT_TYPES and summary["last_switch_result"] is None:
+                summary["last_switch_result"] = event_type
+                summary["last_switch_reason"] = reason
+                summary["last_switch_at"] = event.get("timestamp")
+
+        summary["prevented_false_switches"] = (
+            summary["pre_probe_prevented_switches"]
+            + summary["recovery_guard_prevented_switches"]
+            + summary["stale_stream_guard_skips"]
+            + summary["rate_limited_skips"]
+        )
+        return summary
+
+    @staticmethod
+    def _compact_probe_context(
+        reason: Optional[str],
+        probe: Optional[Dict[str, Any]],
+        thresholds: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not reason or reason not in DETECTION_REASONS or not isinstance(probe, dict):
+            return None
+
+        measurements = {
+            key: probe.get(key)
+            for key in DETECTION_MEASUREMENT_KEYS.get(reason, ())
+            if probe.get(key) is not None
+        }
+        threshold_values = {
+            key: (thresholds or {}).get(key)
+            for key in DETECTION_THRESHOLD_KEYS.get(reason, ())
+            if (thresholds or {}).get(key) is not None
+        }
+        if not measurements and not threshold_values:
+            return {"reason": reason}
+        context: Dict[str, Any] = {"reason": reason}
+        if measurements:
+            context["measurements"] = measurements
+        if threshold_values:
+            context["thresholds"] = threshold_values
+        return context
+
+    @staticmethod
+    def _viewer_context(target: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = (
+            "real_client_count",
+            "watcher_client_count",
+            "watcher_state",
+            "watcher_client_ref",
+            "watcher_uptime_seconds",
+            "watcher_absent_seconds",
+            "watcher_recovered_after_seconds",
+        )
+        return {
+            key: target.get(key)
+            for key in allowed
+            if target.get(key) is not None
+        }
+
+    def _event_details_with_context(
+        self,
+        event_type: str,
+        target: Dict[str, Any],
+        details: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        enriched = dict(details or {})
+        reason = self._event_trigger_reason(event_type, enriched)
+        if reason:
+            enriched.setdefault("trigger_reason", reason)
+        if target.get("stream_ref"):
+            enriched.setdefault("origin_stream_ref", target.get("stream_ref"))
+
+        viewer_context = self._viewer_context(target)
+        if viewer_context:
+            enriched.setdefault("viewer_context", viewer_context)
+
+        detection_context = self._compact_probe_context(
+            reason,
+            target.get("last_probe"),
+            target.get("last_probe_thresholds"),
+        )
+        if detection_context:
+            if "confirmations" in enriched:
+                detection_context["confirmations"] = enriched.get("confirmations")
+            if "required" in enriched:
+                detection_context["required"] = enriched.get("required")
+            enriched.setdefault("detection", detection_context)
+
+        if event_type in SWITCH_EVENT_TYPES:
+            enriched.setdefault("switch_result", event_type)
+        return enriched
+
     def _record_event(self, event_type: str, target: Dict[str, Any], details: Dict[str, Any]) -> None:
+        details = self._event_details_with_context(event_type, target, details)
         event = {
             "timestamp": self.clock(),
             "type": event_type,
+            "decision_group": self._event_decision_group(event_type),
+            "trigger_reason": details.get("trigger_reason"),
             "channel_ref": target.get("channel_ref"),
             "stream_ref": target.get("stream_ref"),
             "real_client_count": target.get("real_client_count"),

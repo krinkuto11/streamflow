@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.stream.teamarr_preflight_service import (
     DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
+    DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY,
     TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
     TeamarrPreflightService,
     normalize_config,
@@ -30,6 +31,20 @@ class FakeResponse:
 
     def json(self):
         return self.payload
+
+
+class RouteHttpGet:
+    def __init__(self, routes):
+        self.routes = dict(routes)
+        self.calls = []
+
+    def __call__(self, url, *args, **kwargs):
+        path = str(url).replace("http://teamarr.test", "")
+        self.calls.append(path)
+        payload = self.routes.get(path, [])
+        if isinstance(payload, Exception):
+            raise payload
+        return FakeResponse(payload)
 
 
 class FakeChecker:
@@ -139,6 +154,7 @@ class FakeAutomationConfig:
         self.profiles = [dict(profile) for profile in (profiles or [])]
         self.next_id = str(next_id)
         self.created_profiles = []
+        self.updated_profiles = []
 
     def get_all_profiles(self, *args, **kwargs):
         return [dict(profile) for profile in self.profiles]
@@ -157,6 +173,14 @@ class FakeAutomationConfig:
         self.profiles.append(profile)
         return self.next_id
 
+    def update_profile(self, profile_id, profile_data):
+        self.updated_profiles.append((str(profile_id), dict(profile_data)))
+        for profile in self.profiles:
+            if str(profile.get("id")) == str(profile_id):
+                profile.update(dict(profile_data))
+                return True
+        return False
+
 
 def make_event(**overrides):
     event = {
@@ -173,6 +197,45 @@ def make_event(**overrides):
     }
     event.update(overrides)
     return event
+
+
+def make_team_status(**overrides):
+    status = {
+        "team": {
+            "id": 501,
+            "provider": "espn",
+            "provider_team_id": "20",
+            "primary_league": "mlb",
+            "leagues": ["mlb"],
+            "sport": "baseball",
+            "team_name": "Static Test Team",
+            "team_abbrev": "STT",
+            "channel_id": "StaticTestTeam.mlb",
+            "active": True,
+        },
+        "dispatcharr_channel": {
+            "found": True,
+            "id": 77,
+            "uuid": "uuid-77",
+            "name": "Static Team Channel",
+            "tvg_id": "StaticTestTeam.mlb",
+            "stream_count": 2,
+            "streams": [1, 2],
+        },
+        "next_live_window": {
+            "found": True,
+            "start": "2026-05-28T22:20:00+00:00",
+            "stop": "2026-05-29T01:20:00+00:00",
+            "title": "Static Test Team Live",
+            "is_live": True,
+            "source": "team_epg_xmltv",
+        },
+        "status": "ready",
+        "missing": [],
+        "xmltv_updated_at": "2026-05-28T21:00:00+00:00",
+    }
+    status.update(overrides)
+    return status
 
 
 class TeamarrPreflightServiceTest(unittest.TestCase):
@@ -236,6 +299,242 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertTrue(public_config["queue_during_active_checks"])
         self.assertFalse(public_config["defer_during_active_checks"])
         self.assertFalse(public_config["skip_during_quality_check"])
+        self.assertTrue(public_config["managed_event_preflight_enabled"])
+        self.assertFalse(public_config["static_team_preflight_enabled"])
+
+    def test_static_team_source_default_off_does_not_call_teams_api(self):
+        http_get = RouteHttpGet({
+            "/api/v1/channels/managed": [make_event()],
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        service, _, _ = self.make_service([], http_get=http_get)
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["teams_seen"], 0)
+        self.assertNotIn("/api/v1/teams?active_only=true", http_get.calls)
+        status = service.get_status()
+        self.assertEqual(status["upcoming_teams"], [])
+        self.assertFalse(status["team_status"]["enabled"])
+
+    def test_static_team_source_enabled_fetches_team_channel_status(self):
+        team_status = make_team_status()
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [team_status["team"]],
+            "/api/v1/teams/501/channel-status": team_status,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        service, _, _ = self.make_service([], http_get=http_get)
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["events_seen"], 0)
+        self.assertEqual(result["teams_seen"], 1)
+        self.assertIn("/api/v1/teams?active_only=true", http_get.calls)
+        self.assertIn("/api/v1/teams/501/channel-status", http_get.calls)
+        status = service.get_status()
+        self.assertEqual(status["team_status"]["ready"], 1)
+        self.assertEqual(status["team_status"]["queueable"], 1)
+        self.assertEqual(status["upcoming_teams"][0]["preflight_kind"], "team")
+        self.assertEqual(status["upcoming_teams"][0]["teamarr_team_id"], 501)
+        self.assertEqual(status["upcoming_teams"][0]["state"], "due")
+        self.assertEqual(status["preflight_items"][0]["identity"], status["upcoming_teams"][0]["identity"])
+
+    def test_incomplete_static_team_is_visible_but_not_queueable(self):
+        incomplete = make_team_status(
+            dispatcharr_channel={"found": True, "id": 77, "stream_count": 0, "streams": []},
+            status="incomplete",
+            missing=["next_live_window"],
+            next_live_window={"found": False, "is_live": False, "source": "team_epg_xmltv"},
+        )
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [incomplete["team"]],
+            "/api/v1/teams/501/channel-status": incomplete,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = FakeChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+        team = service.get_status()["upcoming_teams"][0]
+        self.assertEqual(team["state"], "no_streams_yet")
+        self.assertEqual(service.get_status()["team_status"]["queueable"], 0)
+
+    def test_due_static_team_queues_single_channel_check_with_team_metadata(self):
+        team_status = make_team_status()
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [team_status["team"]],
+            "/api/v1/teams/501/channel-status": team_status,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = BusyChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(len(checker.queued), 1)
+        args, kwargs = checker.queued[0]
+        self.assertEqual(args[0], 77)
+        self.assertTrue(kwargs["force_check"])
+        metadata = kwargs["metadata"]
+        self.assertEqual(metadata["source"], "teamarr_preflight")
+        self.assertEqual(metadata["preflight_kind"], "team")
+        self.assertEqual(metadata["forced_profile_id"], "42")
+        self.assertEqual(metadata["quality_profile_id"], "42")
+        self.assertEqual(metadata["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
+        self.assertEqual(metadata["event"]["preflight_kind"], "team")
+        self.assertEqual(metadata["event"]["teamarr_team_id"], 501)
+        self.assertEqual(metadata["event"]["quality_profile_id"], "42")
+        self.assertEqual(metadata["event"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
+        self.assertFalse(metadata["event"]["may_start_full_run"])
+
+        service.run_once(force=True)
+        self.assertEqual(len(checker.queued), 1)
+
+    def test_static_team_queue_uses_selected_preflight_profile(self):
+        team_status = make_team_status()
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [team_status["team"]],
+            "/api/v1/teams/501/channel-status": team_status,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = BusyChecker()
+        automation_config = FakeAutomationConfig(
+            profiles=[
+                {"id": "7", "name": "Custom Team Preflight"},
+                {"id": "8", "name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME},
+            ]
+        )
+        service, _, _ = self.make_service(
+            [],
+            checker=checker,
+            automation_config=automation_config,
+            http_get=http_get,
+        )
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+            "forced_profile_id": "7",
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(len(checker.queued), 1)
+        _, kwargs = checker.queued[0]
+        metadata = kwargs["metadata"]
+        self.assertEqual(metadata["preflight_kind"], "team")
+        self.assertEqual(metadata["forced_profile_id"], "7")
+        self.assertEqual(metadata["quality_profile_id"], "7")
+        self.assertEqual(metadata["quality_profile_name"], "Custom Team Preflight")
+        self.assertEqual(metadata["event"]["preflight_kind"], "team")
+        self.assertEqual(metadata["event"]["quality_profile_id"], "7")
+        self.assertEqual(metadata["event"]["quality_profile_name"], "Custom Team Preflight")
+        checker.check_queue = type("FakeQueue", (), {})()
+        checker.check_queue.queued_priorities = {77: TEAMARR_PREFLIGHT_QUEUE_PRIORITY}
+        checker.check_queue.queued_metadata = {77: metadata}
+        checker.check_queue.in_progress_metadata = {}
+        queued = service.get_status()["queued_checks"]
+        self.assertEqual(queued[0]["preflight_kind"], "team")
+        self.assertEqual(queued[0]["forced_profile_id"], "7")
+        self.assertEqual(queued[0]["quality_profile_id"], "7")
+        self.assertEqual(queued[0]["quality_profile_name"], "Custom Team Preflight")
+
+    def test_manual_force_static_team_identity_runs_single_channel_check(self):
+        team_status = make_team_status(
+            next_live_window={
+                "found": True,
+                "start": "2026-05-28T23:00:00+00:00",
+                "stop": "2026-05-29T02:00:00+00:00",
+                "title": "Static Test Team Live",
+                "is_live": True,
+                "source": "team_epg_xmltv",
+            },
+        )
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [team_status["team"]],
+            "/api/v1/teams/501/channel-status": team_status,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = FakeChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+        service.run_once(force=True)
+        identity = service.get_status()["upcoming_teams"][0]["identity"]
+
+        result = service.force_check_event(identity)
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["launched"])
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+        args, kwargs = checker.calls[0]
+        self.assertEqual(args[0], 77)
+        self.assertEqual(kwargs["program_name"], "Static Test Team")
+        self.assertTrue(kwargs["is_epg_scheduled"])
+        self.assertEqual(kwargs["forced_profile_id"], "42")
+
+    def test_static_team_endpoint_error_degrades_without_blocking_events(self):
+        http_get = RouteHttpGet({
+            "/api/v1/channels/managed": [make_event()],
+            "/api/v1/teams?active_only=true": RuntimeError("HTTP 500"),
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = FakeChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({"static_team_preflight_enabled": True})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["events_seen"], 1)
+        self.assertEqual(result["team_error"], "Teamarr static team endpoint did not complete the last scan")
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+        self.assertEqual(len(checker.calls), 1)
+        status = service.get_status()
+        self.assertEqual(status["team_status"]["last_error"], "Teamarr static team endpoint did not complete the last scan")
+        self.assertEqual(status["upcoming_teams"], [])
 
     def test_default_profile_is_created_and_selected_for_preflight(self):
         automation_config = FakeAutomationConfig()
@@ -253,6 +552,28 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertFalse(created_profile["stream_matching"]["enabled"])
         self.assertTrue(created_profile["stream_checking"]["enabled"])
         self.assertFalse(created_profile["stream_checking"]["remove_dead_streams"])
+        self.assertEqual(
+            created_profile["channel_visibility_automation"],
+            DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY,
+        )
+
+    def test_existing_default_profile_is_updated_with_visibility_policy(self):
+        automation_config = FakeAutomationConfig(
+            profiles=[{"id": "42", "name": DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME}]
+        )
+        service, _, _ = self.make_service([], automation_config=automation_config)
+
+        config = service.get_config()
+
+        self.assertEqual(config["default_profile_id"], "42")
+        self.assertEqual(len(automation_config.created_profiles), 0)
+        self.assertEqual(len(automation_config.updated_profiles), 1)
+        profile_id, payload = automation_config.updated_profiles[0]
+        self.assertEqual(profile_id, "42")
+        self.assertEqual(
+            payload["channel_visibility_automation"],
+            DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY,
+        )
 
     def test_existing_forced_profile_is_preserved(self):
         automation_config = FakeAutomationConfig(
@@ -277,6 +598,10 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["events_seen"], 1)
         self.assertEqual(result["launched"], 1)
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["match_evidence"]["source"], "teamarr_managed_event")
+        self.assertFalse(upcoming[0]["match_evidence"]["may_start_full_run"])
+        self.assertFalse(upcoming[0]["may_start_full_run"])
 
         deadline = time.time() + 2
         while time.time() < deadline and not checker.calls:
@@ -300,10 +625,16 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
                 break
             time.sleep(0.01)
         self.assertEqual(recent[0]["type"], "preflight_completed")
+        self.assertFalse(recent[0]["may_start_full_run"])
+        self.assertFalse(recent[0]["details"]["may_start_full_run"])
+        self.assertEqual(recent[0]["details"]["match_evidence"]["source"], "teamarr_managed_event")
+        self.assertFalse(recent[0]["details"]["match_evidence"]["may_start_full_run"])
         public_stats = recent[0]["details"]["stats"]
         self.assertEqual(public_stats["total_streams"], 2)
         self.assertEqual(public_stats["duration_seconds"], 12)
         self.assertNotIn("stream_details", public_stats)
+        self.assertEqual(recent[0]["details"]["quality_profile_id"], "42")
+        self.assertEqual(recent[0]["details"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
 
     def test_status_keeps_large_managed_event_lists_visible(self):
         events = [
@@ -763,13 +1094,24 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(kwargs["metadata"]["source"], "teamarr_preflight")
         self.assertEqual(kwargs["metadata"]["program_name"], "Home vs Away")
         self.assertTrue(kwargs["metadata"]["is_epg_scheduled"])
+        self.assertFalse(kwargs["metadata"]["may_start_full_run"])
+        self.assertEqual(kwargs["metadata"]["match_evidence"]["source"], "teamarr_managed_event")
+        self.assertFalse(kwargs["metadata"]["match_evidence"]["may_start_full_run"])
         self.assertEqual(kwargs["metadata"]["forced_profile_id"], "42")
+        self.assertEqual(kwargs["metadata"]["quality_profile_id"], "42")
+        self.assertEqual(kwargs["metadata"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
         self.assertEqual(kwargs["metadata"]["event"]["identity"], "id:100:2026-05-28T22:10:00+00:00")
         self.assertEqual(kwargs["metadata"]["event"]["event_name"], "Home vs Away")
+        self.assertEqual(kwargs["metadata"]["event"]["quality_profile_id"], "42")
+        self.assertEqual(kwargs["metadata"]["event"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
+        self.assertFalse(kwargs["metadata"]["event"]["may_start_full_run"])
 
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["type"], "preflight_queued")
         self.assertEqual(recent[0]["details"]["priority"], TEAMARR_PREFLIGHT_QUEUE_PRIORITY)
+        self.assertEqual(recent[0]["details"]["match_evidence"]["source"], "teamarr_managed_event")
+        self.assertEqual(recent[0]["details"]["quality_profile_id"], "42")
+        self.assertEqual(recent[0]["details"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
 
         service.record_queued_check_result(
             kwargs["metadata"],
@@ -780,6 +1122,25 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["event_name"], "Home vs Away")
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 2)
         self.assertNotIn("priority", recent[0]["details"])
+        self.assertFalse(recent[0]["details"]["may_start_full_run"])
+        self.assertEqual(recent[0]["details"]["quality_profile_id"], "42")
+        self.assertEqual(recent[0]["details"]["quality_profile_name"], DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME)
+
+    def test_duplicate_due_events_are_deduped_before_queueing(self):
+        checker = BusyChecker()
+        service, _, _ = self.make_service([make_event(), make_event()], checker=checker)
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(len(checker.queued), 1)
+        recent = service.get_status()["recent_events"]
+        self.assertEqual(recent[0]["type"], "duplicate_preflight_skipped")
+        self.assertEqual(recent[1]["type"], "preflight_queued")
+        self.assertFalse(recent[0]["details"]["may_start_full_run"])
+        self.assertEqual(recent[0]["details"]["match_evidence"]["source"], "teamarr_managed_event")
 
     def test_status_exposes_teamarr_stream_checker_queue(self):
         checker = QueueBackedChecker()

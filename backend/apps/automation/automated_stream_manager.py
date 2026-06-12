@@ -35,10 +35,28 @@ _CHANNEL_NAME_PLACEHOLDER = 'PLACEHOLDER'
 
 
 class RefreshResult(tuple):
-    """Tuple-compatible playlist refresh result with bool(success) semantics."""
+    """Tuple-compatible playlist refresh result with V6 outcome metadata."""
 
-    def __new__(cls, success: bool, accounts: Optional[List[Dict[str, Any]]] = None):
-        return super().__new__(cls, (success, accounts or []))
+    def __new__(
+        cls,
+        success: bool,
+        accounts: Optional[List[Dict[str, Any]]] = None,
+        *,
+        failed_refresh_requests: Optional[List[Dict[str, Any]]] = None,
+        outcome: Optional[str] = None,
+    ):
+        obj = super().__new__(cls, (success, accounts or []))
+        obj.failed_refresh_requests = list(failed_refresh_requests or [])
+        obj.failed_refresh_request_count = len(obj.failed_refresh_requests)
+        obj.degraded = bool(success and obj.failed_refresh_request_count > 0)
+        obj.outcome = outcome or (
+            "completed_degraded"
+            if obj.degraded
+            else "completed"
+            if success
+            else "failed"
+        )
+        return obj
 
     def __bool__(self) -> bool:
         return bool(self[0])
@@ -71,6 +89,10 @@ from apps.core.api_utils import (
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
 from apps.automation.automation_config_manager import get_automation_config_manager
+from apps.automation.channel_visibility_automation import (
+    ChannelVisibilityAutomation,
+    resolve_channel_visibility_config,
+)
 
 # Import channel settings manager
 # Import channel settings manager - DEPRECATED/REMOVED
@@ -1317,6 +1339,7 @@ class AutomatedStreamManager:
         self.config = self._load_config()
         self.changelog = ChangelogManager()
         self.regex_matcher = RegexChannelMatcher()
+        self.channel_visibility_automation = ChannelVisibilityAutomation()
         
         # Initialize dead streams tracker
         self.dead_streams_tracker = None
@@ -2367,10 +2390,14 @@ class AutomatedStreamManager:
                 except (TypeError, ValueError):
                     pass
             for stage_item in status_data.get("stages", []):
-                if final_state == "completed" and stage_item["status"] == "pending":
+                if final_state in {"completed", "completed_degraded"} and stage_item["status"] == "pending":
                     stage_item["status"] = "skipped"
                 if stage_item["key"] == active_stage and stage_item["status"] == "running":
-                    stage_item["status"] = "completed" if final_state == "completed" else final_state
+                    stage_item["status"] = (
+                        "completed"
+                        if final_state in {"completed", "completed_degraded"}
+                        else final_state
+                    )
 
     def _queue_run_status(self, message: str) -> None:
         """Mark the current automation intent as queued, not completed."""
@@ -2419,11 +2446,20 @@ class AutomatedStreamManager:
         refresh_success: bool,
         cycle_abort_message: Optional[str],
         cycle_failed_message: Optional[str] = None,
+        refresh_degraded: bool = False,
     ) -> str:
         if not cycle_abort_message and self._is_manual_stop_requested():
             cycle_abort_message = self._manual_stop_message()
 
         if refresh_success and not cycle_abort_message and not cycle_failed_message:
+            if refresh_degraded:
+                self._finish_run_status(
+                    state="completed_degraded",
+                    stage="completed_degraded",
+                    stage_label="Completed with Warnings",
+                    message="Automation cycle completed with provider refresh warnings",
+                )
+                return "completed_degraded"
             self._finish_run_status(
                 state="completed",
                 stage="completed",
@@ -2551,6 +2587,50 @@ class AutomatedStreamManager:
         except Exception as e:
             logger.error(f"Error reading stream checker config from DB: {e}")
             return True
+
+    def _get_channel_visibility_config(self, profile: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        try:
+            from apps.database.manager import get_db_manager
+
+            config = get_db_manager().get_system_setting('stream_checker_config', {}) or {}
+            global_config = config.get('channel_visibility_automation', {}) if isinstance(config, dict) else {}
+            return resolve_channel_visibility_config(global_config, profile)
+        except Exception as e:
+            logger.error(f"Error reading channel visibility automation config from DB: {e}")
+            return {}
+
+    @staticmethod
+    def _visibility_changelog_result(result: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not result:
+            return None
+        if result.get('action') in {'disabled', 'no_visibility_change', 'visible_unmanaged'}:
+            return None
+        return result
+
+    def _record_channel_visibility_events(
+        self,
+        events: List[Dict[str, Any]],
+        *,
+        skip_changelog: bool,
+        source: str,
+    ) -> None:
+        significant = [
+            event for event in (self._visibility_changelog_result(item) for item in events)
+            if event
+        ]
+        if not significant:
+            return
+        if skip_changelog or not self.config.get("enabled_features", {}).get("changelog_tracking", True):
+            return
+        try:
+            self.changelog.add_entry("channel_visibility", {
+                "source": source,
+                "events": significant,
+                "changed_count": sum(1 for event in significant if event.get("changed")),
+                "total_events": len(significant),
+            })
+        except Exception as exc:
+            logger.warning(f"Failed to write channel visibility changelog: {exc}")
     
     def _filter_channels_by_profile(self, all_channels: List[Dict], action_description: str) -> List[Dict]:
         """Filter channels by selected profile if one is configured.
@@ -2602,7 +2682,7 @@ class AutomatedStreamManager:
             if not force and not self.config.get("enabled_features", {}).get("auto_playlist_update", True):
                 if not force:  # Allow force to override feature flag
                     logger.info("Playlist update is disabled in configuration")
-                    return RefreshResult(False, [])
+                    return RefreshResult(False, [], outcome="skipped")
             
             logger.info("Starting M3U playlist refresh...")
             
@@ -2847,7 +2927,11 @@ class AutomatedStreamManager:
                     })
                 else:
                     logger.error("Playlist refresh encountered failed account refreshes and none were accepted")
-                    return RefreshResult(False, refreshed_accounts)
+                    return RefreshResult(
+                        False,
+                        refreshed_accounts,
+                        failed_refresh_requests=failed_refresh_requests,
+                    )
             
             # NOTE: UDI refresh, changelog write, and dead stream cleanup are
             # intentionally NOT performed here. run_automation_cycle() owns all
@@ -2875,7 +2959,11 @@ class AutomatedStreamManager:
             # after streams are actually assigned to specific channels. This prevents marking all channels
             # when we only know that *some* streams changed in the playlist, not which channels are affected.
 
-            return RefreshResult(True, refreshed_accounts)
+            return RefreshResult(
+                True,
+                refreshed_accounts,
+                failed_refresh_requests=failed_refresh_requests,
+            )
             
         except Exception as e:
             logger.error(f"Failed to refresh M3U playlists: {e}")
@@ -2888,7 +2976,7 @@ class AutomatedStreamManager:
                     "timestamp": datetime.now().isoformat()
                 })
             
-            return RefreshResult(False, [])
+            return RefreshResult(False, [], outcome="failed")
 
     def _is_m3u_refresh_response_success(self, response: Any) -> bool:
         """Validate M3U refresh API responses.
@@ -3402,6 +3490,7 @@ class AutomatedStreamManager:
             channel_to_match_priorities = {}
             channel_to_group_map = {}
             channel_name_map = {}
+            channel_visibility_events = []
             
             
             for channel in all_channels:
@@ -3458,9 +3547,30 @@ class AutomatedStreamManager:
                     matching_enabled = True
                 
                 if matching_enabled:
-                    matching_enabled_channel_ids.append(channel_id)
-                    # Store match priority order
-                    channel_to_match_priorities[str(channel_id)] = profile.get('stream_matching', {}).get('match_priority_order', ['tvg', 'regex'])
+                    has_regex_patterns = self.regex_matcher.has_regex_patterns(str(channel_id), effective_group_id)
+                    has_tvg_matching = self.regex_matcher.get_match_by_tvg_id(str(channel_id), effective_group_id)
+                    if has_regex_patterns or has_tvg_matching:
+                        matching_enabled_channel_ids.append(channel_id)
+                        # Store match priority order
+                        channel_to_match_priorities[str(channel_id)] = profile.get('stream_matching', {}).get('match_priority_order', ['tvg', 'regex'])
+                    else:
+                        channel_visibility_config = self._get_channel_visibility_config(profile)
+                        no_regex_visibility_enabled = bool(
+                            channel_visibility_config.get("enabled")
+                            and channel_visibility_config.get("hide_on_no_regex")
+                        )
+                        if no_regex_visibility_enabled:
+                            channel_visibility_events.append(
+                                self.channel_visibility_automation.handle_no_regex(
+                                    channel,
+                                    config=channel_visibility_config,
+                                    details={
+                                        "source": "stream_matching",
+                                        "has_regex_patterns": False,
+                                        "match_by_tvg_id": False,
+                                    },
+                                )
+                            )
                     
                 # Check if revive is enabled
                 if profile and profile.get('stream_checking', {}).get('allow_revive', False):
@@ -3506,7 +3616,15 @@ class AutomatedStreamManager:
                 else:
                     _period_profile = _config.get('profile')
 
-                if _period_profile and _period_profile.get('stream_checking', {}).get('enabled', False):
+                _matching_disabled = not bool(
+                    _period_profile
+                    and _period_profile.get('stream_matching', {}).get('enabled', False)
+                )
+                if (
+                    _period_profile
+                    and _matching_disabled
+                    and _period_profile.get('stream_checking', {}).get('enabled', False)
+                ):
                     checking_only_channel_ids.append(_ch_id)
 
             if checking_only_channel_ids:
@@ -3522,6 +3640,12 @@ class AutomatedStreamManager:
             excluded_count = len(all_channels) - len(filtered_channels)
             if excluded_count > 0:
                 logger.info(f"Excluding {excluded_count} channel(s) without automation periods or with matching disabled from stream assignment")
+
+            self._record_channel_visibility_events(
+                channel_visibility_events,
+                skip_changelog=skip_changelog,
+                source="stream_matching",
+            )
             
             # Use filtered channels for the rest of the logic
             all_channels = filtered_channels
@@ -3543,7 +3667,7 @@ class AutomatedStreamManager:
             if not all_channels:
                 logger.info("No channels available for stream assignment (all filtered or in monitoring)")
                 self._mark_checking_only_channels(checking_only_channel_ids, udi, skip_check_trigger)
-                return {}
+                return {"channel_visibility_events": channel_visibility_events}
             
 
 
@@ -3866,7 +3990,8 @@ class AutomatedStreamManager:
             return {
                 "assignment_count": accepted_assignment_count,
                 "assignment_details": detailed_assignments,
-                "assigned_stream_ids": dict(accepted_assigned_stream_ids)
+                "assigned_stream_ids": dict(accepted_assigned_stream_ids),
+                "channel_visibility_events": channel_visibility_events,
             }
             
         except Exception as e:
@@ -4789,6 +4914,9 @@ class AutomatedStreamManager:
             # 3. Update Playlists
             refresh_success = False
             refreshed_accounts = []
+            refresh_degraded = False
+            failed_refresh_requests = []
+            provider_refresh_failed_count = 0
             pre_refresh_stream_count = 0
             post_refresh_stream_count = 0
             check_results = {}
@@ -4863,11 +4991,18 @@ class AutomatedStreamManager:
 
             if update_all_playlists:
                 logger.info("Updating ALL playlists (requested by one or more profiles)")
-                refresh_success, refreshed_accounts = self.refresh_playlists(
+                refresh_result = self.refresh_playlists(
                     account_id=None,
                     skip_changelog=True,
                     progress_callback=update_m3u_refresh_progress,
                 )
+                refresh_success, refreshed_accounts = refresh_result
+                failed_refresh_requests.extend(getattr(refresh_result, "failed_refresh_requests", []))
+                provider_refresh_failed_count = max(
+                    provider_refresh_failed_count,
+                    len(failed_refresh_requests),
+                )
+                refresh_degraded = refresh_degraded or bool(getattr(refresh_result, "degraded", False))
             elif playlists_to_update:
                 logger.info(f"Updating {len(playlists_to_update)} specific playlists: {playlists_to_update}")
                 refresh_success = True
@@ -4904,17 +5039,29 @@ class AutomatedStreamManager:
                             message_override=message,
                         )
 
-                    success, accs = self.refresh_playlists(
+                    refresh_result = self.refresh_playlists(
                         account_id=int(acc_id),
                         skip_changelog=True,
                         progress_callback=specific_refresh_progress,
                     )
+                    success, accs = refresh_result
+                    result_failures = list(getattr(refresh_result, "failed_refresh_requests", []))
+                    if result_failures:
+                        failed_refresh_requests.extend(result_failures)
                     if not success:
                         specific_refresh_failures += 1
+                        if not result_failures:
+                            failed_refresh_requests.append({"id": acc_id})
+                    provider_refresh_failed_count = max(
+                        provider_refresh_failed_count,
+                        len(failed_refresh_requests),
+                    )
+                    refresh_degraded = refresh_degraded or bool(getattr(refresh_result, "degraded", False))
                     if accs:
                         refreshed_accounts.extend(accs)
                 if specific_refresh_failures and refreshed_accounts:
                     refresh_success = True
+                    refresh_degraded = True
                     update_m3u_refresh_progress(
                         {
                             "state": "partial",
@@ -4940,10 +5087,15 @@ class AutomatedStreamManager:
                 counts={
                     "refreshed_playlists": len(refreshed_accounts),
                     "pre_refresh_streams": pre_refresh_stream_count,
+                    "failed_refresh_requests": len(failed_refresh_requests),
+                    "provider_refresh_failed_count": provider_refresh_failed_count,
+                    "provider_refresh_degraded": refresh_degraded,
                 },
                 durations={"m3u_refresh_seconds": time.time() - m3u_refresh_started},
                 message=(
-                    f"Playlist refresh requests {'accepted' if refresh_success else 'failed'}"
+                    "Playlist refresh requests partially accepted"
+                    if refresh_success and refresh_degraded
+                    else f"Playlist refresh requests {'accepted' if refresh_success else 'failed'}"
                     if playlists_refreshed
                     else "Current cache selected for stream matching"
                 ),
@@ -4975,6 +5127,20 @@ class AutomatedStreamManager:
                     cycle_abort_message = wait_result.get("message") or "Playlist refresh did not settle"
                     logger.error(cycle_abort_message)
                     refresh_success = False
+                elif wait_result.get("state") == "partial":
+                    refresh_degraded = True
+                    wait_snapshot = wait_result.get("snapshot") or {}
+                    failed_wait_count = int(wait_snapshot.get("failed_count") or 0)
+                    provider_refresh_failed_count = max(
+                        provider_refresh_failed_count,
+                        failed_wait_count,
+                    )
+                    if failed_wait_count and not failed_refresh_requests:
+                        failed_refresh_requests.extend(
+                            {"id": account.get("id")}
+                            for account in wait_snapshot.get("failed_accounts") or []
+                            if isinstance(account, dict)
+                        )
 
             # Deduplicate while preserving order (channels may appear in multiple active period groups).
             channels_to_quality_check = list(dict.fromkeys(channels_to_quality_check))
@@ -5041,12 +5207,20 @@ class AutomatedStreamManager:
                         removed_streams = [{"id": sid, "name": before_stream_ids.get(sid, '')} for sid in removed_stream_ids]
                         self.changelog.add_entry("playlist_refresh", {
                             "success": True,
+                            "job_outcome": (
+                                "completed_degraded"
+                                if refresh_degraded
+                                else "completed"
+                            ),
                             "timestamp": self.last_playlist_update.isoformat(),
                             "total_streams": len(after_stream_ids),
                             "added_streams": added_streams[:50],
                             "removed_streams": removed_streams[:50],
                             "added_count": len(added_streams),
                             "removed_count": len(removed_streams),
+                            "failed_refresh_requests": len(failed_refresh_requests),
+                            "provider_refresh_failed_count": provider_refresh_failed_count,
+                            "degraded_count": provider_refresh_failed_count if refresh_degraded else 0,
                         })
                         logger.info(
                             f"Playlist changelog: {len(added_streams)} added, "
@@ -5436,9 +5610,18 @@ class AutomatedStreamManager:
                     if m3u_enabled:
                         steps.append({
                             'step': 'Playlist Refresh',
-                            'status': 'success' if refresh_success else ('skipped' if not refreshed_accounts else 'failed'),
+                            'status': (
+                                'warning'
+                                if refresh_success and refresh_degraded
+                                else 'success'
+                                if refresh_success
+                                else ('skipped' if not refreshed_accounts else 'failed')
+                            ),
                             'details': {
-                                'accounts': refreshed_accounts
+                                'accounts': refreshed_accounts,
+                                'failed_refresh_requests': len(failed_refresh_requests),
+                                'provider_refresh_failed_count': provider_refresh_failed_count,
+                                'degraded': refresh_degraded,
                             }
                         })
                     
@@ -5598,6 +5781,31 @@ class AutomatedStreamManager:
                 run_results['avg_fps'] = format_fps(sum(agg_fps) / len(agg_fps))
             if agg_resolutions:
                 run_results['avg_resolution'] = Counter(agg_resolutions).most_common(1)[0][0]
+
+            provider_refresh_outcome = (
+                "completed_degraded"
+                if refresh_success and refresh_degraded
+                else "completed"
+                if refresh_success and playlists_refreshed
+                else "failed"
+                if playlists_refreshed
+                else "skipped"
+            )
+            run_job_outcome = (
+                "aborted"
+                if cycle_abort_message
+                else "failed"
+                if cycle_failed_message or not refresh_success
+                else "completed_degraded"
+                if refresh_degraded
+                else "completed"
+            )
+            degraded_count = provider_refresh_failed_count if refresh_degraded else 0
+            run_results['job_outcome'] = run_job_outcome
+            run_results['provider_refresh_outcome'] = provider_refresh_outcome
+            run_results['failed_refresh_requests'] = len(failed_refresh_requests)
+            run_results['provider_refresh_failed_count'] = provider_refresh_failed_count
+            run_results['degraded_count'] = degraded_count
             
             # Add to changelog if there's any work done
             has_work = any(len(p['channels']) > 0 for p in run_results['periods'])
@@ -5625,6 +5833,10 @@ class AutomatedStreamManager:
                     "streams_revived": revived_streams_count,
                     "added_streams": added_streams_count,
                     "removed_streams": removed_streams_count,
+                    "failed_refresh_requests": len(failed_refresh_requests),
+                    "provider_refresh_failed_count": provider_refresh_failed_count,
+                    "degraded_count": degraded_count,
+                    "provider_refresh_degraded": refresh_degraded,
                 },
                 durations={"total_cycle_seconds": duration_sec},
             )
@@ -5632,10 +5844,13 @@ class AutomatedStreamManager:
                 refresh_success=refresh_success,
                 cycle_abort_message=cycle_abort_message,
                 cycle_failed_message=cycle_failed_message,
+                refresh_degraded=refresh_degraded,
             )
             
             if cycle_outcome == "completed":
                 logger.info("Automation cycle completed")
+            elif cycle_outcome == "completed_degraded":
+                logger.warning("Automation cycle completed with provider refresh warnings")
             elif cycle_outcome == "aborted":
                 logger.warning("Automation cycle aborted")
             else:

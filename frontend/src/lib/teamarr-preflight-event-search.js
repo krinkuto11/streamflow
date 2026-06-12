@@ -7,10 +7,15 @@ const eventSearchFields = (event = {}) => {
   const lastDetails = lastPreflight.details || {}
 
   return [
+    event.preflight_kind,
     event.event_name,
+    event.team_name,
+    event.team_abbrev,
     event.channel_name,
     event.sport,
     event.league,
+    event.primary_league,
+    event.team_status,
     event.state,
     event.bucket,
     event.trigger_bucket,
