@@ -781,6 +781,7 @@ class ShadowBlankMonitorService:
         for event_type, event_target, details in continuity_events:
             if event_type == "watcher_recovered":
                 self._reset_detection_state(event_target["channel_uuid"])
+                self._set_cooldown(event_target["channel_uuid"], config)
             self._record_event(event_type, event_target, details)
         return targets
 
@@ -792,13 +793,13 @@ class ShadowBlankMonitorService:
         )
         for target in targets:
             channel_uuid = target["channel_uuid"]
+            if int(target.get("watcher_client_count") or 0) > 0:
+                continue
             if self._cooldown_remaining(channel_uuid) > 0:
                 self._record_event("cooldown", target, {"cooldown_seconds": self._cooldown_remaining(channel_uuid)})
                 continue
             if self._quality_checker_conflicts(target, config):
                 self._record_event("quality_check_active", target, {})
-                continue
-            if int(target.get("watcher_client_count") or 0) > 0:
                 continue
 
             with self._lock:
