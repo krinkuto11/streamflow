@@ -25,6 +25,7 @@ export const getShadowMonitorDisplayState = ({
   const loopDetectionGates = status?.loop_detection_gates || {}
   const nextStreamPreProbeEnabled = Boolean(
     loopDetectionGates?.next_stream_pre_probe_enabled
+      ?? status?.next_stream_pre_probe_enabled
       ?? config?.next_stream_pre_probe_enabled
       ?? editedConfig?.next_stream_pre_probe_enabled,
   )

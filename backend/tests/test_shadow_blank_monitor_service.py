@@ -186,6 +186,7 @@ def test_status_exposes_shadow_loop_detection_context(tmp_path):
 
     status = service.get_status()
     assert status["watch_mode"] == "periodic"
+    assert status["has_watcher_api_key"] is True
     assert status["loop_detection_enabled"] is True
     assert status["loop_probe_duration_seconds"] == 180
     assert status["loop_switch_requires_pre_probe"] is True

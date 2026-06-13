@@ -616,6 +616,7 @@ class ShadowBlankMonitorService:
                 "configuration_required": bool(issue),
                 "configuration_issue": issue["code"] if issue else None,
                 "configuration_message": issue["message"] if issue else None,
+                "has_watcher_api_key": bool(str(self._config.get("watcher_api_key") or "").strip()),
                 "last_scan_at": self._last_scan_at,
                 "last_error": self._last_error,
                 "watched_count": len(watched_channels),

@@ -34,6 +34,24 @@ describe('shadow monitor display state', () => {
     expect(state.canUseWatcher).toBe(false)
   })
 
+  it('can derive configured paused state from status without a separate config payload', () => {
+    const state = getShadowMonitorDisplayState({
+      status: {
+        enabled: false,
+        running: false,
+        configuration_required: false,
+        has_watcher_api_key: true,
+      },
+      editedConfig: { enabled: false },
+      actionLoading: '',
+    })
+
+    expect(state.hasKey).toBe(true)
+    expect(state.configurationRequired).toBe(false)
+    expect(state.canStartWatcher).toBe(true)
+    expect(state.serviceLabel).toBe('Stopped')
+  })
+
   it('treats a running backend with disabled config as stale instead of healthy running', () => {
     const state = getShadowMonitorDisplayState({
       status: { enabled: false, running: true },
@@ -105,6 +123,27 @@ describe('shadow monitor display state', () => {
     expect(state.loopSwitchRequiresPreProbe).toBe(true)
     expect(state.nextStreamPreProbeEnabled).toBe(false)
     expect(state.loopSwitchGateSatisfied).toBe(false)
+  })
+
+  it('uses top-level status pre-probe state when gate details are absent', () => {
+    const state = getShadowMonitorDisplayState({
+      status: {
+        enabled: true,
+        running: true,
+        has_watcher_api_key: true,
+        loop_detection_enabled: true,
+        loop_switch_requires_pre_probe: true,
+        next_stream_pre_probe_enabled: true,
+      },
+      editedConfig: {
+        loop_detection_enabled: false,
+        next_stream_pre_probe_enabled: false,
+      },
+    })
+
+    expect(state.loopDetectionEnabled).toBe(true)
+    expect(state.nextStreamPreProbeEnabled).toBe(true)
+    expect(state.loopSwitchGateSatisfied).toBe(true)
   })
 
   it('requires watcher configuration before start or scan actions', () => {
