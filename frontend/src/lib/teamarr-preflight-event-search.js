@@ -55,6 +55,7 @@ const staticTeamHiddenStates = new Set([
   'filtered',
   'incomplete_team',
   'no_dispatcharr_channel',
+  'no_event_window',
   'no_live_window',
   'no_streams_yet',
   'past',

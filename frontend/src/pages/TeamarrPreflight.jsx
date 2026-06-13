@@ -74,6 +74,7 @@ const stateLabels = {
   scheduled: 'Scheduled',
   already_attempted: 'Attempted',
   no_dispatcharr_channel: 'No Channel',
+  no_event_window: 'No Event',
   no_live_window: 'No Window',
   no_streams_yet: 'No Streams',
   incomplete_team: 'Incomplete',
@@ -268,6 +269,7 @@ const eventScheduleDiagnosticParts = (event, automaticCheckSummary, config) => {
 
 const forceEventTooltip = (event) => {
   if (!event?.dispatcharr_channel_id) return 'No Dispatcharr channel'
+  if (event?.state === 'no_event_window') return 'No event evidence'
   if (event?.state === 'no_live_window') return 'No live window'
   if (event?.state === 'no_streams_yet') return 'No channel streams'
   if (event?.state === 'incomplete_team') return 'Incomplete team status'

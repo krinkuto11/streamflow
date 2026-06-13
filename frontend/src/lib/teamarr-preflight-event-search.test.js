@@ -99,6 +99,16 @@ describe('Teamarr preflight event search helpers', () => {
       {
         preflight_kind: 'team',
         event_name: 'Arizona Cardinals',
+        state: 'no_event_window',
+        event_date: '2026-06-13T16:00:00Z',
+        seconds_to_start: -170,
+        dispatcharr_channel_id: 645,
+        stream_count: 1,
+        team_status: 'ready',
+      },
+      {
+        preflight_kind: 'team',
+        event_name: 'Arizona Cardinals',
         state: 'scheduled',
         event_date: '2026-06-13T22:05:00Z',
         seconds_to_start: 7200,
@@ -125,8 +135,8 @@ describe('Teamarr preflight event search helpers', () => {
     ]
 
     expect(filterTeamarrEventsByView(staticTeams, 'upcoming', config)).toEqual([
-      staticTeams[3],
       staticTeams[4],
+      staticTeams[5],
     ])
     expect(filterTeamarrEventsByView(staticTeams, 'all', config)).toEqual(staticTeams)
   })

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -33,6 +34,14 @@ MAX_UPCOMING_EVENTS = 1000
 TEAMARR_PREFLIGHT_QUEUE_PRIORITY = 100
 
 READY_SYNC_STATES = {"in_sync", "synced", "ready"}
+STATIC_TEAM_MATCHUP_RE = re.compile(
+    r"(^|\s)(?:@|at|vs\.?|v\.?|versus|bei|gegen)(?=\s|$)",
+    re.IGNORECASE,
+)
+STATIC_TEAM_NON_EVENT_WINDOW_RE = re.compile(
+    r"^\s*(?:coming\s+up|upcoming|pre[-\s]?game)\b",
+    re.IGNORECASE,
+)
 EVENT_DATETIME_KEYS = (
     "event_date",
     "start_time",
@@ -68,6 +77,7 @@ MANUAL_FORCE_ERROR_MESSAGES = {
     "filtered": "Managed event is filtered by the current preflight configuration",
     "no_dispatcharr_channel": "Managed event has no Dispatcharr channel yet",
     "no_live_window": "Static team has no live window yet",
+    "no_event_window": "Static team live window has no event evidence",
     "no_streams_yet": "Static team channel has no streams yet",
     "incomplete_team": "Static team channel status is incomplete",
     "past": "Managed event is outside the post-start grace window",
@@ -1166,6 +1176,12 @@ class TeamarrPreflightService:
                 state, bucket = "no_live_window", None
             elif str(candidate.get("team_status") or "") != "ready":
                 state, bucket = "incomplete_team", None
+            elif not candidate.get("live_window_event_evidence"):
+                state, bucket = "no_event_window", None
+                missing = list(candidate.get("missing") or [])
+                if "team_event_evidence" not in missing:
+                    missing.append("team_event_evidence")
+                candidate["missing"] = missing
             else:
                 state, bucket = self._classify_event(candidate, config, now)
 
@@ -1263,6 +1279,45 @@ class TeamarrPreflightService:
         )
         return f"team:{team_id}:{event_date or 'no-window'}:{channel_ref}"
 
+    @staticmethod
+    def _normalize_team_window_text(value: Any) -> str:
+        text = re.sub(r"[\._-]+", " ", str(value or ""))
+        return re.sub(r"\s+", " ", text).strip().casefold()
+
+    @staticmethod
+    def _static_team_live_window_has_event_evidence(
+        team: Dict[str, Any],
+        next_live_window: Dict[str, Any],
+    ) -> bool:
+        if not next_live_window.get("found"):
+            return False
+        if not next_live_window.get("start"):
+            return False
+        if next_live_window.get("is_live") is not True:
+            return False
+
+        title = TeamarrPreflightService._normalize_team_window_text(next_live_window.get("title"))
+        sub_title = TeamarrPreflightService._normalize_team_window_text(next_live_window.get("sub_title"))
+        raw_title = str(next_live_window.get("title") or "")
+        raw_sub_title = str(next_live_window.get("sub_title") or "")
+        if STATIC_TEAM_NON_EVENT_WINDOW_RE.search(raw_title) or STATIC_TEAM_NON_EVENT_WINDOW_RE.search(raw_sub_title):
+            return False
+
+        text_values = [value for value in (title, sub_title) if value]
+        if not text_values:
+            return False
+
+        team_terms = {
+            TeamarrPreflightService._normalize_team_window_text(team.get("team_name")),
+            TeamarrPreflightService._normalize_team_window_text(team.get("team_abbrev")),
+            TeamarrPreflightService._normalize_team_window_text(team.get("channel_id")),
+        }
+        team_terms = {value for value in team_terms if value}
+        if text_values and all(value in team_terms for value in text_values):
+            return False
+
+        return bool(STATIC_TEAM_MATCHUP_RE.search(" ".join(text_values)))
+
     def _public_team(self, status: Dict[str, Any], now: datetime) -> Optional[Dict[str, Any]]:
         team = status.get("team") if isinstance(status.get("team"), dict) else {}
         if not team:
@@ -1308,6 +1363,10 @@ class TeamarrPreflightService:
             "seconds_to_start": seconds_to_start,
             "team_status": status.get("status") or "incomplete",
             "missing": list(status.get("missing") or []),
+            "live_window_event_evidence": self._static_team_live_window_has_event_evidence(
+                team,
+                next_live_window,
+            ),
             "next_live_window": {
                 key: value
                 for key, value in next_live_window.items()
@@ -1338,6 +1397,7 @@ class TeamarrPreflightService:
             "sport": event.get("sport"),
             "league": event.get("league"),
             "team_status": event.get("team_status"),
+            "live_window_event_evidence": event.get("live_window_event_evidence"),
             "state": state or event.get("state"),
             "trigger_bucket": bucket if bucket is not None else event.get("trigger_bucket"),
             "may_start_full_run": False,
