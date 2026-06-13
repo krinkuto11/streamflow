@@ -514,11 +514,8 @@ export default function StreamChecker() {
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
-              <Badge
-                variant={progressStale ? "secondary" : (isChecking ? "default" : "secondary")}
-                className={progressStale ? "border border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900/70 dark:bg-sky-950/25 dark:text-sky-200" : undefined}
-              >
-                {progressStale ? "Idle (Previous Progress)" : (isChecking ? "Active" : "Idle")}
+              <Badge variant={isChecking ? "default" : "secondary"}>
+                {isChecking ? "Active" : "Idle"}
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
@@ -578,19 +575,23 @@ export default function StreamChecker() {
       )}
 
       {progressStale && (
-        <Alert
-          className="min-w-0 w-full overflow-hidden border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-100"
+        <div
+          className="min-w-0 w-full overflow-hidden rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground"
           style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
         >
-          <Info className="h-4 w-4 text-sky-700 dark:text-sky-200" />
-          <AlertTitle className="min-w-0 max-w-[calc(100%-1.75rem)] break-words">Idle, Previous Progress Hidden</AlertTitle>
-          <AlertDescription className="min-w-0 max-w-[calc(100%-1.75rem)] whitespace-normal [overflow-wrap:anywhere]">
-            The last progress update belongs to an inactive checker run. The checker is idle and new runs can start.
-            {Number.isFinite(Number(progressStaleAge)) && (
-              <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
-            )}
-          </AlertDescription>
-        </Alert>
+          <div className="flex min-w-0 items-start gap-2">
+            <Info className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" />
+            <div className="min-w-0 space-y-1">
+              <p className="min-w-0 max-w-full break-words font-medium text-foreground">Previous progress hidden</p>
+              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+                The last progress update belongs to an inactive checker run. The checker is idle and new runs can start.
+                {Number.isFinite(Number(progressStaleAge)) && (
+                  <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
       )}
 
       {externalStaleDisplay && (
