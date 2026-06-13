@@ -17,7 +17,13 @@ import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js
 import { formatDuration } from '@/lib/time-format.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
-import { getParallelProgressBadgeText, getProfileSlotDisplay, getProfileSlotMatrixRows, getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
+import {
+  getParallelProgressBadgeText,
+  getProfileSlotDisplay,
+  getProfileSlotMatrixRows,
+  getProviderCapacityExplanationDisplay,
+  getProviderWaitReasonDisplay,
+} from '@/lib/provider-progress-display.js'
 import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
   Activity,
@@ -708,6 +714,7 @@ export default function StreamChecker() {
                       const finishedPercent = provider.total > 0 ? Math.round((provider.finished / provider.total) * 100) : 0
                       const waitReason = getProviderWaitReasonDisplay(provider)
                       const profileSlots = (provider.profile_slots || []).map(getProfileSlotDisplay)
+                      const capacityExplanation = getProviderCapacityExplanationDisplay(provider)
                       return (
                         <div key={provider.account_id ?? provider.name} className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 px-3 py-2 text-sm">
                           <div className="min-w-0">
@@ -757,6 +764,17 @@ export default function StreamChecker() {
                                   <span className="rounded border px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
                                     +{profileSlots.length - 5}
                                   </span>
+                                )}
+                              </div>
+                            )}
+                            {capacityExplanation && (
+                              <div
+                                className="mt-1 max-w-full text-[10px] leading-snug text-muted-foreground"
+                                title={capacityExplanation.title}
+                              >
+                                <span className="font-medium text-foreground/80">{capacityExplanation.text}</span>
+                                {capacityExplanation.detail && (
+                                  <span className="ml-1">{capacityExplanation.detail}</span>
                                 )}
                               </div>
                             )}

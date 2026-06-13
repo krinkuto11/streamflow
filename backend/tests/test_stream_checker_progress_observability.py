@@ -105,6 +105,36 @@ def test_progress_update_builds_provider_progress_counters():
     }
     assert provider_a['dominant_wait_reason'] == 'active_viewers'
     assert provider_a['account_id'] == 5
+    assert provider_a['capacity_explanation'] == {
+        'state': 'viewer_protected',
+        'message': 'Real viewer capacity is protected before StreamFlow probes use the slot.',
+        'operator_action': 'wait_for_viewer_capacity',
+        'primary_reason': 'active_viewers',
+        'wait_reason_counts': {
+            'active_viewers': 1,
+            'checking_capacity': 1,
+            'viewer_preempted': 1,
+        },
+        'capacity_sources': [
+            'real_viewers',
+            'provider_profile',
+            'streamflow_workers',
+            'profile_limit',
+        ],
+        'has_free_profile_slot': True,
+        'has_full_profile_slot': True,
+        'has_real_viewer_usage': True,
+        'has_streamflow_worker_usage': True,
+        'profile_slot_summary': {
+            'total': 2,
+            'limited': 2,
+            'unlimited': 0,
+            'full': 1,
+            'open': 1,
+            'with_real_viewers': 0,
+            'with_streamflow_workers': 1,
+        },
+    }
     assert provider_a['profile_slots'] == [
         {
             'id': 50,
@@ -145,6 +175,11 @@ def test_progress_update_builds_provider_progress_counters():
         'completed_streams': 1,
         'skipped_streams': 2,
         'failed_streams': 1,
+        'profile_slots_total': 2,
+        'profile_slots_full': 1,
+        'profile_slots_open': 1,
+        'profile_slots_with_real_viewers': 0,
+        'profile_slots_with_streamflow_workers': 1,
     }
 
 
@@ -181,3 +216,84 @@ def test_progress_update_persists_run_quality_and_capacity_context():
     assert saved['quality_profile_source'] == 'forced'
     assert saved['capacity_profile_name'] == 'Provider account profiles'
     assert saved['capacity_profile_source'] == 'm3u_account_profiles'
+
+
+def test_capacity_explanation_marks_viewer_preemption_as_retry_later():
+    explanation = StreamCheckerProgress._build_capacity_explanation(
+        {
+            'checking': 0,
+            'waiting': 0,
+            'skipped': 1,
+        },
+        dominant_wait_reason='viewer_preempted',
+        profile_slots=[
+            {
+                'id': 10,
+                'name': 'Main',
+                'limit': 1,
+                'unlimited': False,
+                'active_viewers': 1,
+                'checking': 0,
+                'used': 1,
+                'available': 0,
+                'full': True,
+            },
+            {
+                'id': 11,
+                'name': 'Backup',
+                'limit': 2,
+                'unlimited': False,
+                'active_viewers': 0,
+                'checking': 0,
+                'used': 0,
+                'available': 2,
+                'full': False,
+            },
+        ],
+    )
+
+    assert explanation['state'] == 'viewer_preempted'
+    assert explanation['operator_action'] == 'retry_later'
+    assert explanation['capacity_sources'] == [
+        'real_viewers',
+        'provider_profile',
+        'profile_limit',
+    ]
+    assert explanation['has_free_profile_slot'] is True
+    assert explanation['has_real_viewer_usage'] is True
+    assert explanation['profile_slot_summary'] == {
+        'total': 2,
+        'limited': 2,
+        'unlimited': 0,
+        'full': 1,
+        'open': 1,
+        'with_real_viewers': 1,
+        'with_streamflow_workers': 0,
+    }
+
+
+def test_capacity_explanation_marks_provider_account_timeout_without_profile_slots():
+    explanation = StreamCheckerProgress._build_capacity_explanation(
+        {
+            'checking': 0,
+            'waiting': 0,
+            'skipped': 1,
+        },
+        dominant_wait_reason='provider_capacity',
+    )
+
+    assert explanation['state'] == 'capacity_timeout'
+    assert explanation['message'] == 'Provider account capacity did not free up before the wait timeout.'
+    assert explanation['operator_action'] == 'review_capacity_or_retry'
+    assert explanation['capacity_sources'] == ['provider_account']
+    assert explanation['has_free_profile_slot'] is False
+    assert explanation['has_full_profile_slot'] is False
+    assert explanation['profile_slot_summary'] == {
+        'total': 0,
+        'limited': 0,
+        'unlimited': 0,
+        'full': 0,
+        'open': 0,
+        'with_real_viewers': 0,
+        'with_streamflow_workers': 0,
+    }

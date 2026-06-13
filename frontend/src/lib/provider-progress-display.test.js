@@ -5,6 +5,7 @@ import {
   getParallelProgressBadgeText,
   getProfileSlotDisplay,
   getProfileSlotMatrixRows,
+  getProviderCapacityExplanationDisplay,
   getProviderWaitReasonDisplay,
 } from './provider-progress-display'
 
@@ -118,6 +119,51 @@ describe('getProviderWaitReasonDisplay', () => {
         status: 'Available',
       }),
     ])
+  })
+
+  it('formats provider capacity explanations with source and action details', () => {
+    expect(getProviderCapacityExplanationDisplay({
+      capacity_explanation: {
+        state: 'viewer_protected',
+        message: 'Real viewer capacity is protected before StreamFlow probes use the slot.',
+        operator_action: 'wait_for_viewer_capacity',
+        primary_reason: 'active_viewers',
+        capacity_sources: ['real_viewers', 'provider_profile', 'streamflow_workers'],
+        profile_slot_summary: {
+          full: 1,
+          open: 1,
+          with_real_viewers: 1,
+          with_streamflow_workers: 1,
+        },
+      },
+    })).toEqual({
+      state: 'viewer_protected',
+      text: 'Real viewer capacity is protected before StreamFlow probes use the slot.',
+      detail: 'Sources: Real viewers, Provider profile, StreamFlow probes | Wait for viewer capacity | Slots: 1 full, 1 open, 1 viewer, 1 probing',
+      title: 'Reason: active_viewers | Sources: Real viewers, Provider profile, StreamFlow probes | Wait for viewer capacity | Slots: 1 full, 1 open, 1 viewer, 1 probing',
+      sources: ['Real viewers', 'Provider profile', 'StreamFlow probes'],
+      action: 'Wait for viewer capacity',
+      slotParts: ['1 full', '1 open', '1 viewer', '1 probing'],
+    })
+  })
+
+  it('returns null for missing capacity explanations', () => {
+    expect(getProviderCapacityExplanationDisplay({})).toBeNull()
+  })
+
+  it('does not render idle capacity explanations without active pressure', () => {
+    expect(getProviderCapacityExplanationDisplay({
+      checking: 0,
+      waiting: 0,
+      skipped: 0,
+      capacity_explanation: {
+        state: 'idle',
+        message: 'No provider capacity wait is active.',
+        operator_action: 'none',
+        capacity_sources: [],
+        profile_slot_summary: {},
+      },
+    })).toBeNull()
   })
 
   it('does not render a zero-worker parallel badge while active checks are visible', () => {

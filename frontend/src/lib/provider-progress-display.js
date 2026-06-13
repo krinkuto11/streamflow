@@ -9,6 +9,24 @@ const WAIT_REASON_LABELS = {
   viewer_preempted: 'Viewer needed slot',
 }
 
+const CAPACITY_SOURCE_LABELS = {
+  global_worker: 'Global workers',
+  profile_limit: 'Profile limit',
+  provider_account: 'Provider account',
+  provider_profile: 'Provider profile',
+  real_viewers: 'Real viewers',
+  streamflow_workers: 'StreamFlow probes',
+}
+
+const OPERATOR_ACTION_LABELS = {
+  none: null,
+  retry_later: 'Retry later',
+  review_capacity_or_retry: 'Review capacity or retry',
+  wait_for_slot: 'Wait for slot',
+  wait_for_viewer_capacity: 'Wait for viewer capacity',
+  watch_progress: 'Watch progress',
+}
+
 const titleizeCode = (code) => {
   if (!code) return ''
   return String(code)
@@ -28,6 +46,62 @@ export function getProviderWaitReasonDisplay(provider = {}) {
     code,
     text: `${label}${suffix}`,
     title: count ? `${code}: ${count}` : code,
+  }
+}
+
+export function getProviderCapacityExplanationDisplay(provider = {}) {
+  const explanation = provider.capacity_explanation || {}
+  if (!explanation || Object.keys(explanation).length === 0) return null
+  if (
+    ['idle', 'available'].includes(explanation.state) &&
+    !explanation.primary_reason &&
+    Number(provider.waiting || 0) <= 0 &&
+    Number(provider.skipped || 0) <= 0 &&
+    Number(provider.checking || 0) <= 0
+  ) {
+    return null
+  }
+
+  const sources = (explanation.capacity_sources || [])
+    .map(source => CAPACITY_SOURCE_LABELS[source] || titleizeCode(source))
+    .filter(Boolean)
+  const action = OPERATOR_ACTION_LABELS[explanation.operator_action] || null
+  const slotSummary = explanation.profile_slot_summary || {}
+  const slotParts = []
+
+  if (Number(slotSummary.full || 0) > 0) {
+    slotParts.push(`${slotSummary.full} full`)
+  }
+  if (Number(slotSummary.open || 0) > 0) {
+    slotParts.push(`${slotSummary.open} open`)
+  }
+  if (Number(slotSummary.with_real_viewers || 0) > 0) {
+    slotParts.push(`${slotSummary.with_real_viewers} viewer`)
+  }
+  if (Number(slotSummary.with_streamflow_workers || 0) > 0) {
+    slotParts.push(`${slotSummary.with_streamflow_workers} probing`)
+  }
+
+  const message = explanation.message || ''
+  const detailParts = [
+    sources.length > 0 ? `Sources: ${sources.join(', ')}` : null,
+    action,
+    slotParts.length > 0 ? `Slots: ${slotParts.join(', ')}` : null,
+  ].filter(Boolean)
+
+  if (!message && detailParts.length === 0) return null
+
+  return {
+    state: explanation.state || 'idle',
+    text: message || detailParts[0],
+    detail: detailParts.join(' | '),
+    title: [
+      explanation.primary_reason ? `Reason: ${explanation.primary_reason}` : null,
+      ...detailParts,
+    ].filter(Boolean).join(' | '),
+    sources,
+    action,
+    slotParts,
   }
 }
 
