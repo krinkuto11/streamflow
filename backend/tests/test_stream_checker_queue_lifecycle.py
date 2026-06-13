@@ -572,6 +572,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             program_name='Home vs Away',
             is_epg_scheduled=True,
             forced_profile_id='42',
+            run_mode='teamarr_preflight',
         )
         teamarr_service.record_queued_check_result.assert_called_once()
         queued_metadata, result = teamarr_service.record_queued_check_result.call_args.args
@@ -735,6 +736,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             is_epg_scheduled=True,
             forced_profile_id='42',
             provider_limit_override=True,
+            run_mode='teamarr_preflight',
         )
         service.check_queue.mark_completed.assert_called_once_with(8441)
 

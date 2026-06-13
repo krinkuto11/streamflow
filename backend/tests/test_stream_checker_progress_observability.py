@@ -124,7 +124,10 @@ def test_progress_update_builds_provider_progress_counters():
         'has_free_profile_slot': True,
         'has_full_profile_slot': True,
         'has_real_viewer_usage': True,
+        'has_shadow_watcher_usage': False,
         'has_streamflow_worker_usage': True,
+        'has_teamarr_preflight_usage': False,
+        'has_quality_check_usage': False,
         'profile_slot_summary': {
             'total': 2,
             'limited': 2,
@@ -132,7 +135,10 @@ def test_progress_update_builds_provider_progress_counters():
             'full': 1,
             'open': 1,
             'with_real_viewers': 0,
+            'with_shadow_watchers': 0,
             'with_streamflow_workers': 1,
+            'with_teamarr_preflight': 0,
+            'with_quality_checks': 0,
         },
     }
     assert provider_a['profile_slots'] == [
@@ -179,7 +185,10 @@ def test_progress_update_builds_provider_progress_counters():
         'profile_slots_full': 1,
         'profile_slots_open': 1,
         'profile_slots_with_real_viewers': 0,
+        'profile_slots_with_shadow_watchers': 0,
         'profile_slots_with_streamflow_workers': 1,
+        'profile_slots_with_teamarr_preflight': 0,
+        'profile_slots_with_quality_checks': 0,
     }
 
 
@@ -268,7 +277,10 @@ def test_capacity_explanation_marks_viewer_preemption_as_retry_later():
         'full': 1,
         'open': 1,
         'with_real_viewers': 1,
+        'with_shadow_watchers': 0,
         'with_streamflow_workers': 0,
+        'with_teamarr_preflight': 0,
+        'with_quality_checks': 0,
     }
 
 
@@ -295,5 +307,100 @@ def test_capacity_explanation_marks_provider_account_timeout_without_profile_slo
         'full': 0,
         'open': 0,
         'with_real_viewers': 0,
+        'with_shadow_watchers': 0,
         'with_streamflow_workers': 0,
+        'with_teamarr_preflight': 0,
+        'with_quality_checks': 0,
     }
+
+
+def test_capacity_explanation_keeps_shadow_watcher_out_of_real_viewers():
+    explanation = StreamCheckerProgress._build_capacity_explanation(
+        {
+            'checking': 0,
+            'waiting': 1,
+            'skipped': 0,
+        },
+        dominant_wait_reason='shadow_watchers',
+        profile_slots=[
+            {
+                'id': 10,
+                'name': 'Shadow Only',
+                'limit': 1,
+                'unlimited': False,
+                'active_viewers': 1,
+                'real_viewers': 0,
+                'shadow_watchers': 1,
+                'checking': 0,
+                'used': 1,
+                'available': 0,
+                'full': True,
+            },
+        ],
+    )
+
+    assert explanation['state'] == 'shadow_watcher_capacity'
+    assert explanation['operator_action'] == 'wait_for_shadow_watcher'
+    assert explanation['capacity_sources'] == [
+        'shadow_watchers',
+        'provider_profile',
+        'profile_limit',
+    ]
+    assert explanation['has_real_viewer_usage'] is False
+    assert explanation['has_shadow_watcher_usage'] is True
+    assert explanation['profile_slot_summary']['with_real_viewers'] == 0
+    assert explanation['profile_slot_summary']['with_shadow_watchers'] == 1
+
+
+def test_capacity_explanation_surfaces_teamarr_and_quality_slot_context():
+    explanation = StreamCheckerProgress._build_capacity_explanation(
+        {
+            'checking': 2,
+            'waiting': 0,
+            'skipped': 0,
+        },
+        dominant_wait_reason='checking_capacity',
+        profile_slots=[
+            {
+                'id': 20,
+                'name': 'Teamarr',
+                'limit': 1,
+                'unlimited': False,
+                'active_viewers': 0,
+                'real_viewers': 0,
+                'shadow_watchers': 0,
+                'checking': 1,
+                'teamarr_preflight': 1,
+                'used': 1,
+                'available': 0,
+                'full': True,
+            },
+            {
+                'id': 21,
+                'name': 'Quality',
+                'limit': 1,
+                'unlimited': False,
+                'active_viewers': 0,
+                'real_viewers': 0,
+                'shadow_watchers': 0,
+                'checking': 1,
+                'quality_checks': 1,
+                'used': 1,
+                'available': 0,
+                'full': True,
+            },
+        ],
+    )
+
+    assert explanation['has_teamarr_preflight_usage'] is True
+    assert explanation['has_quality_check_usage'] is True
+    assert explanation['capacity_sources'] == [
+        'streamflow_workers',
+        'provider_profile',
+        'teamarr_preflight',
+        'quality_checks',
+        'profile_limit',
+    ]
+    assert explanation['profile_slot_summary']['with_streamflow_workers'] == 2
+    assert explanation['profile_slot_summary']['with_teamarr_preflight'] == 1
+    assert explanation['profile_slot_summary']['with_quality_checks'] == 1

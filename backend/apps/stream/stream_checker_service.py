@@ -553,6 +553,8 @@ class StreamCheckerService:
             'is_epg_scheduled': bool(queue_metadata.get('is_epg_scheduled')),
             'forced_profile_id': forced_profile_id,
         }
+        if queue_metadata.get('source') == 'teamarr_preflight':
+            single_check_kwargs['run_mode'] = 'teamarr_preflight'
         if queue_metadata.get('provider_limit_override'):
             single_check_kwargs['provider_limit_override'] = True
 
@@ -2416,10 +2418,23 @@ class StreamCheckerService:
 
             def build_provider_profile_slots():
                 snapshots = {}
+                run_mode_name = str(profile_progress_context.get('run_mode') or '').lower()
+                checking_context_key = (
+                    'teamarr_preflight'
+                    if run_mode_name == 'teamarr_preflight'
+                    else 'quality_checks'
+                )
                 limiter = get_account_limiter()
                 for account_id in profile_slot_account_ids:
                     try:
                         slots = limiter.get_profile_slot_snapshot(account_id)
+                        for slot in slots:
+                            try:
+                                checking_count = int(slot.get('checking') or 0)
+                            except (TypeError, ValueError):
+                                checking_count = 0
+                            if checking_count > 0 and checking_context_key not in slot:
+                                slot[checking_context_key] = checking_count
                     except Exception as exc:
                         logger.debug(
                             "Could not build profile slot snapshot for account %s: %s",
@@ -2459,6 +2474,7 @@ class StreamCheckerService:
                         streams_detail=list(stream_statuses.values()),
                         stream_duration=analysis_params.get('ffmpeg_duration', 30),
                         provider_profile_slots=build_provider_profile_slots(),
+                        **profile_progress_context,
                     )
             
             def progress_callback(completed, total, result):
@@ -2542,6 +2558,7 @@ class StreamCheckerService:
                     streams_detail=list(stream_statuses.values()),
                     stream_duration=analysis_params.get('ffmpeg_duration', 30),
                     provider_profile_slots=build_provider_profile_slots(),
+                    **profile_progress_context,
                 )
 
             def defer_callback(stream, reason):
@@ -2564,6 +2581,7 @@ class StreamCheckerService:
                         streams_detail=list(stream_statuses.values()),
                         stream_duration=analysis_params.get('ffmpeg_duration', 30),
                         provider_profile_slots=build_provider_profile_slots(),
+                        **profile_progress_context,
                     )
             
             if streams_to_check:
@@ -2576,7 +2594,8 @@ class StreamCheckerService:
                     total=total_streams,
                     status='analyzing',
                     step='Analyzing streams with account limits',
-                    step_detail=f'Using smart scheduler with per-account limits'
+                    step_detail=f'Using smart scheduler with per-account limits',
+                    **profile_progress_context,
                 )
 
                 # Heartbeat thread: pushes current stream_statuses to the frontend
@@ -2599,6 +2618,7 @@ class StreamCheckerService:
                                 streams_detail=list(stream_statuses.values()),
                                 stream_duration=analysis_params.get('ffmpeg_duration', 30),
                                 provider_profile_slots=build_provider_profile_slots(),
+                                **profile_progress_context,
                             )
                         except Exception:
                             pass  # never let the heartbeat crash the check
@@ -5736,6 +5756,7 @@ class StreamCheckerService:
         forced_profile_id: Optional[str] = None,
         force_check: bool = False,
         provider_limit_override: bool = False,
+        run_mode: Optional[str] = None,
     ) -> Dict:
         """Check a single channel immediately and return results.
         
@@ -5763,6 +5784,7 @@ class StreamCheckerService:
             force_check: If True, bypass stream-check immunity and re-analyze all streams
             provider_limit_override: If True, bypass provider/profile capacity
                 skips while still protecting active viewers.
+            run_mode: Optional progress context label for specialized callers.
             
         Returns:
             Dict with check results and statistics
@@ -5908,7 +5930,7 @@ class StreamCheckerService:
                 profile,
                 forced_profile_id=_effective_profile_id_for_context if forced_profile_id else None,
             )
-            profile_progress_context['run_mode'] = 'single_channel_check'
+            profile_progress_context['run_mode'] = run_mode or 'single_channel_check'
             m3u_refresh_scope = "disabled"
             m3u_refresh_account_ids: List[int] = []
 

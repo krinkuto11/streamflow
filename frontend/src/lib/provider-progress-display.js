@@ -6,6 +6,8 @@ const WAIT_REASON_LABELS = {
   max_streams_reached: 'Provider limit',
   active_viewers: 'Viewer slots',
   quota_consumed_by_active_viewers: 'Viewer slots',
+  shadow_watchers: 'Shadow watcher',
+  shadow_watcher_capacity: 'Shadow watcher',
   viewer_preempted: 'Viewer needed slot',
 }
 
@@ -14,14 +16,18 @@ const CAPACITY_SOURCE_LABELS = {
   profile_limit: 'Profile limit',
   provider_account: 'Provider account',
   provider_profile: 'Provider profile',
+  quality_checks: 'Quality checks',
   real_viewers: 'Real viewers',
+  shadow_watchers: 'Shadow watchers',
   streamflow_workers: 'StreamFlow probes',
+  teamarr_preflight: 'Teamarr Preflight',
 }
 
 const OPERATOR_ACTION_LABELS = {
   none: null,
   retry_later: 'Retry later',
   review_capacity_or_retry: 'Review capacity or retry',
+  wait_for_shadow_watcher: 'Wait for Shadow watcher',
   wait_for_slot: 'Wait for slot',
   wait_for_viewer_capacity: 'Wait for viewer capacity',
   watch_progress: 'Watch progress',
@@ -78,8 +84,27 @@ export function getProviderCapacityExplanationDisplay(provider = {}) {
   if (Number(slotSummary.with_real_viewers || 0) > 0) {
     slotParts.push(`${slotSummary.with_real_viewers} viewer`)
   }
-  if (Number(slotSummary.with_streamflow_workers || 0) > 0) {
-    slotParts.push(`${slotSummary.with_streamflow_workers} probing`)
+  if (Number(slotSummary.with_shadow_watchers || 0) > 0) {
+    slotParts.push(`${slotSummary.with_shadow_watchers} shadow`)
+  }
+  if (Number(slotSummary.with_teamarr_preflight || 0) > 0) {
+    slotParts.push(`${slotSummary.with_teamarr_preflight} preflight`)
+  }
+  if (Number(slotSummary.with_quality_checks || 0) > 0) {
+    slotParts.push(`${slotSummary.with_quality_checks} quality`)
+  }
+  const streamflowWorkerSlots = Number(slotSummary.with_streamflow_workers || 0)
+  const categorizedCheckingSlots = Math.min(
+    streamflowWorkerSlots,
+    Number(slotSummary.with_teamarr_preflight || 0) +
+      Number(slotSummary.with_quality_checks || 0),
+  )
+  const genericCheckingSlots = Math.max(
+    0,
+    streamflowWorkerSlots - categorizedCheckingSlots,
+  )
+  if (genericCheckingSlots > 0) {
+    slotParts.push(`${genericCheckingSlots} probing`)
   }
 
   const message = explanation.message || ''
@@ -109,7 +134,17 @@ export function getProfileSlotDisplay(slot = {}) {
   const name = slot.name || (slot.id != null ? `Profile ${slot.id}` : 'Profile')
   const idText = slot.id != null ? `ID ${slot.id}` : null
   const activeViewers = Number(slot.active_viewers || 0)
+  const hasExplicitViewerContext = (
+    Object.prototype.hasOwnProperty.call(slot, 'real_viewers') ||
+    Object.prototype.hasOwnProperty.call(slot, 'shadow_watchers')
+  )
+  const realViewers = hasExplicitViewerContext
+    ? Number(slot.real_viewers || 0)
+    : activeViewers
+  const shadowWatchers = Number(slot.shadow_watchers || 0)
   const checking = Number(slot.checking || 0)
+  const teamarrPreflight = Number(slot.teamarr_preflight || 0)
+  const qualityChecks = Number(slot.quality_checks ?? slot.quality_checking ?? 0)
   const used = Number(slot.used ?? (activeViewers + checking))
   const unlimited = Boolean(slot.unlimited)
   const limit = Number(slot.limit || 0)
@@ -122,22 +157,43 @@ export function getProfileSlotDisplay(slot = {}) {
     : `${availableValue} free`
   const status = slot.full
     ? 'Full'
-    : checking > 0
-      ? 'Checking'
-      : activeViewers > 0
-        ? 'Viewer active'
-        : 'Available'
+    : teamarrPreflight > 0
+      ? 'Teamarr Preflight'
+      : qualityChecks > 0
+        ? 'Quality check'
+        : checking > 0
+          ? 'Checking'
+          : realViewers > 0
+            ? 'Viewer active'
+            : shadowWatchers > 0
+              ? 'Shadow watcher'
+              : 'Available'
+  const viewerTitle = hasExplicitViewerContext
+    ? `${realViewers} real viewer`
+    : `${activeViewers} viewer`
+  const contextParts = [
+    viewerTitle,
+    shadowWatchers > 0 ? `${shadowWatchers} shadow watcher` : null,
+    teamarrPreflight > 0 ? `${teamarrPreflight} Teamarr preflight` : null,
+    qualityChecks > 0 ? `${qualityChecks} quality check` : null,
+    `${checking} checking`,
+    freeText,
+  ]
 
   return {
     id: slot.id,
     name,
     text: `${name}: ${capacityText}`,
-    title: [name, idText, `${activeViewers} viewer`, `${checking} checking`, freeText]
+    title: [name, idText, ...contextParts]
       .filter(Boolean)
       .join(', '),
     full: Boolean(slot.full),
     checking,
     activeViewers,
+    realViewers,
+    shadowWatchers,
+    teamarrPreflight,
+    qualityChecks,
     used,
     limit,
     available: availableValue,

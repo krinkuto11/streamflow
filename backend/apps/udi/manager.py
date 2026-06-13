@@ -57,6 +57,16 @@ UDI_INTEGRITY_THRESHOLD = 0.9
 # the cached state and Dispatcharr, refresh_delta() falls back to refresh_all().
 # 20 % covers large M3U imports while still catching single-item add/delete quickly.
 UDI_DELTA_FALLBACK_THRESHOLD = 0.20
+SHADOW_MONITOR_DEFAULT_USER_AGENT = 'StreamFlow-Shadow-Blank-Monitor/1.0'
+SHADOW_MONITOR_CONFIG_FILE = Path(os.environ.get("CONFIG_DIR", "/app/data")) / "shadow_blank_monitor_config.json"
+
+
+def _safe_positive_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
 
 
 def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
@@ -1758,6 +1768,78 @@ class UDIManager:
             return True
             
         return False
+
+    @staticmethod
+    def _client_text(client: Any) -> str:
+        if isinstance(client, dict):
+            values = [
+                client.get("user_agent"),
+                client.get("client_id"),
+                client.get("username"),
+                client.get("user"),
+                client.get("ip"),
+            ]
+            return " ".join(str(value) for value in values if value is not None)
+        return str(client)
+
+    @staticmethod
+    def _clients_from_status(status: Dict[str, Any]) -> Optional[List[Any]]:
+        clients = status.get("clients") if isinstance(status, dict) else None
+        if isinstance(clients, dict):
+            return list(clients.values())
+        if isinstance(clients, list):
+            return clients
+        return None
+
+    def _shadow_watcher_user_agent(self) -> str:
+        """Return the configured Shadow watcher marker without importing stream services."""
+        try:
+            if SHADOW_MONITOR_CONFIG_FILE.exists():
+                with open(SHADOW_MONITOR_CONFIG_FILE, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                marker = str(payload.get("watcher_user_agent") or "").strip()
+                if marker:
+                    return marker
+        except Exception as exc:
+            logger.debug("Could not read Shadow watcher user-agent config: %s", exc)
+        return SHADOW_MONITOR_DEFAULT_USER_AGENT
+
+    def _split_status_profile_usage(self, status: Dict[str, Any], watcher_marker: str) -> Dict[str, int]:
+        """Split a proxy status into capacity slots, real viewers, and Shadow watchers."""
+        clients = self._clients_from_status(status)
+        marker = str(watcher_marker or "").lower().strip()
+
+        if clients is None:
+            active_streams = 1 if self._is_channel_status_active(status) else 0
+            real_viewers = 0
+            for key in ("real_client_count", "client_count", "current_viewers", "viewer_count"):
+                count = _safe_positive_int(status.get(key))
+                if count > 0:
+                    real_viewers = count
+                    break
+            if real_viewers == 0 and active_streams:
+                real_viewers = 1
+            return {
+                "active_streams": active_streams,
+                "real_viewers": real_viewers,
+                "shadow_watchers": 0,
+            }
+
+        real_viewers = 0
+        shadow_watchers = 0
+        for client in clients:
+            text = self._client_text(client).lower()
+            if marker and marker in text:
+                shadow_watchers += 1
+            else:
+                real_viewers += 1
+
+        total_clients = real_viewers + shadow_watchers
+        return {
+            "active_streams": 1 if total_clients > 0 else 0,
+            "real_viewers": real_viewers,
+            "shadow_watchers": shadow_watchers,
+        }
     
     def _get_proxy_status(self, force_refresh: bool = False) -> Dict[str, Any]:
         """Get cached proxy status or fetch fresh if needed.
@@ -1875,10 +1957,15 @@ class UDIManager:
             logger.warning(f"Profile {profile_id} not found in any M3U account")
             return 0
         
-        profile_counts = self.get_active_streams_count_per_profile(account_id)
-        active_count = profile_counts.get(profile_id, 0)
+        profile_counts = self.get_active_stream_context_per_profile(account_id)
+        usage = profile_counts.get(profile_id, {})
+        active_count = (
+            usage.get('active_streams', 0)
+            if isinstance(usage, dict)
+            else usage
+        )
         logger.debug(f"Profile {profile_id} has {active_count} active streams")
-        return active_count
+        return _safe_positive_int(active_count)
     
     def get_active_streams_for_account(self, account_id: int) -> int:
         """Calculate the number of active streams for an M3U account.
@@ -2084,22 +2171,27 @@ class UDIManager:
         logger.debug(f"Account {account_id} has {total_viewers} total viewers")
         return total_viewers
     
-    def get_active_streams_count_per_profile(self, account_id: int) -> Dict[int, int]:
-        """Get the count of active streams for each profile in an account.
+    def get_active_stream_context_per_profile(self, account_id: int) -> Dict[int, Dict[str, int]]:
+        """Get active profile capacity context for an account.
+
+        ``active_streams`` preserves the historical slot-count semantics used
+        for profile capacity. ``real_viewers`` and ``shadow_watchers`` split the
+        downstream client context when Dispatcharr exposes client details.
         
         Args:
             account_id: M3U account ID
             
         Returns:
-            Dictionary mapping profile_id to active stream count
+            Dictionary mapping profile_id to active stream context
         """
         self._ensure_initialized()
         
         # Get real-time proxy status
         proxy_status = self._get_proxy_status()
+        watcher_marker = self._shadow_watcher_user_agent()
         
         # Count active streams per profile
-        profile_counts: Dict[int, int] = {}
+        profile_counts: Dict[int, Dict[str, int]] = {}
         
         for channel_id_str, status in proxy_status.items():
             if not self._is_channel_status_active(status):
@@ -2109,17 +2201,48 @@ class UDIManager:
             profile_id = status.get('m3u_profile_id')
             if not profile_id:
                 continue
+            try:
+                profile_id = int(profile_id)
+            except (TypeError, ValueError):
+                continue
             
             # Find which account owns this profile
             profile_account_id = self._find_account_for_profile(profile_id)
             if profile_account_id != account_id:
                 continue
-            
-            # Increment count for this profile
-            profile_counts[profile_id] = profile_counts.get(profile_id, 0) + 1
+
+            usage = self._split_status_profile_usage(status, watcher_marker)
+            if usage.get("active_streams", 0) <= 0:
+                continue
+
+            current = profile_counts.setdefault(
+                profile_id,
+                {
+                    "active_streams": 0,
+                    "real_viewers": 0,
+                    "shadow_watchers": 0,
+                },
+            )
+            current["active_streams"] += usage.get("active_streams", 0)
+            current["real_viewers"] += usage.get("real_viewers", 0)
+            current["shadow_watchers"] += usage.get("shadow_watchers", 0)
         
         logger.debug(f"Account {account_id} profile usage: {profile_counts}")
         return profile_counts
+
+    def get_active_streams_count_per_profile(self, account_id: int) -> Dict[int, int]:
+        """Get the count of active streams for each profile in an account.
+
+        Kept as the legacy integer API for callers that only need capacity slot
+        counts. Use ``get_active_stream_context_per_profile`` when client class
+        context matters.
+        """
+        profile_context = self.get_active_stream_context_per_profile(account_id)
+        return {
+            profile_id: _safe_positive_int(context.get("active_streams", 0))
+            for profile_id, context in profile_context.items()
+            if isinstance(context, dict)
+        }
     
     def find_available_profile_for_stream(self, stream: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Find an available profile that can serve this stream.

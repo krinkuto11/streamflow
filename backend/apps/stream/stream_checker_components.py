@@ -1208,7 +1208,10 @@ class StreamCheckerProgress:
             'profile_slots_full': sum(item.get('full', 0) for item in capacity_summaries),
             'profile_slots_open': sum(item.get('open', 0) for item in capacity_summaries),
             'profile_slots_with_real_viewers': sum(item.get('with_real_viewers', 0) for item in capacity_summaries),
+            'profile_slots_with_shadow_watchers': sum(item.get('with_shadow_watchers', 0) for item in capacity_summaries),
             'profile_slots_with_streamflow_workers': sum(item.get('with_streamflow_workers', 0) for item in capacity_summaries),
+            'profile_slots_with_teamarr_preflight': sum(item.get('with_teamarr_preflight', 0) for item in capacity_summaries),
+            'profile_slots_with_quality_checks': sum(item.get('with_quality_checks', 0) for item in capacity_summaries),
         }
 
     @staticmethod
@@ -1221,10 +1224,39 @@ class StreamCheckerProgress:
     ) -> Dict[str, Any]:
         """Build a compact operator-facing capacity explanation without private stream data."""
         slots = profile_slots or []
+
+        def safe_count(value: Any) -> int:
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        explicit_viewer_context = any(
+            isinstance(slot, dict)
+            and ('real_viewers' in slot or 'shadow_watchers' in slot)
+            for slot in slots
+        )
+
+        def slot_real_viewer_count(slot: Dict[str, Any]) -> int:
+            if 'real_viewers' in slot or 'shadow_watchers' in slot:
+                return safe_count(slot.get('real_viewers'))
+            return safe_count(slot.get('active_viewers'))
+
         total_slots = len(slots)
         full_slots = sum(1 for slot in slots if slot.get('full'))
-        checking_slots = sum(1 for slot in slots if int(slot.get('checking') or 0) > 0)
-        real_viewer_slots = sum(1 for slot in slots if int(slot.get('active_viewers') or 0) > 0)
+        checking_slots = sum(1 for slot in slots if safe_count(slot.get('checking')) > 0)
+        real_viewer_slots = sum(
+            1
+            for slot in slots
+            if slot_real_viewer_count(slot) > 0
+        )
+        shadow_watcher_slots = sum(1 for slot in slots if safe_count(slot.get('shadow_watchers')) > 0)
+        teamarr_preflight_slots = sum(1 for slot in slots if safe_count(slot.get('teamarr_preflight')) > 0)
+        quality_check_slots = sum(
+            1
+            for slot in slots
+            if safe_count(slot.get('quality_checks', slot.get('quality_checking'))) > 0
+        )
         unlimited_slots = sum(1 for slot in slots if slot.get('unlimited'))
         open_slots = sum(
             1
@@ -1238,18 +1270,34 @@ class StreamCheckerProgress:
         account_capacity_reasons = {'provider_capacity', 'provider_capacity_unavailable', 'max_streams_reached'}
         worker_capacity_reasons = {'checking_capacity', 'global_worker_limit'}
         viewer_capacity_reasons = {'active_viewers', 'quota_consumed_by_active_viewers', 'viewer_preempted'}
-        capacity_reasons = account_capacity_reasons | worker_capacity_reasons | viewer_capacity_reasons
+        shadow_capacity_reasons = {'shadow_watchers', 'shadow_watcher_capacity'}
+        capacity_reasons = (
+            account_capacity_reasons
+            | worker_capacity_reasons
+            | viewer_capacity_reasons
+            | shadow_capacity_reasons
+        )
 
-        if dominant_wait_reason in viewer_capacity_reasons:
+        if dominant_wait_reason in viewer_capacity_reasons and (
+            real_viewer_slots > 0 or not explicit_viewer_context
+        ):
             sources.append('real_viewers')
+        if dominant_wait_reason in shadow_capacity_reasons:
+            sources.append('shadow_watchers')
         if dominant_wait_reason in worker_capacity_reasons:
             sources.append('streamflow_workers')
         if dominant_wait_reason in account_capacity_reasons:
             sources.append('provider_account')
         if total_slots:
             sources.append('provider_profile')
+        if shadow_watcher_slots:
+            sources.append('shadow_watchers')
         if checking_slots:
             sources.append('streamflow_workers')
+        if teamarr_preflight_slots:
+            sources.append('teamarr_preflight')
+        if quality_check_slots:
+            sources.append('quality_checks')
         if real_viewer_slots:
             sources.append('real_viewers')
         if full_slots:
@@ -1264,6 +1312,10 @@ class StreamCheckerProgress:
             state = 'viewer_preempted'
             message = 'A live viewer needed the slot; the probe yielded and can be retried later.'
             action = 'retry_later'
+        elif dominant_wait_reason in shadow_capacity_reasons:
+            state = 'shadow_watcher_capacity'
+            message = 'A Shadow Monitor watcher is using the provider profile slot without being counted as a real viewer.'
+            action = 'wait_for_shadow_watcher'
         elif dominant_wait_reason in {'active_viewers', 'quota_consumed_by_active_viewers'} or real_viewer_slots:
             state = 'viewer_protected'
             message = 'Real viewer capacity is protected before StreamFlow probes use the slot.'
@@ -1315,12 +1367,19 @@ class StreamCheckerProgress:
                     'quota_consumed_by_active_viewers',
                     'viewer_preempted',
                 }
+                and not (explicit_viewer_context and shadow_watcher_slots > 0 and real_viewer_slots == 0)
+            ),
+            'has_shadow_watcher_usage': (
+                shadow_watcher_slots > 0
+                or dominant_wait_reason in shadow_capacity_reasons
             ),
             'has_streamflow_worker_usage': (
                 checking_slots > 0
                 or provider.get('checking', 0) > 0
                 or dominant_wait_reason in {'checking_capacity', 'global_worker_limit'}
             ),
+            'has_teamarr_preflight_usage': teamarr_preflight_slots > 0,
+            'has_quality_check_usage': quality_check_slots > 0,
             'profile_slot_summary': {
                 'total': total_slots,
                 'limited': limited_slots,
@@ -1328,7 +1387,10 @@ class StreamCheckerProgress:
                 'full': full_slots,
                 'open': open_slots,
                 'with_real_viewers': real_viewer_slots,
+                'with_shadow_watchers': shadow_watcher_slots,
                 'with_streamflow_workers': checking_slots,
+                'with_teamarr_preflight': teamarr_preflight_slots,
+                'with_quality_checks': quality_check_slots,
             },
         }
     
