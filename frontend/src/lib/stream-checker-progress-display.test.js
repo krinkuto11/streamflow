@@ -127,8 +127,16 @@ describe('getCurrentProgressDisplay', () => {
     expect(display.progressStale).toBe(true)
     expect(display.progressStaleAge).toBe(95)
     expect(display.isChecking).toBe(false)
+    expect(display.statusLabel).toBe('Idle')
+    expect(display.staleNoticeTitle).toBe('Previous progress hidden')
+    expect(display.staleNoticeText).toContain('inactive checker run')
     expect(display.showCurrentProgress).toBe(false)
     expect(display.progressRunMode).toBe('Single Channel Check')
+    expect([
+      display.statusLabel,
+      display.staleNoticeTitle,
+      display.staleNoticeText,
+    ].join(' ')).not.toContain('Stale Progress')
   })
 
   it('falls back to progress stale age when status details are absent', () => {

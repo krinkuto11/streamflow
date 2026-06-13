@@ -12,6 +12,9 @@ export const formatProgressMode = (mode) => {
   return labels[mode] || String(mode).replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
+export const STALE_PROGRESS_NOTICE_TITLE = 'Previous progress hidden'
+export const STALE_PROGRESS_NOTICE_TEXT = 'The last progress update belongs to an inactive checker run. The checker is idle and new runs can start.'
+
 export function getCurrentProgressDisplay(status, progress) {
   const queueSize = status?.queue?.queue_size || 0
   const inProgress = status?.queue?.in_progress || 0
@@ -38,6 +41,9 @@ export function getCurrentProgressDisplay(status, progress) {
     progressStale,
     progressStaleAge,
     isChecking,
+    statusLabel: isChecking ? 'Active' : 'Idle',
+    staleNoticeTitle: progressStale ? STALE_PROGRESS_NOTICE_TITLE : null,
+    staleNoticeText: progressStale ? STALE_PROGRESS_NOTICE_TEXT : null,
     progressRunMode: formatProgressMode(progress?.run_mode),
     runProfileName,
     runProfileSource,

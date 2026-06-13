@@ -385,6 +385,9 @@ export default function StreamChecker() {
     progressStale,
     progressStaleAge,
     isChecking,
+    statusLabel,
+    staleNoticeTitle,
+    staleNoticeText,
     progressRunMode,
     runProfileName,
     runProfileSource,
@@ -515,7 +518,7 @@ export default function StreamChecker() {
           <CardContent>
             <div className="flex items-center gap-2">
               <Badge variant={isChecking ? "default" : "secondary"}>
-                {isChecking ? "Active" : "Idle"}
+                {statusLabel}
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
@@ -582,9 +585,9 @@ export default function StreamChecker() {
           <div className="flex min-w-0 items-start gap-2">
             <Info className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="min-w-0 max-w-full break-words font-medium text-foreground">Previous progress hidden</p>
+              <p className="min-w-0 max-w-full break-words font-medium text-foreground">{staleNoticeTitle}</p>
               <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
-                The last progress update belongs to an inactive checker run. The checker is idle and new runs can start.
+                {staleNoticeText}
                 {Number.isFinite(Number(progressStaleAge)) && (
                   <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
                 )}
