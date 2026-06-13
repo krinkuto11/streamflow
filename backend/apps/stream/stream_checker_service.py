@@ -4853,6 +4853,64 @@ class StreamCheckerService:
 
         return {'active': max(0, active), 'waiting': max(0, waiting)}
 
+    def _current_progress_stale_after_seconds(self) -> int:
+        analysis_duration = self._queue_number(self.config.get('stream_analysis.ffmpeg_duration', 30)) or 30.0
+        analysis_timeout = self._queue_number(self.config.get('stream_analysis.timeout', 30)) or 30.0
+        startup_buffer = self._queue_number(self.config.get('stream_analysis.stream_startup_buffer', 10)) or 10.0
+        retries = self._queue_number(self.config.get('stream_analysis.retries', 1))
+        retry_delay = self._queue_number(self.config.get('stream_analysis.retry_delay', 10)) or 10.0
+        loop_duration = self._queue_number(self.config.get('stream_analysis.max_loop_duration', 120)) or 120.0
+        provider_wait = self._queue_number(self.config.get('concurrent_streams.provider_wait_timeout', 180)) or 180.0
+
+        attempts = max(1.0, retries + 1.0)
+        probe_budget = attempts * (analysis_duration + analysis_timeout + startup_buffer)
+        retry_budget = max(0.0, retries) * retry_delay
+        loop_budget = loop_duration * 3.0
+        stale_after = probe_budget + retry_budget + loop_budget + provider_wait + 60.0
+        return int(max(300.0, min(stale_after, 1800.0)))
+
+    def _current_progress_cleanup_after_seconds(self) -> int:
+        return int(max(3600, min(self._current_progress_stale_after_seconds() * 6, 21600)))
+
+    def _current_progress_age_seconds(self, progress: Optional[Dict[str, Any]]) -> Optional[int]:
+        if not isinstance(progress, dict) or not progress.get('timestamp'):
+            return None
+        return int(self._elapsed_seconds_since(progress.get('timestamp')))
+
+    def _current_progress_stale_gate(
+        self,
+        progress: Optional[Dict[str, Any]],
+        *,
+        worker_or_queue_active: bool,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(progress, dict) or not progress:
+            return None
+        if worker_or_queue_active:
+            return None
+
+        age_seconds = self._current_progress_age_seconds(progress)
+        stale_after_seconds = self._current_progress_stale_after_seconds()
+        is_single_channel = bool(progress.get('is_single_channel_check'))
+        if is_single_channel and age_seconds is not None and age_seconds <= stale_after_seconds:
+            return None
+
+        reason = 'missing_progress_timestamp' if age_seconds is None else 'no_active_worker'
+        if not is_single_channel:
+            reason = 'idle_batch_progress'
+
+        stale_state = {
+            'stale': True,
+            'reason': reason,
+            'age_seconds': age_seconds,
+            'stale_after_seconds': stale_after_seconds,
+            'cleanup_after_seconds': self._current_progress_cleanup_after_seconds(),
+            'detected_at': datetime.now().isoformat(),
+            'channel_id': progress.get('channel_id'),
+            'channel_name': progress.get('channel_name'),
+            'is_single_channel_check': is_single_channel,
+        }
+        return stale_state
+
     @staticmethod
     def _clear_active_stream_reason(stream_status: Dict) -> None:
         for key in (
@@ -5035,21 +5093,48 @@ class StreamCheckerService:
             
         queue_status['eta_seconds'] = self._calculate_queue_eta_seconds(queue_status)
         
-        single_channel_progress_active = bool(progress and progress.get('is_single_channel_check'))
+        worker_or_queue_active = bool(
+            self.checking or
+            queue_status.get('queue_size', 0) > 0 or
+            queue_status.get('in_progress', 0) > 0 or
+            queue_status.get('current_channel') is not None or
+            sync_state.get('active', False)
+        )
+        progress_stale = self._current_progress_stale_gate(
+            progress,
+            worker_or_queue_active=worker_or_queue_active,
+        )
+        if progress_stale:
+            progress = {
+                **progress,
+                'stale': True,
+                'stale_reason': progress_stale.get('reason'),
+                'stale_age_seconds': progress_stale.get('age_seconds'),
+                'stale_after_seconds': progress_stale.get('stale_after_seconds'),
+            }
+            cleanup_after = progress_stale.get('cleanup_after_seconds')
+            age_seconds = progress_stale.get('age_seconds')
+            if age_seconds is None or (cleanup_after is not None and age_seconds >= cleanup_after):
+                self.progress.clear()
+                progress_stale['cleared'] = True
+                progress = None
+
+        single_channel_progress_active = bool(
+            progress and
+            progress.get('is_single_channel_check') and
+            not progress.get('stale')
+        )
 
         # Stream checking mode is active when:
         # - An individual channel is being checked or preparing to be checked, OR
         # - There are channels in the queue waiting to be checked
         stream_checking_mode = (
-            self.checking or 
-            queue_status.get('queue_size', 0) > 0 or
-            queue_status.get('in_progress', 0) > 0 or
-            queue_status.get('current_channel') is not None or
+            worker_or_queue_active or
             single_channel_progress_active or
             sync_state.get('active', False)
         )
 
-        if not stream_checking_mode and progress:
+        if not stream_checking_mode and progress and not progress.get('stale'):
             self.progress.clear()
             progress = None
 
@@ -5066,6 +5151,8 @@ class StreamCheckerService:
             'enabled': self.config.get('enabled', True),
             'queue': queue_status,
             'progress': progress,
+            'progress_stale': bool(progress_stale),
+            'progress_stale_details': progress_stale or {},
             'connectivity_guard': connectivity_guard_status,
             'last_global_check': self.update_tracker.get_last_global_check(),
             'config': {

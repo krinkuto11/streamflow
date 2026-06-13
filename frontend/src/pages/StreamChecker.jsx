@@ -82,12 +82,17 @@ export default function StreamChecker() {
   useEffect(() => {
     loadData()
     // Poll for updates - use shorter interval when checking is active
-    const pollInterval = (status?.checking || (status?.queue?.queue_size > 0)) ? 1000 : 3000
+    const pollInterval = (
+      status?.stream_checking_mode ||
+      status?.checking ||
+      (status?.queue?.queue_size > 0) ||
+      (status?.queue?.in_progress > 0)
+    ) ? 1000 : 3000
     const interval = setInterval(() => {
       loadData()
     }, pollInterval)
     return () => clearInterval(interval)
-  }, [status?.checking, status?.queue?.queue_size])
+  }, [status?.stream_checking_mode, status?.checking, status?.queue?.queue_size, status?.queue?.in_progress])
 
   useEffect(() => {
     loadStartChannels()
@@ -377,9 +382,18 @@ export default function StreamChecker() {
     )
   }
 
-  const isChecking = status?.checking || (status?.queue?.queue_size > 0)
   const queueSize = status?.queue?.queue_size || 0
   const inProgress = status?.queue?.in_progress || 0
+  const progressStale = status?.progress_stale === true || progress?.stale === true
+  const progressStaleDetails = status?.progress_stale_details || {}
+  const progressStaleAge = progressStaleDetails.age_seconds ?? progress?.stale_age_seconds
+  const isChecking = !progressStale && Boolean(
+    status?.stream_checking_mode ||
+    status?.checking ||
+    queueSize > 0 ||
+    inProgress > 0 ||
+    (status?.queue?.current_channel !== null && status?.queue?.current_channel !== undefined)
+  )
   const completed = status?.queue?.completed || 0
   const failed = status?.queue?.failed || 0
   const queued = status?.queue?.queued || 0
@@ -506,8 +520,11 @@ export default function StreamChecker() {
           </CardHeader>
           <CardContent>
             <div className="flex items-center gap-2">
-              <Badge variant={isChecking ? "default" : "secondary"}>
-                {isChecking ? "Active" : "Idle"}
+              <Badge
+                variant={progressStale ? "outline" : (isChecking ? "default" : "secondary")}
+                className={progressStale ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300" : undefined}
+              >
+                {progressStale ? "Stale Progress" : (isChecking ? "Active" : "Idle")}
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
@@ -566,6 +583,19 @@ export default function StreamChecker() {
         </Alert>
       )}
 
+      {progressStale && (
+        <Alert className="border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>Stale Progress</AlertTitle>
+          <AlertDescription>
+            Last progress update no longer has an active worker or queue. The checker is idle and new runs can start.
+            {Number.isFinite(Number(progressStaleAge)) && (
+              <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {/* Batch Progress — hidden during single channel checks to avoid showing
            stale counters from the previous automation run */}
       {isChecking && totalBatch > 0 && !progress?.is_single_channel_check && (
@@ -599,7 +629,7 @@ export default function StreamChecker() {
       )}
 
       {/* Current Progress */}
-      {progress && isChecking && (
+      {progress && isChecking && !progressStale && (
         <Card>
           <CardHeader>
             <CardTitle>Current Progress</CardTitle>

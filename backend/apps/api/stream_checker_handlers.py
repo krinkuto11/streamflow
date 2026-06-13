@@ -55,7 +55,11 @@ def _stream_checker_work_is_active(service: Any) -> bool:
     if not isinstance(status, dict):
         return False
     progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
-    if progress.get("is_single_channel_check"):
+    if (
+        progress.get("is_single_channel_check")
+        and not progress.get("stale")
+        and not status.get("progress_stale")
+    ):
         return True
     queue = status.get("queue") if isinstance(status.get("queue"), dict) else {}
     queue_active = (

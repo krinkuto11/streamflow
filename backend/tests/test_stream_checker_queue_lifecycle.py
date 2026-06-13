@@ -849,7 +849,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['queue']['started_at'], '2026-05-29T18:03:41')
         self.assertTrue(status['stream_checking_mode'])
 
-    def test_get_status_clears_stale_progress_when_no_check_is_active(self):
+    def _service_for_idle_progress_status(self, progress_payload):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.check_queue = StreamCheckQueue(max_size=10)
         service.lock = threading.Lock()
@@ -860,19 +860,63 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.config.get.side_effect = lambda key, default=None: default
         service.connectivity_guard_status = {'ok': True}
         service.progress = Mock()
-        service.progress.get.return_value = {
-            'status': 'analyzing',
-            'channel_id': 1946,
-            'streams_detail': [{'id': 1, 'status': 'checking'}],
-        }
+        service.progress.get.return_value = progress_payload
         service.update_tracker = Mock()
         service.update_tracker.get_last_global_check.return_value = None
+        return service
+
+    def test_get_status_marks_stale_batch_progress_when_no_check_is_active(self):
+        service = self._service_for_idle_progress_status({
+            'status': 'analyzing',
+            'channel_id': 1946,
+            'timestamp': datetime.now().isoformat(),
+            'streams_detail': [{'id': 1, 'status': 'checking'}],
+        })
 
         status = service.get_status()
 
         self.assertFalse(status['stream_checking_mode'])
-        self.assertIsNone(status['progress'])
-        service.progress.clear.assert_called_once()
+        self.assertTrue(status['progress_stale'])
+        self.assertEqual(status['progress_stale_details']['reason'], 'idle_batch_progress')
+        self.assertTrue(status['progress']['stale'])
+        self.assertEqual(status['progress']['stale_reason'], 'idle_batch_progress')
+        service.progress.clear.assert_not_called()
+
+    def test_get_status_keeps_recent_single_channel_progress_active_when_mode_lags(self):
+        service = self._service_for_idle_progress_status({
+            'status': 'preparing',
+            'channel_id': 1946,
+            'is_single_channel_check': True,
+            'timestamp': (datetime.now() - timedelta(seconds=60)).isoformat(),
+            'streams_detail': [{'id': 1, 'status': 'pending'}],
+        })
+
+        status = service.get_status()
+
+        self.assertTrue(status['stream_checking_mode'])
+        self.assertFalse(status['progress_stale'])
+        self.assertFalse(status['progress_stale_details'])
+        self.assertFalse(status['progress'].get('stale', False))
+        service.progress.clear.assert_not_called()
+
+    def test_get_status_marks_old_single_channel_progress_stale(self):
+        service = self._service_for_idle_progress_status({
+            'status': 'checking',
+            'channel_id': 1946,
+            'is_single_channel_check': True,
+            'timestamp': (datetime.now() - timedelta(minutes=20)).isoformat(),
+            'streams_detail': [{'id': 1, 'status': 'checking'}],
+        })
+
+        status = service.get_status()
+
+        self.assertFalse(status['stream_checking_mode'])
+        self.assertTrue(status['progress_stale'])
+        self.assertEqual(status['progress_stale_details']['reason'], 'no_active_worker')
+        self.assertTrue(status['progress']['stale'])
+        self.assertEqual(status['progress']['stale_reason'], 'no_active_worker')
+        self.assertGreater(status['progress']['stale_age_seconds'], status['progress']['stale_after_seconds'])
+        service.progress.clear.assert_not_called()
 
     def test_sync_batch_invokes_progress_callback_after_each_channel(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
