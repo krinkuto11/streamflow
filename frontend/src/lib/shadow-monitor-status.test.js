@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { getShadowMonitorDisplayState } from './shadow-monitor-status.js'
+import {
+  getShadowMonitorDisplayState,
+  syncShadowMonitorConfigFromStatus,
+} from './shadow-monitor-status.js'
 
 describe('shadow monitor display state', () => {
   it('keeps unsaved form enablement separate from backend service state', () => {
@@ -101,5 +104,78 @@ describe('shadow monitor display state', () => {
     expect(state.configurationRequired).toBe(true)
     expect(state.canUseWatcher).toBe(false)
     expect(state.serviceLabel).toBe('Setup required')
+  })
+
+  it('syncs service status fields into clean config and form state', () => {
+    const config = {
+      enabled: false,
+      dry_run: true,
+      watch_mode: 'periodic',
+      loop_detection_enabled: false,
+      loop_probe_duration_seconds: 120,
+      next_stream_pre_probe_enabled: false,
+      confirmation_count: 2,
+    }
+    const editedConfig = { ...config }
+
+    const result = syncShadowMonitorConfigFromStatus({
+      config,
+      editedConfig,
+      status: {
+        enabled: true,
+        dry_run: false,
+        watch_mode: 'continuous',
+        loop_detection_enabled: true,
+        loop_probe_duration_seconds: 180,
+        loop_detection_gates: {
+          next_stream_pre_probe_enabled: true,
+        },
+      },
+    })
+
+    expect(result.config).toMatchObject({
+      enabled: true,
+      dry_run: false,
+      watch_mode: 'continuous',
+      loop_detection_enabled: true,
+      loop_probe_duration_seconds: 180,
+      next_stream_pre_probe_enabled: true,
+      confirmation_count: 2,
+    })
+    expect(result.editedConfig).toMatchObject(result.config)
+    expect(result.changedConfig).toBe(true)
+    expect(result.changedEditedConfig).toBe(true)
+  })
+
+  it('does not overwrite unsaved dirty form fields while syncing saved service state', () => {
+    const result = syncShadowMonitorConfigFromStatus({
+      config: {
+        enabled: false,
+        dry_run: true,
+        watch_mode: 'periodic',
+      },
+      editedConfig: {
+        enabled: false,
+        dry_run: true,
+        watch_mode: 'periodic',
+      },
+      dirtyFields: new Set(['enabled']),
+      status: {
+        enabled: true,
+        dry_run: false,
+        watch_mode: 'continuous',
+      },
+    })
+
+    expect(result.config).toMatchObject({
+      enabled: true,
+      dry_run: false,
+      watch_mode: 'continuous',
+    })
+    expect(result.editedConfig).toMatchObject({
+      enabled: false,
+      dry_run: false,
+      watch_mode: 'continuous',
+    })
   })
 })

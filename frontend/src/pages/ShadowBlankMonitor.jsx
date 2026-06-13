@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
@@ -17,7 +17,10 @@ import {
   shadowMonitorNumberFields,
   shadowMonitorThresholdFields,
 } from '@/lib/shadow-monitor-config-fields.js'
-import { getShadowMonitorDisplayState } from '@/lib/shadow-monitor-status.js'
+import {
+  getShadowMonitorDisplayState,
+  syncShadowMonitorConfigFromStatus,
+} from '@/lib/shadow-monitor-status.js'
 import {
   filterShadowDecisionEvents,
   formatShadowEventReason,
@@ -83,6 +86,9 @@ export default function ShadowBlankMonitor() {
   const [historyFilter, setHistoryFilter] = useState('all')
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
+  const configRef = useRef(null)
+  const editedConfigRef = useRef(null)
+  const dirtyFieldsRef = useRef(new Set())
   const { toast } = useToast()
 
   useEffect(() => {
@@ -124,6 +130,9 @@ export default function ShadowBlankMonitor() {
         shadowBlankMonitorAPI.getStatus(),
       ])
       const nextConfig = configResponse.data || {}
+      configRef.current = nextConfig
+      editedConfigRef.current = nextConfig
+      dirtyFieldsRef.current = new Set()
       setConfig(nextConfig)
       setEditedConfig(nextConfig)
       setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
@@ -145,24 +154,49 @@ export default function ShadowBlankMonitor() {
   const loadStatus = async () => {
     try {
       const response = await shadowBlankMonitorAPI.getStatus()
-      setStatus(response.data || {})
+      const nextStatus = response.data || {}
+      setStatus(nextStatus)
+
+      const currentConfig = configRef.current || {}
+      const currentEditedConfig = editedConfigRef.current || {}
+      const synced = syncShadowMonitorConfigFromStatus({
+        status: nextStatus,
+        config: currentConfig,
+        editedConfig: currentEditedConfig,
+        dirtyFields: dirtyFieldsRef.current,
+      })
+
+      if (synced.changedConfig) {
+        configRef.current = synced.config
+        setConfig(synced.config)
+      }
+      if (synced.changedEditedConfig) {
+        editedConfigRef.current = synced.editedConfig
+        setEditedConfig(synced.editedConfig)
+      }
     } catch (err) {
       console.error('Failed to load shadow monitor status:', err)
     }
   }
 
   const updateConfigValue = (field, value) => {
+    dirtyFieldsRef.current = new Set(dirtyFieldsRef.current).add(field)
     setEditedConfig(prev => ({
       ...(prev || {}),
       [field]: value,
     }))
+    editedConfigRef.current = {
+      ...(editedConfigRef.current || editedConfig || {}),
+      [field]: value,
+    }
   }
 
   const saveConfig = async (extra = {}) => {
     try {
       setActionLoading('save')
+      const sourceConfig = editedConfigRef.current || editedConfig || {}
       const payload = {
-        ...(editedConfig || {}),
+        ...sourceConfig,
         excluded_channel_ids: parseCsv(excludedIds, true),
         excluded_channel_uuids: parseCsv(excludedUuids),
         offline_image_reference_hashes: parseCsv(offlineImageHashes),
@@ -170,6 +204,9 @@ export default function ShadowBlankMonitor() {
       }
       const response = await shadowBlankMonitorAPI.updateConfig(payload)
       const nextConfig = response.data || {}
+      configRef.current = nextConfig
+      editedConfigRef.current = nextConfig
+      dirtyFieldsRef.current = new Set()
       setConfig(nextConfig)
       setEditedConfig(nextConfig)
       setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
@@ -196,6 +233,9 @@ export default function ShadowBlankMonitor() {
       })
       const result = response.data || {}
       const nextConfig = result.config || config || {}
+      configRef.current = nextConfig
+      editedConfigRef.current = nextConfig
+      dirtyFieldsRef.current = new Set()
       setConfig(nextConfig)
       setEditedConfig(nextConfig)
       setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))

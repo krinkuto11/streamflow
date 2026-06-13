@@ -74,3 +74,68 @@ export const getShadowMonitorDisplayState = ({
       : serviceEnabled ? 'Enabled' : 'Disabled',
   }
 }
+
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key)
+
+const statusServiceFields = [
+  ['enabled', status => hasOwn(status, 'enabled') ? Boolean(status.enabled) : undefined],
+  ['dry_run', status => hasOwn(status, 'dry_run') ? Boolean(status.dry_run) : undefined],
+  ['watch_mode', status => status?.watch_mode || undefined],
+  [
+    'loop_detection_enabled',
+    status => hasOwn(status, 'loop_detection_enabled') ? Boolean(status.loop_detection_enabled) : undefined,
+  ],
+  [
+    'loop_probe_duration_seconds',
+    status => Number.isFinite(Number(status?.loop_probe_duration_seconds))
+      ? Number(status.loop_probe_duration_seconds)
+      : undefined,
+  ],
+  [
+    'next_stream_pre_probe_enabled',
+    status => hasOwn(status?.loop_detection_gates, 'next_stream_pre_probe_enabled')
+      ? Boolean(status.loop_detection_gates.next_stream_pre_probe_enabled)
+      : undefined,
+  ],
+]
+
+export const syncShadowMonitorConfigFromStatus = ({
+  config = {},
+  editedConfig = {},
+  status = {},
+  dirtyFields = [],
+} = {}) => {
+  const dirty = dirtyFields instanceof Set ? dirtyFields : new Set(dirtyFields || [])
+  let nextConfig = config || {}
+  let nextEditedConfig = editedConfig || {}
+
+  const ensureConfigCopy = () => {
+    if (nextConfig === config) nextConfig = { ...nextConfig }
+  }
+
+  const ensureEditedCopy = () => {
+    if (nextEditedConfig === editedConfig) nextEditedConfig = { ...nextEditedConfig }
+  }
+
+  statusServiceFields.forEach(([field, pickValue]) => {
+    const value = pickValue(status)
+    if (value === undefined) return
+
+    if (nextConfig?.[field] !== value) {
+      ensureConfigCopy()
+      nextConfig[field] = value
+    }
+
+    if (!dirty.has(field) && nextEditedConfig?.[field] !== value) {
+      ensureEditedCopy()
+      nextEditedConfig[field] = value
+    }
+  })
+
+  return {
+    config: nextConfig,
+    editedConfig: nextEditedConfig,
+    changedConfig: nextConfig !== config,
+    changedEditedConfig: nextEditedConfig !== editedConfig,
+  }
+}
