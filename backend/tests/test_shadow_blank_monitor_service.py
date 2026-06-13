@@ -1374,6 +1374,70 @@ def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
     assert status["recent_events"][1]["details"]["pre_probe_metric"] == "preprobe_rejected_media_fault"
 
 
+def test_next_stream_pre_probe_rejects_missing_audio_candidate(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={
+            11: {"id": 11, "url": "http://candidate.local/no-audio"},
+            12: {"id": 12, "url": "http://candidate.local/good"},
+        },
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "silent_audio_detected": True,
+            "silent_audio_duration_secs": 12.0,
+        },
+        switch_calls=switch_calls,
+    )
+    pre_probe_calls = []
+    missing_audio_output = "Stream specifier ':a' in filtergraph description matches no streams.\n"
+
+    def pre_probe(url, config):
+        pre_probe_calls.append(url)
+        if "no-audio" not in url:
+            return {"blank_detected": False, "freeze_detected": False}
+        return {
+            "blank_detected": False,
+            "freeze_detected": False,
+            **ShadowBlankMonitorService._parse_audio_detection(
+                missing_audio_output,
+                normalize_config(config),
+                observed_duration=0.25,
+            ),
+        }
+
+    service._run_blank_probe = pre_probe
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "silent_audio_detection_enabled": True,
+        "next_stream_pre_probe_enabled": True,
+    })
+
+    status = service.run_once(force=True)
+
+    assert pre_probe_calls == [
+        "http://candidate.local/no-audio",
+        "http://candidate.local/good",
+    ]
+    assert switch_calls == [("uuid-1", 12, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["pre_probe"]["result"] == "ok"
+    assert status["recent_events"][1]["type"] == "pre_probe_rejected"
+    assert status["recent_events"][1]["details"]["rejection_reason"] == "silent_audio"
+    assert status["recent_events"][1]["details"]["silent_audio_detected"] is True
+    assert status["recent_events"][1]["details"]["audio_stream_present"] is False
+    assert status["pre_probe"]["metrics"]["preprobe_rejected_media_fault"] == 1
+    assert status["pre_probe"]["metrics"]["preprobe_success"] == 1
+
+
 def test_next_stream_pre_probe_respects_provider_capacity(tmp_path):
     switch_calls = []
     udi = FakeUdi(

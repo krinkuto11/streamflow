@@ -1390,6 +1390,7 @@ class ShadowBlankMonitorService:
                 "no_decodable_frames_detected": bool(probe_result.get("no_decodable_frames_detected")),
                 "garbled_audio_detected": bool(probe_result.get("garbled_audio_detected")),
                 "silent_audio_detected": bool(probe_result.get("silent_audio_detected")),
+                "audio_stream_present": probe_result.get("audio_stream_present"),
                 "offline_image_detected": bool(probe_result.get("offline_image_detected")),
                 "loop_probe_ran": bool(probe_result.get("loop_probe_ran")),
                 "loop_detected": bool(probe_result.get("loop_detected")),
