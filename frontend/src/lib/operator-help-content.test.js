@@ -76,6 +76,9 @@ describe('operatorHelpSections', () => {
     const shadowMonitor = operatorHelpSections.find(section => section.id === 'shadow-monitor')
     expect(shadowMonitor.items.join(' ')).toMatch(/Channel Switch Limit/)
     expect(shadowMonitor.items.join(' ')).toMatch(/per-channel rolling-hour guard/)
+    expect(shadowMonitor.items.join(' ')).toMatch(/Silent Audio/)
+    expect(shadowMonitor.items.join(' ')).toMatch(/Next Stream Pre-Probe/)
+    expect(shadowMonitor.items.join(' ')).toMatch(/Loop Detection/)
 
     const hardware = operatorHelpSections.find(section => section.id === 'hardware')
     expect(hardware.title).toBe('Hardware And Fallback')
@@ -184,12 +187,23 @@ describe('operatorHelpSections', () => {
       'Watch Mode',
       'Dry Run',
       'Freeze Detection',
+      'Garbled Audio',
+      'Silent Audio',
+      'Offline Image',
+      'Next Stream Pre-Probe',
+      'Loop Detection',
+      'Loop Probe Duration',
       'Probe Duration',
       'Channel Switch Limit',
     ]))
     expect(shadowSettings.find(setting => setting.name === 'Watch Mode').defaultValue).toBe('Continuous')
     expect(shadowSettings.find(setting => setting.name === 'Dry Run').defaultValue).toBe('Off')
     expect(shadowSettings.find(setting => setting.name === 'Freeze Detection').defaultValue).toBe('On')
+    expect(shadowSettings.find(setting => setting.name === 'Silent Audio').effect).toMatch(/no usable audio stream/i)
+    expect(shadowSettings.find(setting => setting.name === 'Next Stream Pre-Probe').risk).toMatch(/loop-triggered live switches are blocked/i)
+    expect(shadowSettings.find(setting => setting.name === 'Loop Detection').risk).toMatch(/real viewers/i)
+    expect(shadowSettings.find(setting => setting.name === 'Loop Detection').risk).toMatch(/next-stream pre-probe/i)
+    expect(shadowSettings.find(setting => setting.name === 'Loop Probe Duration').defaultValue).toBe('120 seconds')
     expect(shadowSettings.find(setting => setting.name === 'Probe Duration').defaultValue).toBe('60 seconds')
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')
