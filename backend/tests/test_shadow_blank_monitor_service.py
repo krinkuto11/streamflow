@@ -459,6 +459,221 @@ def test_shadow_loop_pre_probe_rejects_looping_alternative(tmp_path):
     assert service.get_status()["pre_probe"]["last"]["rejection_reason"] == "loop"
 
 
+def test_shadow_loop_dry_run_records_intended_switch_without_live_change(tmp_path):
+    switch_calls = []
+    loop_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={
+            10: {"id": 10, "url": "http://provider.example/old.ts"},
+            11: {"id": 11, "url": "http://provider.example/new.ts"},
+        },
+    )
+
+    def loop_probe(url, config):
+        loop_calls.append(url)
+        return {
+            "loop_probe_ran": True,
+            "loop_detected": "/proxy/ts/stream/" in url,
+            "loop_duration_secs": 12.0,
+            "loop_frames_processed": 180,
+        }
+
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False, "freeze_detected": False},
+        loop_probe=loop_probe,
+        switch_calls=switch_calls,
+    )
+    service._run_blank_probe = lambda url, config: {
+        "blank_detected": False,
+        "freeze_detected": False,
+        "no_decodable_frames_detected": False,
+    }
+    service.update_config({
+        "enabled": False,
+        "dry_run": True,
+        "loop_detection_enabled": True,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+    })
+
+    status = service.run_once(force=True)
+
+    assert loop_calls == [
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://provider.example/new.ts",
+    ]
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "dry_run_switch"
+    assert status["recent_events"][0]["trigger_reason"] == "loop"
+    assert status["recent_events"][0]["details"]["pre_probe"]["result"] == "ok"
+    assert status["cooldowns"][0]["channel_ref"] == status["recent_events"][0]["channel_ref"]
+    assert status["switch_summary"]["dry_run_switches"] == 1
+    assert status["switch_summary"]["successful_switches"] == 0
+    assert status["switch_summary"]["last_switch_reason"] == "loop"
+
+
+def test_shadow_loop_stale_stream_guard_skips_switch_if_stream_changes(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(11)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={11: {"id": 11, "url": "http://provider.example/new.ts"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False, "freeze_detected": False},
+        loop_probe=lambda url, config: {
+            "loop_probe_ran": True,
+            "loop_detected": True,
+            "loop_duration_secs": 15.0,
+            "loop_frames_processed": 240,
+        },
+        switch_calls=switch_calls,
+    )
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "loop_detection_enabled": True,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+    }
+
+    assert service._probe_target_once(udi, target, service.get_config(include_secret=True)) is False
+
+    status = service.get_status()
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "stale_stream_guard"
+    assert status["recent_events"][0]["trigger_reason"] == "loop"
+    assert status["switch_summary"]["stale_stream_guard_skips"] == 1
+    assert status["switch_summary"]["prevented_false_switches"] == 1
+
+
+def test_shadow_loop_rate_limit_blocks_switch_path(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://provider.example/new.ts"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False, "freeze_detected": False},
+        loop_probe=lambda url, config: {
+            "loop_probe_ran": True,
+            "loop_detected": True,
+            "loop_duration_secs": 9.0,
+            "loop_frames_processed": 120,
+        },
+        switch_calls=switch_calls,
+        clock=lambda: 1000.0,
+    )
+    with service._lock:
+        service._switch_history["uuid-1"].append(999.0)
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "loop_detection_enabled": True,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+        "max_switches_per_hour": 1,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+    }
+
+    assert service._probe_target_once(udi, target, service.get_config(include_secret=True)) is False
+
+    status = service.get_status()
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "switch_rate_limited"
+    assert status["recent_events"][0]["trigger_reason"] == "loop"
+    assert status["switch_summary"]["rate_limited_skips"] == 1
+    assert status["switch_summary"]["prevented_false_switches"] == 1
+
+
+def test_shadow_loop_cooldown_blocks_repeated_probe_switch(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://provider.example/new.ts"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False, "freeze_detected": False},
+        loop_probe=lambda url, config: {
+            "loop_probe_ran": True,
+            "loop_detected": True,
+            "loop_duration_secs": 10.0,
+            "loop_frames_processed": 120,
+        },
+        switch_calls=switch_calls,
+        clock=lambda: 1000.0,
+    )
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "loop_detection_enabled": True,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+        "channel_cooldown_seconds": 300,
+    })
+    service._set_cooldown("uuid-1", service.get_config(include_secret=True))
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+    }
+
+    assert service._probe_target_once(udi, target, service.get_config(include_secret=True)) is True
+
+    status = service.get_status()
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "cooldown"
+    assert status["recent_events"][0]["trigger_reason"] == "loop"
+    assert status["recent_events"][0]["details"]["cooldown_seconds"] == 300
+    assert status["switch_summary"]["cooldown_skips"] == 1
+    assert status["switch_summary"]["successful_switches"] == 0
+
+
 def test_learn_offline_image_from_current_frame_adds_hash(tmp_path, monkeypatch):
     service = make_service(
         tmp_path,

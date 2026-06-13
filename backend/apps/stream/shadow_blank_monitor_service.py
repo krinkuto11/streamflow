@@ -1148,7 +1148,10 @@ class ShadowBlankMonitorService:
             self._record_event(
                 "stale_stream_guard",
                 target,
-                {"current_stream_ref": _ref("stream", fresh_stream_id)},
+                {
+                    "reason": reason,
+                    "current_stream_ref": _ref("stream", fresh_stream_id),
+                },
             )
             return
 
