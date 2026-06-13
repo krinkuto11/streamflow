@@ -1914,6 +1914,97 @@ def test_missing_audio_stream_switches_as_silent_audio_when_enabled(tmp_path):
     assert status["watched_channels"][0]["last_probe"]["silent_audio_detected"] is True
 
 
+def test_continuous_default_probe_missing_audio_switches_as_silent_audio(monkeypatch, tmp_path):
+    class FakeStderr:
+        def __init__(self, lines):
+            self._lines = list(lines)
+            self._index = 0
+
+        @property
+        def done(self):
+            return self._index >= len(self._lines)
+
+        def readline(self):
+            if self._index >= len(self._lines):
+                return ""
+            line = self._lines[self._index]
+            self._index += 1
+            return line
+
+    class FakeProcess:
+        def __init__(self, lines):
+            self.stderr = FakeStderr(lines)
+            self.returncode = 1
+
+        def poll(self):
+            return self.returncode if self.stderr.done else None
+
+        def terminate(self):
+            self.returncode = 1
+
+        def kill(self):
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+
+    def switch_stream(channel_id, stream_id=None, url=None):
+        switch_calls.append((channel_id, stream_id, url))
+        return True
+
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=switch_stream,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+    monkeypatch.setattr(
+        shadow_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: FakeProcess([
+            "Stream specifier ':a' in filtergraph description matches no streams.\n",
+        ]),
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "silent_audio_detection_enabled": True,
+        "probe_duration_seconds": 2,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["reason"] == "silent_audio"
+    assert status["recent_events"][0]["details"]["detection"]["measurements"]["audio_stream_present"] is False
+    assert target["last_probe"]["audio_stream_present"] is False
+    assert target["last_probe"]["silent_audio_detected"] is True
+
+
 def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp_path):
     switch_calls = []
     udi = FakeUdi(
