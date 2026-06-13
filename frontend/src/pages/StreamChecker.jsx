@@ -17,6 +17,7 @@ import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js
 import { formatDuration } from '@/lib/time-format.js'
 import { getExternalStaleDiagnosticsDisplay } from '@/lib/external-stale-diagnostics-display.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
+import { getCurrentProgressDisplay } from '@/lib/stream-checker-progress-display.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
 import {
   getParallelProgressBadgeText,
@@ -46,19 +47,6 @@ import {
 // Pagination constants
 const DEAD_STREAMS_PER_PAGE = 20
 const PAGINATION_MAX_VISIBLE_PAGES = 5
-
-const formatProgressMode = (mode) => {
-  const labels = {
-    automation_quality_check: 'Automation Quality Check',
-    manual_full_run: 'Manual Full Run',
-    manual_period_run: 'Manual Period Run',
-    scheduler_run: 'Scheduler Run',
-    single_channel_check: 'Single Channel Check',
-    stream_checker: 'Stream Checker',
-  }
-  if (!mode) return null
-  return labels[mode] || String(mode).replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
-}
 
 export default function StreamChecker() {
   const [status, setStatus] = useState(null)
@@ -389,18 +377,22 @@ export default function StreamChecker() {
     )
   }
 
-  const queueSize = status?.queue?.queue_size || 0
-  const inProgress = status?.queue?.in_progress || 0
-  const progressStale = status?.progress_stale === true || progress?.stale === true
-  const progressStaleDetails = status?.progress_stale_details || {}
-  const progressStaleAge = progressStaleDetails.age_seconds ?? progress?.stale_age_seconds
-  const isChecking = !progressStale && Boolean(
-    status?.stream_checking_mode ||
-    status?.checking ||
-    queueSize > 0 ||
-    inProgress > 0 ||
-    (status?.queue?.current_channel !== null && status?.queue?.current_channel !== undefined)
-  )
+  const currentProgressDisplay = getCurrentProgressDisplay(status, progress)
+  const {
+    queueSize,
+    inProgress,
+    progressStale,
+    progressStaleAge,
+    isChecking,
+    progressRunMode,
+    runProfileName,
+    runProfileSource,
+    qualityProfileName,
+    qualityProfileSource,
+    capacityProfileName,
+    showQualityRules,
+    showCurrentProgress,
+  } = currentProgressDisplay
   const completed = status?.queue?.completed || 0
   const failed = status?.queue?.failed || 0
   const queued = status?.queue?.queued || 0
@@ -409,13 +401,6 @@ export default function StreamChecker() {
   const providerProgress = progress?.provider_progress || []
   const providerSummary = progress?.provider_summary || {}
   const parallelProgressBadgeText = getParallelProgressBadgeText(status, providerSummary)
-  const progressRunMode = formatProgressMode(progress?.run_mode)
-  const runProfileName = progress?.run_profile_name || progress?.automation_profile_name
-  const runProfileSource = progress?.run_profile_source || progress?.automation_profile_source
-  const qualityProfileName = progress?.quality_profile_name || progress?.automation_profile_name
-  const qualityProfileSource = progress?.quality_profile_source || progress?.automation_profile_source
-  const capacityProfileName = progress?.capacity_profile_name
-  const showQualityRules = qualityProfileName && qualityProfileName !== runProfileName
   const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
   const selectedStartChannel = startChannels.find(channel => String(channel.id) === String(queueStartChannelId))
   const firstStartChannel = startChannels[0]
@@ -658,7 +643,7 @@ export default function StreamChecker() {
       )}
 
       {/* Current Progress */}
-      {progress && isChecking && !progressStale && (
+      {showCurrentProgress && (
         <Card>
           <CardHeader>
             <CardTitle>Current Progress</CardTitle>
