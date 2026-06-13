@@ -126,6 +126,10 @@ describe('shadow monitor display state', () => {
       enabled: false,
       dry_run: true,
       watch_mode: 'periodic',
+      freeze_detection_enabled: true,
+      garbled_audio_detection_enabled: false,
+      silent_audio_detection_enabled: false,
+      offline_image_detection_enabled: false,
       loop_detection_enabled: false,
       loop_probe_duration_seconds: 120,
       next_stream_pre_probe_enabled: false,
@@ -140,6 +144,11 @@ describe('shadow monitor display state', () => {
         enabled: true,
         dry_run: false,
         watch_mode: 'continuous',
+        freeze_detection_enabled: false,
+        garbled_audio_detection_enabled: true,
+        silent_audio_detection_enabled: true,
+        offline_image_detection_enabled: true,
+        next_stream_pre_probe_enabled: true,
         loop_detection_enabled: true,
         loop_probe_duration_seconds: 180,
         loop_detection_gates: {
@@ -152,6 +161,10 @@ describe('shadow monitor display state', () => {
       enabled: true,
       dry_run: false,
       watch_mode: 'continuous',
+      freeze_detection_enabled: false,
+      garbled_audio_detection_enabled: true,
+      silent_audio_detection_enabled: true,
+      offline_image_detection_enabled: true,
       loop_detection_enabled: true,
       loop_probe_duration_seconds: 180,
       next_stream_pre_probe_enabled: true,
@@ -168,17 +181,23 @@ describe('shadow monitor display state', () => {
         enabled: false,
         dry_run: true,
         watch_mode: 'periodic',
+        silent_audio_detection_enabled: false,
+        offline_image_detection_enabled: false,
       },
       editedConfig: {
         enabled: false,
         dry_run: true,
         watch_mode: 'periodic',
+        silent_audio_detection_enabled: false,
+        offline_image_detection_enabled: false,
       },
-      dirtyFields: new Set(['enabled']),
+      dirtyFields: new Set(['enabled', 'silent_audio_detection_enabled']),
       status: {
         enabled: true,
         dry_run: false,
         watch_mode: 'continuous',
+        silent_audio_detection_enabled: true,
+        offline_image_detection_enabled: true,
       },
     })
 
@@ -186,11 +205,15 @@ describe('shadow monitor display state', () => {
       enabled: true,
       dry_run: false,
       watch_mode: 'continuous',
+      silent_audio_detection_enabled: true,
+      offline_image_detection_enabled: true,
     })
     expect(result.editedConfig).toMatchObject({
       enabled: false,
       dry_run: false,
       watch_mode: 'continuous',
+      silent_audio_detection_enabled: false,
+      offline_image_detection_enabled: true,
     })
   })
 })

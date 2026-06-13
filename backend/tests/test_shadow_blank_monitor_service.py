@@ -204,6 +204,30 @@ def test_status_exposes_shadow_loop_detection_context(tmp_path):
     }
 
 
+def test_status_exposes_shadow_detection_toggle_context(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+
+    service.update_config({
+        "freeze_detection_enabled": False,
+        "garbled_audio_detection_enabled": True,
+        "silent_audio_detection_enabled": True,
+        "offline_image_detection_enabled": True,
+        "next_stream_pre_probe_enabled": True,
+    })
+
+    status = service.get_status()
+    assert status["freeze_detection_enabled"] is False
+    assert status["garbled_audio_detection_enabled"] is True
+    assert status["silent_audio_detection_enabled"] is True
+    assert status["offline_image_detection_enabled"] is True
+    assert status["next_stream_pre_probe_enabled"] is True
+    assert status["offline_image"]["enabled"] is True
+    assert status["loop_detection_gates"]["next_stream_pre_probe_enabled"] is True
+
+
 def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
     switch_calls = []
     loop_calls = []

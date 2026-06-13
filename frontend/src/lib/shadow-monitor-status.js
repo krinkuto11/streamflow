@@ -84,6 +84,22 @@ const statusServiceFields = [
   ['dry_run', status => hasOwn(status, 'dry_run') ? Boolean(status.dry_run) : undefined],
   ['watch_mode', status => status?.watch_mode || undefined],
   [
+    'freeze_detection_enabled',
+    status => hasOwn(status, 'freeze_detection_enabled') ? Boolean(status.freeze_detection_enabled) : undefined,
+  ],
+  [
+    'garbled_audio_detection_enabled',
+    status => hasOwn(status, 'garbled_audio_detection_enabled') ? Boolean(status.garbled_audio_detection_enabled) : undefined,
+  ],
+  [
+    'silent_audio_detection_enabled',
+    status => hasOwn(status, 'silent_audio_detection_enabled') ? Boolean(status.silent_audio_detection_enabled) : undefined,
+  ],
+  [
+    'offline_image_detection_enabled',
+    status => hasOwn(status, 'offline_image_detection_enabled') ? Boolean(status.offline_image_detection_enabled) : undefined,
+  ],
+  [
     'loop_detection_enabled',
     status => hasOwn(status, 'loop_detection_enabled') ? Boolean(status.loop_detection_enabled) : undefined,
   ],
@@ -97,6 +113,8 @@ const statusServiceFields = [
     'next_stream_pre_probe_enabled',
     status => hasOwn(status?.loop_detection_gates, 'next_stream_pre_probe_enabled')
       ? Boolean(status.loop_detection_gates.next_stream_pre_probe_enabled)
+      : hasOwn(status, 'next_stream_pre_probe_enabled')
+        ? Boolean(status.next_stream_pre_probe_enabled)
       : undefined,
   ],
 ]
