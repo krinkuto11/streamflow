@@ -40,6 +40,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   RefreshCw,
+  Info,
   List,
   Save
 } from 'lucide-react'
@@ -514,10 +515,10 @@ export default function StreamChecker() {
           <CardContent>
             <div className="flex items-center gap-2">
               <Badge
-                variant={progressStale ? "outline" : (isChecking ? "default" : "secondary")}
-                className={progressStale ? "border-amber-300 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-300" : undefined}
+                variant={progressStale ? "secondary" : (isChecking ? "default" : "secondary")}
+                className={progressStale ? "border border-sky-200 bg-sky-50 text-sky-800 dark:border-sky-900/70 dark:bg-sky-950/25 dark:text-sky-200" : undefined}
               >
-                {progressStale ? "Stale Progress" : (isChecking ? "Active" : "Idle")}
+                {progressStale ? "Idle (Previous Progress)" : (isChecking ? "Active" : "Idle")}
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
@@ -577,11 +578,14 @@ export default function StreamChecker() {
       )}
 
       {progressStale && (
-        <Alert className="border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle>Stale Progress</AlertTitle>
-          <AlertDescription>
-            Last progress update no longer has an active worker or queue. The checker is idle and new runs can start.
+        <Alert
+          className="min-w-0 w-full overflow-hidden border-sky-200 bg-sky-50 text-sky-900 dark:border-sky-900/60 dark:bg-sky-950/20 dark:text-sky-100"
+          style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
+        >
+          <Info className="h-4 w-4 text-sky-700 dark:text-sky-200" />
+          <AlertTitle className="min-w-0 max-w-[calc(100%-1.75rem)] break-words">Idle, Previous Progress Hidden</AlertTitle>
+          <AlertDescription className="min-w-0 max-w-[calc(100%-1.75rem)] whitespace-normal [overflow-wrap:anywhere]">
+            The last progress update belongs to an inactive checker run. The checker is idle and new runs can start.
             {Number.isFinite(Number(progressStaleAge)) && (
               <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
             )}
