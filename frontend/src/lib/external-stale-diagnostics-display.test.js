@@ -33,7 +33,7 @@ describe('getExternalStaleDiagnosticsDisplay', () => {
 
     expect(display).toEqual({
       title: 'Dispatcharr Status Risk',
-      text: 'Dispatcharr provider status may be stale; no automatic repair.',
+      text: 'Provider status may be stale. No automatic repair.',
       detail: '1 provider status conflict. Celery, Redis, Postgres evidence is not available from StreamFlow.',
       accounts: ['Provider A: Fetching (active status with completed message)'],
       checks: ['Celery: Unknown', 'Redis: Unknown', 'Postgres: Unknown'],
