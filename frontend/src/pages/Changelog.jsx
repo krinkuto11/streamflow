@@ -649,7 +649,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
                 variant="outline"
                 className="min-w-0 max-w-full justify-start gap-1 whitespace-normal border-amber-500/70 bg-amber-500/10 text-left leading-snug text-amber-700 dark:text-amber-300"
               >
-                <span className="shrink-0 text-[10px] uppercase tracking-tight text-amber-800/80 dark:text-amber-200/80">{item.label}</span>
+                <span className="shrink-0 text-[10px] uppercase text-amber-800/80 dark:text-amber-200/80">{item.label}</span>
                 <span className="min-w-0 break-words font-semibold">{item.value}</span>
               </Badge>
             ))}
