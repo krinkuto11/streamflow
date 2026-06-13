@@ -50,7 +50,7 @@ export function getExternalStaleDiagnosticsDisplay(diagnostics = {}) {
 
   return {
     title: 'Dispatcharr Status Risk',
-    text: diagnostics?.operator_note || 'Dispatcharr provider status may be stale.',
+    text: 'Dispatcharr provider status may be stale; StreamFlow will not repair it automatically.',
     detail: unknownChecks.length > 0
       ? `${suspectCount} ${conflictLabel}. ${unknownChecks.join(', ')} evidence is not available from StreamFlow.`
       : `${suspectCount} ${conflictLabel}.`,

@@ -605,16 +605,16 @@ export default function StreamChecker() {
       )}
 
       {externalStaleDisplay && (
-        <Alert className="min-w-0 overflow-hidden border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+        <Alert className="min-w-0 w-full max-w-[calc(100vw-1.5rem)] overflow-hidden border-amber-200 bg-amber-50 text-amber-900 sm:max-w-none dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
           <AlertCircle className="h-4 w-4" />
-          <AlertTitle>{externalStaleDisplay.title}</AlertTitle>
-          <AlertDescription className="min-w-0 space-y-1">
-            <span className="block min-w-0 break-words">{externalStaleDisplay.text}</span>
+          <AlertTitle className="min-w-0 break-words">{externalStaleDisplay.title}</AlertTitle>
+          <AlertDescription className="min-w-0 max-w-full space-y-1 whitespace-normal [overflow-wrap:anywhere]">
+            <span className="block min-w-0 max-w-full break-words">{externalStaleDisplay.text}</span>
             {externalStaleDisplay.detail && (
-              <span className="block min-w-0 break-words">{externalStaleDisplay.detail}</span>
+              <span className="block min-w-0 max-w-full break-words">{externalStaleDisplay.detail}</span>
             )}
             {externalStaleDisplay.accounts.length > 0 && (
-              <span className="block min-w-0 break-words text-xs">
+              <span className="block min-w-0 max-w-full break-words text-xs">
                 {externalStaleDisplay.accounts.join(' | ')}
               </span>
             )}
