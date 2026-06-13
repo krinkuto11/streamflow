@@ -371,6 +371,44 @@ def test_shadow_loop_detection_is_gated_by_config(tmp_path):
     assert service.get_status()["recent_events"][0]["type"] == "probe_ok"
 
 
+def test_shadow_loop_detection_requires_real_viewer_not_shadow_watcher(tmp_path):
+    loop_calls = []
+    watcher_client = {
+        "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+        "client_id": "shadow-client",
+    }
+    udi = FakeUdi(
+        statuses=[
+            {
+                "/proxy/ts/stream/uuid-1": active_status(
+                    10,
+                    clients=[watcher_client],
+                )
+            },
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10}, 11: {"id": 11}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False, "freeze_detected": False},
+        loop_probe=lambda url, config: loop_calls.append(url) or {"loop_detected": True},
+    )
+    service.update_config({
+        "enabled": False,
+        "loop_detection_enabled": True,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+    })
+
+    status = service.run_once(force=True)
+
+    assert loop_calls == []
+    assert status["watched_channels"] == []
+    assert status["recent_events"] == []
+
+
 def test_shadow_loop_pre_probe_rejects_looping_alternative(tmp_path):
     udi = FakeUdi(
         statuses=[{"/proxy/ts/stream/uuid-1": active_status(10)}],
