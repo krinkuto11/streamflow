@@ -610,8 +610,8 @@ export default function StreamChecker() {
           style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
         >
           <AlertCircle className="h-4 w-4" />
-          <AlertTitle className="min-w-0 break-words">{externalStaleDisplay.title}</AlertTitle>
-          <AlertDescription className="min-w-0 max-w-full space-y-1 whitespace-normal [overflow-wrap:anywhere]">
+          <AlertTitle className="min-w-0 max-w-[calc(100%-1.75rem)] break-words">{externalStaleDisplay.title}</AlertTitle>
+          <AlertDescription className="min-w-0 max-w-[calc(100%-1.75rem)] space-y-1 whitespace-normal [overflow-wrap:anywhere]">
             <span className="block min-w-0 max-w-full break-words">{externalStaleDisplay.text}</span>
             {externalStaleDisplay.detail && (
               <span className="block min-w-0 max-w-full break-words">{externalStaleDisplay.detail}</span>
