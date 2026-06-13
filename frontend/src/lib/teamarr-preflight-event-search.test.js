@@ -82,6 +82,79 @@ describe('Teamarr preflight event search helpers', () => {
     expect(filterTeamarrEventsByView(events, 'all')).toEqual(events)
   })
 
+  it('keeps static team diagnostics out of the default upcoming view', () => {
+    const config = { preflight_offset_minutes: 20, poll_interval_seconds: 30 }
+    const staticTeams = [
+      {
+        preflight_kind: 'team',
+        event_name: 'Chicago Cubs',
+        state: 'no_dispatcharr_channel',
+        seconds_to_start: -18600,
+      },
+      {
+        preflight_kind: 'team',
+        event_name: 'New York Yankees',
+        state: 'no_live_window',
+      },
+      {
+        preflight_kind: 'team',
+        event_name: 'Arizona Cardinals',
+        state: 'scheduled',
+        event_date: '2026-06-13T22:05:00Z',
+        seconds_to_start: 7200,
+        dispatcharr_channel_id: 458,
+        stream_count: 1,
+        team_status: 'ready',
+      },
+      {
+        preflight_kind: 'team',
+        event_name: 'San Francisco Giants',
+        state: 'scheduled',
+        event_date: '2026-06-13T22:05:00Z',
+        seconds_to_start: 1200,
+        dispatcharr_channel_id: 458,
+        stream_count: 1,
+        team_status: 'ready',
+      },
+      {
+        preflight_kind: 'team',
+        event_name: 'Static Team Due',
+        state: 'due',
+        dispatcharr_channel_id: 459,
+      },
+    ]
+
+    expect(filterTeamarrEventsByView(staticTeams, 'upcoming', config)).toEqual([
+      staticTeams[3],
+      staticTeams[4],
+    ])
+    expect(filterTeamarrEventsByView(staticTeams, 'all', config)).toEqual(staticTeams)
+  })
+
+  it('does not hide scheduled managed events outside the static team window', () => {
+    const managedEvent = {
+      preflight_kind: 'event',
+      event_name: 'Managed MLB Event',
+      state: 'scheduled',
+      seconds_to_start: 7200,
+    }
+    const staticTeam = {
+      preflight_kind: 'team',
+      event_name: 'Static MLB Team',
+      state: 'scheduled',
+      event_date: '2026-06-13T22:05:00Z',
+      seconds_to_start: 7200,
+      dispatcharr_channel_id: 458,
+      stream_count: 1,
+      team_status: 'ready',
+    }
+
+    expect(filterTeamarrEventsByView([managedEvent, staticTeam], 'upcoming', {
+      preflight_offset_minutes: 20,
+      poll_interval_seconds: 30,
+    })).toEqual([managedEvent])
+  })
+
   it('paginates managed event lists', () => {
     expect(paginateTeamarrEvents([1, 2, 3, 4, 5], 2, 2)).toEqual([3, 4])
     expect(paginateTeamarrEvents([1, 2, 3], 0, 2)).toEqual([1, 2])

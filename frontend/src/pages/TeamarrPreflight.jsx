@@ -397,13 +397,14 @@ export default function TeamarrPreflight() {
     () => sortTeamarrManagedEvents(sourceFilteredPreflightItems),
     [sourceFilteredPreflightItems]
   )
+  const effectivePreflightConfig = status?.config || config || editedConfig || null
   const upcomingViewEvents = useMemo(
-    () => filterTeamarrEventsByView(sortedUpcomingEvents, 'upcoming'),
-    [sortedUpcomingEvents]
+    () => filterTeamarrEventsByView(sortedUpcomingEvents, 'upcoming', effectivePreflightConfig || {}),
+    [sortedUpcomingEvents, effectivePreflightConfig]
   )
   const viewFilteredUpcomingEvents = useMemo(
-    () => filterTeamarrEventsByView(sortedUpcomingEvents, managedEventView),
-    [sortedUpcomingEvents, managedEventView]
+    () => filterTeamarrEventsByView(sortedUpcomingEvents, managedEventView, effectivePreflightConfig || {}),
+    [sortedUpcomingEvents, managedEventView, effectivePreflightConfig]
   )
   const filteredUpcomingEvents = useMemo(
     () => filterTeamarrEventsBySearch(viewFilteredUpcomingEvents, eventSearch),
@@ -439,13 +440,13 @@ export default function TeamarrPreflight() {
   const allManagedEventsCount = upcomingEvents.length
   const allStaticTeamsCount = upcomingTeams.length
   const allPreflightItemsCount = preflightItems.length
-  const pastEventsCount = allPreflightItemsCount - upcomingViewCount
+  const pastEventsCount = preflightItems.filter(item => String(item?.state || '') === 'past').length
   const teamStatus = status?.team_status || {}
   const managedCandidates = Number(status?.managed_candidates ?? upcomingEvents.length)
   const managedEventsSeen = Number(status?.managed_events_seen ?? managedCandidates)
   const managedEventsReturned = Number(status?.managed_events_returned ?? upcomingEvents.length)
   const managedEventsTruncated = Boolean(status?.managed_events_truncated)
-  const nextEvent = useMemo(() => preflightItems.find(event => event.state !== 'past') || null, [preflightItems])
+  const nextEvent = useMemo(() => upcomingViewEvents[0] || null, [upcomingViewEvents])
   const connectorDisplay = connectorStatusDisplay(status?.teamarr_connector || {})
   const ConnectorIcon = connectorDisplay.icon
   const queuedChecksDetail = queuedChecksCount > 0
