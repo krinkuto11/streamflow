@@ -40,6 +40,19 @@ import {
 const DEAD_STREAMS_PER_PAGE = 20
 const PAGINATION_MAX_VISIBLE_PAGES = 5
 
+const formatProgressMode = (mode) => {
+  const labels = {
+    automation_quality_check: 'Automation Quality Check',
+    manual_full_run: 'Manual Full Run',
+    manual_period_run: 'Manual Period Run',
+    scheduler_run: 'Scheduler Run',
+    single_channel_check: 'Single Channel Check',
+    stream_checker: 'Stream Checker',
+  }
+  if (!mode) return null
+  return labels[mode] || String(mode).replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
 export default function StreamChecker() {
   const [status, setStatus] = useState(null)
   const [progress, setProgress] = useState(null)
@@ -375,6 +388,13 @@ export default function StreamChecker() {
   const providerProgress = progress?.provider_progress || []
   const providerSummary = progress?.provider_summary || {}
   const parallelProgressBadgeText = getParallelProgressBadgeText(status, providerSummary)
+  const progressRunMode = formatProgressMode(progress?.run_mode)
+  const runProfileName = progress?.run_profile_name || progress?.automation_profile_name
+  const runProfileSource = progress?.run_profile_source || progress?.automation_profile_source
+  const qualityProfileName = progress?.quality_profile_name || progress?.automation_profile_name
+  const qualityProfileSource = progress?.quality_profile_source || progress?.automation_profile_source
+  const capacityProfileName = progress?.capacity_profile_name
+  const showQualityRules = qualityProfileName && qualityProfileName !== runProfileName
   const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
   const selectedStartChannel = startChannels.find(channel => String(channel.id) === String(queueStartChannelId))
   const firstStartChannel = startChannels[0]
@@ -597,11 +617,26 @@ export default function StreamChecker() {
               <p className="text-xs text-muted-foreground">{progress.step_detail}</p>
             </div>
 
-            <div className="flex items-center gap-2 text-sm pb-2 border-b">
+            <div className="flex flex-wrap items-center gap-2 text-sm pb-2 border-b">
               <Badge variant="outline">{progress.status}</Badge>
-              {progress.automation_profile_name && (
-                <Badge variant={progress.automation_profile_source === 'forced' ? 'default' : 'outline'}>
-                  Quality Profile: {progress.automation_profile_name}
+              {progressRunMode && (
+                <Badge variant="secondary">
+                  Run Mode: {progressRunMode}
+                </Badge>
+              )}
+              {runProfileName && (
+                <Badge variant={runProfileSource === 'forced' ? 'default' : 'outline'}>
+                  Run Profile: {runProfileName}
+                </Badge>
+              )}
+              {showQualityRules && (
+                <Badge variant={qualityProfileSource === 'forced' ? 'default' : 'outline'}>
+                  Quality Rules: {qualityProfileName}
+                </Badge>
+              )}
+              {capacityProfileName && (
+                <Badge variant="outline">
+                  Capacity Profile: {capacityProfileName}
                 </Badge>
               )}
               {parallelProgressBadgeText && (

@@ -911,7 +911,7 @@ export default function Dashboard() {
               })}
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-8">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-10">
               {displayRunMetrics.map((metric) => (
                 <div key={metric.key} className="rounded-md border p-3" title={metric.description}>
                   <div className="text-xs text-muted-foreground">{metric.label}</div>

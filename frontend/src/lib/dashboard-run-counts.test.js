@@ -13,6 +13,8 @@ describe('dashboard run counts', () => {
         dead_streams: 1,
         blank_streams: 2,
         freeze_streams: 3,
+        channels_hidden: 2,
+        channels_ready: 1,
       },
     })
 
@@ -25,6 +27,8 @@ describe('dashboard run counts', () => {
       dead: 1,
       blank: 2,
       freeze: 3,
+      hidden: 2,
+      ready: 1,
     })
   })
 
@@ -47,6 +51,8 @@ describe('dashboard run counts', () => {
       dead: 0,
       blank: 0,
       freeze: 0,
+      hidden: 0,
+      ready: 0,
     })
   })
 
@@ -144,6 +150,8 @@ describe('dashboard run counts', () => {
         dead_streams: 0,
         blank_streams: 0,
         freeze_streams: 0,
+        channels_hidden: 2,
+        channels_ready: 1,
       },
       streamCheckerStatus: {
         queue: {
@@ -166,6 +174,8 @@ describe('dashboard run counts', () => {
       ['dead', 'Dead Streams', 1],
       ['blank', 'Blank Streams', 1],
       ['freeze', 'Frozen Streams', 0],
+      ['hidden', 'Channels Hidden', 2],
+      ['ready', 'Channels Ready', 1],
     ])
     expect(metrics.find(metric => metric.key === 'dead').description).toMatch(/last completed Stream Checker batch/i)
   })
@@ -201,6 +211,8 @@ describe('dashboard run counts', () => {
       ['dead', 'Dead Streams', 1],
       ['blank', 'Blank Streams', 1],
       ['freeze', 'Frozen Streams', 1],
+      ['hidden', 'Channels Hidden', 0],
+      ['ready', 'Channels Ready', 0],
     ])
   })
 
@@ -260,6 +272,8 @@ describe('dashboard run counts', () => {
       ['dead', 'Dead Streams', 1],
       ['blank', 'Blank Streams', 0],
       ['freeze', 'Frozen Streams', 1],
+      ['hidden', 'Channels Hidden', 0],
+      ['ready', 'Channels Ready', 0],
     ])
   })
 })

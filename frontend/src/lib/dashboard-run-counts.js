@@ -66,6 +66,8 @@ export const getDashboardRunCounts = ({
     freeze: queueCountsVisible
       ? Math.max(queueFreeze ?? 0, progressFreeze)
       : (singleQualityOnlyRun ? progressFreeze : (runCounts.freeze_streams ?? 0)),
+    hidden: runCounts.channels_hidden ?? 0,
+    ready: runCounts.channels_ready ?? 0,
   }
 }
 
@@ -161,6 +163,22 @@ export const getDashboardRunMetrics = ({
       description: activeStreamCheckerRun
         ? streamProblemDescription
         : 'Streams classified as frozen by the completed automation quality stage.',
+    },
+    {
+      key: 'hidden',
+      label: 'Channels Hidden',
+      value: counts.hidden,
+      description: activeStreamCheckerRun
+        ? 'Channels hidden by visibility automation during this Stream Checker batch.'
+        : 'Channels hidden by visibility automation during the automation run.',
+    },
+    {
+      key: 'ready',
+      label: 'Channels Ready',
+      value: counts.ready,
+      description: activeStreamCheckerRun
+        ? 'Channels restored by visibility automation during this Stream Checker batch.'
+        : 'Channels restored by visibility automation during the automation run.',
     },
   ]
 }

@@ -7,6 +7,17 @@ from apps.automation.automated_stream_manager import AutomatedStreamManager
 from apps.udi.fetcher import UDIFetcher
 
 
+class FakeSettingsDB:
+    def __init__(self, settings=None):
+        self.settings = dict(settings or {})
+
+    def get_system_setting(self, key, default=None):
+        return self.settings.get(key, default)
+
+    def set_system_setting(self, key, value):
+        self.settings[key] = value
+
+
 class AutomationRunStatusTests(unittest.TestCase):
     def _manager(self):
         manager = AutomatedStreamManager.__new__(AutomatedStreamManager)
@@ -65,6 +76,78 @@ class AutomationRunStatusTests(unittest.TestCase):
                 "finalizing",
             ],
         )
+
+    def test_run_status_captures_initial_and_effective_run_snapshot(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {
+                "changelog_tracking": True,
+                "teamarr_event_groups": False,
+            },
+        }
+        fake_db = FakeSettingsDB({
+            AutomatedStreamManager.RUN_SNAPSHOT_SETTINGS_KEY: {
+                "max_bytes": 8192,
+                "retention_count": 3,
+            },
+        })
+        automation_config = Mock()
+        automation_config.get_profile.return_value = {
+            "name": "Prime",
+            "stream_checking": {
+                "enabled": True,
+                "check_all_streams": True,
+                "stream_limit": 4,
+            },
+        }
+        udi = Mock()
+        udi.is_network_ready.return_value = True
+
+        with patch("apps.database.manager.get_db_manager", return_value=fake_db):
+            manager._start_run_status(forced=True, forced_period_id="period-1")
+
+            initial_snapshot = manager.get_run_status()["run_snapshot"]
+            self.assertEqual(initial_snapshot["run_mode"], "manual_period_run")
+            self.assertEqual(initial_snapshot["start_source"], "manual")
+            self.assertEqual(initial_snapshot["forced_period_id"], "period-1")
+            self.assertEqual(initial_snapshot["limits"]["retention_count"], 3)
+
+            manager._finalize_run_snapshot(
+                {
+                    ("period-1", "Prime Time"): {
+                        "profile_id": "profile-a",
+                        "profile_name": "Prime",
+                        "channels": [{"id": 10}, {"id": 11}],
+                    },
+                },
+                automation_config,
+                {"regular_automation_enabled": True},
+                udi=udi,
+                teamarr_event_window={"hours": 12},
+            )
+            manager._finish_run_status(
+                state="completed",
+                stage="completed",
+                stage_label="Completed",
+                message="Automation cycle completed",
+            )
+
+        status = manager.get_run_status()
+        snapshot = status["run_snapshot"]
+        self.assertEqual(snapshot["run_id"], status["run_id"])
+        self.assertEqual(snapshot["effective_profile_count"], 1)
+        self.assertEqual(snapshot["channel_count"], 2)
+        self.assertEqual(snapshot["effective_profiles"][0]["profile_name"], "Prime")
+        self.assertEqual(snapshot["quality_rules"][0]["enabled"], True)
+        self.assertEqual(snapshot["capacity_profile_context"]["type"], "provider_account_profiles")
+        self.assertEqual(snapshot["dispatcharr_status"]["network_ready"], True)
+        self.assertEqual(snapshot["teamarr_status"]["event_window_active"], True)
+        self.assertEqual(snapshot["feature_flags"]["regular_automation_enabled"], True)
+        self.assertFalse(snapshot["snapshot_truncated"])
+
+        stored = fake_db.settings[AutomatedStreamManager.RUN_SNAPSHOT_HISTORY_KEY]
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]["run_id"], status["run_id"])
 
     def test_run_status_marks_prior_stages_completed(self):
         manager = self._manager()
@@ -243,6 +326,19 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(summary["aborted_count"], 1)
         self.assertEqual(summary["incomplete_count"], 3)
         self.assertEqual(summary["abort_message"], "dispatcharr_api connectivity probe timed out")
+
+    def test_channel_visibility_summary_counts_unique_hidden_and_ready_channels(self):
+        summary = AutomatedStreamManager._summarize_channel_visibility_events([
+            {"changed": True, "action": "hidden", "channel_id": 10},
+            {"changed": True, "action": "hidden", "channel_id": 10},
+            {"changed": True, "action": "unhidden", "channel_ref": "channel-11"},
+            {"changed": False, "action": "hidden", "channel_id": 12},
+            {"changed": True, "action": "noop", "channel_id": 13},
+        ])
+
+        self.assertEqual(summary["channels_hidden"], 1)
+        self.assertEqual(summary["channels_ready"], 1)
+        self.assertEqual(summary["channel_visibility_changed"], 4)
 
     def test_refresh_playlists_emits_account_progress(self):
         manager = self._manager()

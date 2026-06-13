@@ -146,3 +146,38 @@ def test_progress_update_builds_provider_progress_counters():
         'skipped_streams': 2,
         'failed_streams': 1,
     }
+
+
+def test_progress_update_persists_run_quality_and_capacity_context():
+    fake_db = FakeDB()
+
+    with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+        progress = StreamCheckerProgress()
+        progress.update(
+            channel_id=10,
+            channel_name='Test Channel',
+            current=1,
+            total=1,
+            status='analyzing',
+            run_mode='automation_quality_check',
+            run_profile_id='profile-a',
+            run_profile_name='Prime',
+            run_profile_source='schedule',
+            quality_profile_id='quality-a',
+            quality_profile_name='Strict Quality',
+            quality_profile_source='forced',
+            capacity_profile_name='Provider account profiles',
+            capacity_profile_source='m3u_account_profiles',
+        )
+
+    saved = fake_db.settings['stream_checker_progress']
+
+    assert saved['run_mode'] == 'automation_quality_check'
+    assert saved['run_profile_id'] == 'profile-a'
+    assert saved['run_profile_name'] == 'Prime'
+    assert saved['run_profile_source'] == 'schedule'
+    assert saved['quality_profile_id'] == 'quality-a'
+    assert saved['quality_profile_name'] == 'Strict Quality'
+    assert saved['quality_profile_source'] == 'forced'
+    assert saved['capacity_profile_name'] == 'Provider account profiles'
+    assert saved['capacity_profile_source'] == 'm3u_account_profiles'

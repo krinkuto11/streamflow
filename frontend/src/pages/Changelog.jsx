@@ -667,6 +667,18 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
               <p className="text-lg font-bold text-green-500">{details.streams_revived}</p>
             </div>
           )}
+          {details.channels_hidden !== undefined && details.channels_hidden > 0 && (
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">Channels Hidden</p>
+              <p className="text-lg font-bold text-amber-500">{details.channels_hidden}</p>
+            </div>
+          )}
+          {details.channels_ready !== undefined && details.channels_ready > 0 && (
+            <div>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">Channels Ready</p>
+              <p className="text-lg font-bold text-green-500">{details.channels_ready}</p>
+            </div>
+          )}
           {details.duration && (
             <div>
               <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">Duration</p>

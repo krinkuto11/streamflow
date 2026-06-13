@@ -1197,10 +1197,26 @@ class StreamCheckerProgress:
                provider_profile_slots: Optional[Dict[str, List[Dict[str, Any]]]] = None,
                automation_profile_id: Optional[str] = None,
                automation_profile_name: Optional[str] = None,
-               automation_profile_source: Optional[str] = None):
+               automation_profile_source: Optional[str] = None,
+               run_mode: Optional[str] = None,
+               run_profile_id: Optional[str] = None,
+               run_profile_name: Optional[str] = None,
+               run_profile_source: Optional[str] = None,
+               quality_profile_id: Optional[str] = None,
+               quality_profile_name: Optional[str] = None,
+               quality_profile_source: Optional[str] = None,
+               capacity_profile_name: Optional[str] = None,
+               capacity_profile_source: Optional[str] = None):
         """Update progress information."""
         from apps.database.manager import get_db_manager
         with self.lock:
+            resolved_run_mode = run_mode or ("single_channel_check" if is_single_channel_check else "stream_checker")
+            resolved_run_profile_id = run_profile_id if run_profile_id not in (None, '') else automation_profile_id
+            resolved_run_profile_name = run_profile_name if run_profile_name not in (None, '') else automation_profile_name
+            resolved_run_profile_source = run_profile_source if run_profile_source not in (None, '') else automation_profile_source
+            resolved_quality_profile_id = quality_profile_id if quality_profile_id not in (None, '') else automation_profile_id
+            resolved_quality_profile_name = quality_profile_name if quality_profile_name not in (None, '') else automation_profile_name
+            resolved_quality_profile_source = quality_profile_source if quality_profile_source not in (None, '') else automation_profile_source
             progress_data = {
                 'channel_id': channel_id,
                 'channel_name': channel_name,
@@ -1213,12 +1229,21 @@ class StreamCheckerProgress:
                 'step_detail': step_detail,
                 'stream_duration': stream_duration,
                 'is_single_channel_check': is_single_channel_check,
+                'run_mode': resolved_run_mode,
                 'timestamp': datetime.now().isoformat()
             }
             for key, value in {
                 'automation_profile_id': automation_profile_id,
                 'automation_profile_name': automation_profile_name,
                 'automation_profile_source': automation_profile_source,
+                'run_profile_id': resolved_run_profile_id,
+                'run_profile_name': resolved_run_profile_name,
+                'run_profile_source': resolved_run_profile_source,
+                'quality_profile_id': resolved_quality_profile_id,
+                'quality_profile_name': resolved_quality_profile_name,
+                'quality_profile_source': resolved_quality_profile_source,
+                'capacity_profile_name': capacity_profile_name,
+                'capacity_profile_source': capacity_profile_source,
             }.items():
                 if value not in (None, ''):
                     progress_data[key] = value
@@ -1238,6 +1263,15 @@ class StreamCheckerProgress:
                         'automation_profile_id',
                         'automation_profile_name',
                         'automation_profile_source',
+                        'run_mode',
+                        'run_profile_id',
+                        'run_profile_name',
+                        'run_profile_source',
+                        'quality_profile_id',
+                        'quality_profile_name',
+                        'quality_profile_source',
+                        'capacity_profile_name',
+                        'capacity_profile_source',
                     ):
                         if key not in progress_data and existing.get(key) not in (None, ''):
                             progress_data[key] = existing.get(key)

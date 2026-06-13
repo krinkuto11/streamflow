@@ -1985,6 +1985,7 @@ class StreamCheckerService:
         target_stream_ids: Optional[List[str]] = None,
         forced_profile_id: Optional[str] = None,
         provider_limit_override: bool = False,
+        run_mode: Optional[str] = None,
     ):
         """Check and reorder streams for a specific channel using parallel thread pool.
         
@@ -2100,6 +2101,7 @@ class StreamCheckerService:
             profile,
             forced_profile_id=forced_profile_id,
         )
+        profile_progress_context['run_mode'] = run_mode or 'stream_checker'
         
         try:
             # Get channel information from UDI
@@ -3261,6 +3263,7 @@ class StreamCheckerService:
         target_stream_ids: Optional[List[str]] = None,
         forced_profile_id: Optional[str] = None,
         provider_limit_override: bool = False,
+        run_mode: Optional[str] = None,
     ):
         """Check and reorder streams for a specific channel using sequential checking.
         
@@ -3367,6 +3370,7 @@ class StreamCheckerService:
             profile,
             forced_profile_id=forced_profile_id,
         )
+        profile_progress_context['run_mode'] = run_mode or 'stream_checker'
         
         try:
             # Get channel information from UDI
@@ -5096,6 +5100,14 @@ class StreamCheckerService:
         if profile_name:
             context['automation_profile_name'] = str(profile_name)
         context['automation_profile_source'] = 'forced' if forced_profile_id else 'resolved'
+        context['run_profile_id'] = context.get('automation_profile_id')
+        context['run_profile_name'] = context.get('automation_profile_name')
+        context['run_profile_source'] = context.get('automation_profile_source')
+        context['quality_profile_id'] = context.get('automation_profile_id')
+        context['quality_profile_name'] = context.get('automation_profile_name')
+        context['quality_profile_source'] = context.get('automation_profile_source')
+        context['capacity_profile_name'] = 'Provider account profiles'
+        context['capacity_profile_source'] = 'm3u_account_profiles'
         return context
 
     def _apply_channel_visibility_after_check(
@@ -5269,6 +5281,7 @@ class StreamCheckerService:
         force_check: bool = False,
         target_stream_ids: Optional[Dict[int, List[str]]] = None,
         progress_callback: Optional[Callable[[int, int, Dict], None]] = None,
+        run_mode: Optional[str] = None,
     ) -> Dict[int, Dict]:
         """Check multiple channels synchronously and return results.
         
@@ -5380,9 +5393,9 @@ class StreamCheckerService:
                         stream_id_whitelist = None
                         
                     if concurrent_enabled:
-                        channel_result = self._check_channel_concurrent(channel_id, skip_batch_changelog=True, target_stream_ids=stream_id_whitelist)
+                        channel_result = self._check_channel_concurrent(channel_id, skip_batch_changelog=True, target_stream_ids=stream_id_whitelist, run_mode=run_mode)
                     else:
-                        channel_result = self._check_channel_sequential(channel_id, skip_batch_changelog=True, target_stream_ids=stream_id_whitelist)
+                        channel_result = self._check_channel_sequential(channel_id, skip_batch_changelog=True, target_stream_ids=stream_id_whitelist, run_mode=run_mode)
                         
                     results[channel_id] = channel_result
                     with self.lock:
@@ -5632,6 +5645,7 @@ class StreamCheckerService:
                 profile,
                 forced_profile_id=_effective_profile_id_for_context if forced_profile_id else None,
             )
+            profile_progress_context['run_mode'] = 'single_channel_check'
             m3u_refresh_scope = "disabled"
             m3u_refresh_account_ids: List[int] = []
 
