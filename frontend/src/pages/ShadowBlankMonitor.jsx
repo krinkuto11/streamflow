@@ -17,6 +17,7 @@ import {
   shadowMonitorNumberFields,
   shadowMonitorThresholdFields,
 } from '@/lib/shadow-monitor-config-fields.js'
+import { getShadowMonitorDisplayState } from '@/lib/shadow-monitor-status.js'
 import {
   filterShadowDecisionEvents,
   formatShadowEventReason,
@@ -243,15 +244,24 @@ export default function ShadowBlankMonitor() {
     )
   }
 
-  const running = Boolean(status?.running)
-  const enabled = Boolean(editedConfig?.enabled)
-  const dryRun = Boolean(editedConfig?.dry_run)
-  const watchMode = editedConfig?.watch_mode || 'continuous'
-  const hasKey = Boolean(config?.has_watcher_api_key)
-  const configurationRequired = Boolean(status?.configuration_required) || !hasKey
-  const configurationMessage = status?.configuration_message || 'Save a Watcher API Key before starting the monitor.'
-  const canUseWatcher = actionLoading === '' && !configurationRequired
-  const continuousWatcherActive = running && watchMode === 'continuous'
+  const displayState = getShadowMonitorDisplayState({ status, config, editedConfig, actionLoading })
+  const {
+    backendRunning,
+    running,
+    formEnabled,
+    formDryRun,
+    serviceDryRun,
+    hasKey,
+    configurationRequired,
+    configurationMessage,
+    canUseWatcher,
+    canStopWatcher,
+    continuousWatcherActive,
+    staleRunning,
+    serviceLabel,
+    serviceDescription,
+  } = displayState
+  const formWatchMode = editedConfig?.watch_mode || 'continuous'
   const canLearnOfflineImage = actionLoading === '' && watchedChannels.length > 0
 
   return (
@@ -269,11 +279,11 @@ export default function ShadowBlankMonitor() {
             {actionLoading === 'save' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
             Save
           </Button>
-          {running ? (
+          {backendRunning ? (
             <Button
               variant="outline"
               onClick={() => runAction('stop', shadowBlankMonitorAPI.stop, 'Shadow monitor stopped')}
-              disabled={actionLoading !== ''}
+              disabled={!canStopWatcher}
             >
               {actionLoading === 'stop' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
               Stop
@@ -311,6 +321,16 @@ export default function ShadowBlankMonitor() {
         </div>
       ) : null}
 
+      {staleRunning ? (
+        <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-100">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">Watcher thread is stopping</p>
+            <p className="mt-1">The backend still reports an active watcher thread while the saved service config is disabled.</p>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -319,14 +339,14 @@ export default function ShadowBlankMonitor() {
           </CardHeader>
           <CardContent>
             <Badge
-              variant={configurationRequired ? 'outline' : running ? 'default' : 'secondary'}
-              className={running ? 'bg-green-500' : configurationRequired ? 'border-amber-500/50 text-amber-700 dark:text-amber-200' : ''}
+              variant={configurationRequired || staleRunning ? 'outline' : running ? 'default' : 'secondary'}
+              className={running ? 'bg-green-500' : configurationRequired || staleRunning ? 'border-amber-500/50 text-amber-700 dark:text-amber-200' : ''}
             >
-              {configurationRequired ? <AlertCircle className="mr-1 h-3 w-3" /> : running ? <CheckCircle2 className="mr-1 h-3 w-3" /> : null}
-              {configurationRequired ? 'Setup required' : running ? 'Running' : 'Stopped'}
+              {configurationRequired || staleRunning ? <AlertCircle className="mr-1 h-3 w-3" /> : running ? <CheckCircle2 className="mr-1 h-3 w-3" /> : null}
+              {serviceLabel}
             </Badge>
             <p className="mt-2 text-xs text-muted-foreground">
-              {configurationRequired ? configurationMessage : enabled ? 'Enabled' : 'Disabled'}
+              {serviceDescription}
             </p>
           </CardContent>
         </Card>
@@ -348,7 +368,7 @@ export default function ShadowBlankMonitor() {
             <Shield className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <Badge variant={dryRun ? 'outline' : 'default'}>{dryRun ? 'Dry Run' : 'Live'}</Badge>
+            <Badge variant={serviceDryRun ? 'outline' : 'default'}>{serviceDryRun ? 'Dry Run' : 'Live'}</Badge>
             <p className="mt-2 truncate text-xs text-muted-foreground">
               {lastSwitchEvent ? `${formatEvent(lastSwitchEvent)}: ${lastSwitchReason}` : `${cooldownCount} channel cooldowns`}
             </p>
@@ -390,7 +410,7 @@ export default function ShadowBlankMonitor() {
                   <Label className="text-sm font-medium">Enabled</Label>
                   <p className="text-xs text-muted-foreground">Auto-starts with the backend</p>
                 </div>
-                <Switch checked={enabled} onCheckedChange={(value) => updateConfigValue('enabled', value)} />
+                <Switch checked={formEnabled} onCheckedChange={(value) => updateConfigValue('enabled', value)} />
               </div>
 
               <div className="flex items-center justify-between rounded-md border p-3">
@@ -398,7 +418,7 @@ export default function ShadowBlankMonitor() {
                   <Label className="text-sm font-medium">Dry Run</Label>
                   <p className="text-xs text-muted-foreground">Records intended switches only</p>
                 </div>
-                <Switch checked={dryRun} onCheckedChange={(value) => updateConfigValue('dry_run', value)} />
+                <Switch checked={formDryRun} onCheckedChange={(value) => updateConfigValue('dry_run', value)} />
               </div>
 
               <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
@@ -447,6 +467,38 @@ export default function ShadowBlankMonitor() {
 
               <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
                 <div>
+                  <Label className="text-sm font-medium">Loop Detection</Label>
+                  <p className="text-xs text-muted-foreground">Switch when active video content repeats in a loop</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.loop_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('loop_detection_enabled', value)}
+                />
+              </div>
+
+              <div className="space-y-2 md:col-span-2">
+                <Label htmlFor="loop_probe_duration_seconds">Loop Probe Duration</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="loop_probe_duration_seconds"
+                    type="number"
+                    min={60}
+                    max={720}
+                    value={editedConfig.loop_probe_duration_seconds ?? 120}
+                    onChange={(event) => updateConfigValue(
+                      'loop_probe_duration_seconds',
+                      Math.min(720, Math.max(60, Number(event.target.value) || 120)),
+                    )}
+                  />
+                  <span className="w-16 shrink-0 text-xs text-muted-foreground">sec</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Loop probes are gated by active real viewers, confirmations, cooldowns, switch budget, and optional next-stream pre-probe.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
+                <div>
                   <Label className="text-sm font-medium">Next Stream Pre-Probe</Label>
                   <p className="text-xs text-muted-foreground">Validate the next candidate before switching</p>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -464,14 +516,14 @@ export default function ShadowBlankMonitor() {
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
                   <Button
                     type="button"
-                    variant={watchMode === 'periodic' ? 'default' : 'outline'}
+                    variant={formWatchMode === 'periodic' ? 'default' : 'outline'}
                     onClick={() => updateConfigValue('watch_mode', 'periodic')}
                   >
                     Periodic
                   </Button>
                   <Button
                     type="button"
-                    variant={watchMode === 'continuous' ? 'default' : 'outline'}
+                    variant={formWatchMode === 'continuous' ? 'default' : 'outline'}
                     onClick={() => updateConfigValue('watch_mode', 'continuous')}
                   >
                     Continuous
@@ -699,6 +751,7 @@ export default function ShadowBlankMonitor() {
                           {channel.last_probe?.garbled_audio_detected && <Badge variant="outline">Garbled Audio</Badge>}
                           {channel.last_probe?.silent_audio_detected && <Badge variant="outline">Silent Audio</Badge>}
                           {channel.last_probe?.offline_image_detected && <Badge variant="outline">Offline Image</Badge>}
+                          {channel.last_probe?.loop_detected && <Badge variant="outline">Loop</Badge>}
                         </div>
                       </div>
                     )

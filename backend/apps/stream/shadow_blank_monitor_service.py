@@ -34,6 +34,7 @@ from apps.stream.stream_check_utils import (
     _parse_blank_detection,
     _parse_ffmpeg_progress_time,
     _parse_freeze_detection,
+    _probe_stream_for_loops,
 )
 from apps.udi import get_udi_manager
 
@@ -105,6 +106,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "offline_image_reference_hashes": [],
     "offline_image_hash_threshold": 4,
     "offline_image_capture_offset_seconds": 3,
+    "loop_detection_enabled": False,
+    "loop_probe_duration_seconds": 120,
     "next_stream_pre_probe_enabled": False,
     "next_stream_pre_probe_duration_seconds": 8,
     "confirmation_count": 2,
@@ -123,6 +126,7 @@ MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
     "offline_image",
     "garbled_audio",
     "silent_audio",
+    "loop",
 }
 DETECTION_REASONS = {
     "blank",
@@ -131,6 +135,7 @@ DETECTION_REASONS = {
     "garbled_audio",
     "silent_audio",
     "offline_image",
+    "loop",
 }
 PENDING_EVENT_REASONS = {
     f"{reason}_pending": reason
@@ -146,6 +151,7 @@ DETECTION_MEASUREMENT_KEYS = {
     "garbled_audio": ("garbled_audio_error_count", "garbled_audio_error"),
     "silent_audio": ("silent_audio_duration_secs", "silent_audio_noise_db"),
     "offline_image": ("offline_image_distance", "offline_image_hash"),
+    "loop": ("loop_duration_secs", "loop_frames_processed"),
 }
 DETECTION_THRESHOLD_KEYS = {
     "blank": (
@@ -165,6 +171,7 @@ DETECTION_THRESHOLD_KEYS = {
         "silent_audio_noise_db",
     ),
     "offline_image": ("offline_image_hash_threshold",),
+    "loop": ("loop_probe_duration_seconds",),
 }
 SWITCH_EVENT_TYPES = {"dry_run_switch", "switch_success", "switch_failed"}
 PRE_PROBE_EVENT_TYPES = {"pre_probe_unavailable", "pre_probe_rejected"}
@@ -199,6 +206,7 @@ INT_BOUNDS = {
     "silent_audio_noise_db": (-90, -20),
     "offline_image_hash_threshold": (0, 20),
     "offline_image_capture_offset_seconds": (0, 30),
+    "loop_probe_duration_seconds": (60, 720),
     "next_stream_pre_probe_duration_seconds": (3, 60),
 }
 
@@ -314,6 +322,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["garbled_audio_detection_enabled"] = bool(config.get("garbled_audio_detection_enabled"))
     config["silent_audio_detection_enabled"] = bool(config.get("silent_audio_detection_enabled"))
     config["offline_image_detection_enabled"] = bool(config.get("offline_image_detection_enabled"))
+    config["loop_detection_enabled"] = bool(config.get("loop_detection_enabled"))
     config["next_stream_pre_probe_enabled"] = bool(config.get("next_stream_pre_probe_enabled"))
     config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
     if config["watch_mode"] not in WATCH_MODES:
@@ -362,6 +371,7 @@ class ShadowBlankMonitorService:
         switch_stream: Callable[..., bool] = change_channel_stream,
         base_url_provider: Optional[Callable[[], Optional[str]]] = None,
         blank_probe: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
+        loop_probe: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
         stream_checker_provider: Optional[Callable[[], Any]] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -370,6 +380,7 @@ class ShadowBlankMonitorService:
         self.switch_stream = switch_stream
         self.base_url_provider = base_url_provider or (lambda: get_dispatcharr_config().get_base_url())
         self.blank_probe = blank_probe or self._run_blank_probe
+        self.loop_probe = loop_probe or self._run_loop_probe
         self._uses_default_blank_probe = blank_probe is None
         self.stream_checker_provider = stream_checker_provider or self._default_stream_checker_provider
         self.clock = clock
@@ -588,6 +599,9 @@ class ShadowBlankMonitorService:
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
                 "dry_run": bool(self._config.get("dry_run")),
+                "watch_mode": self._config.get("watch_mode"),
+                "loop_detection_enabled": bool(self._config.get("loop_detection_enabled")),
+                "loop_probe_duration_seconds": int(self._config.get("loop_probe_duration_seconds") or 0),
                 "configuration_required": bool(issue),
                 "configuration_issue": issue["code"] if issue else None,
                 "configuration_message": issue["message"] if issue else None,
@@ -893,7 +907,12 @@ class ShadowBlankMonitorService:
             target.pop("media_recovery_guard_reason", None)
             target.pop("media_recovery_guard_bypass", None)
             proxy_url = self._channel_proxy_url(channel_uuid)
-            if config.get("watch_mode") == "continuous" and self._uses_default_blank_probe:
+            use_continuous_blank_probe = (
+                config.get("watch_mode") == "continuous"
+                and self._uses_default_blank_probe
+                and not config.get("loop_detection_enabled")
+            )
+            if use_continuous_blank_probe:
                 result = self._run_blank_probe_until_viewer_left(proxy_url, config, udi, target)
             else:
                 result = self.blank_probe(proxy_url, config)
@@ -912,6 +931,7 @@ class ShadowBlankMonitorService:
                 config.get("offline_image_detection_enabled")
                 and result.get("offline_image_detected")
             )
+            loop = False
             detection_reason = next(
                 (
                     reason
@@ -946,6 +966,11 @@ class ShadowBlankMonitorService:
                 "offline_image_detected": offline_image,
                 "offline_image_hash": result.get("offline_image_hash"),
                 "offline_image_distance": result.get("offline_image_distance"),
+                "loop_probe_ran": bool(result.get("loop_probe_ran")),
+                "loop_detected": loop,
+                "loop_duration_secs": result.get("loop_duration_secs"),
+                "loop_frames_processed": result.get("loop_frames_processed"),
+                "loop_probe_error": result.get("loop_probe_error"),
             }
             target["last_probe_thresholds"] = self._detection_thresholds(config)
 
@@ -962,6 +987,30 @@ class ShadowBlankMonitorService:
                 with self._lock:
                     self._watched.pop(channel_uuid, None)
                 return False
+
+            if not detection_reason:
+                loop_result = self._run_loop_probe_if_enabled(proxy_url, target, config)
+                if loop_result:
+                    result.update(loop_result)
+                    loop = bool(loop_result.get("loop_detected"))
+                    target["last_probe"].update({
+                        "loop_probe_ran": bool(loop_result.get("loop_probe_ran")),
+                        "loop_detected": loop,
+                        "loop_duration_secs": loop_result.get("loop_duration_secs"),
+                        "loop_frames_processed": loop_result.get("loop_frames_processed"),
+                        "loop_probe_error": loop_result.get("loop_probe_error"),
+                    })
+                    if loop:
+                        detection_reason = "loop"
+                    fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                    if self._real_client_count(fresh_status, config) <= 0:
+                        self._reset_blank_count(channel_uuid)
+                        self._clear_switch_attempts(channel_uuid)
+                        target.pop("media_recovery_guard_observed", None)
+                        self._record_event("viewer_left", target, {})
+                        with self._lock:
+                            self._watched.pop(channel_uuid, None)
+                        return False
 
             if not detection_reason:
                 self._reset_blank_count(channel_uuid)
@@ -1289,6 +1338,9 @@ class ShadowBlankMonitorService:
                 "garbled_audio_detected": bool(probe_result.get("garbled_audio_detected")),
                 "silent_audio_detected": bool(probe_result.get("silent_audio_detected")),
                 "offline_image_detected": bool(probe_result.get("offline_image_detected")),
+                "loop_probe_ran": bool(probe_result.get("loop_probe_ran")),
+                "loop_detected": bool(probe_result.get("loop_detected")),
+                "loop_duration_secs": probe_result.get("loop_duration_secs"),
             })
             last_details = details
             if rejection_reason:
@@ -1479,7 +1531,11 @@ class ShadowBlankMonitorService:
         pre_probe_config["probe_duration_seconds"] = int(
             config.get("next_stream_pre_probe_duration_seconds", 8)
         )
-        return self._run_blank_probe(url, pre_probe_config)
+        result = self._run_blank_probe(url, pre_probe_config)
+        if self._pre_probe_rejection_reason(result):
+            return result
+        result.update(self._run_loop_probe_if_enabled(url, {"channel_ref": "pre_probe"}, pre_probe_config))
+        return result
 
     @staticmethod
     def _pre_probe_rejection_reason(result: Dict[str, Any]) -> Optional[str]:
@@ -1492,6 +1548,7 @@ class ShadowBlankMonitorService:
             "no_decodable_frames",
             "garbled_audio",
             "silent_audio",
+            "loop",
         ):
             if result.get(f"{reason}_detected"):
                 return reason
@@ -1510,6 +1567,7 @@ class ShadowBlankMonitorService:
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "garbled_audio"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "silent_audio"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "offline_image"), None)
+            self._blank_counts.pop(self._detection_count_key(channel_uuid, "loop"), None)
 
     def _reset_detection_state(self, channel_uuid: str) -> None:
         self._reset_blank_count(channel_uuid)
@@ -1961,6 +2019,54 @@ class ShadowBlankMonitorService:
         if best_distance <= int(config.get("offline_image_hash_threshold", 4)):
             result["offline_image_detected"] = True
         return result
+
+    @staticmethod
+    def _watcher_probe_headers(config: Dict[str, Any]) -> str:
+        api_key = config.get("watcher_api_key")
+        if not api_key:
+            return ""
+        return f"X-API-Key: {api_key}\r\nAuthorization: ApiKey {api_key}\r\n"
+
+    def _run_loop_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        stream_tag = _ref("shadow-loop-url", url)
+        loop_detected, loop_duration, frames = _probe_stream_for_loops(
+            url=url,
+            stream_tag=stream_tag,
+            probe_duration=int(config.get("loop_probe_duration_seconds", 120)),
+            user_agent=config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"],
+            headers=self._watcher_probe_headers(config) or None,
+        )
+        return {
+            "loop_probe_ran": True,
+            "loop_detected": bool(loop_detected),
+            "loop_duration_secs": loop_duration,
+            "loop_frames_processed": frames,
+        }
+
+    def _run_loop_probe_if_enabled(
+        self,
+        url: str,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not config.get("loop_detection_enabled"):
+            return {}
+        try:
+            result = dict(self.loop_probe(url, config) or {})
+            result.setdefault("loop_probe_ran", True)
+            result["loop_detected"] = bool(result.get("loop_detected"))
+            return result
+        except Exception as exc:
+            logger.warning(
+                "Shadow loop probe failed for %s: %s",
+                target.get("channel_ref") or _ref("channel", target.get("channel_uuid")),
+                exc,
+            )
+            return {
+                "loop_probe_ran": False,
+                "loop_detected": False,
+                "loop_probe_error": type(exc).__name__,
+            }
 
     @staticmethod
     def _parse_no_decodable_frames_detection(

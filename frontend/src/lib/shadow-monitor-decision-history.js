@@ -6,6 +6,7 @@ export const shadowEventLabels = {
   garbled_audio_pending: 'Garbled Audio Pending',
   silent_audio_pending: 'Silent Audio Pending',
   offline_image_pending: 'Offline Image Pending',
+  loop_pending: 'Loop Pending',
   dry_run_switch: 'Dry Run Switch',
   switch_success: 'Switch Success',
   switch_failed: 'Switch Failed',
@@ -42,6 +43,7 @@ const reasonLabels = {
   garbled_audio: 'Garbled Audio',
   silent_audio: 'Silent Audio',
   offline_image: 'Offline Image',
+  loop: 'Loop',
   manual: 'Manual',
   pre_probe: 'Pre-Probe',
   provider_capacity: 'Provider Slot',
@@ -203,6 +205,16 @@ const detectionParts = (detection = {}) => {
   if (reason === 'offline_image') {
     return [
       measurements.offline_image_distance !== undefined ? `pHash gap ${measurements.offline_image_distance}` : null,
+    ].filter(Boolean)
+  }
+
+  if (reason === 'loop') {
+    const duration = formatSeconds(measurements.loop_duration_secs)
+    const probeDuration = formatSeconds(thresholds.loop_probe_duration_seconds)
+    return [
+      duration ? `loop ${duration}` : null,
+      probeDuration ? `probe ${probeDuration}` : null,
+      measurements.loop_frames_processed !== undefined ? `${measurements.loop_frames_processed} frames` : null,
     ].filter(Boolean)
   }
 

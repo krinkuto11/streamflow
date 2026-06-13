@@ -64,6 +64,7 @@ def make_service(
     *,
     udi,
     blank_probe=None,
+    loop_probe=None,
     switch_calls=None,
     clock=None,
     checker=None,
@@ -81,6 +82,7 @@ def make_service(
         switch_stream=switch_stream,
         base_url_provider=lambda: "http://dispatcharr.local",
         blank_probe=blank_probe or (lambda url, config: {"blank_detected": False}),
+        loop_probe=loop_probe,
         stream_checker_provider=lambda: checker or FakeStreamChecker(),
         clock=clock or (lambda: 1000.0),
     )
@@ -119,6 +121,8 @@ def test_watch_mode_controls_scan_delay():
     assert defaults["offline_image_detection_enabled"] is False
     assert defaults["offline_image_reference_hashes"] == []
     assert defaults["offline_image_hash_threshold"] == 4
+    assert defaults["loop_detection_enabled"] is False
+    assert defaults["loop_probe_duration_seconds"] == 120
     assert defaults["next_stream_pre_probe_enabled"] is False
     assert defaults["next_stream_pre_probe_duration_seconds"] == 8
     assert defaults["confirmation_count"] == 2
@@ -144,6 +148,10 @@ def test_watch_mode_controls_scan_delay():
     assert invalid["watch_mode"] == "continuous"
     assert invalid["watch_gap_seconds"] == 1
 
+    loop_bounds = normalize_config({"loop_detection_enabled": True, "loop_probe_duration_seconds": 999})
+    assert loop_bounds["loop_detection_enabled"] is True
+    assert loop_bounds["loop_probe_duration_seconds"] == 720
+
 
 def test_offline_image_status_warns_about_missing_or_invalid_hashes(tmp_path):
     service = make_service(
@@ -162,6 +170,170 @@ def test_offline_image_status_warns_about_missing_or_invalid_hashes(tmp_path):
     assert status["offline_image"]["valid_reference_count"] == 1
     assert status["offline_image"]["invalid_reference_count"] == 1
     assert "invalid_reference_hash" in status["offline_image"]["warnings"]
+
+
+def test_status_exposes_shadow_loop_detection_context(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+
+    service.update_config({
+        "loop_detection_enabled": True,
+        "loop_probe_duration_seconds": 180,
+        "watch_mode": "periodic",
+    })
+
+    status = service.get_status()
+    assert status["watch_mode"] == "periodic"
+    assert status["loop_detection_enabled"] is True
+    assert status["loop_probe_duration_seconds"] == 180
+
+
+def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
+    switch_calls = []
+    loop_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={
+            10: {"id": 10, "url": "http://provider.example/old.ts"},
+            11: {"id": 11, "url": "http://provider.example/new.ts"},
+        },
+    )
+
+    def loop_probe(url, config):
+        loop_calls.append((url, config["loop_probe_duration_seconds"]))
+        return {
+            "loop_probe_ran": True,
+            "loop_detected": True,
+            "loop_duration_secs": 12.5,
+            "loop_frames_processed": 240,
+        }
+
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False, "freeze_detected": False},
+        loop_probe=loop_probe,
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        **service.get_config(include_secret=True),
+        "loop_detection_enabled": True,
+        "loop_probe_duration_seconds": 180,
+        "confirmation_count": 1,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+    }
+
+    assert service._probe_target_once(udi, target, config) is False
+
+    assert loop_calls == [("http://dispatcharr.local/proxy/ts/stream/uuid-1", 180)]
+    assert switch_calls == [("uuid-1", 11, None)]
+    event = service.get_status()["recent_events"][0]
+    assert event["type"] == "switch_success"
+    assert event["trigger_reason"] == "loop"
+    assert event["details"]["detection"]["measurements"] == {
+        "loop_duration_secs": 12.5,
+        "loop_frames_processed": 240,
+    }
+
+
+def test_shadow_loop_detection_is_gated_by_config(tmp_path):
+    loop_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10}, 11: {"id": 11}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False, "freeze_detected": False},
+        loop_probe=lambda url, config: loop_calls.append(url) or {"loop_detected": True},
+    )
+    config = normalize_config({
+        **service.get_config(include_secret=True),
+        "loop_detection_enabled": False,
+        "confirmation_count": 1,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+    }
+
+    assert service._probe_target_once(udi, target, config) is True
+
+    assert loop_calls == []
+    assert service.get_status()["recent_events"][0]["type"] == "probe_ok"
+
+
+def test_shadow_loop_pre_probe_rejects_looping_alternative(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"/proxy/ts/stream/uuid-1": active_status(10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={
+            10: {"id": 10, "url": "http://provider.example/old.ts"},
+            11: {"id": 11, "url": "http://provider.example/new.ts"},
+        },
+    )
+    service = make_service(tmp_path, udi=udi)
+    service._run_blank_probe = lambda url, config: {
+        "blank_detected": False,
+        "freeze_detected": False,
+        "no_decodable_frames_detected": False,
+    }
+    service.loop_probe = lambda url, config: {
+        "loop_probe_ran": True,
+        "loop_detected": True,
+        "loop_duration_secs": 14.0,
+        "loop_frames_processed": 200,
+    }
+    config = normalize_config({
+        **service.get_config(include_secret=True),
+        "loop_detection_enabled": True,
+        "next_stream_pre_probe_enabled": True,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+    }
+
+    alternative, details = service._choose_preprobed_alternative_stream(
+        udi,
+        target,
+        config,
+        10,
+        reason="loop",
+    )
+
+    assert alternative is None
+    assert details["result"] == "rejected"
+    assert details["rejection_reason"] == "loop"
+    assert service.get_status()["recent_events"][0]["type"] == "pre_probe_rejected"
+    assert service.get_status()["pre_probe"]["last"]["rejection_reason"] == "loop"
 
 
 def test_learn_offline_image_from_current_frame_adds_hash(tmp_path, monkeypatch):

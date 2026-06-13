@@ -12,7 +12,9 @@ import {
 describe('shadow monitor decision history helpers', () => {
   it('labels switch reasons and legacy event groups', () => {
     expect(formatShadowEventType({ type: 'no_decodable_frames_pending' })).toBe('Decoder Stall Pending')
+    expect(formatShadowEventType({ type: 'loop_pending' })).toBe('Loop Pending')
     expect(formatShadowEventReason('offline_image')).toBe('Offline Image')
+    expect(formatShadowEventReason('loop')).toBe('Loop')
     expect(getShadowEventDecisionGroup({ type: 'dry_run_switch' })).toBe('switch')
     expect(getShadowEventDecisionGroup({ type: 'pre_probe_rejected' })).toBe('pre_probe')
     expect(getShadowEventDecisionGroup({ type: 'blank_pending' })).toBe('probe')
@@ -84,6 +86,31 @@ describe('shadow monitor decision history helpers', () => {
       'pre-probe rejected: Provider Slot',
       'cooldown 1m 5s',
       '2 real viewers',
+    ])
+  })
+
+  it('summarizes loop detection context', () => {
+    expect(getShadowEventDetailParts({
+      type: 'loop_pending',
+      details: {
+        reason: 'loop',
+        detection: {
+          reason: 'loop',
+          confirmations: 1,
+          required: 2,
+          measurements: {
+            loop_duration_secs: 12.5,
+            loop_frames_processed: 240,
+          },
+          thresholds: {
+            loop_probe_duration_seconds: 180,
+          },
+        },
+      },
+    })).toEqual([
+      'Loop',
+      'loop 12.5s, probe 3m, 240 frames',
+      '1/2 confirmations',
     ])
   })
 

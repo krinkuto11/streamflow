@@ -1839,6 +1839,7 @@ def _probe_stream_for_loops(
     probe_duration: int = _LOOP_PROBE_DURATION,
     user_agent: str = 'VLC/3.0.14',
     hardware_acceleration: Optional[Dict[str, Any]] = None,
+    headers: Optional[str] = None,
 ) -> 'tuple[bool, float | None, int]':
     """
     Probe a stream for looping content using a single lightweight FFmpeg process.
@@ -1860,6 +1861,7 @@ def _probe_stream_for_loops(
                         [_LOOP_PROBE_DURATION_MIN, _LOOP_PROBE_DURATION_MAX].
         user_agent:     HTTP User-Agent forwarded to FFmpeg.
         hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default.
+        headers:        Optional HTTP headers forwarded to FFmpeg.
 
     Returns:
         (loop_detected, loop_duration_secs, frames_processed)
@@ -1900,7 +1902,10 @@ def _probe_stream_for_loops(
         '-nostdin',
         '-loglevel', 'warning',
         '-user_agent', user_agent,
-    ] + hwaccel_args + [
+    ]
+    if headers:
+        cmd.extend(['-headers', headers])
+    cmd.extend(hwaccel_args + [
         '-i', url,
         '-t', str(clamped),
         '-map', '0:v:0',
@@ -1909,7 +1914,7 @@ def _probe_stream_for_loops(
         '-c:v', 'ppm',
         '-f', 'image2pipe',
         'pipe:1',
-    ]
+    ])
     fallback_cmd = None
     if hwaccel_args and hwaccel_config.get('allow_fallback', True):
         fallback_cmd = [
@@ -1918,6 +1923,10 @@ def _probe_stream_for_loops(
             '-nostdin',
             '-loglevel', 'warning',
             '-user_agent', user_agent,
+        ]
+        if headers:
+            fallback_cmd.extend(['-headers', headers])
+        fallback_cmd.extend([
             '-i', url,
             '-t', str(clamped),
             '-map', '0:v:0',
@@ -1926,7 +1935,7 @@ def _probe_stream_for_loops(
             '-c:v', 'ppm',
             '-f', 'image2pipe',
             'pipe:1',
-        ]
+        ])
 
     try:
         proc = subprocess.Popen(
@@ -2037,6 +2046,7 @@ def _probe_stream_for_loops(
             probe_duration=probe_duration,
             user_agent=user_agent,
             hardware_acceleration={'enabled': False},
+            headers=headers,
         )
 
     if n == 0:
