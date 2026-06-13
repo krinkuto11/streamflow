@@ -18,6 +18,20 @@ describe('shadow monitor display state', () => {
     expect(state.running).toBe(false)
     expect(state.serviceDescription).toBe('Disabled')
     expect(state.canUseWatcher).toBe(false)
+    expect(state.canStartWatcher).toBe(true)
+  })
+
+  it('allows starting a configured disabled monitor without enabling scan actions', () => {
+    const state = getShadowMonitorDisplayState({
+      status: { enabled: false, running: false, configuration_required: false },
+      config: { enabled: false, has_watcher_api_key: true },
+      editedConfig: { enabled: false },
+      actionLoading: '',
+    })
+
+    expect(state.configurationRequired).toBe(false)
+    expect(state.canStartWatcher).toBe(true)
+    expect(state.canUseWatcher).toBe(false)
   })
 
   it('treats a running backend with disabled config as stale instead of healthy running', () => {
@@ -102,6 +116,7 @@ describe('shadow monitor display state', () => {
     })
 
     expect(state.configurationRequired).toBe(true)
+    expect(state.canStartWatcher).toBe(false)
     expect(state.canUseWatcher).toBe(false)
     expect(state.serviceLabel).toBe('Setup required')
   })

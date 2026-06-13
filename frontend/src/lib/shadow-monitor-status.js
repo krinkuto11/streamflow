@@ -41,6 +41,7 @@ export const getShadowMonitorDisplayState = ({
   const hasKey = Boolean(config?.has_watcher_api_key ?? status?.has_watcher_api_key)
   const configurationRequired = Boolean(status?.configuration_required) || !hasKey
   const configurationMessage = status?.configuration_message || 'Save a Watcher API Key before starting the monitor.'
+  const canStartWatcher = actionLoading === '' && !configurationRequired && !backendRunning
   const canUseWatcher = actionLoading === '' && !configurationRequired && serviceEnabled
   const canStopWatcher = actionLoading === '' && backendRunning
   const continuousWatcherActive = running && watchMode === 'continuous'
@@ -64,6 +65,7 @@ export const getShadowMonitorDisplayState = ({
     hasKey,
     configurationRequired,
     configurationMessage,
+    canStartWatcher,
     canUseWatcher,
     canStopWatcher,
     continuousWatcherActive,

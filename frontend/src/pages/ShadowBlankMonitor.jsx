@@ -294,6 +294,7 @@ export default function ShadowBlankMonitor() {
     hasKey,
     configurationRequired,
     configurationMessage,
+    canStartWatcher,
     canUseWatcher,
     canStopWatcher,
     continuousWatcherActive,
@@ -334,7 +335,7 @@ export default function ShadowBlankMonitor() {
             <Button
               variant="outline"
               onClick={() => runAction('start', shadowBlankMonitorAPI.start, 'Shadow monitor started')}
-              disabled={!canUseWatcher}
+              disabled={!canStartWatcher}
             >
               {actionLoading === 'start' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlayCircle className="mr-2 h-4 w-4" />}
               Start
