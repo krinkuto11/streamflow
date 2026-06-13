@@ -38,10 +38,6 @@ STATIC_TEAM_MATCHUP_RE = re.compile(
     r"(^|\s)(?:@|at|vs\.?|v\.?|versus|bei|gegen)(?=\s|$)",
     re.IGNORECASE,
 )
-STATIC_TEAM_NON_EVENT_WINDOW_RE = re.compile(
-    r"^\s*(?:coming\s+up|upcoming|pre[-\s]?game)\b",
-    re.IGNORECASE,
-)
 EVENT_DATETIME_KEYS = (
     "event_date",
     "start_time",
@@ -741,6 +737,7 @@ class TeamarrPreflightService:
 
         if config.get("managed_event_preflight_enabled", True):
             raw_events = self._fetch_managed_events(config)
+            raw_events = self._events_with_catalog_sports(raw_events, config)
             event_candidates = self._build_candidates(raw_events, config, now)
 
         if config.get("static_team_preflight_enabled"):
@@ -984,6 +981,56 @@ class TeamarrPreflightService:
         )
         response.raise_for_status()
         return response.json()
+
+    def _events_with_catalog_sports(
+        self,
+        events: Iterable[Dict[str, Any]],
+        config: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        event_list = [dict(event) for event in events]
+        missing_league_sport = {
+            str(event.get("league") or "").strip().lower()
+            for event in event_list
+            if self._sport_is_unknown(event.get("sport")) and str(event.get("league") or "").strip()
+        }
+        if not missing_league_sport:
+            return event_list
+
+        try:
+            league_sports = self._league_sports_from_catalog(
+                self._fetch_teamarr_json(config, "/api/v1/cache/leagues")
+            )
+        except Exception as exc:
+            logger.debug("Teamarr league catalog sport enrichment unavailable: %s", exc)
+            return event_list
+
+        for event in event_list:
+            league = str(event.get("league") or "").strip().lower()
+            catalog_sport = league_sports.get(league)
+            if catalog_sport and self._sport_is_unknown(event.get("sport")):
+                event["teamarr_original_sport"] = event.get("sport")
+                event["sport"] = catalog_sport
+        return event_list
+
+    @staticmethod
+    def _sport_is_unknown(value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        return text in {"", "none", "unknown", "n/a", "na"}
+
+    @staticmethod
+    def _league_sports_from_catalog(payload: Any) -> Dict[str, str]:
+        leagues = payload.get("leagues") if isinstance(payload, dict) else []
+        if not isinstance(leagues, list):
+            return {}
+        sports: Dict[str, str] = {}
+        for league in leagues:
+            if not isinstance(league, dict):
+                continue
+            slug = str(league.get("slug") or "").strip().lower()
+            sport = str(league.get("sport") or "").strip().lower()
+            if slug and sport and sport not in {"unknown", "none"}:
+                sports[slug] = sport
+        return sports
 
     def _build_filter_options(self, config: Dict[str, Any], events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         fallback = self._event_filter_options(events)
@@ -1293,15 +1340,9 @@ class TeamarrPreflightService:
             return False
         if not next_live_window.get("start"):
             return False
-        if next_live_window.get("is_live") is not True:
-            return False
 
         title = TeamarrPreflightService._normalize_team_window_text(next_live_window.get("title"))
         sub_title = TeamarrPreflightService._normalize_team_window_text(next_live_window.get("sub_title"))
-        raw_title = str(next_live_window.get("title") or "")
-        raw_sub_title = str(next_live_window.get("sub_title") or "")
-        if STATIC_TEAM_NON_EVENT_WINDOW_RE.search(raw_title) or STATIC_TEAM_NON_EVENT_WINDOW_RE.search(raw_sub_title):
-            return False
 
         text_values = [value for value in (title, sub_title) if value]
         if not text_values:

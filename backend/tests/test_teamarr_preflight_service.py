@@ -477,14 +477,50 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(service.get_status()["team_status"]["ready"], 1)
         self.assertEqual(service.get_status()["team_status"]["queueable"], 0)
 
-    def test_static_team_promo_window_is_visible_but_not_queueable(self):
+    def test_static_team_upcoming_matchup_window_is_queueable_before_live_flag(self):
         promo = make_team_status(
             next_live_window={
                 "found": True,
                 "start": "2026-05-28T22:03:00+00:00",
                 "stop": "2026-05-29T01:03:00+00:00",
                 "title": "Coming up Tonight: Static Test Team @ Fixture Opponent",
-                "is_live": True,
+                "is_live": False,
+                "source": "team_epg_xmltv",
+            },
+            status="ready",
+            missing=[],
+        )
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [promo["team"]],
+            "/api/v1/teams/501/channel-status": promo,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = FakeChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        team = service.get_status()["upcoming_teams"][0]
+        self.assertEqual(team["state"], "due")
+        self.assertTrue(team["live_window_event_evidence"])
+        self.assertEqual(service.get_status()["team_status"]["queueable"], 1)
+
+    def test_static_team_generic_upcoming_window_is_visible_but_not_queueable(self):
+        promo = make_team_status(
+            next_live_window={
+                "found": True,
+                "start": "2026-05-28T22:03:00+00:00",
+                "stop": "2026-05-29T01:03:00+00:00",
+                "title": "Coming up Tonight",
+                "is_live": False,
                 "source": "team_epg_xmltv",
             },
             status="ready",
@@ -1421,6 +1457,34 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
 
         upcoming = service.get_status()["upcoming_events"]
         self.assertEqual(upcoming[0]["state"], "filtered")
+
+    def test_unknown_managed_event_sport_uses_teamarr_league_catalog(self):
+        event = make_event(sport="unknown", league="usa.usl.1")
+        http_get = RouteHttpGet({
+            "/api/v1/channels/managed": [event],
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {
+                "leagues": [
+                    {"slug": "usa.usl.1", "sport": "soccer", "name": "USL Championship"},
+                ],
+            },
+        })
+        checker = FakeChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({"include_sports": ["soccer"]})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+        self.assertEqual(len(checker.calls), 1)
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["sport"], "soccer")
+        self.assertNotEqual(upcoming[0]["state"], "filtered")
 
     def test_manual_force_launches_scheduled_event_with_manual_bucket(self):
         checker = FakeChecker()

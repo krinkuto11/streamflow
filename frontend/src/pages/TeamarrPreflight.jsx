@@ -1006,7 +1006,9 @@ export default function TeamarrPreflight() {
               <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
                 <div className="min-w-0 space-y-1">
                   <Label className="text-base">Static Teams</Label>
-                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">Reads active Teamarr teams and queues only ready single-channel team checks</p>
+                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">
+                    Uses Teamarr teams with matching Dispatcharr channels; queues only when Teamarr shows a real upcoming or live game window
+                  </p>
                 </div>
                 <Switch
                   className="mt-1 shrink-0"
