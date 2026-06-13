@@ -110,6 +110,27 @@ describe('dashboard run counts', () => {
     expect(counts.freeze).toBe(2)
   })
 
+  it('uses stream-checker queue visibility counts while a batch is active', () => {
+    const counts = getDashboardRunCounts({
+      streamQueueActive: true,
+      batchTotal: 4,
+      completed: 2,
+      runCounts: {
+        channels_hidden: 1,
+        channels_ready: 1,
+      },
+      streamCheckerStatus: {
+        queue: {
+          channels_hidden_count: 3,
+          channels_ready_count: 2,
+        },
+      },
+    })
+
+    expect(counts.hidden).toBe(3)
+    expect(counts.ready).toBe(2)
+  })
+
   it('does not let stale zero queue problem counts hide active stream details', () => {
     const counts = getDashboardRunCounts({
       streamQueueActive: true,
@@ -180,6 +201,60 @@ describe('dashboard run counts', () => {
     expect(metrics.find(metric => metric.key === 'dead').description).toMatch(/last completed Stream Checker batch/i)
   })
 
+  it('uses active single-channel visibility counters without stale automation counts', () => {
+    const metrics = getDashboardRunMetrics({
+      streamQueueActive: false,
+      streamCheckerOnlyActive: true,
+      runCounts: {
+        channels_hidden: 9,
+        channels_ready: 8,
+      },
+      streamCheckerStatus: {
+        progress: {
+          is_single_channel_check: true,
+          channel_id: 8442,
+          channels_hidden: 1,
+          channels_ready: 0,
+          streams_detail: [],
+        },
+      },
+    })
+
+    expect(metrics.find(metric => metric.key === 'hidden')).toMatchObject({
+      label: 'Channels Hidden',
+      value: 1,
+    })
+    expect(metrics.find(metric => metric.key === 'ready')).toMatchObject({
+      label: 'Channels Ready',
+      value: 0,
+    })
+  })
+
+  it('falls back to active single-channel snapshot visibility counters', () => {
+    const counts = getDashboardRunCounts({
+      streamCheckerOnlyActive: true,
+      runCounts: {
+        channels_hidden: 9,
+        channels_ready: 8,
+      },
+      streamCheckerStatus: {
+        progress: {
+          is_single_channel_check: true,
+          channel_id: 8442,
+          run_snapshot: {
+            result_summary: {
+              channels_hidden: 0,
+              channels_ready: 1,
+            },
+          },
+        },
+      },
+    })
+
+    expect(counts.hidden).toBe(0)
+    expect(counts.ready).toBe(1)
+  })
+
   it('does not carry playlist or matching counts into manual quality-only metrics', () => {
     const metrics = getDashboardRunMetrics({
       streamQueueActive: true,
@@ -189,6 +264,8 @@ describe('dashboard run counts', () => {
       runCounts: {
         refreshed_playlists: 9,
         assigned_channels: 8,
+        channels_hidden: 7,
+        channels_ready: 6,
       },
       streamCheckerStatus: {
         progress: {

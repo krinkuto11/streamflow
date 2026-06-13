@@ -21,6 +21,48 @@ const numericOrNull = (value) => {
   return Number.isFinite(number) ? number : null
 }
 
+const hasOwn = (source, key) => (
+  source != null && Object.prototype.hasOwnProperty.call(source, key)
+)
+
+const getVisibilityCountsFromSource = (source) => {
+  if (!source || typeof source !== 'object') return null
+  const hasHidden = hasOwn(source, 'channels_hidden') || hasOwn(source, 'channels_hidden_count')
+  const hasReady = hasOwn(source, 'channels_ready') || hasOwn(source, 'channels_ready_count')
+  if (!hasHidden && !hasReady) return null
+
+  return {
+    hidden: numericOrNull(source.channels_hidden ?? source.channels_hidden_count) ?? 0,
+    ready: numericOrNull(source.channels_ready ?? source.channels_ready_count) ?? 0,
+  }
+}
+
+const getStreamCheckerVisibilityCounts = (streamCheckerStatus = {}) => {
+  const progress = streamCheckerStatus?.progress || {}
+  const queue = streamCheckerStatus?.queue || {}
+  const sources = [
+    queue,
+    queue?.result_summary,
+    queue?.run_snapshot?.result_summary,
+    progress,
+    progress?.stats,
+    progress?.result_summary,
+    progress?.run_snapshot?.result_summary,
+    streamCheckerStatus?.result_summary,
+    streamCheckerStatus?.run_snapshot?.result_summary,
+  ]
+  const counts = sources
+    .map(getVisibilityCountsFromSource)
+    .filter(Boolean)
+
+  if (!counts.length) return null
+
+  return counts.reduce((summary, count) => ({
+    hidden: Math.max(summary.hidden, count.hidden),
+    ready: Math.max(summary.ready, count.ready),
+  }), { hidden: 0, ready: 0 })
+}
+
 export const getDashboardRunCounts = ({
   streamCheckerStatus,
   streamQueueActive = false,
@@ -44,6 +86,10 @@ export const getDashboardRunCounts = ({
   const qualityOnlyRun = streamCheckerOnlyActive || streamQueueHistory
   const singleQualityOnlyRun = qualityOnlyRun && !streamQueueActive
   const activeStreamCheckerRun = streamQueueActive || qualityOnlyRun
+  const streamCheckerVisibilityCounts = activeStreamCheckerRun
+    ? getStreamCheckerVisibilityCounts(streamCheckerStatus)
+    : null
+  const useRunVisibilityCounts = !streamCheckerOnlyActive
 
   return {
     channels: queueCountsVisible
@@ -66,8 +112,10 @@ export const getDashboardRunCounts = ({
     freeze: queueCountsVisible
       ? Math.max(queueFreeze ?? 0, progressFreeze)
       : (singleQualityOnlyRun ? progressFreeze : (runCounts.freeze_streams ?? 0)),
-    hidden: runCounts.channels_hidden ?? 0,
-    ready: runCounts.channels_ready ?? 0,
+    hidden: streamCheckerVisibilityCounts?.hidden
+      ?? (useRunVisibilityCounts ? (runCounts.channels_hidden ?? 0) : 0),
+    ready: streamCheckerVisibilityCounts?.ready
+      ?? (useRunVisibilityCounts ? (runCounts.channels_ready ?? 0) : 0),
   }
 }
 
