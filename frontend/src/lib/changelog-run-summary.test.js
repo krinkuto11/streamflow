@@ -100,6 +100,25 @@ describe('changelog run summary', () => {
     ])
   })
 
+  it('keeps stale progress changelog badges neutral', () => {
+    expect(getChangelogStaleWarnings({
+      run_snapshot: {
+        stale_warnings: [
+          {
+            type: 'progress_stale',
+            status: 'idle_batch_progress',
+          },
+        ],
+      },
+    })).toEqual([
+      {
+        key: 'stale-warning-progress_stale',
+        label: 'Previous Progress',
+        value: 'Idle Batch Progress',
+      },
+    ])
+  })
+
   it('falls back to dispatcharr stale summary when warning records are absent', () => {
     expect(getChangelogStaleWarnings({
       run_snapshot: {

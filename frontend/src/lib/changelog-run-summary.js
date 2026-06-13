@@ -108,7 +108,7 @@ export function getChangelogRunContextBadges(details = {}) {
 
 const STALE_WARNING_LABELS = {
   dispatcharr_status_risk: 'Dispatcharr Status Risk',
-  progress_stale: 'Stale Progress',
+  progress_stale: 'Previous Progress',
 }
 
 const staleWarningValue = (warning = {}) => {
