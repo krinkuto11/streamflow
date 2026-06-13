@@ -407,24 +407,24 @@ export default function ShadowBlankMonitor() {
           </CardHeader>
           <CardContent className="space-y-6">
             <div className="grid gap-4 md:grid-cols-2">
-              <div className="flex items-center justify-between rounded-md border p-3">
-                <div>
+              <div className="flex items-center justify-between gap-3 rounded-md border p-3">
+                <div className="min-w-0 flex-1">
                   <Label className="text-sm font-medium">Enabled</Label>
                   <p className="text-xs text-muted-foreground">Auto-starts with the backend</p>
                 </div>
                 <Switch checked={formEnabled} onCheckedChange={(value) => updateConfigValue('enabled', value)} />
               </div>
 
-              <div className="flex items-center justify-between rounded-md border p-3">
-                <div>
+              <div className="flex items-center justify-between gap-3 rounded-md border p-3">
+                <div className="min-w-0 flex-1">
                   <Label className="text-sm font-medium">Dry Run</Label>
                   <p className="text-xs text-muted-foreground">Records intended switches only</p>
                 </div>
                 <Switch checked={formDryRun} onCheckedChange={(value) => updateConfigValue('dry_run', value)} />
               </div>
 
-              <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
-                <div>
+              <div className="flex items-center justify-between gap-3 rounded-md border p-3 md:col-span-2">
+                <div className="min-w-0 flex-1">
                   <Label className="text-sm font-medium">Freeze Detection</Label>
                   <p className="text-xs text-muted-foreground">Switch when the active picture is stuck but not black</p>
                 </div>
@@ -434,8 +434,8 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
-              <div className="flex items-center justify-between rounded-md border p-3">
-                <div>
+              <div className="flex items-center justify-between gap-3 rounded-md border p-3">
+                <div className="min-w-0 flex-1">
                   <Label className="text-sm font-medium">Garbled Audio</Label>
                   <p className="text-xs text-muted-foreground">Treat repeated audio decode errors as a media fault</p>
                 </div>
@@ -445,8 +445,8 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
-              <div className="flex items-center justify-between rounded-md border p-3">
-                <div>
+              <div className="flex items-center justify-between gap-3 rounded-md border p-3">
+                <div className="min-w-0 flex-1">
                   <Label className="text-sm font-medium">Silent Audio</Label>
                   <p className="text-xs text-muted-foreground">Treat long audio silence as a media fault</p>
                 </div>
@@ -456,8 +456,8 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
-              <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
-                <div>
+              <div className="flex items-center justify-between gap-3 rounded-md border p-3 md:col-span-2">
+                <div className="min-w-0 flex-1">
                   <Label className="text-sm font-medium">Offline Image</Label>
                   <p className="text-xs text-muted-foreground">Detect provider offline slates by reference pHash</p>
                 </div>
@@ -467,12 +467,12 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
-              <div className={`flex items-center justify-between rounded-md border p-3 md:col-span-2 ${
+              <div className={`flex items-center justify-between gap-3 rounded-md border p-3 md:col-span-2 ${
                 loopDetectionEnabled && !loopSwitchGateSatisfied
                   ? 'border-amber-500/50 bg-amber-500/5'
                   : ''
               }`}>
-                <div>
+                <div className="min-w-0 flex-1">
                   <Label className="text-sm font-medium">Loop Detection</Label>
                   <p className="text-xs text-muted-foreground">
                     {loopDetectionEnabled && !loopSwitchGateSatisfied
@@ -507,8 +507,8 @@ export default function ShadowBlankMonitor() {
                 </p>
               </div>
 
-              <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
-                <div>
+              <div className="flex items-center justify-between gap-3 rounded-md border p-3 md:col-span-2">
+                <div className="min-w-0 flex-1">
                   <Label className="text-sm font-medium">Next Stream Pre-Probe</Label>
                   <p className="text-xs text-muted-foreground">Validate the next candidate before switching</p>
                   <p className="mt-1 text-xs text-muted-foreground">
