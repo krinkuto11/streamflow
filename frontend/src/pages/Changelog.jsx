@@ -7,6 +7,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { changelogAPI } from '@/services/api.js'
+import { getChangelogRunContextBadges, getChangelogVisibilityMetrics } from '@/lib/changelog-run-summary.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download } from 'lucide-react'
 
@@ -564,6 +565,8 @@ function AutomationChannel({ channel, cIdx }) {
 function ChangelogEntry({ entry, onExport, exportingScope }) {
   const { timestamp, action, details, subentries } = entry
   const hasSubentries = subentries && subentries.length > 0
+  const runContextBadges = getChangelogRunContextBadges(details)
+  const visibilityMetrics = getChangelogVisibilityMetrics(details)
 
   return (
     <Card className={`overflow-hidden shadow-md transition-shadow hover:shadow-lg dark:bg-card/40 ${action === 'automation_run' ? 'border-2 border-blue-500 dark:border-green-500' : 'border-muted/60'}`}>
@@ -618,6 +621,21 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
           </div>
         </div>
 
+        {runContextBadges.length > 0 && (
+          <div className="mt-3 flex min-w-0 flex-wrap gap-2 border-t pt-3">
+            {runContextBadges.map(item => (
+              <Badge
+                key={item.key}
+                variant="secondary"
+                className="min-w-0 max-w-full justify-start gap-1 whitespace-normal text-left leading-snug"
+              >
+                <span className="shrink-0 text-[10px] uppercase tracking-tight text-muted-foreground">{item.label}</span>
+                <span className="min-w-0 break-words font-semibold">{item.value}</span>
+              </Badge>
+            ))}
+          </div>
+        )}
+
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3 pt-3 border-t">
           {details.total_channels !== undefined && (
             <div>
@@ -667,18 +685,12 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
               <p className="text-lg font-bold text-green-500">{details.streams_revived}</p>
             </div>
           )}
-          {details.channels_hidden !== undefined && details.channels_hidden > 0 && (
-            <div>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">Channels Hidden</p>
-              <p className="text-lg font-bold text-amber-500">{details.channels_hidden}</p>
+          {visibilityMetrics.map(metric => (
+            <div key={metric.key}>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">{metric.label}</p>
+              <p className={`text-lg font-bold ${metric.className}`}>{metric.value}</p>
             </div>
-          )}
-          {details.channels_ready !== undefined && details.channels_ready > 0 && (
-            <div>
-              <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">Channels Ready</p>
-              <p className="text-lg font-bold text-green-500">{details.channels_ready}</p>
-            </div>
-          )}
+          ))}
           {details.duration && (
             <div>
               <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">Duration</p>
