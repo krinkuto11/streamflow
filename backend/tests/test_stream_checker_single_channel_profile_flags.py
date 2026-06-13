@@ -252,6 +252,13 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
         self.assertFalse(snapshot['snapshot_truncated'])
         self.assertNotIn('stream_details', snapshot)
         self.assertNotIn('stream_url', json.dumps(snapshot))
+        service._check_channel.assert_called_once_with(
+            channel_id,
+            skip_batch_changelog=True,
+            forced_profile_id='profile-v7',
+            run_mode='single_channel_check',
+            is_single_channel_check=True,
+        )
 
         service.changelog.add_single_channel_check_entry.assert_called_once()
         changelog_stats = service.changelog.add_single_channel_check_entry.call_args.kwargs['check_stats']

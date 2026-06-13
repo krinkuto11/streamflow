@@ -1694,11 +1694,13 @@ class StreamCheckerService:
         channel_id: Optional[int] = None,
         channel_name: Optional[str] = None,
         update_progress: bool = True,
+        progress_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[ConnectivityCheckResult]:
         """Return a failed result when destructive quality work must abort."""
         result = self._run_connectivity_guard(phase)
         if result.ok:
             return None
+        progress_context = dict(progress_context or {})
 
         recoverable_phases = {
             'mark_dead_stream',
@@ -1747,6 +1749,7 @@ class StreamCheckerService:
                             step_detail=(
                                 f"{result.message}; retrying for up to {int(remaining)}s"
                             ),
+                            **progress_context,
                         )
                     except Exception as exc:
                         logger.debug("Failed to publish connectivity recovery progress: %s", exc)
@@ -1777,6 +1780,7 @@ class StreamCheckerService:
                     status='aborted',
                     step='Connectivity check failed',
                     step_detail=result.message,
+                    **progress_context,
                 )
             except Exception as exc:
                 logger.debug("Failed to publish connectivity abort progress: %s", exc)
@@ -1789,6 +1793,8 @@ class StreamCheckerService:
         skip_batch_changelog: bool = False,
         forced_profile_id: Optional[str] = None,
         provider_limit_override: bool = False,
+        run_mode: Optional[str] = None,
+        is_single_channel_check: bool = False,
     ):
         """Check and reorder streams for a specific channel.
         
@@ -1799,10 +1805,22 @@ class StreamCheckerService:
             skip_batch_changelog: If True, don't add this check to the batch changelog
             provider_limit_override: If True, bypass provider/profile capacity
                 skips while still protecting active viewers.
+            run_mode: Optional progress context label for specialized callers.
+            is_single_channel_check: If True, preserve single-channel progress
+                semantics through the internal quality-analysis phases.
         """
+        connectivity_progress_context: Dict[str, Any] = {}
+        if run_mode:
+            connectivity_progress_context['run_mode'] = run_mode
+        elif is_single_channel_check:
+            connectivity_progress_context['run_mode'] = 'single_channel_check'
+        if is_single_channel_check:
+            connectivity_progress_context['is_single_channel_check'] = True
+
         failed_connectivity = self._require_quality_check_connectivity(
             phase='quality_check_preflight',
             channel_id=channel_id,
+            progress_context=connectivity_progress_context,
         )
         if failed_connectivity is not None:
             return self._fail_channel_for_connectivity(
@@ -1818,6 +1836,8 @@ class StreamCheckerService:
                 skip_batch_changelog=skip_batch_changelog,
                 forced_profile_id=forced_profile_id,
                 provider_limit_override=provider_limit_override,
+                run_mode=run_mode,
+                is_single_channel_check=is_single_channel_check,
             )
         else:
             return self._check_channel_sequential(
@@ -1825,6 +1845,8 @@ class StreamCheckerService:
                 skip_batch_changelog=skip_batch_changelog,
                 forced_profile_id=forced_profile_id,
                 provider_limit_override=provider_limit_override,
+                run_mode=run_mode,
+                is_single_channel_check=is_single_channel_check,
             )
 
     def _complete_channel_check(self, channel_id: int, on_completed=None) -> bool:
@@ -1989,6 +2011,7 @@ class StreamCheckerService:
         forced_profile_id: Optional[str] = None,
         provider_limit_override: bool = False,
         run_mode: Optional[str] = None,
+        is_single_channel_check: bool = False,
     ):
         """Check and reorder streams for a specific channel using parallel thread pool.
         
@@ -1999,6 +2022,9 @@ class StreamCheckerService:
                                streams will be checked, bypassing all other logic.
             provider_limit_override: If True, bypass provider/profile capacity
                                      skips while still protecting active viewers.
+            run_mode: Optional progress context label for specialized callers.
+            is_single_channel_check: If True, keep Current Progress in
+                                     single-channel mode for every phase update.
         """
         import time as time_module
         from apps.stream.concurrent_stream_limiter import get_smart_scheduler, get_account_limiter, initialize_account_limits
@@ -2104,7 +2130,11 @@ class StreamCheckerService:
             profile,
             forced_profile_id=forced_profile_id,
         )
-        profile_progress_context['run_mode'] = run_mode or 'stream_checker'
+        profile_progress_context['run_mode'] = run_mode or (
+            'single_channel_check' if is_single_channel_check else 'stream_checker'
+        )
+        if is_single_channel_check:
+            profile_progress_context['is_single_channel_check'] = True
         
         try:
             # Get channel information from UDI
@@ -2141,7 +2171,8 @@ class StreamCheckerService:
                 total=0,
                 status='initializing',
                 step='Fetching streams',
-                step_detail=f'Loading streams for {channel_name}'
+                step_detail=f'Loading streams for {channel_name}',
+                **profile_progress_context,
             )
             
             streams = fetch_channel_streams(channel_id)
@@ -2713,6 +2744,7 @@ class StreamCheckerService:
                             phase='mark_dead_stream',
                             channel_id=channel_id,
                             channel_name=channel_name,
+                            progress_context=profile_progress_context,
                         )
                         if failed_connectivity is not None:
                             return self._fail_channel_for_connectivity(
@@ -2762,6 +2794,7 @@ class StreamCheckerService:
                                 phase='keep_dead_stream_marked',
                                 channel_id=channel_id,
                                 channel_name=channel_name,
+                                progress_context=profile_progress_context,
                             )
                             if failed_connectivity is not None:
                                 return self._fail_channel_for_connectivity(
@@ -2883,6 +2916,7 @@ class StreamCheckerService:
                     channel_id=channel_id,
                     channel_name=channel_name,
                     streams_detail=list(stream_statuses.values()),
+                    profile_progress_context=profile_progress_context,
                 )
             else:
                 logger.debug("[loop-probe] Loop checking disabled by profile — skipping")
@@ -2913,7 +2947,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='processing',
                 step='Calculating scores',
-                step_detail='Sorting streams by quality score'
+                step_detail='Sorting streams by quality score',
+                **profile_progress_context,
             )
             # Sort streams using tiered sort keys (lexicographical ranking)
             for analyzed in analyzed_streams:
@@ -2954,7 +2989,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='updating',
                 step='Reordering streams',
-                step_detail='Applying new stream order to channel'
+                step_detail='Applying new stream order to channel',
+                **profile_progress_context,
             )
             reordered_ids = [s.get('stream_id') for s in analyzed_streams if s.get('stream_id') is not None]
             reordered_ids = self._merge_protected_stream_order(
@@ -2989,6 +3025,7 @@ class StreamCheckerService:
                     phase='channel_stream_update',
                     channel_id=channel_id,
                     channel_name=channel_name,
+                    progress_context=profile_progress_context,
                 )
                 if failed_connectivity is not None:
                     return self._fail_channel_for_connectivity(
@@ -3012,7 +3049,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='verifying',
                 step='Verifying update',
-                step_detail='Confirming stream order was applied'
+                step_detail='Confirming stream order was applied',
+                **profile_progress_context,
             )
             
             # Only verify if enabled in configuration
@@ -3285,6 +3323,7 @@ class StreamCheckerService:
         forced_profile_id: Optional[str] = None,
         provider_limit_override: bool = False,
         run_mode: Optional[str] = None,
+        is_single_channel_check: bool = False,
     ):
         """Check and reorder streams for a specific channel using sequential checking.
         
@@ -3295,6 +3334,9 @@ class StreamCheckerService:
                                streams will be checked, bypassing all other logic.
             provider_limit_override: If True, bypass provider/profile capacity
                                      skips while still protecting active viewers.
+            run_mode: Optional progress context label for specialized callers.
+            is_single_channel_check: If True, keep Current Progress in
+                                     single-channel mode for every phase update.
         """
         import time as time_module
         start_time = time_module.time()
@@ -3391,7 +3433,11 @@ class StreamCheckerService:
             profile,
             forced_profile_id=forced_profile_id,
         )
-        profile_progress_context['run_mode'] = run_mode or 'stream_checker'
+        profile_progress_context['run_mode'] = run_mode or (
+            'single_channel_check' if is_single_channel_check else 'stream_checker'
+        )
+        if is_single_channel_check:
+            profile_progress_context['is_single_channel_check'] = True
         
         try:
             # Get channel information from UDI
@@ -3428,7 +3474,8 @@ class StreamCheckerService:
                 total=0,
                 status='initializing',
                 step='Fetching streams',
-                step_detail=f'Loading streams for {channel_name}'
+                step_detail=f'Loading streams for {channel_name}',
+                **profile_progress_context,
             )
             
             streams = fetch_channel_streams(channel_id)
@@ -3654,7 +3701,8 @@ class StreamCheckerService:
                     status='analyzing',
                     step='Analyzing stream quality',
                     step_detail=f'Checking bitrate, resolution, codec ({idx}/{total_streams})',
-                    streams_detail=list(stream_statuses.values())
+                    streams_detail=list(stream_statuses.values()),
+                    **profile_progress_context,
                 )
                 
                 if stream['id'] in stream_statuses:
@@ -3676,7 +3724,8 @@ class StreamCheckerService:
                     step='Analyzing stream quality',
                     step_detail=f'Checking bitrate, resolution, codec ({idx}/{total_streams})',
                     streams_detail=list(stream_statuses.values()),
-                    stream_duration=analysis_params.get('ffmpeg_duration', 20)
+                    stream_duration=analysis_params.get('ffmpeg_duration', 20),
+                    **profile_progress_context,
                 )
                 
                 # Apply URL transformation if using M3U profile with search/replace patterns
@@ -3722,6 +3771,7 @@ class StreamCheckerService:
                         phase='mark_dead_stream',
                         channel_id=channel_id,
                         channel_name=channel_name,
+                        progress_context=profile_progress_context,
                     )
                     if failed_connectivity is not None:
                         return self._fail_channel_for_connectivity(
@@ -3772,6 +3822,7 @@ class StreamCheckerService:
                             phase='keep_dead_stream_marked',
                             channel_id=channel_id,
                             channel_name=channel_name,
+                            progress_context=profile_progress_context,
                         )
                         if failed_connectivity is not None:
                             return self._fail_channel_for_connectivity(
@@ -3992,6 +4043,7 @@ class StreamCheckerService:
                     channel_id=channel_id,
                     channel_name=channel_name,
                     streams_detail=list(stream_statuses.values()),
+                    profile_progress_context=profile_progress_context,
                 )
                 # Write stats for all probed streams so loop fields
                 # (loop_probe_ran, loop_detected, loop_duration_secs) are
@@ -4016,7 +4068,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='processing',
                 step='Calculating scores',
-                step_detail='Sorting streams by quality score'
+                step_detail='Sorting streams by quality score',
+                **profile_progress_context,
             )
             # Sort streams using tiered sort keys (lexicographical ranking)
             for analyzed in analyzed_streams:
@@ -4062,7 +4115,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='updating',
                 step='Reordering streams',
-                step_detail='Applying new stream order to channel'
+                step_detail='Applying new stream order to channel',
+                **profile_progress_context,
             )
             reordered_ids = [s.get('stream_id') for s in analyzed_streams if s.get('stream_id') is not None]
             reordered_ids = self._merge_protected_stream_order(
@@ -4097,6 +4151,7 @@ class StreamCheckerService:
                     phase='channel_stream_update',
                     channel_id=channel_id,
                     channel_name=channel_name,
+                    progress_context=profile_progress_context,
                 )
                 if failed_connectivity is not None:
                     return self._fail_channel_for_connectivity(
@@ -4120,7 +4175,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='verifying',
                 step='Verifying update',
-                step_detail='Confirming stream order was applied'
+                step_detail='Confirming stream order was applied',
+                **profile_progress_context,
             )
             
             # Only verify if enabled in configuration
@@ -4371,7 +4427,8 @@ class StreamCheckerService:
     def _run_loop_probes(self, analyzed_streams: list, user_agent: str = 'VLC/3.0.14', loop_penalty: float = 0.0,
                          probe_duration: int = 360, hardware_acceleration: Optional[dict] = None,
                          channel_id: int = 0, channel_name: str = '',
-                         streams_detail: Optional[list] = None) -> None:
+                         streams_detail: Optional[list] = None,
+                         profile_progress_context: Optional[Dict[str, Any]] = None) -> None:
         """
         Run loop detection probes on eligible streams in parallel with
         per-account concurrent limits, then write results back into each
@@ -4416,6 +4473,8 @@ class StreamCheckerService:
                               check method. Used to build probe_detail for live
                               frontend grid updates. None on paths where
                               stream_statuses is not available.
+            profile_progress_context: Optional Current Progress context to
+                              preserve across loop-probe UI updates.
         """
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -4459,6 +4518,7 @@ class StreamCheckerService:
         udi = get_udi_manager()
         results_lock = threading.Lock()
         completed = [0]
+        progress_context = dict(profile_progress_context or {})
 
         # Build probe_detail from the streams_detail snapshot passed in by the
         # calling check method. Keyed by integer stream id (same as stream_statuses).
@@ -4491,6 +4551,7 @@ class StreamCheckerService:
                 step_detail=f'Probing {total} stream(s) for looping content',
                 streams_detail=list(probe_detail.values()),
                 stream_duration=probe_duration,
+                **progress_context,
             )
 
         def _probe_one(stream: dict) -> None:
@@ -4570,6 +4631,7 @@ class StreamCheckerService:
                             step_detail=f'Completed {completed[0]}/{total}: {stream_name}',
                             streams_detail=list(probe_detail.values()),
                             stream_duration=probe_duration,
+                            **progress_context,
                         )
                     logger.info(
                         f"[loop-probe] Completed {completed[0]}/{total}: {stream_audit_ref}"
@@ -6148,6 +6210,7 @@ class StreamCheckerService:
                     phase='single_channel_preflight',
                     channel_id=channel_id,
                     channel_name=channel_name,
+                    progress_context=profile_progress_context,
                 )
                 if failed_connectivity is not None:
                     return self._connectivity_abort_payload(
@@ -6448,6 +6511,7 @@ class StreamCheckerService:
                         phase='single_channel_validation_removal',
                         channel_id=channel_id,
                         channel_name=channel_name,
+                        progress_context=profile_progress_context,
                     )
                     if failed_connectivity is not None:
                         self.progress.clear()
@@ -6508,6 +6572,7 @@ class StreamCheckerService:
                         phase='single_channel_matching_update',
                         channel_id=channel_id,
                         channel_name=channel_name,
+                        progress_context=profile_progress_context,
                     )
                     if failed_connectivity is not None:
                         self.progress.clear()
@@ -6584,7 +6649,11 @@ class StreamCheckerService:
                 # Perform the check using normal profile logic.
                 # Returns dict with dead_streams_count and revived_streams_count
                 # Skip batch changelog since this is a single channel check
-                _check_kwargs = {'skip_batch_changelog': True}
+                _check_kwargs = {
+                    'skip_batch_changelog': True,
+                    'run_mode': profile_progress_context.get('run_mode') or 'single_channel_check',
+                    'is_single_channel_check': True,
+                }
                 if _effective_profile_id:
                     _check_kwargs['forced_profile_id'] = _effective_profile_id
                 if provider_limit_override:
