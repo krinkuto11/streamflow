@@ -60,9 +60,10 @@ class FakeStreamChecker:
 
 
 class FakeProbeStderr:
-    def __init__(self, lines):
+    def __init__(self, lines, *, line_delay=0.0):
         self._lines = list(lines)
         self._index = 0
+        self._line_delay = line_delay
 
     @property
     def done(self):
@@ -71,17 +72,22 @@ class FakeProbeStderr:
     def readline(self):
         if self._index >= len(self._lines):
             return ""
+        if self._line_delay:
+            time.sleep(self._line_delay)
         line = self._lines[self._index]
         self._index += 1
         return line
 
 
 class FakeProbeProcess:
-    def __init__(self, lines):
-        self.stderr = FakeProbeStderr(lines)
+    def __init__(self, lines, *, immediate_exit=False, line_delay=0.0):
+        self.stderr = FakeProbeStderr(lines, line_delay=line_delay)
         self.returncode = 1
+        self._immediate_exit = immediate_exit
 
     def poll(self):
+        if self._immediate_exit:
+            return self.returncode
         return self.returncode if self.stderr.done else None
 
     def terminate(self):
@@ -2005,6 +2011,64 @@ def test_continuous_default_probe_missing_audio_switches_as_silent_audio(monkeyp
     assert status["recent_events"][0]["details"]["detection"]["measurements"]["audio_stream_present"] is False
     assert target["last_probe"]["audio_stream_present"] is False
     assert target["last_probe"]["silent_audio_detected"] is True
+
+
+def test_continuous_default_probe_reads_fast_exit_missing_audio_stderr(monkeypatch, tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+
+    def switch_stream(channel_id, stream_id=None, url=None):
+        switch_calls.append((channel_id, stream_id, url))
+        return True
+
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=switch_stream,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+    monkeypatch.setattr(
+        shadow_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: FakeProbeProcess(
+            ["Stream specifier ':a' in filtergraph description matches no streams.\n"],
+            immediate_exit=True,
+            line_delay=0.05,
+        ),
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "silent_audio_detection_enabled": True,
+        "probe_duration_seconds": 2,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["reason"] == "silent_audio"
+    assert target["last_probe"]["audio_stream_present"] is False
 
 
 def test_continuous_default_probe_silencedetect_switches_as_silent_audio(monkeypatch, tmp_path):

@@ -2566,6 +2566,7 @@ class ShadowBlankMonitorService:
                 process.wait(timeout=5)
                 stopped = True
 
+            reader.join(timeout=1.0)
             while True:
                 try:
                     lines.append(line_queue.get_nowait())
