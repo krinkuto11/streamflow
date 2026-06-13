@@ -1075,8 +1075,8 @@ export default function StreamChecker() {
 
       {/* Configuration Section */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <div>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
             <CardTitle>Stream Checker Configuration</CardTitle>
             <CardDescription>
               Configure stream analysis and checking parameters
@@ -1086,6 +1086,7 @@ export default function StreamChecker() {
             variant="outline"
             size="sm"
             onClick={() => setConfigEditing(!configEditing)}
+            className="self-start sm:shrink-0"
           >
             <Settings className="mr-2 h-4 w-4" />
             {configEditing ? 'Cancel' : 'Edit'}
