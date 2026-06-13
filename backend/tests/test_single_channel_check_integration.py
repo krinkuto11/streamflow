@@ -136,7 +136,12 @@ class TestSingleChannelCheckIntegration(unittest.TestCase):
             "Stream matching should skip automatic check trigger")
         
         # c) Force check was performed (Step 5)
-        service._check_channel.assert_called_once_with(16, skip_batch_changelog=True)
+        service._check_channel.assert_called_once_with(
+            16,
+            skip_batch_changelog=True,
+            run_mode='single_channel_check',
+            is_single_channel_check=True,
+        )
         
         # 4. Verify final stats reflect the revived stream
         self.assertEqual(result['stats']['total_streams'], 3,

@@ -111,7 +111,12 @@ class TestSingleChannelDeadCount(unittest.TestCase):
                         "Should have 2 streams remaining after removing dead ones")
         
         # Verify _check_channel was called
-        service._check_channel.assert_called_once_with(16, skip_batch_changelog=True)
+        service._check_channel.assert_called_once_with(
+            16,
+            skip_batch_changelog=True,
+            run_mode='single_channel_check',
+            is_single_channel_check=True,
+        )
     
     @patch('stream_checker_service.StreamCheckConfig')
     @patch('stream_checker_service.get_udi_manager')
