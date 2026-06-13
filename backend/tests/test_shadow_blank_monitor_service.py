@@ -188,6 +188,20 @@ def test_status_exposes_shadow_loop_detection_context(tmp_path):
     assert status["watch_mode"] == "periodic"
     assert status["loop_detection_enabled"] is True
     assert status["loop_probe_duration_seconds"] == 180
+    assert status["loop_switch_requires_pre_probe"] is True
+    assert status["loop_switch_gate_satisfied"] is False
+    assert status["loop_detection_gates"] == {
+        "enabled": True,
+        "active_real_viewer_required": True,
+        "confirmation_required": True,
+        "cooldown_required": True,
+        "switch_rate_limit_required": True,
+        "stale_stream_guard_required": True,
+        "watcher_recovery_guard_required": True,
+        "next_stream_pre_probe_required": True,
+        "next_stream_pre_probe_enabled": False,
+        "switch_gate_satisfied": False,
+    }
 
 
 def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
@@ -208,11 +222,12 @@ def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
 
     def loop_probe(url, config):
         loop_calls.append((url, config["loop_probe_duration_seconds"]))
+        loop_detected = "/proxy/ts/stream/" in url
         return {
             "loop_probe_ran": True,
-            "loop_detected": True,
-            "loop_duration_secs": 12.5,
-            "loop_frames_processed": 240,
+            "loop_detected": loop_detected,
+            "loop_duration_secs": 12.5 if loop_detected else 0,
+            "loop_frames_processed": 240 if loop_detected else 120,
         }
 
     service = make_service(
@@ -227,7 +242,13 @@ def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
         "loop_detection_enabled": True,
         "loop_probe_duration_seconds": 180,
         "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
     })
+    service._run_blank_probe = lambda url, config: {
+        "blank_detected": False,
+        "freeze_detected": False,
+        "no_decodable_frames_detected": False,
+    }
     target = {
         "channel_uuid": "uuid-1",
         "channel_id": 1,
@@ -239,15 +260,79 @@ def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
 
     assert service._probe_target_once(udi, target, config) is False
 
-    assert loop_calls == [("http://dispatcharr.local/proxy/ts/stream/uuid-1", 180)]
+    assert loop_calls == [
+        ("http://dispatcharr.local/proxy/ts/stream/uuid-1", 180),
+        ("http://provider.example/new.ts", 180),
+    ]
     assert switch_calls == [("uuid-1", 11, None)]
     event = service.get_status()["recent_events"][0]
     assert event["type"] == "switch_success"
     assert event["trigger_reason"] == "loop"
+    assert event["details"]["pre_probe"]["result"] == "ok"
     assert event["details"]["detection"]["measurements"] == {
         "loop_duration_secs": 12.5,
         "loop_frames_processed": 240,
     }
+
+
+def test_shadow_loop_switch_requires_next_stream_pre_probe_gate(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+            {"/proxy/ts/stream/uuid-1": active_status(10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={
+            10: {"id": 10, "url": "http://provider.example/old.ts"},
+            11: {"id": 11, "url": "http://provider.example/new.ts"},
+        },
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": False, "freeze_detected": False},
+        loop_probe=lambda url, config: {
+            "loop_probe_ran": True,
+            "loop_detected": True,
+            "loop_duration_secs": 18,
+            "loop_frames_processed": 360,
+        },
+        switch_calls=switch_calls,
+    )
+    service.update_config({
+        "enabled": False,
+        "loop_detection_enabled": True,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": False,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+    }
+
+    assert service._probe_target_once(udi, target, service.get_config(include_secret=True)) is False
+
+    status = service.get_status()
+    assert switch_calls == []
+    event = status["recent_events"][0]
+    assert event["type"] == "loop_pre_probe_required"
+    assert event["decision_group"] == "guard"
+    assert event["trigger_reason"] == "loop"
+    assert event["details"]["operator_action"] == "enable_next_stream_pre_probe"
+    assert event["details"]["detection"]["measurements"] == {
+        "loop_duration_secs": 18,
+        "loop_frames_processed": 360,
+    }
+    assert status["loop_switch_gate_satisfied"] is False
+    assert status["loop_detection_gates"]["next_stream_pre_probe_required"] is True
+    assert status["switch_summary"]["loop_pre_probe_required_skips"] == 1
+    assert status["switch_summary"]["prevented_false_switches"] == 1
 
 
 def test_shadow_loop_detection_is_gated_by_config(tmp_path):

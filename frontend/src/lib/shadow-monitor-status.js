@@ -22,6 +22,22 @@ export const getShadowMonitorDisplayState = ({
       ?? editedConfig?.loop_probe_duration_seconds
       ?? 120,
   )
+  const loopDetectionGates = status?.loop_detection_gates || {}
+  const nextStreamPreProbeEnabled = Boolean(
+    loopDetectionGates?.next_stream_pre_probe_enabled
+      ?? config?.next_stream_pre_probe_enabled
+      ?? editedConfig?.next_stream_pre_probe_enabled,
+  )
+  const loopSwitchRequiresPreProbe = Boolean(
+    loopDetectionGates?.next_stream_pre_probe_required
+      ?? status?.loop_switch_requires_pre_probe
+      ?? true,
+  )
+  const loopSwitchGateSatisfied = Boolean(
+    loopDetectionGates?.switch_gate_satisfied
+      ?? status?.loop_switch_gate_satisfied
+      ?? (!loopDetectionEnabled || !loopSwitchRequiresPreProbe || nextStreamPreProbeEnabled),
+  )
   const hasKey = Boolean(config?.has_watcher_api_key ?? status?.has_watcher_api_key)
   const configurationRequired = Boolean(status?.configuration_required) || !hasKey
   const configurationMessage = status?.configuration_message || 'Save a Watcher API Key before starting the monitor.'
@@ -42,6 +58,9 @@ export const getShadowMonitorDisplayState = ({
     loopProbeDurationSeconds: Number.isFinite(loopProbeDurationSeconds)
       ? loopProbeDurationSeconds
       : 120,
+    nextStreamPreProbeEnabled,
+    loopSwitchRequiresPreProbe,
+    loopSwitchGateSatisfied,
     hasKey,
     configurationRequired,
     configurationMessage,

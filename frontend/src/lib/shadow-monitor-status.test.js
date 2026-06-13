@@ -40,6 +40,11 @@ describe('shadow monitor display state', () => {
         watch_mode: 'periodic',
         loop_detection_enabled: true,
         loop_probe_duration_seconds: 180,
+        loop_detection_gates: {
+          next_stream_pre_probe_required: true,
+          next_stream_pre_probe_enabled: true,
+          switch_gate_satisfied: true,
+        },
       },
       config: { has_watcher_api_key: true },
       editedConfig: {
@@ -55,6 +60,34 @@ describe('shadow monitor display state', () => {
     expect(state.watchMode).toBe('periodic')
     expect(state.loopDetectionEnabled).toBe(true)
     expect(state.loopProbeDurationSeconds).toBe(180)
+    expect(state.loopSwitchRequiresPreProbe).toBe(true)
+    expect(state.nextStreamPreProbeEnabled).toBe(true)
+    expect(state.loopSwitchGateSatisfied).toBe(true)
+  })
+
+  it('marks enabled loop detection as switch-gated until next-stream pre-probe is enabled', () => {
+    const state = getShadowMonitorDisplayState({
+      status: {
+        enabled: true,
+        running: true,
+        loop_detection_enabled: true,
+        loop_detection_gates: {
+          next_stream_pre_probe_required: true,
+          next_stream_pre_probe_enabled: false,
+          switch_gate_satisfied: false,
+        },
+      },
+      config: { has_watcher_api_key: true },
+      editedConfig: {
+        loop_detection_enabled: true,
+        next_stream_pre_probe_enabled: false,
+      },
+    })
+
+    expect(state.loopDetectionEnabled).toBe(true)
+    expect(state.loopSwitchRequiresPreProbe).toBe(true)
+    expect(state.nextStreamPreProbeEnabled).toBe(false)
+    expect(state.loopSwitchGateSatisfied).toBe(false)
   })
 
   it('requires watcher configuration before start or scan actions', () => {

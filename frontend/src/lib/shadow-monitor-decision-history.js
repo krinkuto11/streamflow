@@ -12,6 +12,7 @@ export const shadowEventLabels = {
   switch_failed: 'Switch Failed',
   no_alternative: 'No Alternative',
   cooldown: 'Cooldown',
+  loop_pre_probe_required: 'Loop Pre-Probe Required',
   stale_stream_guard: 'Stale Stream',
   switch_rate_limited: 'Rate Limited',
   viewer_left: 'Viewer Left',
@@ -44,6 +45,7 @@ const reasonLabels = {
   silent_audio: 'Silent Audio',
   offline_image: 'Offline Image',
   loop: 'Loop',
+  loop_pre_probe_required: 'Loop Pre-Probe Required',
   manual: 'Manual',
   pre_probe: 'Pre-Probe',
   provider_capacity: 'Provider Slot',
@@ -133,6 +135,7 @@ export const getShadowEventDecisionGroup = (event = {}) => {
   if (type === 'offline_image_learned') return 'learn'
   if ([
     'cooldown',
+    'loop_pre_probe_required',
     'stale_stream_guard',
     'switch_rate_limited',
     'quality_check_active',
@@ -231,6 +234,9 @@ export const getShadowEventDetailParts = (event = {}) => {
   if (details.pre_probe_metric && !details.pre_probe) {
     const metricLabel = preProbeMetricLabels[details.pre_probe_metric] || titleizeCode(details.pre_probe_metric)
     parts.push(`pre-probe ${metricLabel}`)
+  }
+  if (event.type === 'loop_pre_probe_required') {
+    parts.push('next-stream pre-probe required')
   }
   if (event.type === 'offline_image_learned') {
     parts.push(details.deduplicated ? 'deduplicated' : 'reference added')

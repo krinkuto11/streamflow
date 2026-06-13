@@ -43,6 +43,7 @@ logger = setup_logging(__name__)
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/data"))
 CONFIG_FILE = CONFIG_DIR / "shadow_blank_monitor_config.json"
 MAX_EVENTS = 100
+LOOP_SWITCH_REQUIRES_PRE_PROBE = True
 WATCHER_API_KEY_REQUIRED_CODE = "watcher_api_key_required"
 WATCHER_API_KEY_REQUIRED_MESSAGE = "Watcher API Key is required before Shadow Monitor can start."
 SHADOW_MONITOR_LOOP_ERROR_MESSAGE = "Shadow monitor loop failed; see server logs."
@@ -187,6 +188,7 @@ PRE_PROBE_METRICS = {
 }
 GUARD_EVENT_TYPES = {
     "cooldown",
+    "loop_pre_probe_required",
     "stale_stream_guard",
     "switch_rate_limited",
     "quality_check_active",
@@ -595,6 +597,7 @@ class ShadowBlankMonitorService:
                     "cooldown_seconds": max(0, int(until - now)),
                 })
             recent_events = list(self._events)
+            loop_gate_status = self._loop_detection_gate_status(self._config)
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
@@ -602,6 +605,9 @@ class ShadowBlankMonitorService:
                 "watch_mode": self._config.get("watch_mode"),
                 "loop_detection_enabled": bool(self._config.get("loop_detection_enabled")),
                 "loop_probe_duration_seconds": int(self._config.get("loop_probe_duration_seconds") or 0),
+                "loop_switch_requires_pre_probe": LOOP_SWITCH_REQUIRES_PRE_PROBE,
+                "loop_switch_gate_satisfied": bool(loop_gate_status.get("switch_gate_satisfied")),
+                "loop_detection_gates": loop_gate_status,
                 "configuration_required": bool(issue),
                 "configuration_issue": issue["code"] if issue else None,
                 "configuration_message": issue["message"] if issue else None,
@@ -1146,6 +1152,20 @@ class ShadowBlankMonitorService:
             )
             return
 
+        if self._loop_switch_pre_probe_required(config, reason):
+            self._set_cooldown(channel_uuid, config)
+            self._reset_blank_count(channel_uuid)
+            self._record_event(
+                "loop_pre_probe_required",
+                target,
+                {
+                    "reason": reason,
+                    "next_stream_pre_probe_enabled": False,
+                    "operator_action": "enable_next_stream_pre_probe",
+                },
+            )
+            return
+
         if not self._switch_allowed(channel_uuid, config):
             self._record_event("switch_rate_limited", target, {"reason": reason})
             return
@@ -1270,6 +1290,35 @@ class ShadowBlankMonitorService:
             ),
             None,
         )
+
+    @staticmethod
+    def _loop_switch_pre_probe_required(config: Dict[str, Any], reason: str) -> bool:
+        return (
+            str(reason or "") == "loop"
+            and LOOP_SWITCH_REQUIRES_PRE_PROBE
+            and not bool(config.get("next_stream_pre_probe_enabled"))
+        )
+
+    @staticmethod
+    def _loop_detection_gate_status(config: Dict[str, Any]) -> Dict[str, Any]:
+        loop_enabled = bool(config.get("loop_detection_enabled"))
+        pre_probe_enabled = bool(config.get("next_stream_pre_probe_enabled"))
+        return {
+            "enabled": loop_enabled,
+            "active_real_viewer_required": True,
+            "confirmation_required": True,
+            "cooldown_required": True,
+            "switch_rate_limit_required": True,
+            "stale_stream_guard_required": True,
+            "watcher_recovery_guard_required": True,
+            "next_stream_pre_probe_required": LOOP_SWITCH_REQUIRES_PRE_PROBE,
+            "next_stream_pre_probe_enabled": pre_probe_enabled,
+            "switch_gate_satisfied": not (
+                loop_enabled
+                and LOOP_SWITCH_REQUIRES_PRE_PROBE
+                and not pre_probe_enabled
+            ),
+        }
 
     def _choose_preprobed_alternative_stream(
         self,
@@ -2860,6 +2909,7 @@ class ShadowBlankMonitorService:
             "dry_run_switches": 0,
             "skipped_switches": 0,
             "pre_probe_prevented_switches": 0,
+            "loop_pre_probe_required_skips": 0,
             "recovery_guard_prevented_switches": 0,
             "stale_stream_guard_skips": 0,
             "cooldown_skips": 0,
@@ -2896,6 +2946,9 @@ class ShadowBlankMonitorService:
             elif event_type == "watcher_recovery_guard":
                 summary["skipped_switches"] += 1
                 summary["recovery_guard_prevented_switches"] += 1
+            elif event_type == "loop_pre_probe_required":
+                summary["skipped_switches"] += 1
+                summary["loop_pre_probe_required_skips"] += 1
             elif event_type == "stale_stream_guard":
                 summary["skipped_switches"] += 1
                 summary["stale_stream_guard_skips"] += 1
@@ -2914,6 +2967,7 @@ class ShadowBlankMonitorService:
 
         summary["prevented_false_switches"] = (
             summary["pre_probe_prevented_switches"]
+            + summary["loop_pre_probe_required_skips"]
             + summary["recovery_guard_prevented_switches"]
             + summary["stale_stream_guard_skips"]
             + summary["rate_limited_skips"]

@@ -260,6 +260,8 @@ export default function ShadowBlankMonitor() {
     staleRunning,
     serviceLabel,
     serviceDescription,
+    loopDetectionEnabled,
+    loopSwitchGateSatisfied,
   } = displayState
   const formWatchMode = editedConfig?.watch_mode || 'continuous'
   const canLearnOfflineImage = actionLoading === '' && watchedChannels.length > 0
@@ -465,10 +467,18 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
-              <div className="flex items-center justify-between rounded-md border p-3 md:col-span-2">
+              <div className={`flex items-center justify-between rounded-md border p-3 md:col-span-2 ${
+                loopDetectionEnabled && !loopSwitchGateSatisfied
+                  ? 'border-amber-500/50 bg-amber-500/5'
+                  : ''
+              }`}>
                 <div>
                   <Label className="text-sm font-medium">Loop Detection</Label>
-                  <p className="text-xs text-muted-foreground">Switch when active video content repeats in a loop</p>
+                  <p className="text-xs text-muted-foreground">
+                    {loopDetectionEnabled && !loopSwitchGateSatisfied
+                      ? 'Detects loops; switching is blocked until next-stream pre-probe is enabled'
+                      : 'Switch when active video content repeats in a loop'}
+                  </p>
                 </div>
                 <Switch
                   checked={Boolean(editedConfig.loop_detection_enabled)}
@@ -493,7 +503,7 @@ export default function ShadowBlankMonitor() {
                   <span className="w-16 shrink-0 text-xs text-muted-foreground">sec</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Loop probes are gated by active real viewers, confirmations, cooldowns, switch budget, and optional next-stream pre-probe.
+                  Loop probes are gated by active real viewers, confirmations, cooldowns, switch budget, stale-stream checks, watcher recovery, and required next-stream pre-probe.
                 </p>
               </div>
 
