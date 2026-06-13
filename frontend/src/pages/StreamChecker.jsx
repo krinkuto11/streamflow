@@ -15,6 +15,7 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
+import { getExternalStaleDiagnosticsDisplay } from '@/lib/external-stale-diagnostics-display.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
 import {
@@ -435,6 +436,7 @@ export default function StreamChecker() {
   const analysisPathDisplay = getHardwareAnalysisPathDisplay(hardwareStatus)
   const hardwareOperatorNote = getHardwareOperatorNote(hardwareStatus)
   const queueEtaDisplay = getQueueEtaDisplay(status?.queue)
+  const externalStaleDisplay = getExternalStaleDiagnosticsDisplay(status?.external_stale_diagnostics)
 
   return (
     <div className="space-y-6">
@@ -597,6 +599,24 @@ export default function StreamChecker() {
             Last progress update no longer has an active worker or queue. The checker is idle and new runs can start.
             {Number.isFinite(Number(progressStaleAge)) && (
               <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {externalStaleDisplay && (
+        <Alert className="border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200">
+          <AlertCircle className="h-4 w-4" />
+          <AlertTitle>{externalStaleDisplay.title}</AlertTitle>
+          <AlertDescription className="space-y-1">
+            <span className="block">{externalStaleDisplay.text}</span>
+            {externalStaleDisplay.detail && (
+              <span className="block">{externalStaleDisplay.detail}</span>
+            )}
+            {externalStaleDisplay.accounts.length > 0 && (
+              <span className="block text-xs">
+                {externalStaleDisplay.accounts.join(' | ')}
+              </span>
             )}
           </AlertDescription>
         </Alert>

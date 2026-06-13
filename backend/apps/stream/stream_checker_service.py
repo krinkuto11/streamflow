@@ -4912,6 +4912,176 @@ class StreamCheckerService:
         return stale_state
 
     @staticmethod
+    def _external_message_class(message: Any) -> str:
+        """Classify Dispatcharr status text without exposing the raw message."""
+        text = str(message or "").strip().lower()
+        if not text:
+            return "none"
+        if "processing completed" in text or "completed in" in text or "refresh completed" in text:
+            return "completed"
+        if any(token in text for token in ("error", "failed", "exception", "traceback", "can't ", "cannot ")):
+            return "error"
+        return "other"
+
+    @staticmethod
+    def _external_m3u_account_risk(account: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a UI-safe M3U account status summary and stale-risk classification."""
+        status = str(account.get("status") or "unknown").strip().lower() or "unknown"
+        message_class = StreamCheckerService._external_message_class(account.get("last_message"))
+        active_status = status in {"fetching", "parsing", "processing", "queued", "running"}
+        stale_suspected = False
+        conflict = None
+
+        if active_status and message_class == "completed":
+            stale_suspected = True
+            conflict = "active_status_with_completed_message"
+        elif active_status and message_class == "error":
+            stale_suspected = True
+            conflict = "active_status_with_error_message"
+        elif status == "success" and message_class == "error":
+            stale_suspected = True
+            conflict = "success_status_with_error_message"
+        elif status == "error" and message_class == "completed":
+            stale_suspected = True
+            conflict = "error_status_with_completed_message"
+
+        return {
+            "account_id": account.get("id"),
+            "account_name": account.get("name") or (f"Account {account.get('id')}" if account.get("id") is not None else "Account"),
+            "status": status,
+            "message_class": message_class,
+            "updated_at": account.get("updated_at"),
+            "active_status": active_status,
+            "stale_status_suspected": stale_suspected,
+            "conflict": conflict,
+        }
+
+    def _build_external_stale_diagnostics(
+        self,
+        *,
+        stream_checking_mode: bool,
+        queue_status: Dict[str, Any],
+        progress: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build read-only diagnostics for external Dispatcharr stale-status risks.
+
+        StreamFlow cannot safely inspect Dispatcharr's Celery/Redis/Postgres internals from
+        inside this container, so unavailable signals are reported as unknown instead of
+        being inferred. This method only reads StreamFlow's UDI cache/status and never
+        mutates Dispatcharr state.
+        """
+        base = {
+            "status": "unknown",
+            "read_only": True,
+            "generated_at": datetime.now().isoformat(),
+            "stale_status_suspected": False,
+            "operator_note": "External Dispatcharr stale-state diagnostics are read-only.",
+            "m3u_accounts": {
+                "available": False,
+                "total": 0,
+                "active": 0,
+                "status_counts": {},
+                "stale_suspected": [],
+            },
+            "streamflow_activity": {
+                "stream_checking_mode": bool(stream_checking_mode),
+                "queue_active": bool(
+                    queue_status.get("queue_size", 0) > 0
+                    or queue_status.get("in_progress", 0) > 0
+                    or queue_status.get("current_channel") is not None
+                ),
+                "progress_present": isinstance(progress, dict) and bool(progress),
+            },
+            "external_checks": {
+                "celery": {
+                    "status": "unknown",
+                    "operator_note": "Not available from the StreamFlow container; verify directly in Dispatcharr before treating active provider status as real work.",
+                },
+                "redis": {
+                    "status": "unknown",
+                    "operator_note": "Not available from the StreamFlow container; verify Dispatcharr refresh or M3U locks directly if needed.",
+                },
+                "postgres": {
+                    "status": "unknown",
+                    "operator_note": "Not available from the StreamFlow container; verify database locks directly if needed.",
+                },
+            },
+            "actions": {
+                "dispatcharr_mutated": False,
+                "dispatcharr_restart_attempted": False,
+                "repair_requires_operator_approval": True,
+            },
+        }
+
+        try:
+            udi = get_udi_manager()
+            observability = {}
+            getter = getattr(udi, "get_observability_status", None)
+            if callable(getter):
+                observability = getter() or {}
+            network_ready = bool(getattr(udi, "is_network_ready", lambda: False)())
+            automation_busy = bool(getattr(udi, "is_automation_busy", lambda: False)())
+            base["streamflow_activity"].update({
+                "udi_network_ready": network_ready,
+                "udi_init_in_progress": bool(observability.get("init_in_progress")),
+                "udi_refresh_running": bool(observability.get("refresh_running")),
+                "udi_automation_busy": automation_busy,
+                "udi_last_refresh_time": observability.get("last_refresh_time"),
+                "udi_last_refresh_age_seconds": observability.get("last_refresh_age_seconds"),
+            })
+
+            if not network_ready:
+                base["status"] = "insufficient_evidence"
+                base["operator_note"] = "UDI has not completed a live Dispatcharr refresh yet, so external stale-state diagnostics are incomplete."
+                return base
+
+            account_getter = getattr(udi, "get_m3u_accounts", None)
+            accounts = account_getter() if callable(account_getter) else []
+            if not isinstance(accounts, list):
+                accounts = []
+
+            status_counts: Counter = Counter()
+            active_count = 0
+            stale_suspected = []
+            for account in accounts:
+                if not isinstance(account, dict):
+                    continue
+                if account.get("is_active") is False:
+                    continue
+                active_count += 1
+                risk = self._external_m3u_account_risk(account)
+                status_counts[risk["status"]] += 1
+                if risk["stale_status_suspected"]:
+                    stale_suspected.append(risk)
+
+            base["m3u_accounts"] = {
+                "available": True,
+                "total": len(accounts),
+                "active": active_count,
+                "status_counts": dict(sorted(status_counts.items())),
+                "stale_suspected": stale_suspected[:10],
+                "stale_suspected_count": len(stale_suspected),
+            }
+
+            if stale_suspected:
+                base["status"] = "stale_risk"
+                base["stale_status_suspected"] = True
+                base["operator_note"] = (
+                    "Dispatcharr provider status may be stale. StreamFlow detected a status/message contradiction "
+                    "and will not repair Dispatcharr automatically."
+                )
+            else:
+                base["status"] = "ok"
+                base["operator_note"] = "No Dispatcharr provider status/message contradiction was detected in the current UDI cache."
+        except Exception as exc:
+            logger.debug("Could not build external stale diagnostics: %s", exc, exc_info=True)
+            base["status"] = "error"
+            base["operator_note"] = "External stale-state diagnostics could not be built."
+            base["error"] = exc.__class__.__name__
+
+        return base
+
+    @staticmethod
     def _clear_active_stream_reason(stream_status: Dict) -> None:
         for key in (
             'reason_detail',
@@ -5143,6 +5313,11 @@ class StreamCheckerService:
         guard_failed = connectivity_guard_status.get('ok') is False
         connectivity_guard_status['active_failure'] = bool(guard_failed and stream_checking_mode)
         connectivity_guard_status['stale_failure'] = bool(guard_failed and not stream_checking_mode)
+        external_stale_diagnostics = self._build_external_stale_diagnostics(
+            stream_checking_mode=stream_checking_mode,
+            queue_status=queue_status,
+            progress=progress,
+        )
         
         return {
             'running': self.running,
@@ -5154,6 +5329,7 @@ class StreamCheckerService:
             'progress_stale': bool(progress_stale),
             'progress_stale_details': progress_stale or {},
             'connectivity_guard': connectivity_guard_status,
+            'external_stale_diagnostics': external_stale_diagnostics,
             'last_global_check': self.update_tracker.get_last_global_check(),
             'config': {
                 'automation_controls': self.config.get('automation_controls', {}),
