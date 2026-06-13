@@ -569,18 +569,18 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
   const visibilityMetrics = getChangelogVisibilityMetrics(details)
 
   return (
-    <Card className={`overflow-hidden shadow-md transition-shadow hover:shadow-lg dark:bg-card/40 ${action === 'automation_run' ? 'border-2 border-blue-500 dark:border-green-500' : 'border-muted/60'}`}>
-      <CardHeader className="pb-3 bg-muted/10">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className={`${getActionColor(action)} border-current font-bold px-2 py-0.5`}>
-              <div className="bg-current/10 p-1 rounded-sm mr-2 inline-flex">
+    <Card className={`min-w-0 max-w-full overflow-hidden shadow-md transition-shadow hover:shadow-lg dark:bg-card/40 ${action === 'automation_run' ? 'border-2 border-blue-500 dark:border-green-500' : 'border-muted/60'}`}>
+      <CardHeader className="min-w-0 pb-3 bg-muted/10">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-center gap-2">
+            <Badge variant="outline" className={`${getActionColor(action)} min-w-0 max-w-full whitespace-normal border-current px-2 py-0.5 font-bold leading-snug`}>
+              <div className="mr-2 inline-flex shrink-0 rounded-sm bg-current/10 p-1">
                 {getActionIcon(action)}
               </div>
-              <span className="text-[11px] uppercase tracking-wider">{getActionLabel(action)}</span>
+              <span className="min-w-0 break-words text-[11px] uppercase tracking-wider">{getActionLabel(action)}</span>
             </Badge>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
             {entry.id !== undefined && (
               <>
                 <Button
@@ -617,7 +617,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
                 </Button>
               </>
             )}
-            <span className="text-[11px] font-medium text-muted-foreground bg-muted/30 px-2 py-1 rounded-md">{formatTimestamp(timestamp)}</span>
+            <span className="rounded-md bg-muted/30 px-2 py-1 text-[11px] font-medium text-muted-foreground">{formatTimestamp(timestamp)}</span>
           </div>
         </div>
 
@@ -725,13 +725,13 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
               {details.periods.map((period, pIdx) => (
                 <AccordionItem key={pIdx} value={`period-${pIdx}`} className="border rounded-xl overflow-hidden bg-background shadow-sm border-muted/50">
                   <AccordionTrigger className="hover:no-underline hover:bg-muted/30 px-5 py-4 transition-colors">
-                    <div className="flex items-center justify-between w-full pr-4">
-                      <div className="flex items-center gap-4">
+                    <div className="flex min-w-0 w-full flex-col gap-3 pr-4 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex min-w-0 items-center gap-4">
                         <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary font-bold text-sm border border-primary/20">
                           {pIdx + 1}
                         </div>
-                        <div className="flex flex-col items-start gap-0.5">
-                          <span className="font-bold text-lg tracking-tight">{period.period_name}</span>
+                        <div className="flex min-w-0 flex-col items-start gap-0.5">
+                          <span className="min-w-0 break-words text-lg font-bold tracking-tight">{period.period_name}</span>
                           <span className="text-[10px] font-bold uppercase text-muted-foreground tracking-widest opacity-70">Automation Period</span>
                         </div>
                       </div>
@@ -971,18 +971,18 @@ export default function Changelog() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="min-w-0 space-y-6 overflow-hidden">
+      <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
           <h1 className="text-3xl font-bold tracking-tight">Changelog</h1>
           <p className="text-muted-foreground">
             View activity history and system events
           </p>
         </div>
 
-        <div className="flex gap-3">
+        <div className="grid w-full min-w-0 grid-cols-1 gap-3 sm:grid-cols-3 lg:flex lg:w-auto">
           <Select value={sourceFilter} onValueChange={setSourceFilter}>
-            <SelectTrigger className="w-[190px]">
+            <SelectTrigger className="w-full lg:w-[190px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -996,7 +996,7 @@ export default function Changelog() {
           </Select>
 
           <Select value={actionFilter} onValueChange={setActionFilter}>
-            <SelectTrigger className="w-[200px]">
+            <SelectTrigger className="w-full lg:w-[200px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1013,7 +1013,7 @@ export default function Changelog() {
           </Select>
 
           <Select value={days.toString()} onValueChange={(value) => setDays(Number(value))}>
-            <SelectTrigger className="w-[150px]">
+            <SelectTrigger className="w-full lg:w-[150px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1044,7 +1044,7 @@ export default function Changelog() {
           </CardContent>
         </Card>
       ) : (
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           {filteredEntries.map((entry, index) => (
             <ChangelogEntry
               key={entry.id ?? index}
