@@ -49,6 +49,39 @@ RUN_STREAM_EXPORT_FIELDS = [
     "audio_codec",
     "score",
 ]
+RUN_SNAPSHOT_EXPORT_FIELDS = [
+    "schema_version",
+    "run_id",
+    "run_mode",
+    "start_source",
+    "started_at",
+    "completed_at",
+    "duration_seconds",
+    "streamflow_version",
+    "streamflow_commit",
+    "channel_id",
+    "channel_name",
+    "forced",
+    "forced_profile_id",
+    "forced_period_id",
+    "force_check",
+    "provider_limit_override",
+    "is_epg_scheduled",
+    "effective_profile_count",
+    "channel_count",
+    "effective_profiles",
+    "quality_rules",
+    "capacity_profile_context",
+    "feature_flags",
+    "dispatcharr_status",
+    "teamarr_status",
+    "m3u_refresh",
+    "result_summary",
+    "limits",
+    "snapshot_size_bytes",
+    "snapshot_truncated",
+    "snapshot_omitted_reason",
+]
 DEAD_STREAM_EXPORT_FORMATS = {
     "txt": ("|", "txt", "text/plain; charset=utf-8"),
     "pipe": ("|", "txt", "text/plain; charset=utf-8"),
@@ -77,6 +110,25 @@ _RUN_DEAD_REASONS = _RUN_DEAD_STATUSES | {
     "frozen_video",
 }
 _RUN_EMPTY_VALUES = {"", "none", "null", "n/a", "na", "unknown", "-"}
+_RUN_SNAPSHOT_PRIVATE_KEY_FRAGMENTS = (
+    "url",
+    "credential",
+    "password",
+    "passwd",
+    "token",
+    "secret",
+    "apikey",
+    "authorization",
+    "authheader",
+    "cookie",
+    "header",
+    "streamdetails",
+    "streamstats",
+    "raw",
+    "log",
+    "screenshot",
+)
+_SNAPSHOT_EXPORT_OMIT = object()
 
 
 def get_changelog_response(*, request_args: Any):
@@ -401,6 +453,58 @@ def _text(value: Any) -> str:
     return str(value or "").strip().casefold()
 
 
+def _normalise_snapshot_key(key: Any) -> str:
+    return "".join(ch for ch in str(key or "").strip().casefold() if ch.isalnum())
+
+
+def _is_private_snapshot_export_key(key: Any) -> bool:
+    normalised = _normalise_snapshot_key(key)
+    if not normalised:
+        return False
+    return any(fragment in normalised for fragment in _RUN_SNAPSHOT_PRIVATE_KEY_FRAGMENTS)
+
+
+def _scrub_snapshot_export_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 6:
+        return _SNAPSHOT_EXPORT_OMIT
+    if isinstance(value, dict):
+        scrubbed = {}
+        for key, item in value.items():
+            if _is_private_snapshot_export_key(key):
+                continue
+            safe_value = _scrub_snapshot_export_value(item, depth=depth + 1)
+            if safe_value is not _SNAPSHOT_EXPORT_OMIT:
+                scrubbed[str(key)] = safe_value
+        return scrubbed
+    if isinstance(value, list):
+        scrubbed_items = []
+        for item in value[:50]:
+            safe_value = _scrub_snapshot_export_value(item, depth=depth + 1)
+            if safe_value is not _SNAPSHOT_EXPORT_OMIT:
+                scrubbed_items.append(safe_value)
+        return scrubbed_items
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _safe_run_snapshot_for_export(details: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not isinstance(details, dict):
+        return None
+    snapshot = details.get("run_snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+
+    exported = {}
+    for key in RUN_SNAPSHOT_EXPORT_FIELDS:
+        if key not in snapshot or _is_private_snapshot_export_key(key):
+            continue
+        safe_value = _scrub_snapshot_export_value(snapshot.get(key))
+        if safe_value is not _SNAPSHOT_EXPORT_OMIT:
+            exported[key] = safe_value
+    return exported or None
+
+
 def _truthy(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -687,6 +791,7 @@ def _render_changelog_run_export(
     export_format: str,
     scope: str = "all",
     include_url: bool = False,
+    run_snapshot: Optional[Dict[str, Any]] = None,
     generated_at: Optional[str] = None,
 ) -> Tuple[str, str, str]:
     delimiter, extension, mimetype = DEAD_STREAM_EXPORT_FORMATS[export_format]
@@ -696,17 +801,17 @@ def _render_changelog_run_export(
     generated_at = generated_at or datetime.now(timezone.utc).isoformat()
 
     if export_format == "json":
-        content = json.dumps(
-            {
-                "generated_at": generated_at,
-                "format": "json",
-                "scope": scope,
-                "total_stream_rows": len(rows),
-                "fields": fields,
-                "streams": [{field: row.get(field) for field in fields} for row in rows],
-            },
-            indent=2,
-        )
+        payload = {
+            "generated_at": generated_at,
+            "format": "json",
+            "scope": scope,
+            "total_stream_rows": len(rows),
+            "fields": fields,
+            "streams": [{field: row.get(field) for field in fields} for row in rows],
+        }
+        if run_snapshot is not None:
+            payload["run_snapshot"] = run_snapshot
+        content = json.dumps(payload, indent=2)
         return content + "\n", extension, mimetype
 
     output = io.StringIO()
@@ -756,6 +861,7 @@ def export_changelog_run_response(*, run_id: int, request_args: Any):
             details = json.loads(getattr(run, "raw_details", None) or "{}")
             subentries = json.loads(getattr(run, "raw_subentries", None) or "[]")
             rows = _extract_changelog_run_stream_rows(run, details, subentries)
+            run_snapshot = _safe_run_snapshot_for_export(details)
             if requested_scope == "dead":
                 rows = [row for row in rows if _is_dead_run_stream_row(row)]
         finally:
@@ -766,6 +872,7 @@ def export_changelog_run_response(*, run_id: int, request_args: Any):
             export_format=requested_format,
             scope=requested_scope,
             include_url=_as_bool(_arg(request_args, "include_url", False), default=False),
+            run_snapshot=run_snapshot,
         )
         suffix = "-dead" if requested_scope == "dead" else ""
         filename = f"changelog-run-{run_id}{suffix}-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.{extension}"
