@@ -438,14 +438,14 @@ export default function StreamChecker() {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-start">
-        <div>
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
           <h1 className="text-3xl font-bold tracking-tight">Stream Checker</h1>
           <p className="text-muted-foreground">
             Monitor and manage stream quality checking
           </p>
         </div>
-        <div className="flex flex-col sm:flex-row sm:items-end gap-2 min-w-0">
+        <div className="flex w-full min-w-0 flex-col gap-2 sm:flex-row sm:items-end lg:w-auto lg:flex-nowrap">
           <div className="w-full sm:w-44 space-y-1">
             <Label htmlFor="queue-start-mode" className="text-xs text-muted-foreground">Run Start</Label>
             <Select
@@ -489,7 +489,7 @@ export default function StreamChecker() {
             variant="outline"
             onClick={() => persistQueueStart(queueStartMode, queueStartChannelId)}
             disabled={isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start'}
-            className="gap-2"
+            className="w-full gap-2 sm:w-auto"
           >
             {actionLoading === 'queue-start' ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -501,7 +501,7 @@ export default function StreamChecker() {
           <Button
             onClick={handleQueueAllChannels}
             disabled={queueAllDisabled}
-            className="sm:min-w-44"
+            className="w-full sm:w-auto sm:min-w-44"
           >
             {actionLoading === 'queue-all' ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
