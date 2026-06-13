@@ -91,6 +91,33 @@ describe('shadow monitor decision history helpers', () => {
     ])
   })
 
+  it('shows missing audio stream context for silent-audio switches', () => {
+    expect(getShadowEventDetailParts({
+      type: 'switch_success',
+      trigger_reason: 'silent_audio',
+      details: {
+        trigger_reason: 'silent_audio',
+        detection: {
+          reason: 'silent_audio',
+          confirmations: 1,
+          required: 1,
+          measurements: {
+            audio_stream_present: false,
+            silent_audio_duration_secs: 0.25,
+            silent_audio_noise_db: -50,
+          },
+          thresholds: {
+            silent_audio_min_duration_seconds: 10,
+          },
+        },
+      },
+    })).toEqual([
+      'Silent Audio',
+      'no audio stream',
+      '1/1 confirmations',
+    ])
+  })
+
   it('summarizes loop detection context', () => {
     expect(getShadowEventDetailParts({
       type: 'loop_pending',

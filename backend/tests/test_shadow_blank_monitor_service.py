@@ -1634,6 +1634,26 @@ def test_audio_detection_parser_detects_silent_audio_duration():
     assert parsed["silent_audio_noise_db"] == -48
 
 
+def test_audio_detection_parser_treats_missing_audio_as_silent_fault():
+    config = normalize_config({
+        "silent_audio_detection_enabled": True,
+        "silent_audio_min_duration_seconds": 10,
+        "silent_audio_noise_db": -48,
+    })
+    output = "Stream specifier ':a' in filtergraph description matches no streams.\n"
+
+    parsed = ShadowBlankMonitorService._parse_audio_detection(
+        output,
+        config,
+        observed_duration=0.25,
+    )
+
+    assert parsed["audio_stream_present"] is False
+    assert parsed["silent_audio_detected"] is True
+    assert parsed["silent_audio_duration_secs"] == 0.25
+    assert parsed["silent_audio_noise_db"] == -48
+
+
 def test_media_fault_results_are_ignored_unless_enabled(tmp_path):
     switch_calls = []
     udi = FakeUdi(
@@ -1717,6 +1737,49 @@ def test_enabled_media_fault_switches_to_next_stream_when_live(tmp_path):
         assert status["recent_events"][0]["type"] == "switch_success"
         assert status["recent_events"][0]["details"]["reason"] == reason
         assert status["cooldowns"] == []
+
+
+def test_missing_audio_stream_switches_as_silent_audio_when_enabled(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    missing_audio_output = "Stream specifier ':a' in filtergraph description matches no streams.\n"
+
+    def probe_missing_audio(_url, config):
+        parsed = ShadowBlankMonitorService._parse_audio_detection(
+            missing_audio_output,
+            normalize_config(config),
+            observed_duration=0.25,
+        )
+        return {
+            "blank_detected": False,
+            "freeze_detected": False,
+            **parsed,
+        }
+
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=probe_missing_audio,
+        switch_calls=switch_calls,
+    )
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "silent_audio_detection_enabled": True,
+    })
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["reason"] == "silent_audio"
+    assert status["recent_events"][0]["details"]["detection"]["reason"] == "silent_audio"
+    assert status["watched_channels"][0]["last_probe"]["audio_stream_present"] is False
+    assert status["watched_channels"][0]["last_probe"]["silent_audio_detected"] is True
 
 
 def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp_path):

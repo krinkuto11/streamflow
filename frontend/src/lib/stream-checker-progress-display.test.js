@@ -66,6 +66,49 @@ describe('getCurrentProgressDisplay', () => {
     expect(display.showQualityRules).toBe(false)
   })
 
+  it('keeps live single-channel capacity progress visible with idle queue counters', () => {
+    const display = getCurrentProgressDisplay(
+      {
+        stream_checking_mode: true,
+        queue: { queue_size: 0, in_progress: 0, current_channel: null },
+      },
+      {
+        run_mode: 'single_channel_check',
+        is_single_channel_check: true,
+        run_profile_name: 'Teamarr Event Preflight',
+        run_profile_source: 'forced',
+        quality_profile_name: 'Teamarr Event Preflight',
+        quality_profile_source: 'forced',
+        capacity_profile_name: 'Provider account profiles',
+        capacity_profile_source: 'm3u_account_profiles',
+        provider_progress: [
+          {
+            account_id: 1,
+            name: 'Provider account',
+            total: 2,
+            checking: 1,
+          },
+        ],
+        provider_summary: {
+          total_providers: 1,
+          checking_streams: 1,
+        },
+      },
+    )
+
+    expect(display).toMatchObject({
+      isChecking: true,
+      showCurrentProgress: true,
+      progressRunMode: 'Single Channel Check',
+      runProfileName: 'Teamarr Event Preflight',
+      runProfileSource: 'forced',
+      qualityProfileName: 'Teamarr Event Preflight',
+      qualityProfileSource: 'forced',
+      capacityProfileName: 'Provider account profiles',
+      showQualityRules: false,
+    })
+  })
+
   it('uses status stale details and hides Current Progress for stale payloads', () => {
     const display = getCurrentProgressDisplay(
       {

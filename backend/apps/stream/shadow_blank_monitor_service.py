@@ -150,7 +150,7 @@ DETECTION_MEASUREMENT_KEYS = {
         "no_decodable_frames_error",
     ),
     "garbled_audio": ("garbled_audio_error_count", "garbled_audio_error"),
-    "silent_audio": ("silent_audio_duration_secs", "silent_audio_noise_db"),
+    "silent_audio": ("silent_audio_duration_secs", "silent_audio_noise_db", "audio_stream_present"),
     "offline_image": ("offline_image_distance", "offline_image_hash"),
     "loop": ("loop_duration_secs", "loop_frames_processed"),
 }
@@ -969,6 +969,7 @@ class ShadowBlankMonitorService:
                 "silent_audio_detected": silent_audio,
                 "silent_audio_duration_secs": result.get("silent_audio_duration_secs"),
                 "silent_audio_noise_db": result.get("silent_audio_noise_db"),
+                "audio_stream_present": result.get("audio_stream_present"),
                 "offline_image_detected": offline_image,
                 "offline_image_hash": result.get("offline_image_hash"),
                 "offline_image_distance": result.get("offline_image_distance"),
@@ -1942,6 +1943,10 @@ class ShadowBlankMonitorService:
 
         result["audio_stream_present"] = not audio_missing if (audio_missing or garbled_count or longest_silence) else None
         if audio_missing:
+            if config.get("silent_audio_detection_enabled"):
+                result["silent_audio_detected"] = True
+                result["silent_audio_duration_secs"] = round(max(0.0, float(observed_duration or 0.0)), 3)
+                result["silent_audio_noise_db"] = int(config.get("silent_audio_noise_db", DEFAULT_CONFIG["silent_audio_noise_db"]))
             return result
 
         if config.get("garbled_audio_detection_enabled"):

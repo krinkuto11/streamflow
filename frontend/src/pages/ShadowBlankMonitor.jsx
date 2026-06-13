@@ -760,6 +760,7 @@ export default function ShadowBlankMonitor() {
                           {channel.last_probe?.blank_detected && <Badge variant="outline">Blank</Badge>}
                           {channel.last_probe?.garbled_audio_detected && <Badge variant="outline">Garbled Audio</Badge>}
                           {channel.last_probe?.silent_audio_detected && <Badge variant="outline">Silent Audio</Badge>}
+                          {channel.last_probe?.audio_stream_present === false && <Badge variant="outline">No Audio Stream</Badge>}
                           {channel.last_probe?.offline_image_detected && <Badge variant="outline">Offline Image</Badge>}
                           {channel.last_probe?.loop_detected && <Badge variant="outline">Loop</Badge>}
                         </div>

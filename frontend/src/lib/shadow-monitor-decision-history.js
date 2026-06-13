@@ -197,6 +197,9 @@ const detectionParts = (detection = {}) => {
   }
 
   if (reason === 'silent_audio') {
+    if (measurements.audio_stream_present === false) {
+      return ['no audio stream']
+    }
     const duration = formatSeconds(measurements.silent_audio_duration_secs)
     const minimum = formatSeconds(thresholds.silent_audio_min_duration_seconds)
     return [
