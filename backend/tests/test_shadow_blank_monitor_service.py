@@ -774,6 +774,49 @@ def test_start_requires_watcher_api_key(tmp_path):
     assert config["enabled"] is False
 
 
+def test_start_enables_configured_paused_monitor(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+
+    try:
+        assert service.get_config()["enabled"] is False
+        assert service.start() is True
+
+        status = service.get_status()
+        config = service.get_config()
+        assert config["enabled"] is True
+        assert status["enabled"] is True
+        assert status["running"] is True
+        assert status["configuration_required"] is False
+    finally:
+        service.stop()
+
+
+def test_start_handler_enables_configured_paused_monitor(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+
+    app = Flask(__name__)
+    with app.app_context():
+        try:
+            response, status_code = start_shadow_blank_monitor_response(get_service=lambda: service)
+            payload = response.get_json()
+
+            assert status_code == 200
+            assert payload["success"] is True
+            assert payload["status"]["enabled"] is True
+            assert payload["status"]["running"] is True
+            assert service.get_config()["enabled"] is True
+        finally:
+            service.stop()
+
+
 def test_enabled_config_without_watcher_api_key_stays_off(tmp_path):
     udi = FakeUdi(
         statuses=[{"uuid-1": active_status()}],
