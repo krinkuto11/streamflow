@@ -296,6 +296,27 @@ class ChangelogManager:
             'avg_resolution': check_stats.get('avg_resolution', 'N/A'),
             'avg_bitrate': check_stats.get('avg_bitrate', 'N/A')
         }
+        v7_detail_fields = (
+            'avg_fps',
+            'duration',
+            'duration_seconds',
+            'run_mode',
+            'run_profile_id',
+            'run_profile_name',
+            'run_profile_source',
+            'quality_profile_id',
+            'quality_profile_name',
+            'quality_profile_source',
+            'capacity_profile_name',
+            'capacity_profile_source',
+            'channels_hidden',
+            'channels_ready',
+            'channel_visibility_changed',
+            'run_snapshot',
+        )
+        for field in v7_detail_fields:
+            if field in check_stats:
+                details[field] = check_stats.get(field)
         
         # Add program name if provided (for scheduled EPG checks)
         if program_name:

@@ -184,6 +184,82 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.StreamCheckConfig')
     @patch('stream_checker_service.get_automation_config_manager')
+    @patch('stream_checker_service.get_session_manager')
+    @patch('stream_checker_service.fetch_channel_streams')
+    def test_single_channel_check_records_v7_snapshot_and_visibility_counters(
+        self, mock_fetch, mock_session_mgr, mock_acm_factory,
+        mock_config_class, mock_get_udi,
+    ):
+        """Single-channel checks carry immutable V7 run context into stats/changelog."""
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        profile = _make_profile(m3u_update_enabled=False, matching_enabled=False, checking_enabled=True)
+        profile['id'] = 'profile-v7'
+        profile['name'] = 'V7 Snapshot Profile'
+        profile['stream_checking']['check_all_streams'] = True
+        profile['stream_checking']['stream_limit'] = 4
+        channel_id = 52
+        streams = [{'id': 11, 'url': 'http://x/11', 'm3u_account': 5, 'stream_stats': {}}]
+
+        mock_config_class.return_value = _make_mock_config()
+        mock_udi = _make_mock_udi(channel_id, 'V7 Snapshot Channel', streams)
+        mock_get_udi.return_value = mock_udi
+        mock_session_mgr.return_value.get_channels_in_active_sessions.return_value = []
+        mock_acm = _make_mock_acm(profile)
+        mock_acm.get_profile.return_value = profile
+        mock_acm_factory.return_value = mock_acm
+        mock_fetch.return_value = streams
+
+        service = StreamCheckerService()
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel = Mock(return_value={
+            'dead_streams_count': 1,
+            'revived_streams_count': 0,
+            'analyzed_streams': [],
+            'channel_visibility': {
+                'action': 'hidden',
+                'changed': True,
+                'channel_id': channel_id,
+                'reason': 'all_failed',
+            },
+        })
+        service.dead_streams_tracker = Mock()
+        service.dead_streams_tracker.get_dead_streams_for_channel.return_value = {}
+        service.dead_streams_tracker.cleanup_removed_streams.return_value = 0
+        service.changelog = Mock()
+
+        with patch('apps.core.api_utils.refresh_m3u_playlists'):
+            result = service.check_single_channel(channel_id=channel_id, forced_profile_id='profile-v7')
+
+        stats = result['stats']
+        snapshot = stats['run_snapshot']
+        self.assertEqual(result['run_mode'], 'single_channel_check')
+        self.assertEqual(result['channels_hidden'], 1)
+        self.assertEqual(result['channels_ready'], 0)
+        self.assertEqual(stats['run_profile_name'], 'V7 Snapshot Profile')
+        self.assertEqual(stats['quality_profile_name'], 'V7 Snapshot Profile')
+        self.assertEqual(stats['capacity_profile_source'], 'm3u_account_profiles')
+        self.assertEqual(stats['channels_hidden'], 1)
+        self.assertEqual(stats['channels_ready'], 0)
+        self.assertEqual(stats['channel_visibility_changed'], 1)
+        self.assertEqual(snapshot['run_mode'], 'single_channel_check')
+        self.assertEqual(snapshot['start_source'], 'manual_forced_profile')
+        self.assertEqual(snapshot['effective_profiles'][0]['profile_name'], 'V7 Snapshot Profile')
+        self.assertEqual(snapshot['quality_rules'][0]['stream_limit'], 4)
+        self.assertEqual(snapshot['capacity_profile_context']['type'], 'provider_account_profiles')
+        self.assertEqual(snapshot['result_summary']['channels_hidden'], 1)
+        self.assertEqual(snapshot['result_summary']['channels_ready'], 0)
+        self.assertFalse(snapshot['snapshot_truncated'])
+        self.assertNotIn('stream_details', snapshot)
+        self.assertNotIn('stream_url', json.dumps(snapshot))
+
+        service.changelog.add_single_channel_check_entry.assert_called_once()
+        changelog_stats = service.changelog.add_single_channel_check_entry.call_args.kwargs['check_stats']
+        self.assertIs(changelog_stats, stats)
+
+    @patch('stream_checker_service.get_udi_manager')
+    @patch('stream_checker_service.StreamCheckConfig')
+    @patch('stream_checker_service.get_automation_config_manager')
     @patch('apps.stream.stream_session_manager.get_session_manager')
     @patch('stream_checker_service.fetch_channel_streams')
     def test_m3u_update_disabled_refreshes_channel_after_matching_only(

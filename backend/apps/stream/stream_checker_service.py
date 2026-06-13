@@ -253,6 +253,7 @@ def _resolve_single_channel_m3u_refresh_scope(
 
 class StreamCheckerService:
     """Main service for managing stream checking operations."""
+    SINGLE_CHANNEL_RUN_SNAPSHOT_MAX_BYTES = 50 * 1024
     
     def __init__(self):
         log_function_call(logger, "__init__")
@@ -5393,6 +5394,206 @@ class StreamCheckerService:
         context['capacity_profile_source'] = 'm3u_account_profiles'
         return context
 
+    @staticmethod
+    def _single_channel_snapshot_size_bytes(snapshot: Dict[str, Any]) -> int:
+        try:
+            return len(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            return 0
+
+    def _bound_single_channel_run_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        bounded = dict(snapshot or {})
+        if self._single_channel_snapshot_size_bytes(bounded) <= self.SINGLE_CHANNEL_RUN_SNAPSHOT_MAX_BYTES:
+            bounded["snapshot_size_bytes"] = self._single_channel_snapshot_size_bytes(bounded)
+            bounded["snapshot_truncated"] = False
+            return bounded
+
+        for key in ("effective_profiles", "quality_rules", "feature_flags", "dispatcharr_status", "result_summary"):
+            value = bounded.get(key)
+            if isinstance(value, list):
+                bounded[f"{key}_omitted_count"] = max(0, len(value) - 3)
+                bounded[key] = value[:3]
+            elif isinstance(value, dict):
+                bounded[f"{key}_omitted"] = True
+                bounded[key] = {}
+            bounded["snapshot_truncated"] = True
+            if self._single_channel_snapshot_size_bytes(bounded) <= self.SINGLE_CHANNEL_RUN_SNAPSHOT_MAX_BYTES:
+                bounded["snapshot_size_bytes"] = self._single_channel_snapshot_size_bytes(bounded)
+                return bounded
+
+        minimal = {
+            "schema_version": bounded.get("schema_version", 1),
+            "run_id": bounded.get("run_id"),
+            "run_mode": bounded.get("run_mode"),
+            "start_source": bounded.get("start_source"),
+            "started_at": bounded.get("started_at"),
+            "completed_at": bounded.get("completed_at"),
+            "streamflow_version": bounded.get("streamflow_version"),
+            "streamflow_commit": bounded.get("streamflow_commit"),
+            "snapshot_truncated": True,
+            "snapshot_omitted_reason": "max_bytes_exceeded",
+        }
+        minimal["snapshot_size_bytes"] = self._single_channel_snapshot_size_bytes(minimal)
+        return minimal
+
+    @staticmethod
+    def _single_channel_visibility_summary(visibility_result: Optional[Dict[str, Any]]) -> Dict[str, int]:
+        if not isinstance(visibility_result, dict) or not visibility_result.get("changed"):
+            return {
+                "channels_hidden": 0,
+                "channels_ready": 0,
+                "channel_visibility_changed": 0,
+            }
+        action = visibility_result.get("action")
+        return {
+            "channels_hidden": 1 if action == "hidden" else 0,
+            "channels_ready": 1 if action == "unhidden" else 0,
+            "channel_visibility_changed": 1,
+        }
+
+    @staticmethod
+    def _streamflow_version_context() -> Dict[str, Optional[str]]:
+        version = os.getenv("STREAMFLOW_VERSION")
+        if not version:
+            current_file = Path(__file__)
+            for version_file in (
+                current_file.parent / "version.txt",
+                current_file.parents[2] / "version.txt",
+                current_file.parents[2] / "static" / "version.txt",
+            ):
+                try:
+                    if version_file.exists():
+                        value = version_file.read_text(encoding="utf-8").strip()
+                        if value:
+                            version = value
+                            break
+                except Exception:
+                    continue
+        commit = (
+            os.getenv("STREAMFLOW_COMMIT")
+            or os.getenv("STREAMFLOW_REVISION")
+            or os.getenv("GITHUB_SHA")
+        )
+        return {
+            "version": version or "dev-unknown",
+            "commit": commit or None,
+        }
+
+    def _build_single_channel_run_snapshot(
+        self,
+        *,
+        channel_id: int,
+        channel_name: str,
+        start_time: float,
+        completed_at: datetime,
+        duration_seconds: int,
+        profile: Optional[Dict[str, Any]],
+        profile_progress_context: Dict[str, Any],
+        check_stats: Dict[str, Any],
+        visibility_summary: Dict[str, int],
+        checking_enabled: bool,
+        matching_enabled: bool,
+        m3u_update_enabled: bool,
+        forced_profile_id: Optional[str],
+        force_check: bool,
+        provider_limit_override: bool,
+        is_epg_scheduled: bool,
+        m3u_refresh_scope: str,
+        m3u_refresh_account_count: int,
+        udi: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        run_mode = profile_progress_context.get("run_mode") or "single_channel_check"
+        if run_mode == "teamarr_preflight":
+            start_source = "teamarr_preflight"
+        elif is_epg_scheduled:
+            start_source = "epg_scheduled"
+        elif forced_profile_id:
+            start_source = "manual_forced_profile"
+        else:
+            start_source = "manual"
+
+        version_context = self._streamflow_version_context()
+        stream_checking = profile.get("stream_checking", {}) if isinstance(profile, dict) else {}
+        dispatcharr_status: Dict[str, Any] = {}
+        try:
+            if udi and hasattr(udi, "is_network_ready"):
+                dispatcharr_status["network_ready"] = bool(udi.is_network_ready())
+        except Exception as exc:
+            dispatcharr_status["network_ready_error"] = type(exc).__name__
+
+        profile_id = profile_progress_context.get("run_profile_id")
+        profile_name = profile_progress_context.get("run_profile_name")
+        snapshot = {
+            "schema_version": 1,
+            "run_id": f"{run_mode}-{channel_id}-{int(start_time)}",
+            "run_mode": run_mode,
+            "start_source": start_source,
+            "started_at": datetime.fromtimestamp(start_time).isoformat(),
+            "completed_at": completed_at.isoformat(),
+            "duration_seconds": duration_seconds,
+            "streamflow_version": version_context["version"],
+            "streamflow_commit": version_context["commit"],
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "forced_profile_id": str(forced_profile_id) if forced_profile_id else None,
+            "force_check": bool(force_check),
+            "provider_limit_override": bool(provider_limit_override),
+            "is_epg_scheduled": bool(is_epg_scheduled),
+            "effective_profiles": [{
+                "profile_id": profile_id,
+                "profile_name": profile_name,
+                "profile_source": profile_progress_context.get("run_profile_source"),
+                "channel_count": 1,
+                "quality_rules_enabled": bool(checking_enabled),
+                "check_all_streams": bool(stream_checking.get("check_all_streams", False)),
+                "stream_limit": stream_checking.get("stream_limit", 0),
+            }],
+            "effective_profile_count": 1 if profile_name or profile_id else 0,
+            "channel_count": 1,
+            "quality_rules": [{
+                "profile_id": profile_progress_context.get("quality_profile_id"),
+                "profile_name": profile_progress_context.get("quality_profile_name"),
+                "enabled": bool(checking_enabled),
+                "check_all_streams": bool(stream_checking.get("check_all_streams", False)),
+                "stream_limit": stream_checking.get("stream_limit", 0),
+            }],
+            "capacity_profile_context": {
+                "type": "provider_account_profiles",
+                "description": "Capacity is enforced by account limits and active provider profiles.",
+                "profile_limited": not bool(provider_limit_override),
+            },
+            "feature_flags": {
+                "single_channel_checking": True,
+                "m3u_update_enabled": bool(m3u_update_enabled),
+                "stream_matching_enabled": bool(matching_enabled),
+                "stream_checking_enabled": bool(checking_enabled),
+                "force_check": bool(force_check),
+                "provider_limit_override": bool(provider_limit_override),
+            },
+            "dispatcharr_status": dispatcharr_status,
+            "teamarr_status": {
+                "preflight_context": run_mode == "teamarr_preflight",
+            },
+            "m3u_refresh": {
+                "scope": m3u_refresh_scope,
+                "account_count": int(m3u_refresh_account_count or 0),
+            },
+            "result_summary": {
+                "total_streams": check_stats.get("total_streams", 0),
+                "dead_streams": check_stats.get("dead_streams", 0),
+                "avg_resolution": check_stats.get("avg_resolution"),
+                "avg_bitrate": check_stats.get("avg_bitrate"),
+                "avg_fps": check_stats.get("avg_fps"),
+                "channels_hidden": visibility_summary.get("channels_hidden", 0),
+                "channels_ready": visibility_summary.get("channels_ready", 0),
+                "channel_visibility_changed": visibility_summary.get("channel_visibility_changed", 0),
+            },
+            "limits": {
+                "max_bytes": self.SINGLE_CHANNEL_RUN_SNAPSHOT_MAX_BYTES,
+            },
+        }
+        return self._bound_single_channel_run_snapshot(snapshot)
+
     def _apply_channel_visibility_after_check(
         self,
         channel_data: Dict[str, Any],
@@ -6648,6 +6849,45 @@ class StreamCheckerService:
             # Add duration to check stats
             check_stats['duration'] = duration_str
             check_stats['duration_seconds'] = duration_seconds
+            visibility_summary = self._single_channel_visibility_summary(
+                check_result.get('channel_visibility') if checking_enabled else None
+            )
+            check_stats.update({
+                'run_mode': profile_progress_context.get('run_mode') or 'single_channel_check',
+                'run_profile_id': profile_progress_context.get('run_profile_id'),
+                'run_profile_name': profile_progress_context.get('run_profile_name'),
+                'run_profile_source': profile_progress_context.get('run_profile_source'),
+                'quality_profile_id': profile_progress_context.get('quality_profile_id'),
+                'quality_profile_name': profile_progress_context.get('quality_profile_name'),
+                'quality_profile_source': profile_progress_context.get('quality_profile_source'),
+                'capacity_profile_name': profile_progress_context.get('capacity_profile_name'),
+                'capacity_profile_source': profile_progress_context.get('capacity_profile_source'),
+                'channels_hidden': visibility_summary['channels_hidden'],
+                'channels_ready': visibility_summary['channels_ready'],
+                'channel_visibility_changed': visibility_summary['channel_visibility_changed'],
+            })
+            completed_at = datetime.now()
+            check_stats['run_snapshot'] = self._build_single_channel_run_snapshot(
+                channel_id=channel_id,
+                channel_name=channel_name,
+                start_time=start_time,
+                completed_at=completed_at,
+                duration_seconds=duration_seconds,
+                profile=profile,
+                profile_progress_context=profile_progress_context,
+                check_stats=check_stats,
+                visibility_summary=visibility_summary,
+                checking_enabled=checking_enabled,
+                matching_enabled=matching_enabled,
+                m3u_update_enabled=m3u_update_enabled,
+                forced_profile_id=forced_profile_id,
+                force_check=force_check,
+                provider_limit_override=provider_limit_override,
+                is_epg_scheduled=is_epg_scheduled,
+                m3u_refresh_scope=m3u_refresh_scope,
+                m3u_refresh_account_count=len(m3u_refresh_account_ids),
+                udi=udi,
+            )
             
             # Add changelog entry
             if self.changelog:
@@ -6709,6 +6949,11 @@ class StreamCheckerService:
                 'automation_profile_id': profile_progress_context.get('automation_profile_id'),
                 'automation_profile_name': profile_progress_context.get('automation_profile_name'),
                 'automation_profile_source': profile_progress_context.get('automation_profile_source'),
+                'run_mode': check_stats.get('run_mode'),
+                'run_snapshot': check_stats.get('run_snapshot'),
+                'channels_hidden': check_stats.get('channels_hidden'),
+                'channels_ready': check_stats.get('channels_ready'),
+                'channel_visibility_changed': check_stats.get('channel_visibility_changed'),
                 'stats': check_stats
             }
             

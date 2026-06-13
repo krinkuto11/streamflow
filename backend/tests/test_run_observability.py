@@ -3,7 +3,7 @@ import threading
 import unittest
 from unittest.mock import Mock, patch
 
-from apps.automation.automated_stream_manager import AutomatedStreamManager
+from apps.automation.automated_stream_manager import AutomatedStreamManager, ChangelogManager
 from apps.udi.fetcher import UDIFetcher
 
 
@@ -738,6 +738,57 @@ class FetcherTimingSummaryTests(unittest.TestCase):
         self.assertGreater(summary["p99_seconds"], summary["p95_seconds"])
         self.assertEqual(summary["slowest"][0]["path"], "/api/channels/streams/by-ids/")
         self.assertNotIn("dispatcharr.local", summary["slowest"][0]["path"])
+
+
+class ChangelogV7SingleChannelTests(unittest.TestCase):
+    def test_single_channel_changelog_copies_v7_run_context(self):
+        manager = ChangelogManager("unused.json")
+        manager.add_entry = Mock()
+        run_snapshot = {
+            "schema_version": 1,
+            "run_mode": "single_channel_check",
+            "start_source": "manual",
+            "effective_profiles": [{"profile_name": "Single Profile"}],
+            "quality_rules": [{"profile_name": "Single Profile", "enabled": True}],
+            "capacity_profile_context": {"type": "provider_account_profiles"},
+        }
+
+        manager.add_single_channel_check_entry(
+            channel_id=12,
+            channel_name="Single Channel",
+            check_stats={
+                "total_streams": 3,
+                "dead_streams": 1,
+                "avg_resolution": "1920x1080",
+                "avg_bitrate": "5000 kbps",
+                "avg_fps": "50 fps",
+                "duration_seconds": 17,
+                "run_mode": "single_channel_check",
+                "run_profile_name": "Single Profile",
+                "run_profile_source": "forced",
+                "quality_profile_name": "Single Profile",
+                "quality_profile_source": "forced",
+                "capacity_profile_name": "Provider account profiles",
+                "capacity_profile_source": "m3u_account_profiles",
+                "channels_hidden": 0,
+                "channels_ready": 1,
+                "channel_visibility_changed": 1,
+                "run_snapshot": run_snapshot,
+            },
+        )
+
+        manager.add_entry.assert_called_once()
+        kwargs = manager.add_entry.call_args.kwargs
+        details = kwargs["details"]
+        self.assertEqual(kwargs["action"], "single_channel_check")
+        self.assertEqual(details["run_mode"], "single_channel_check")
+        self.assertEqual(details["run_profile_name"], "Single Profile")
+        self.assertEqual(details["quality_profile_name"], "Single Profile")
+        self.assertEqual(details["capacity_profile_source"], "m3u_account_profiles")
+        self.assertEqual(details["channels_hidden"], 0)
+        self.assertEqual(details["channels_ready"], 1)
+        self.assertEqual(details["channel_visibility_changed"], 1)
+        self.assertEqual(details["run_snapshot"], run_snapshot)
 
 
 if __name__ == "__main__":
