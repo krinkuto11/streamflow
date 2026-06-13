@@ -7,7 +7,11 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { changelogAPI } from '@/services/api.js'
-import { getChangelogRunContextBadges, getChangelogVisibilityMetrics } from '@/lib/changelog-run-summary.js'
+import {
+  getChangelogRunContextBadges,
+  getChangelogStaleWarnings,
+  getChangelogVisibilityMetrics,
+} from '@/lib/changelog-run-summary.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download } from 'lucide-react'
 
@@ -566,6 +570,7 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
   const { timestamp, action, details, subentries } = entry
   const hasSubentries = subentries && subentries.length > 0
   const runContextBadges = getChangelogRunContextBadges(details)
+  const staleWarnings = getChangelogStaleWarnings(details)
   const visibilityMetrics = getChangelogVisibilityMetrics(details)
 
   return (
@@ -630,6 +635,21 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
                 className="min-w-0 max-w-full justify-start gap-1 whitespace-normal text-left leading-snug"
               >
                 <span className="shrink-0 text-[10px] uppercase tracking-tight text-muted-foreground">{item.label}</span>
+                <span className="min-w-0 break-words font-semibold">{item.value}</span>
+              </Badge>
+            ))}
+          </div>
+        )}
+
+        {staleWarnings.length > 0 && (
+          <div className="mt-3 flex min-w-0 flex-wrap gap-2 border-t pt-3">
+            {staleWarnings.map(item => (
+              <Badge
+                key={item.key}
+                variant="outline"
+                className="min-w-0 max-w-full justify-start gap-1 whitespace-normal border-amber-500/70 bg-amber-500/10 text-left leading-snug text-amber-700 dark:text-amber-300"
+              >
+                <span className="shrink-0 text-[10px] uppercase tracking-tight text-amber-800/80 dark:text-amber-200/80">{item.label}</span>
                 <span className="min-w-0 break-words font-semibold">{item.value}</span>
               </Badge>
             ))}

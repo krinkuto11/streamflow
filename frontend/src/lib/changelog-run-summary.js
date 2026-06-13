@@ -106,6 +106,48 @@ export function getChangelogRunContextBadges(details = {}) {
   ].filter(item => isPresent(item.value))
 }
 
+const STALE_WARNING_LABELS = {
+  dispatcharr_status_risk: 'Dispatcharr Status Risk',
+  progress_stale: 'Stale Progress',
+}
+
+const staleWarningValue = (warning = {}) => {
+  if (warning.type === 'dispatcharr_status_risk') {
+    const count = Number(warning.count)
+    const conflictText = Number.isFinite(count) && count > 0
+      ? `${count} provider ${count === 1 ? 'conflict' : 'conflicts'}`
+      : 'Detected'
+    return warning.read_only === false ? conflictText : `${conflictText} / Read Only`
+  }
+  return formatEnumLabel(warning.status || warning.type) || 'Detected'
+}
+
+export function getChangelogStaleWarnings(details = {}) {
+  const snapshot = getSnapshot(details)
+  const snapshotWarnings = asArray(snapshot.stale_warnings)
+    .filter(warning => warning && typeof warning === 'object')
+
+  const fallbackWarnings = []
+  const dispatcharrStale = snapshot?.dispatcharr_status?.stale_status
+  if (
+    snapshotWarnings.length === 0 &&
+    dispatcharrStale?.stale_status_suspected === true
+  ) {
+    fallbackWarnings.push({
+      type: 'dispatcharr_status_risk',
+      status: dispatcharrStale.status,
+      count: dispatcharrStale.stale_suspected_count,
+      read_only: dispatcharrStale.read_only,
+    })
+  }
+
+  return [...snapshotWarnings, ...fallbackWarnings].map((warning, index) => ({
+    key: `stale-warning-${warning.type || index}`,
+    label: STALE_WARNING_LABELS[warning.type] || formatEnumLabel(warning.type) || 'Stale Warning',
+    value: staleWarningValue(warning),
+  })).filter(item => isPresent(item.value))
+}
+
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key)
 
 const numericCount = (value) => {

@@ -50,6 +50,12 @@ from apps.stream.stream_check_utils import analyze_stream
 from apps.stream.queue_start import order_channels_for_queue_start
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
 from apps.stream.stream_session_manager import get_session_manager
+from apps.stream.stale_status_snapshot import (
+    build_dispatcharr_stale_snapshot,
+    build_stale_warnings,
+    external_m3u_account_risk,
+    external_message_class,
+)
 from apps.automation.automation_config_manager import get_automation_config_manager
 from apps.automation.channel_visibility_automation import (
     ChannelVisibilityAutomation,
@@ -4997,47 +5003,12 @@ class StreamCheckerService:
     @staticmethod
     def _external_message_class(message: Any) -> str:
         """Classify Dispatcharr status text without exposing the raw message."""
-        text = str(message or "").strip().lower()
-        if not text:
-            return "none"
-        if "processing completed" in text or "completed in" in text or "refresh completed" in text:
-            return "completed"
-        if any(token in text for token in ("error", "failed", "exception", "traceback", "can't ", "cannot ")):
-            return "error"
-        return "other"
+        return external_message_class(message)
 
     @staticmethod
     def _external_m3u_account_risk(account: Dict[str, Any]) -> Dict[str, Any]:
         """Return a UI-safe M3U account status summary and stale-risk classification."""
-        status = str(account.get("status") or "unknown").strip().lower() or "unknown"
-        message_class = StreamCheckerService._external_message_class(account.get("last_message"))
-        active_status = status in {"fetching", "parsing", "processing", "queued", "running"}
-        stale_suspected = False
-        conflict = None
-
-        if active_status and message_class == "completed":
-            stale_suspected = True
-            conflict = "active_status_with_completed_message"
-        elif active_status and message_class == "error":
-            stale_suspected = True
-            conflict = "active_status_with_error_message"
-        elif status == "success" and message_class == "error":
-            stale_suspected = True
-            conflict = "success_status_with_error_message"
-        elif status == "error" and message_class == "completed":
-            stale_suspected = True
-            conflict = "error_status_with_completed_message"
-
-        return {
-            "account_id": account.get("id"),
-            "account_name": account.get("name") or (f"Account {account.get('id')}" if account.get("id") is not None else "Account"),
-            "status": status,
-            "message_class": message_class,
-            "updated_at": account.get("updated_at"),
-            "active_status": active_status,
-            "stale_status_suspected": stale_suspected,
-            "conflict": conflict,
-        }
+        return external_m3u_account_risk(account)
 
     def _build_external_stale_diagnostics(
         self,
@@ -5470,7 +5441,7 @@ class StreamCheckerService:
             bounded["snapshot_truncated"] = False
             return bounded
 
-        for key in ("effective_profiles", "quality_rules", "feature_flags", "dispatcharr_status", "result_summary"):
+        for key in ("effective_profiles", "quality_rules", "feature_flags", "dispatcharr_status", "result_summary", "stale_warnings"):
             value = bounded.get(key)
             if isinstance(value, list):
                 bounded[f"{key}_omitted_count"] = max(0, len(value) - 3)
@@ -5577,11 +5548,27 @@ class StreamCheckerService:
         version_context = self._streamflow_version_context()
         stream_checking = profile.get("stream_checking", {}) if isinstance(profile, dict) else {}
         dispatcharr_status: Dict[str, Any] = {}
+        network_ready: Optional[bool] = None
+        m3u_accounts: Optional[List[Dict[str, Any]]] = None
         try:
             if udi and hasattr(udi, "is_network_ready"):
-                dispatcharr_status["network_ready"] = bool(udi.is_network_ready())
+                network_ready = bool(udi.is_network_ready())
+                dispatcharr_status["network_ready"] = network_ready
         except Exception as exc:
             dispatcharr_status["network_ready_error"] = type(exc).__name__
+        try:
+            account_getter = getattr(udi, "get_m3u_accounts", None)
+            if callable(account_getter):
+                candidate_accounts = account_getter()
+                if isinstance(candidate_accounts, list):
+                    m3u_accounts = candidate_accounts
+        except Exception as exc:
+            dispatcharr_status["m3u_accounts_error"] = type(exc).__name__
+        dispatcharr_status["stale_status"] = build_dispatcharr_stale_snapshot(
+            network_ready=network_ready,
+            accounts=m3u_accounts,
+        )
+        stale_warnings = build_stale_warnings(dispatcharr_stale=dispatcharr_status["stale_status"])
 
         profile_id = profile_progress_context.get("run_profile_id")
         profile_name = profile_progress_context.get("run_profile_name")
@@ -5633,6 +5620,7 @@ class StreamCheckerService:
                 "provider_limit_override": bool(provider_limit_override),
             },
             "dispatcharr_status": dispatcharr_status,
+            "stale_warnings": stale_warnings,
             "teamarr_status": {
                 "preflight_context": run_mode == "teamarr_preflight",
             },

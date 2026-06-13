@@ -88,6 +88,7 @@ from apps.core.api_utils import (
 
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
+from apps.stream.stale_status_snapshot import build_dispatcharr_stale_snapshot, build_stale_warnings
 from apps.automation.automation_config_manager import get_automation_config_manager
 from apps.automation.channel_visibility_automation import (
     ChannelVisibilityAutomation,
@@ -1704,7 +1705,7 @@ class AutomatedStreamManager:
             bounded["snapshot_truncated"] = False
             return bounded
 
-        for key in ("effective_profiles", "quality_rules", "feature_flags", "dispatcharr_status", "teamarr_status"):
+        for key in ("effective_profiles", "quality_rules", "feature_flags", "dispatcharr_status", "teamarr_status", "stale_warnings"):
             value = bounded.get(key)
             if isinstance(value, list):
                 bounded[f"{key}_omitted_count"] = max(0, len(value) - 5)
@@ -1889,11 +1890,27 @@ class AutomatedStreamManager:
         ]
         channel_count = sum(item.get("channel_count", 0) for item in profile_items)
         dispatcharr_status = {}
+        network_ready: Optional[bool] = None
+        m3u_accounts: Optional[List[Dict[str, Any]]] = None
         try:
             if udi and hasattr(udi, "is_network_ready"):
-                dispatcharr_status["network_ready"] = bool(udi.is_network_ready())
+                network_ready = bool(udi.is_network_ready())
+                dispatcharr_status["network_ready"] = network_ready
         except Exception as exc:
             dispatcharr_status["network_ready_error"] = type(exc).__name__
+        try:
+            account_getter = getattr(udi, "get_m3u_accounts", None)
+            if callable(account_getter):
+                candidate_accounts = account_getter()
+                if isinstance(candidate_accounts, list):
+                    m3u_accounts = candidate_accounts
+        except Exception as exc:
+            dispatcharr_status["m3u_accounts_error"] = type(exc).__name__
+        dispatcharr_status["stale_status"] = build_dispatcharr_stale_snapshot(
+            network_ready=network_ready,
+            accounts=m3u_accounts,
+        )
+        stale_warnings = build_stale_warnings(dispatcharr_stale=dispatcharr_status["stale_status"])
 
         snapshot = {
             **base_snapshot,
@@ -1910,6 +1927,7 @@ class AutomatedStreamManager:
             },
             "feature_flags": self._safe_feature_flags(global_settings),
             "dispatcharr_status": dispatcharr_status,
+            "stale_warnings": stale_warnings,
             "teamarr_status": {
                 "event_window_active": bool(teamarr_event_window),
             },

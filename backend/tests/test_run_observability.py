@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import json
 import threading
 import unittest
 from unittest.mock import Mock, patch
@@ -102,6 +103,22 @@ class AutomationRunStatusTests(unittest.TestCase):
         }
         udi = Mock()
         udi.is_network_ready.return_value = True
+        udi.get_m3u_accounts.return_value = [
+            {
+                "id": 5,
+                "name": "Provider A",
+                "is_active": True,
+                "status": "fetching",
+                "last_message": "Processing completed in 168.5 seconds.",
+            },
+            {
+                "id": 7,
+                "name": "Provider B",
+                "is_active": True,
+                "status": "success",
+                "last_message": "Processing completed in 140.9 seconds.",
+            },
+        ]
 
         with patch("apps.database.manager.get_db_manager", return_value=fake_db):
             manager._start_run_status(forced=True, forced_period_id="period-1")
@@ -141,6 +158,11 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(snapshot["quality_rules"][0]["enabled"], True)
         self.assertEqual(snapshot["capacity_profile_context"]["type"], "provider_account_profiles")
         self.assertEqual(snapshot["dispatcharr_status"]["network_ready"], True)
+        self.assertEqual(snapshot["dispatcharr_status"]["stale_status"]["status"], "stale_risk")
+        self.assertEqual(snapshot["dispatcharr_status"]["stale_status"]["stale_suspected_count"], 1)
+        self.assertEqual(snapshot["stale_warnings"][0]["type"], "dispatcharr_status_risk")
+        self.assertNotIn("Provider A", json.dumps(snapshot))
+        self.assertNotIn("Processing completed", json.dumps(snapshot))
         self.assertEqual(snapshot["teamarr_status"]["event_window_active"], True)
         self.assertEqual(snapshot["feature_flags"]["regular_automation_enabled"], True)
         self.assertFalse(snapshot["snapshot_truncated"])

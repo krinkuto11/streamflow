@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   getChangelogRunContextBadges,
+  getChangelogStaleWarnings,
   getChangelogVisibilityMetrics,
 } from './changelog-run-summary.js'
 
@@ -75,7 +76,49 @@ describe('changelog run summary', () => {
 
   it('keeps old changelog runs without V7 fields quiet', () => {
     expect(getChangelogRunContextBadges({ total_channels: 3 })).toEqual([])
+    expect(getChangelogStaleWarnings({ total_channels: 3 })).toEqual([])
     expect(getChangelogVisibilityMetrics({ total_channels: 3 })).toEqual([])
+  })
+
+  it('derives stale warning badges from V7 run snapshots', () => {
+    expect(getChangelogStaleWarnings({
+      run_snapshot: {
+        stale_warnings: [
+          {
+            type: 'dispatcharr_status_risk',
+            count: 2,
+            read_only: true,
+          },
+        ],
+      },
+    })).toEqual([
+      {
+        key: 'stale-warning-dispatcharr_status_risk',
+        label: 'Dispatcharr Status Risk',
+        value: '2 provider conflicts / Read Only',
+      },
+    ])
+  })
+
+  it('falls back to dispatcharr stale summary when warning records are absent', () => {
+    expect(getChangelogStaleWarnings({
+      run_snapshot: {
+        dispatcharr_status: {
+          stale_status: {
+            status: 'stale_risk',
+            stale_status_suspected: true,
+            stale_suspected_count: 1,
+            read_only: true,
+          },
+        },
+      },
+    })).toEqual([
+      {
+        key: 'stale-warning-dispatcharr_status_risk',
+        label: 'Dispatcharr Status Risk',
+        value: '1 provider conflict / Read Only',
+      },
+    ])
   })
 
   it('keeps zero hide and ready counts visible when the run recorded them', () => {

@@ -74,6 +74,7 @@ RUN_SNAPSHOT_EXPORT_FIELDS = [
     "capacity_profile_context",
     "feature_flags",
     "dispatcharr_status",
+    "stale_warnings",
     "teamarr_status",
     "m3u_refresh",
     "result_summary",

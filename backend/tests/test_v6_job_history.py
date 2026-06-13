@@ -204,9 +204,30 @@ def test_changelog_run_json_export_includes_sanitized_v7_run_snapshot():
                 },
                 "dispatcharr_status": {
                     "network_ready": True,
+                    "stale_status": {
+                        "status": "stale_risk",
+                        "read_only": True,
+                        "stale_status_suspected": True,
+                        "stale_suspected_count": 1,
+                        "m3u_status_counts": {"fetching": 1},
+                        "external_checks": {"celery": "unknown", "redis": "unknown", "postgres": "unknown"},
+                        "actions": {
+                            "dispatcharr_mutated": False,
+                            "dispatcharr_restart_attempted": False,
+                            "repair_requires_operator_approval": True,
+                        },
+                    },
                     "base_url": "http://snapshot-secret.example/dispatcharr",
                     "headers": {"Authorization": "Bearer snapshot-secret-token"},
                 },
+                "stale_warnings": [
+                    {
+                        "type": "dispatcharr_status_risk",
+                        "label": "Dispatcharr Status Risk",
+                        "count": 1,
+                        "read_only": True,
+                    }
+                ],
                 "teamarr_status": {"preflight_context": False},
                 "m3u_refresh": {
                     "scope": "none",
@@ -263,6 +284,8 @@ def test_changelog_run_json_export_includes_sanitized_v7_run_snapshot():
     assert snapshot["effective_profiles"][0]["profile_name"] == "V7 Export Profile"
     assert snapshot["result_summary"]["total_streams"] == 2
     assert snapshot["result_summary"]["dead_streams"] == 1
+    assert snapshot["stale_warnings"][0]["type"] == "dispatcharr_status_risk"
+    assert snapshot["dispatcharr_status"]["stale_status"]["stale_suspected_count"] == 1
     assert snapshot["limits"]["max_bytes"] == 51200
     assert "snapshot-secret" not in snapshot_json
     assert "stream_url" not in snapshot_json
