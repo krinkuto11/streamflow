@@ -205,6 +205,14 @@ export const streamCheckerAPI = {
     ...(profileId ? { profile_id: profileId } : {}),
     force_check: forceCheck,
   }, { timeout: 120000 }),
+  checkStream: (streamIdOrPayload, options = {}) => {
+    const payload = typeof streamIdOrPayload === 'object'
+      ? streamIdOrPayload
+      : { stream_id: streamIdOrPayload, ...options };
+    return api.post('/stream-checker/check-stream', payload, { timeout: 120000 });
+  },
+  checkStreamById: (streamId, options = {}) => api.post(`/stream-checker/streams/${streamId}/check`, options, { timeout: 120000 }),
+  getStreamLastQualityStats: (streamId) => api.get(`/stream-checker/streams/${streamId}/last-quality-stats`),
   markUpdated: (data) => api.post('/stream-checker/mark-updated', data),
   queueAllChannels: (options = {}) => api.post('/stream-checker/queue-all', options),
   triggerGlobalAction: () => api.post('/stream-checker/global-action'),

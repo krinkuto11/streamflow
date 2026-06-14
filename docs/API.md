@@ -85,9 +85,19 @@ Configure via environment variables:
 | GET    | `/api/stream-checker/status`        | Current checker status and stats                 |
 | POST   | `/api/stream-checker/run`           | Trigger a global action (update → match → check) |
 | POST   | `/api/stream-checker/check-channel` | Check a single channel                           |
+| POST   | `/api/stream-checker/check-stream`  | Check one Dispatcharr stream by ID or reference  |
+| POST   | `/api/stream-checker/streams/<stream_id>/check` | Check one Dispatcharr stream by path ID |
+| GET    | `/api/stream-checker/streams/<stream_id>/last-quality-stats` | Latest persisted quality stats for one stream |
 | GET    | `/api/stream-checker/config`        | Stream checker config                            |
 | POST   | `/api/stream-checker/config`        | Update stream checker config                     |
 | GET    | `/api/stream-checker/hardware-status` | Effective ffmpeg hardware/GPU status           |
+
+Single-stream checks accept `stream_id`, `id`, `stream_reference`, or
+`stream_ref` payload fields. They can measure an unassigned Dispatcharr stream,
+which is useful while building regex rules before a channel mapping exists. The
+check still consumes stream-checker/provider analysis capacity, so run it while
+regular Stream Checker and Teamarr Preflight work are idle unless queue pressure
+is intentional.
 
 ---
 
