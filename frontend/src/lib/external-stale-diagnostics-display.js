@@ -5,10 +5,10 @@ const CHECK_LABELS = {
 }
 
 const CONFLICT_LABELS = {
-  active_status_with_completed_message: 'active status with completed message',
-  active_status_with_error_message: 'active status with error message',
-  success_status_with_error_message: 'success status with error message',
-  error_status_with_completed_message: 'error status with completed message',
+  active_status_with_completed_message: 'last message already says completed',
+  active_status_with_error_message: 'last message contains an error',
+  success_status_with_error_message: 'success status with an error message',
+  error_status_with_completed_message: 'error status with a completed message',
 }
 
 const titleizeStatus = (value) => {
@@ -36,7 +36,7 @@ export function getExternalStaleDiagnosticsDisplay(diagnostics = {}) {
   const suspectCount = Number.isFinite(Number(m3uAccounts.stale_suspected_count))
     ? Number(m3uAccounts.stale_suspected_count)
     : staleSuspected.length
-  const conflictLabel = suspectCount === 1 ? 'provider status conflict' : 'provider status conflicts'
+  const conflictLabel = suspectCount === 1 ? 'provider status mismatch' : 'provider status mismatches'
 
   const externalChecks = diagnostics?.external_checks || {}
   const checkStatuses = Object.entries(CHECK_LABELS).map(([key, label]) => ({
@@ -49,10 +49,10 @@ export function getExternalStaleDiagnosticsDisplay(diagnostics = {}) {
     .map((check) => check.label)
 
   return {
-    title: 'Dispatcharr Status Risk',
-    text: 'Provider status may be stale. No automatic repair.',
+    title: 'Dispatcharr Provider Notice',
+    text: 'Provider status looks inconsistent, but checking can continue.',
     detail: unknownChecks.length > 0
-      ? `${suspectCount} ${conflictLabel}. ${unknownChecks.join(', ')} evidence is not available from StreamFlow.`
+      ? `${suspectCount} ${conflictLabel}. StreamFlow cannot inspect ${unknownChecks.join(', ')} internals from here.`
       : `${suspectCount} ${conflictLabel}.`,
     accounts: staleSuspected.slice(0, 3).map(formatAccount),
     checks: checkStatuses.map((check) => `${check.label}: ${check.status}`),

@@ -149,7 +149,7 @@ def build_stale_warnings(*, dispatcharr_stale: Optional[Dict[str, Any]] = None) 
     if isinstance(dispatcharr_stale, dict) and dispatcharr_stale.get("stale_status_suspected"):
         warnings.append({
             "type": "dispatcharr_status_risk",
-            "label": "Dispatcharr Status Risk",
+            "label": "Dispatcharr Provider Notice",
             "status": dispatcharr_stale.get("status") or "stale_risk",
             "count": int(dispatcharr_stale.get("stale_suspected_count") or 0),
             "read_only": dispatcharr_stale.get("read_only") is not False,

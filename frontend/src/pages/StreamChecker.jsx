@@ -599,11 +599,11 @@ export default function StreamChecker() {
 
       {externalStaleDisplay && (
         <Alert
-          className="min-w-0 w-full overflow-hidden border-amber-200 bg-amber-50 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-200"
+          className="min-w-0 w-full overflow-hidden border-border bg-muted/30 text-muted-foreground"
           style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
         >
-          <AlertCircle className="h-4 w-4" />
-          <AlertTitle className="min-w-0 max-w-[calc(100%-1.75rem)] break-words">{externalStaleDisplay.title}</AlertTitle>
+          <Info className="h-4 w-4 text-muted-foreground" />
+          <AlertTitle className="min-w-0 max-w-[calc(100%-1.75rem)] break-words text-foreground">{externalStaleDisplay.title}</AlertTitle>
           <AlertDescription className="min-w-0 max-w-[calc(100%-1.75rem)] space-y-1 whitespace-normal [overflow-wrap:anywhere]">
             <span className="block min-w-0 max-w-full break-words">{externalStaleDisplay.text}</span>
             {externalStaleDisplay.detail && (

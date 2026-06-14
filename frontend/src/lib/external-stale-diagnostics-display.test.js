@@ -32,10 +32,10 @@ describe('getExternalStaleDiagnosticsDisplay', () => {
     })
 
     expect(display).toEqual({
-      title: 'Dispatcharr Status Risk',
-      text: 'Provider status may be stale. No automatic repair.',
-      detail: '1 provider status conflict. Celery, Redis, Postgres evidence is not available from StreamFlow.',
-      accounts: ['Provider A: Fetching (active status with completed message)'],
+      title: 'Dispatcharr Provider Notice',
+      text: 'Provider status looks inconsistent, but checking can continue.',
+      detail: '1 provider status mismatch. StreamFlow cannot inspect Celery, Redis, Postgres internals from here.',
+      accounts: ['Provider A: Fetching (last message already says completed)'],
       checks: ['Celery: Unknown', 'Redis: Unknown', 'Postgres: Unknown'],
     })
   })
@@ -57,8 +57,8 @@ describe('getExternalStaleDiagnosticsDisplay', () => {
       },
     })
 
-    expect(display.detail).toBe('4 provider status conflicts. Celery, Redis, Postgres evidence is not available from StreamFlow.')
+    expect(display.detail).toBe('4 provider status mismatches. StreamFlow cannot inspect Celery, Redis, Postgres internals from here.')
     expect(display.accounts).toHaveLength(3)
-    expect(display.accounts[0]).toBe('Account 1: Processing (active status with error message)')
+    expect(display.accounts[0]).toBe('Account 1: Processing (last message contains an error)')
   })
 })

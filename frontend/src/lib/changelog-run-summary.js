@@ -107,7 +107,7 @@ export function getChangelogRunContextBadges(details = {}) {
 }
 
 const STALE_WARNING_LABELS = {
-  dispatcharr_status_risk: 'Dispatcharr Status Risk',
+  dispatcharr_status_risk: 'Dispatcharr Provider Notice',
   progress_stale: 'Previous Progress',
 }
 
@@ -115,9 +115,9 @@ const staleWarningValue = (warning = {}) => {
   if (warning.type === 'dispatcharr_status_risk') {
     const count = Number(warning.count)
     const conflictText = Number.isFinite(count) && count > 0
-      ? `${count} provider ${count === 1 ? 'conflict' : 'conflicts'}`
+      ? `${count} provider status ${count === 1 ? 'mismatch' : 'mismatches'}`
       : 'Detected'
-    return warning.read_only === false ? conflictText : `${conflictText} / Read Only`
+    return warning.read_only === false ? conflictText : `${conflictText} / observed only`
   }
   return formatEnumLabel(warning.status || warning.type) || 'Detected'
 }
