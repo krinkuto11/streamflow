@@ -134,6 +134,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 CONFIG_KEYS = set(DEFAULT_CONFIG)
 WATCH_MODES = {"periodic", "continuous"}
 MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
+    "freeze",
     "offline_image",
     "garbled_audio",
     "silent_audio",
@@ -969,6 +970,7 @@ class ShadowBlankMonitorService:
         try:
             target.pop("media_recovery_guard_reason", None)
             target.pop("media_recovery_guard_bypass", None)
+            target["active_probe_started_at"] = self.clock()
             proxy_url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
             use_continuous_blank_probe = (
                 config.get("watch_mode") == "continuous"
@@ -1729,6 +1731,8 @@ class ShadowBlankMonitorService:
             }
         else:
             fresh_details = self._watcher_client_details(fresh_status, config)
+            if self._watcher_client_started_with_current_probe(target, fresh_details):
+                return None
             target_watcher_ref = target.get("watcher_client_ref")
             fresh_watcher_ref = fresh_details.get("watcher_client_ref")
             if target_watcher_ref and fresh_watcher_ref and fresh_watcher_ref != target_watcher_ref:
@@ -1745,6 +1749,18 @@ class ShadowBlankMonitorService:
                 }
 
         return guard_details
+
+    @staticmethod
+    def _watcher_client_started_with_current_probe(
+        target: Dict[str, Any],
+        watcher_details: Dict[str, Any],
+    ) -> bool:
+        try:
+            probe_started = float(target.get("active_probe_started_at"))
+            watcher_connected = float(watcher_details.get("watcher_connected_at"))
+        except (TypeError, ValueError):
+            return False
+        return watcher_connected >= probe_started - 0.5
 
     def _media_recovery_guard_bypass_details(
         self,

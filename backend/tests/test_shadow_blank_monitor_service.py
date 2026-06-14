@@ -2711,6 +2711,57 @@ def test_detection_with_fresh_watcher_client_stops_without_pending_or_switch(tmp
         assert "uuid-1" not in service._switch_attempts
 
 
+def test_current_probe_watcher_does_not_trigger_recovery_guard(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-current-probe",
+                            "connected_at": 1000.0,
+                        },
+                    ],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True, "blank_duration_secs": 3.0},
+        switch_calls=switch_calls,
+        clock=lambda: 1000.0,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 2,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is True
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "blank_pending"
+    assert "watcher_recovery_guard" not in [event["type"] for event in status["recent_events"]]
+
+
 def test_continuous_media_fault_recovery_guard_requires_pre_probe(tmp_path):
     switch_calls = []
     udi = FakeUdi(
@@ -2770,6 +2821,70 @@ def test_continuous_media_fault_recovery_guard_requires_pre_probe(tmp_path):
     assert status["recent_events"][0]["details"]["reason"] == "silent_audio"
     with service._lock:
         assert service._blank_counts[service._detection_count_key("uuid-1", "silent_audio")] == 0
+
+
+def test_continuous_freeze_fault_recovery_guard_needs_second_confirmation(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-recovered-watcher",
+                            "connected_at": 990.0,
+                        },
+                    ],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/good"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": True,
+            "freeze_duration_secs": 12.0,
+        },
+        switch_calls=switch_calls,
+    )
+    service._run_blank_probe = lambda url, config: {"blank_detected": False, "freeze_detected": False}
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    first_result = service._probe_target_once(udi, target, config)
+    second_result = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert first_result is True
+    assert second_result is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    recovery_guard = status["recent_events"][0]["details"]["recovery_guard"]
+    assert recovery_guard["bypassed"] is True
+    assert recovery_guard["pre_probe_required"] is True
+    assert recovery_guard["confirmations"] == 2
+    assert recovery_guard["required"] == 2
+    assert status["recent_events"][1]["type"] == "freeze_pending"
 
 
 def test_continuous_media_fault_recovery_guard_needs_second_confirmation(tmp_path):
