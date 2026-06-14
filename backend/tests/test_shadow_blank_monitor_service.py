@@ -1847,6 +1847,59 @@ def test_audio_detection_parser_treats_missing_audio_as_silent_fault():
     assert parsed["silent_audio_noise_db"] == -48
 
 
+def test_audio_detection_parser_treats_video_only_stream_listing_as_silent_fault():
+    config = normalize_config({
+        "silent_audio_detection_enabled": True,
+        "silent_audio_min_duration_seconds": 2,
+        "silent_audio_noise_db": -48,
+    })
+    output = (
+        "Input #0, mpegts, from 'http://dispatcharr.local/video-only.ts':\n"
+        "  Stream #0:0[0x100]: Video: mpeg2video, yuv420p, 640x360, 25 fps\n"
+        "Stream mapping:\n"
+        "  Stream #0:0 -> #0:0 (mpeg2video (native) -> wrapped_avframe (native))\n"
+        "[out#0/null @ 000] video:32KiB audio:0KiB subtitle:0KiB other streams:0KiB\n"
+        "frame=   75 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.00 bitrate=N/A speed= 205x\n"
+    )
+
+    parsed = ShadowBlankMonitorService._parse_audio_detection(
+        output,
+        config,
+        observed_duration=3,
+    )
+
+    assert parsed["audio_stream_present"] is False
+    assert parsed["silent_audio_detected"] is True
+    assert parsed["silent_audio_duration_secs"] == 3
+    assert parsed["silent_audio_noise_db"] == -48
+
+
+def test_audio_detection_parser_keeps_audio_stream_listing_ok():
+    config = normalize_config({
+        "silent_audio_detection_enabled": True,
+        "silent_audio_min_duration_seconds": 2,
+        "silent_audio_noise_db": -48,
+    })
+    output = (
+        "Input #0, mpegts, from 'http://dispatcharr.local/with-audio.ts':\n"
+        "  Stream #0:0[0x100]: Video: mpeg2video, yuv420p, 640x360, 25 fps\n"
+        "  Stream #0:1[0x101]: Audio: mp2, 48000 Hz, mono, fltp, 128 kb/s\n"
+        "Stream mapping:\n"
+        "  Stream #0:0 -> #0:0 (mpeg2video (native) -> wrapped_avframe (native))\n"
+        "  Stream #0:1 -> #0:1 (mp2 (native) -> pcm_s16le (native))\n"
+        "frame=   75 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.00 bitrate=N/A speed= 205x\n"
+    )
+
+    parsed = ShadowBlankMonitorService._parse_audio_detection(
+        output,
+        config,
+        observed_duration=3,
+    )
+
+    assert parsed["audio_stream_present"] is None
+    assert parsed["silent_audio_detected"] is False
+
+
 def test_media_fault_results_are_ignored_unless_enabled(tmp_path):
     switch_calls = []
     udi = FakeUdi(
@@ -2089,6 +2142,69 @@ def test_continuous_default_probe_reads_fast_exit_missing_audio_stderr(monkeypat
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["reason"] == "silent_audio"
     assert target["last_probe"]["audio_stream_present"] is False
+
+
+def test_continuous_default_probe_video_only_stream_switches_as_silent_audio(monkeypatch, tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+
+    def switch_stream(channel_id, stream_id=None, url=None):
+        switch_calls.append((channel_id, stream_id, url))
+        return True
+
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=switch_stream,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+    monkeypatch.setattr(
+        shadow_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: FakeProbeProcess([
+            "Input #0, mpegts, from 'http://dispatcharr.local/video-only.ts':\n",
+            "  Stream #0:0[0x100]: Video: mpeg2video, yuv420p, 640x360, 25 fps\n",
+            "Stream mapping:\n",
+            "  Stream #0:0 -> #0:0 (mpeg2video (native) -> wrapped_avframe (native))\n",
+            "frame=   75 fps=0.0 q=-0.0 Lsize=N/A time=00:00:03.00 bitrate=N/A speed= 205x\n",
+        ]),
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "silent_audio_detection_enabled": True,
+        "silent_audio_min_duration_seconds": 2,
+        "probe_duration_seconds": 2,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["reason"] == "silent_audio"
+    assert status["recent_events"][0]["details"]["detection"]["measurements"]["audio_stream_present"] is False
+    assert target["last_probe"]["audio_stream_present"] is False
+    assert target["last_probe"]["silent_audio_detected"] is True
 
 
 def test_continuous_default_probe_silencedetect_switches_as_silent_audio(monkeypatch, tmp_path):

@@ -81,6 +81,10 @@ AUDIO_DECODER_ERROR_PATTERNS = (
     "invalid",
     "not allocated",
 )
+FFMPEG_STREAM_AUDIO_RE = re.compile(r"^\s*Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]+\))?:\s*Audio:", re.IGNORECASE)
+FFMPEG_STREAM_VIDEO_RE = re.compile(r"^\s*Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]+\))?:\s*Video:", re.IGNORECASE)
+FFMPEG_STREAM_MAPPING_RE = re.compile(r"^\s*Stream mapping:", re.IGNORECASE)
+FFMPEG_ZERO_AUDIO_SUMMARY_RE = re.compile(r"\baudio:\s*0KiB\b", re.IGNORECASE)
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -1871,6 +1875,40 @@ class ShadowBlankMonitorService:
         )
 
     @staticmethod
+    def _line_has_audio_stream(line: str) -> bool:
+        return FFMPEG_STREAM_AUDIO_RE.search(line or "") is not None
+
+    @staticmethod
+    def _line_has_video_stream(line: str) -> bool:
+        return FFMPEG_STREAM_VIDEO_RE.search(line or "") is not None
+
+    @staticmethod
+    def _line_marks_stream_mapping(line: str) -> bool:
+        return FFMPEG_STREAM_MAPPING_RE.search(line or "") is not None
+
+    @staticmethod
+    def _output_has_video_without_audio(output: str) -> bool:
+        saw_video_stream = False
+        saw_audio_stream = False
+        saw_stream_mapping = False
+        saw_frame_progress = False
+        saw_zero_audio_summary = False
+        for line in (output or "").splitlines():
+            if ShadowBlankMonitorService._line_has_audio_stream(line):
+                saw_audio_stream = True
+            if ShadowBlankMonitorService._line_has_video_stream(line):
+                saw_video_stream = True
+            if ShadowBlankMonitorService._line_marks_stream_mapping(line):
+                saw_stream_mapping = True
+            if FFMPEG_FRAME_RE.search(line):
+                saw_frame_progress = True
+            if FFMPEG_ZERO_AUDIO_SUMMARY_RE.search(line):
+                saw_zero_audio_summary = True
+        return saw_video_stream and not saw_audio_stream and (
+            saw_stream_mapping or saw_frame_progress or saw_zero_audio_summary
+        )
+
+    @staticmethod
     def _line_is_garbled_audio(line: str) -> bool:
         lowered = (line or "").lower()
         if not lowered or ShadowBlankMonitorService._line_is_missing_audio(lowered):
@@ -1944,6 +1982,9 @@ class ShadowBlankMonitorService:
                 except (TypeError, ValueError):
                     pass
                 active_silence_start = None
+
+        if not audio_missing and ShadowBlankMonitorService._output_has_video_without_audio(output):
+            audio_missing = True
 
         if active_silence_start is not None:
             longest_silence = max(longest_silence, max(0.0, float(observed_duration or 0.0) - active_silence_start))
@@ -2352,6 +2393,9 @@ class ShadowBlankMonitorService:
             active_freeze_start: Optional[float] = None
             active_freeze_wall: Optional[float] = None
             last_viewer_poll = 0.0
+            saw_audio_stream = False
+            saw_video_stream = False
+            saw_stream_mapping = False
 
             def observed_duration(media_start: Optional[float], wall_start: Optional[float]) -> float:
                 media_duration = 0.0
@@ -2383,6 +2427,13 @@ class ShadowBlankMonitorService:
                         break
                     lines.append(line)
 
+                    if self._line_has_audio_stream(line):
+                        saw_audio_stream = True
+                    if self._line_has_video_stream(line):
+                        saw_video_stream = True
+                    if self._line_marks_stream_mapping(line):
+                        saw_stream_mapping = True
+
                     progress_time = _parse_ffmpeg_progress_time(line)
                     if progress_time is not None:
                         last_media_time = max(last_media_time, progress_time)
@@ -2401,6 +2452,12 @@ class ShadowBlankMonitorService:
                                 break
 
                     if config.get("silent_audio_detection_enabled"):
+                        if saw_video_stream and not saw_audio_stream and (
+                            saw_stream_mapping or FFMPEG_FRAME_RE.search(line)
+                        ):
+                            if mark_detection("silent_audio", max(0.0, now - probe_started_wall)):
+                                break
+
                         silence_start = SILENCE_START_RE.search(line)
                         if silence_start:
                             try:
