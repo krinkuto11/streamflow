@@ -44,6 +44,7 @@ CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/data"))
 CONFIG_FILE = CONFIG_DIR / "shadow_blank_monitor_config.json"
 MAX_EVENTS = 100
 LOOP_SWITCH_REQUIRES_PRE_PROBE = True
+AGGREGATE_ONLY_VIEWER_GRACE_SECONDS = 2.0
 WATCHER_API_KEY_REQUIRED_CODE = "watcher_api_key_required"
 WATCHER_API_KEY_REQUIRED_MESSAGE = "Watcher API Key is required before Shadow Monitor can start."
 SHADOW_MONITOR_LOOP_ERROR_MESSAGE = "Shadow monitor loop failed; see server logs."
@@ -917,7 +918,7 @@ class ShadowBlankMonitorService:
                     break
 
                 fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                if self._real_client_count(fresh_status, config) <= 0:
+                if self._real_client_count(fresh_status, config, target) <= 0:
                     self._reset_blank_count(channel_uuid)
                     self._clear_switch_attempts(channel_uuid)
                     self._record_event("viewer_left", target, {})
@@ -926,7 +927,7 @@ class ShadowBlankMonitorService:
                     break
 
                 target = dict(target)
-                target["real_client_count"] = self._real_client_count(fresh_status, config)
+                target["real_client_count"] = self._real_client_count(fresh_status, config, target)
                 viewer_output_format = self._real_viewer_output_format(fresh_status, config)
                 if viewer_output_format:
                     target["viewer_output_format"] = viewer_output_format
@@ -1045,7 +1046,7 @@ class ShadowBlankMonitorService:
             else:
                 fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
 
-            if result.get("viewer_left") or self._real_client_count(fresh_status, config) <= 0:
+            if result.get("viewer_left") or self._real_client_count(fresh_status, config, target) <= 0:
                 self._reset_blank_count(channel_uuid)
                 self._clear_switch_attempts(channel_uuid)
                 target.pop("media_recovery_guard_observed", None)
@@ -1069,7 +1070,7 @@ class ShadowBlankMonitorService:
                     if loop:
                         detection_reason = "loop"
                     fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                    if self._real_client_count(fresh_status, config) <= 0:
+                    if self._real_client_count(fresh_status, config, target) <= 0:
                         self._reset_blank_count(channel_uuid)
                         self._clear_switch_attempts(channel_uuid)
                         target.pop("media_recovery_guard_observed", None)
@@ -1153,7 +1154,7 @@ class ShadowBlankMonitorService:
     def _handle_confirmed_blank(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any], *, reason: str = "blank") -> None:
         channel_uuid = target["channel_uuid"]
         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-        if self._real_client_count(fresh_status, config) <= 0:
+        if self._real_client_count(fresh_status, config, target) <= 0:
             self._reset_blank_count(channel_uuid)
             self._clear_switch_attempts(channel_uuid)
             self._record_event("viewer_left", target, {})
@@ -1782,7 +1783,7 @@ class ShadowBlankMonitorService:
             return None
         if require_confirmed and confirmed_count < required_confirmations:
             return None
-        if self._real_client_count(fresh_status, config) <= 0:
+        if self._real_client_count(fresh_status, config, target) <= 0:
             return None
 
         target_stream_id = target.get("stream_id")
@@ -2670,7 +2671,7 @@ class ShadowBlankMonitorService:
                     if now - last_viewer_poll >= 1.0:
                         last_viewer_poll = now
                         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                        if self._real_client_count(fresh_status, config) <= 0:
+                        if self._real_client_count(fresh_status, config, target) <= 0:
                             viewer_left = True
                             process.terminate()
                             break
@@ -2726,7 +2727,7 @@ class ShadowBlankMonitorService:
                 while no_decodable_probe_duration < no_decodable_required and not self._stop_event.is_set():
                     try:
                         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                        if self._real_client_count(fresh_status, config) <= 0:
+                        if self._real_client_count(fresh_status, config, target) <= 0:
                             viewer_left = True
                             break
                     except Exception as exc:
@@ -2900,7 +2901,12 @@ class ShadowBlankMonitorService:
                 return normalized
         return None
 
-    def _real_client_count(self, status: Dict[str, Any], config: Dict[str, Any]) -> int:
+    def _real_client_count(
+        self,
+        status: Dict[str, Any],
+        config: Dict[str, Any],
+        target: Optional[Dict[str, Any]] = None,
+    ) -> int:
         marker = str(config.get("watcher_user_agent") or "").lower()
         clients = status.get("clients")
         if isinstance(clients, dict):
@@ -2914,13 +2920,39 @@ class ShadowBlankMonitorService:
                 real += 1
             return real
 
+        aggregate_count: Optional[int] = None
         for key in ("real_client_count", "client_count", "current_viewers", "viewer_count"):
             try:
                 count = int(status.get(key))
-                if count > 0:
-                    return count
             except (TypeError, ValueError):
                 continue
+            if count >= 0:
+                aggregate_count = count
+                break
+
+        if target is None:
+            if aggregate_count is not None:
+                return aggregate_count
+            return 1 if self._is_status_active(status) else 0
+
+        probe_started = target.get("active_probe_started_at")
+        try:
+            probe_age = self.clock() - float(probe_started)
+        except (TypeError, ValueError):
+            probe_age = 0.0
+        probe_is_established = probe_started is not None and probe_age >= AGGREGATE_ONLY_VIEWER_GRACE_SECONDS
+
+        if aggregate_count is not None:
+            if not probe_is_established:
+                return aggregate_count
+            # When Dispatcharr does not expose per-client details, a continuous
+            # Shadow probe can be the only remaining downstream client. In that
+            # ambiguous state we fail closed: one aggregate client means watcher
+            # only, two or more means at least one real viewer remains.
+            return max(0, aggregate_count - 1)
+
+        if probe_is_established and self._is_status_active(status):
+            return 0
         return 1 if self._is_status_active(status) else 0
 
     def _watcher_client_count(self, status: Dict[str, Any], config: Dict[str, Any]) -> int:

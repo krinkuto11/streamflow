@@ -1330,6 +1330,71 @@ def test_continuous_probe_holds_ffmpeg_until_viewer_leaves(tmp_path, monkeypatch
     assert "-t" not in commands[0]
 
 
+def test_continuous_probe_treats_aggregate_only_single_client_as_viewer_left(tmp_path, monkeypatch):
+    process = PersistentFakeProbeProcess([])
+    commands = []
+
+    def fake_popen(command, **kwargs):
+        commands.append(command)
+        return process
+
+    current_time = {"value": 100.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.1
+        return current_time["value"]
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": {
+                "state": "active",
+                "channel_id": "uuid-1",
+                "stream_id": 10,
+                "client_count": 1,
+            },
+        }],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=lambda *args, **kwargs: True,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1003.0,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+        "active_probe_started_at": 1000.0,
+    }
+
+    result = service._run_blank_probe_until_viewer_left(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+        udi,
+        target,
+    )
+
+    assert result["viewer_left"] is True
+    assert process.returncode == 1
+    assert "-t" not in commands[0]
+
+
 def test_discovers_real_clients_and_hides_raw_channel_identifiers(tmp_path):
     udi = FakeUdi(
         statuses=[{
