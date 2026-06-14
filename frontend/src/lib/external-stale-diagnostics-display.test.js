@@ -32,8 +32,8 @@ describe('getExternalStaleDiagnosticsDisplay', () => {
     })
 
     expect(display).toEqual({
-      title: 'Dispatcharr Provider Sync',
-      text: 'Checking can continue. Dispatcharr has a provider status that differs from its latest completion message.',
+      title: 'Dispatcharr sync note',
+      text: 'Checks continue normally; Dispatcharr is still reporting provider activity after its latest completion message.',
       detail: '1 provider status note. Observed only; StreamFlow cannot inspect Celery, Redis, Postgres internals from here.',
       accounts: ['Provider A: Fetching (last message already says completed)'],
       checks: ['Celery: Unknown', 'Redis: Unknown', 'Postgres: Unknown'],

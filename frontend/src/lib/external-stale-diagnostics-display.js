@@ -49,8 +49,8 @@ export function getExternalStaleDiagnosticsDisplay(diagnostics = {}) {
     .map((check) => check.label)
 
   return {
-    title: 'Dispatcharr Provider Sync',
-    text: 'Checking can continue. Dispatcharr has a provider status that differs from its latest completion message.',
+    title: 'Dispatcharr sync note',
+    text: 'Checks continue normally; Dispatcharr is still reporting provider activity after its latest completion message.',
     detail: unknownChecks.length > 0
       ? `${suspectCount} ${conflictLabel}. Observed only; StreamFlow cannot inspect ${unknownChecks.join(', ')} internals from here.`
       : `${suspectCount} ${conflictLabel}.`,

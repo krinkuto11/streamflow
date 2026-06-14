@@ -599,14 +599,16 @@ export default function StreamChecker() {
 
       {externalStaleDisplay && (
         <div
-          className="min-w-0 w-full overflow-hidden rounded-md border border-border bg-card/40 px-4 py-3 text-sm text-muted-foreground"
+          className="min-w-0 w-full overflow-hidden rounded-md border border-border/70 bg-muted/20 px-3 py-2 text-xs text-muted-foreground"
           style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
         >
           <div className="flex min-w-0 items-start gap-2">
-            <Info className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" />
+            <Info className="mt-0.5 h-3.5 w-3.5 flex-none text-muted-foreground" />
             <div className="min-w-0 space-y-1">
-              <p className="min-w-0 max-w-full break-words font-medium text-foreground">{externalStaleDisplay.title}</p>
-              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">{externalStaleDisplay.text}</p>
+              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+                <span className="font-medium text-foreground">{externalStaleDisplay.title}.</span>{' '}
+                {externalStaleDisplay.text}
+              </p>
               {externalStaleDisplay.detail && (
                 <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">{externalStaleDisplay.detail}</p>
               )}
