@@ -2666,6 +2666,91 @@ def test_continuous_default_probe_open_freeze_start_switches_as_freeze(monkeypat
     assert target["last_probe"]["freeze_duration_secs"] >= 2.0
 
 
+def test_continuous_default_probe_full_screen_color_faults_switch(monkeypatch, tmp_path):
+    cases = [
+        (
+            "black",
+            ["[blackdetect @ 000] black_start:0\n"],
+            "blank",
+            "blank_detected",
+        ),
+        (
+            "green",
+            [
+                "frame=10 time=00:00:00.50 bitrate=1000kbits/s speed=1x\n",
+                "[freezedetect @ 000] lavfi.freezedetect.freeze_start: 0\n",
+            ],
+            "freeze",
+            "freeze_detected",
+        ),
+        (
+            "red",
+            [
+                "frame=10 time=00:00:00.50 bitrate=1000kbits/s speed=1x\n",
+                "[freezedetect @ 000] lavfi.freezedetect.freeze_start: 0\n",
+            ],
+            "freeze",
+            "freeze_detected",
+        ),
+    ]
+
+    for color, ffmpeg_lines, expected_reason, expected_probe_key in cases:
+        switch_calls = []
+        udi = FakeUdi(
+            statuses=[
+                {"uuid-1": active_status(stream_id=10)},
+                {"uuid-1": active_status(stream_id=10)},
+                {"uuid-1": active_status(stream_id=10)},
+            ],
+            channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        )
+
+        def switch_stream(channel_id, stream_id=None, url=None):
+            switch_calls.append((channel_id, stream_id, url))
+            return True
+
+        service = ShadowBlankMonitorService(
+            config_file=tmp_path / color / "shadow.json",
+            udi_provider=lambda udi=udi: udi,
+            switch_stream=switch_stream,
+            base_url_provider=lambda: "http://dispatcharr.local",
+            stream_checker_provider=lambda: FakeStreamChecker(),
+            clock=lambda: 1000.0,
+        )
+        monkeypatch.setattr(
+            shadow_module.subprocess,
+            "Popen",
+            lambda *args, ffmpeg_lines=ffmpeg_lines, **kwargs: PersistentFakeProbeProcess(ffmpeg_lines),
+        )
+        config = normalize_config({
+            "enabled": False,
+            "dry_run": False,
+            "watch_mode": "continuous",
+            "confirmation_count": 1,
+            "blank_min_duration_seconds": 2,
+            "freeze_detection_enabled": True,
+            "freeze_min_duration_seconds": 2,
+            "probe_duration_seconds": 5,
+        })
+        target = {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "channel_ref": f"channel-{color}",
+            "stream_id": 10,
+            "stream_ref": f"stream-{color}",
+            "real_client_count": 1,
+        }
+
+        should_continue = service._probe_target_once(udi, target, config)
+        status = service.get_status()
+
+        assert should_continue is False, color
+        assert switch_calls == [("uuid-1", 11, None)], color
+        assert status["recent_events"][0]["type"] == "switch_success", color
+        assert status["recent_events"][0]["details"]["reason"] == expected_reason, color
+        assert target["last_probe"][expected_probe_key] is True, color
+
+
 def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp_path):
     switch_calls = []
     udi = FakeUdi(
