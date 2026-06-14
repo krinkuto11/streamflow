@@ -32,9 +32,9 @@ describe('getExternalStaleDiagnosticsDisplay', () => {
     })
 
     expect(display).toEqual({
-      title: 'Dispatcharr sync note',
-      text: 'Checks continue normally; Dispatcharr is still reporting provider activity after its latest completion message.',
-      detail: '1 provider status note. Observed only; StreamFlow cannot inspect Celery, Redis, Postgres internals from here.',
+      title: 'Dispatcharr sync is still settling',
+      text: 'Checks continue normally while Dispatcharr refreshes its provider status after the latest completion message.',
+      detail: '1 provider status note. Observed only; no automatic StreamFlow action is needed. Celery, Redis, Postgres internals are not visible from here.',
       accounts: ['Provider A: Fetching (last message already says completed)'],
       checks: ['Celery: Unknown', 'Redis: Unknown', 'Postgres: Unknown'],
     })
@@ -57,7 +57,7 @@ describe('getExternalStaleDiagnosticsDisplay', () => {
       },
     })
 
-    expect(display.detail).toBe('4 provider status notes. Observed only; StreamFlow cannot inspect Celery, Redis, Postgres internals from here.')
+    expect(display.detail).toBe('4 provider status notes. Observed only; no automatic StreamFlow action is needed. Celery, Redis, Postgres internals are not visible from here.')
     expect(display.accounts).toHaveLength(3)
     expect(display.accounts[0]).toBe('Account 1: Processing (last message contains an error)')
   })

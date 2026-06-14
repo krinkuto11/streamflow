@@ -49,10 +49,10 @@ export function getExternalStaleDiagnosticsDisplay(diagnostics = {}) {
     .map((check) => check.label)
 
   return {
-    title: 'Dispatcharr sync note',
-    text: 'Checks continue normally; Dispatcharr is still reporting provider activity after its latest completion message.',
+    title: 'Dispatcharr sync is still settling',
+    text: 'Checks continue normally while Dispatcharr refreshes its provider status after the latest completion message.',
     detail: unknownChecks.length > 0
-      ? `${suspectCount} ${conflictLabel}. Observed only; StreamFlow cannot inspect ${unknownChecks.join(', ')} internals from here.`
+      ? `${suspectCount} ${conflictLabel}. Observed only; no automatic StreamFlow action is needed. ${unknownChecks.join(', ')} internals are not visible from here.`
       : `${suspectCount} ${conflictLabel}.`,
     accounts: staleSuspected.slice(0, 3).map(formatAccount),
     checks: checkStatuses.map((check) => `${check.label}: ${check.status}`),

@@ -599,7 +599,7 @@ export default function StreamChecker() {
 
       {externalStaleDisplay && (
         <div
-          className="min-w-0 w-full overflow-hidden rounded-md border border-border/70 bg-muted/20 px-3 py-2 text-xs text-muted-foreground"
+          className="min-w-0 w-fit max-w-full overflow-hidden rounded-md border border-border/60 bg-transparent px-3 py-2 text-xs text-muted-foreground"
           style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
         >
           <div className="flex min-w-0 items-start gap-2">
