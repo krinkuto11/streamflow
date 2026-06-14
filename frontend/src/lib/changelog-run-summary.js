@@ -168,7 +168,7 @@ export function getChangelogVisibilityMetrics(details = {}) {
   if (hasOwn(details, 'channels_ready')) {
     metrics.push({
       key: 'channels-ready',
-      label: 'Channels Ready',
+      label: 'Channels Restored',
       value: numericCount(details.channels_ready),
       className: 'text-green-500',
     })

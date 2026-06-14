@@ -272,6 +272,25 @@ def _coerce_list(value: Any) -> List[Any]:
     return [value]
 
 
+def _coerce_int_set(value: Any) -> set[int]:
+    items: set[int] = set()
+    for item in _coerce_list(value):
+        try:
+            items.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return items
+
+
+def _coerce_text_set(value: Any) -> set[str]:
+    items: set[str] = set()
+    for item in _coerce_list(value):
+        text = str(item).strip()
+        if text:
+            items.add(text)
+    return items
+
+
 def _offline_image_hashes(value: Any) -> List[str]:
     seen = set()
     hashes: List[str] = []
@@ -675,7 +694,13 @@ class ShadowBlankMonitorService:
             return int(config.get("watch_gap_seconds") or DEFAULT_CONFIG["watch_gap_seconds"])
         return int(config.get("poll_interval_seconds") or DEFAULT_CONFIG["poll_interval_seconds"])
 
-    def run_once(self, *, force: bool = False) -> Dict[str, Any]:
+    def run_once(
+        self,
+        *,
+        force: bool = False,
+        include_channel_ids: Any = None,
+        include_channel_uuids: Any = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             config = dict(self._config)
         issue = _watcher_configuration_issue(config)
@@ -696,7 +721,12 @@ class ShadowBlankMonitorService:
         self._last_scan_at = self.clock()
         try:
             udi = self.udi_provider()
-            targets = self.discover_active_targets(udi, config)
+            targets = self.discover_active_targets(
+                udi,
+                config,
+                include_channel_ids=include_channel_ids,
+                include_channel_uuids=include_channel_uuids,
+            )
             self._probe_targets(
                 udi,
                 targets[: config["max_concurrent_watchers"]],
@@ -714,12 +744,22 @@ class ShadowBlankMonitorService:
                         self._stop_event.set()
         return self.get_status()
 
-    def discover_active_targets(self, udi: Any, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def discover_active_targets(
+        self,
+        udi: Any,
+        config: Dict[str, Any],
+        *,
+        include_channel_ids: Any = None,
+        include_channel_uuids: Any = None,
+    ) -> List[Dict[str, Any]]:
         proxy_status = udi.get_proxy_status() or {}
         channels = udi.get_channels() if hasattr(udi, "get_channels") else []
         by_uuid, by_id = self._index_channels(channels)
         excluded_ids = {int(item) for item in config.get("excluded_channel_ids", [])}
         excluded_uuids = {str(item) for item in config.get("excluded_channel_uuids", [])}
+        included_ids = _coerce_int_set(include_channel_ids)
+        included_uuids = _coerce_text_set(include_channel_uuids)
+        limit_to_included = bool(included_ids or included_uuids)
 
         targets: List[Dict[str, Any]] = []
         watched: Dict[str, Dict[str, Any]] = {}
@@ -750,6 +790,8 @@ class ShadowBlankMonitorService:
                 channel = by_uuid[channel_uuid]
 
             numeric_id = self._extract_channel_id(channel, raw_status)
+            if limit_to_included and numeric_id not in included_ids and channel_uuid not in included_uuids:
+                continue
             if numeric_id in excluded_ids or channel_uuid in excluded_uuids:
                 continue
 

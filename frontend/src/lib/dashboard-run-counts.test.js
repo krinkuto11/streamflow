@@ -196,7 +196,7 @@ describe('dashboard run counts', () => {
       ['blank', 'Blank Streams', 1],
       ['freeze', 'Frozen Streams', 0],
       ['hidden', 'Channels Hidden', 2],
-      ['ready', 'Channels Ready', 1],
+      ['ready', 'Channels Restored', 1],
     ])
     expect(metrics.find(metric => metric.key === 'dead').description).toMatch(/last completed Stream Checker batch/i)
   })
@@ -225,7 +225,7 @@ describe('dashboard run counts', () => {
       value: 1,
     })
     expect(metrics.find(metric => metric.key === 'ready')).toMatchObject({
-      label: 'Channels Ready',
+      label: 'Channels Restored',
       value: 0,
     })
   })
@@ -289,7 +289,7 @@ describe('dashboard run counts', () => {
       ['blank', 'Blank Streams', 1],
       ['freeze', 'Frozen Streams', 1],
       ['hidden', 'Channels Hidden', 0],
-      ['ready', 'Channels Ready', 0],
+      ['ready', 'Channels Restored', 0],
     ])
   })
 
@@ -350,7 +350,7 @@ describe('dashboard run counts', () => {
       ['blank', 'Blank Streams', 0],
       ['freeze', 'Frozen Streams', 1],
       ['hidden', 'Channels Hidden', 0],
-      ['ready', 'Channels Ready', 0],
+      ['ready', 'Channels Restored', 0],
     ])
   })
 })

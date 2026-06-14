@@ -222,7 +222,7 @@ export const getDashboardRunMetrics = ({
     },
     {
       key: 'ready',
-      label: 'Channels Ready',
+      label: 'Channels Restored',
       value: counts.ready,
       description: activeStreamCheckerRun
         ? 'Channels restored by visibility automation during this Stream Checker batch.'

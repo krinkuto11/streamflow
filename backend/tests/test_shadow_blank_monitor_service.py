@@ -994,6 +994,38 @@ def test_shadow_monitor_handler_configuration_details_are_sanitized():
     assert "secret" not in str(start_payload)
 
 
+def test_shadow_monitor_run_once_handler_passes_transient_include_scope():
+    class FakeService:
+        def __init__(self):
+            self.calls = []
+
+        def run_once(self, **kwargs):
+            self.calls.append(kwargs)
+            return {
+                "configuration_required": False,
+                "watched_count": 1,
+            }
+
+    service = FakeService()
+    app = Flask(__name__)
+    with app.app_context():
+        response, status_code = run_shadow_blank_monitor_once_response(
+            payload={
+                "include_channel_ids": [2, "3"],
+                "include_channel_uuids": ["uuid-4"],
+            },
+            get_service=lambda: service,
+        )
+
+    assert status_code == 200
+    assert response.get_json()["watched_count"] == 1
+    assert service.calls == [{
+        "force": True,
+        "include_channel_ids": [2, "3"],
+        "include_channel_uuids": ["uuid-4"],
+    }]
+
+
 def test_freeze_detection_config_and_probe_command():
     config = normalize_config({
         "freeze_detection_enabled": True,
@@ -1470,6 +1502,53 @@ def test_discovery_tracks_all_real_viewer_channels_with_excludes_only(tmp_path):
     assert all(target["real_client_count"] == 1 for target in targets)
     assert "included_channel_ids" not in normalize_config({})
     assert service.get_status()["watched_count"] == 2
+
+
+def test_forced_discovery_can_scope_to_included_channels_without_persisting_config(tmp_path):
+    probe_urls = []
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}]),
+            "uuid-2": {
+                "state": "active",
+                "channel_id": "uuid-2",
+                "stream_id": 20,
+                "clients": [{"user_agent": "VLC"}],
+            },
+            "uuid-3": {
+                "state": "active",
+                "channel_id": "uuid-3",
+                "stream_id": 30,
+                "clients": [{"user_agent": "VLC"}],
+            },
+        }],
+        channels=[
+            {"id": 1, "uuid": "uuid-1", "streams": [10, 11]},
+            {"id": 2, "uuid": "uuid-2", "streams": [20, 21]},
+            {"id": 3, "uuid": "uuid-3", "streams": [30, 31]},
+        ],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    service.update_config({"enabled": False, "dry_run": False, "max_concurrent_watchers": 3})
+
+    status = service.run_once(
+        force=True,
+        include_channel_ids=[2],
+        include_channel_uuids=["uuid-3"],
+    )
+
+    assert probe_urls == [
+        "http://dispatcharr.local/proxy/ts/stream/uuid-2",
+        "http://dispatcharr.local/proxy/ts/stream/uuid-3",
+    ]
+    assert status["watched_count"] == 2
+    assert all(target["real_client_count"] == 1 for target in status["watched_channels"])
+    assert "include_channel_ids" not in service.get_config()
+    assert "include_channel_uuids" not in service.get_config()
 
 
 def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):

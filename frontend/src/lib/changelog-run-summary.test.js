@@ -146,7 +146,7 @@ describe('changelog run summary', () => {
       channels_ready: 0,
     })).toEqual([
       { key: 'channels-hidden', label: 'Channels Hidden', value: 0, className: 'text-amber-500' },
-      { key: 'channels-ready', label: 'Channels Ready', value: 0, className: 'text-green-500' },
+      { key: 'channels-ready', label: 'Channels Restored', value: 0, className: 'text-green-500' },
     ])
   })
 })

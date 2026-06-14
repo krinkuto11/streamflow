@@ -1450,6 +1450,7 @@ def stop_shadow_blank_monitor():
 def run_shadow_blank_monitor_once():
     """Run one active-viewer shadow blank monitor scan."""
     return run_shadow_blank_monitor_once_response(
+        payload=request.get_json(silent=True),
         get_service=get_shadow_blank_monitor_service,
     )
 
