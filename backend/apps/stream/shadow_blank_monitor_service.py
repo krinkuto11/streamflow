@@ -150,6 +150,11 @@ DETECTION_REASONS = {
     "offline_image",
     "loop",
 }
+VIDEO_FAULT_CONFIRMATION_REASONS = {
+    "blank",
+    "freeze",
+}
+VIDEO_FAULT_CONFIRMATION_KEY = "video_fault"
 PENDING_EVENT_REASONS = {
     f"{reason}_pending": reason
     for reason in DETECTION_REASONS
@@ -1672,9 +1677,19 @@ class ShadowBlankMonitorService:
     def _detection_count_key(channel_uuid: str, reason: str) -> str:
         return f"{channel_uuid}:{reason or 'blank'}"
 
+    @staticmethod
+    def _confirmation_count_reason(reason: str) -> str:
+        if reason in VIDEO_FAULT_CONFIRMATION_REASONS:
+            return VIDEO_FAULT_CONFIRMATION_KEY
+        return reason or "blank"
+
     def _reset_blank_count(self, channel_uuid: str) -> None:
         with self._lock:
             self._blank_counts.pop(channel_uuid, None)
+            self._blank_counts.pop(
+                self._detection_count_key(channel_uuid, VIDEO_FAULT_CONFIRMATION_KEY),
+                None,
+            )
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "blank"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "freeze"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
@@ -1688,15 +1703,40 @@ class ShadowBlankMonitorService:
         self._clear_switch_attempts(channel_uuid)
 
     def _increment_blank_count(self, channel_uuid: str, reason: str = "blank") -> int:
-        key = self._detection_count_key(channel_uuid, reason)
+        count_reason = self._confirmation_count_reason(reason)
+        key = self._detection_count_key(channel_uuid, count_reason)
         with self._lock:
+            if count_reason == VIDEO_FAULT_CONFIRMATION_KEY and not self._blank_counts.get(key):
+                self._blank_counts[key] = max(
+                    int(
+                        self._blank_counts.get(self._detection_count_key(channel_uuid, "blank"))
+                        or 0
+                    ),
+                    int(
+                        self._blank_counts.get(self._detection_count_key(channel_uuid, "freeze"))
+                        or 0
+                    ),
+                )
             self._blank_counts[key] += 1
             return self._blank_counts[key]
 
     def _current_detection_count(self, channel_uuid: str, reason: str = "blank") -> int:
-        key = self._detection_count_key(channel_uuid, reason)
+        count_reason = self._confirmation_count_reason(reason)
+        key = self._detection_count_key(channel_uuid, count_reason)
         with self._lock:
-            return int(self._blank_counts.get(key) or 0)
+            current_count = int(self._blank_counts.get(key) or 0)
+            if current_count or count_reason != VIDEO_FAULT_CONFIRMATION_KEY:
+                return current_count
+            return max(
+                int(
+                    self._blank_counts.get(self._detection_count_key(channel_uuid, "blank"))
+                    or 0
+                ),
+                int(
+                    self._blank_counts.get(self._detection_count_key(channel_uuid, "freeze"))
+                    or 0
+                ),
+            )
 
     @staticmethod
     def _required_confirmations(

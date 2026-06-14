@@ -2751,6 +2751,57 @@ def test_continuous_default_probe_full_screen_color_faults_switch(monkeypatch, t
         assert target["last_probe"][expected_probe_key] is True, color
 
 
+def test_mixed_blank_and_freeze_confirmations_switch_as_video_fault(tmp_path):
+    switch_calls = []
+    probe_results = iter([
+        {"blank_detected": False, "freeze_detected": True, "freeze_duration_secs": 12.0},
+        {"blank_detected": True, "blank_duration_secs": 3.0, "freeze_detected": False},
+    ])
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: next(probe_results),
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 2,
+        "freeze_detection_enabled": True,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-video-fault",
+        "stream_id": 10,
+        "stream_ref": "stream-video-fault",
+        "real_client_count": 1,
+    }
+
+    first_continue = service._probe_target_once(udi, target, config)
+    first_status = service.get_status()
+    second_continue = service._probe_target_once(udi, target, config)
+    second_status = service.get_status()
+
+    assert first_continue is True
+    assert first_status["recent_events"][0]["type"] == "freeze_pending"
+    assert first_status["recent_events"][0]["details"]["confirmations"] == 1
+    assert second_continue is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert second_status["recent_events"][0]["type"] == "switch_success"
+    assert second_status["recent_events"][0]["details"]["reason"] == "blank"
+    assert target["last_probe"]["blank_detected"] is True
+
+
 def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp_path):
     switch_calls = []
     udi = FakeUdi(
