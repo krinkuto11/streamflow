@@ -223,7 +223,7 @@ def test_changelog_run_json_export_includes_sanitized_v7_run_snapshot():
                 "stale_warnings": [
                     {
                         "type": "dispatcharr_status_risk",
-                        "label": "Dispatcharr Provider Notice",
+                        "label": "Dispatcharr Provider Sync",
                         "count": 1,
                         "read_only": True,
                     }

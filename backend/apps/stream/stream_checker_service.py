@@ -5121,8 +5121,8 @@ class StreamCheckerService:
                 base["status"] = "stale_risk"
                 base["stale_status_suspected"] = True
                 base["operator_note"] = (
-                    "Dispatcharr provider status may be stale. StreamFlow detected a status/message contradiction "
-                    "and will not repair Dispatcharr automatically."
+                    "Dispatcharr has a provider status that differs from its latest completion message. "
+                    "StreamFlow will keep checking and only reports this as an observed sync note."
                 )
             else:
                 base["status"] = "ok"

@@ -8,11 +8,11 @@ describe('getExternalStaleDiagnosticsDisplay', () => {
     expect(getExternalStaleDiagnosticsDisplay({ stale_status_suspected: false })).toBeNull()
   })
 
-  it('formats read-only Dispatcharr status risk details without raw messages', () => {
+  it('formats read-only Dispatcharr provider sync details without raw messages', () => {
     const display = getExternalStaleDiagnosticsDisplay({
       status: 'stale_risk',
       stale_status_suspected: true,
-      operator_note: 'Dispatcharr provider status may be stale.',
+      operator_note: 'Dispatcharr provider status differs from its completion message.',
       m3u_accounts: {
         stale_suspected_count: 1,
         stale_suspected: [
@@ -32,9 +32,9 @@ describe('getExternalStaleDiagnosticsDisplay', () => {
     })
 
     expect(display).toEqual({
-      title: 'Dispatcharr Provider Notice',
-      text: 'Provider status looks inconsistent, but checking can continue.',
-      detail: '1 provider status mismatch. StreamFlow cannot inspect Celery, Redis, Postgres internals from here.',
+      title: 'Dispatcharr Provider Sync',
+      text: 'Checking can continue. Dispatcharr has a provider status that differs from its latest completion message.',
+      detail: '1 provider status note. Observed only; StreamFlow cannot inspect Celery, Redis, Postgres internals from here.',
       accounts: ['Provider A: Fetching (last message already says completed)'],
       checks: ['Celery: Unknown', 'Redis: Unknown', 'Postgres: Unknown'],
     })
@@ -57,7 +57,7 @@ describe('getExternalStaleDiagnosticsDisplay', () => {
       },
     })
 
-    expect(display.detail).toBe('4 provider status mismatches. StreamFlow cannot inspect Celery, Redis, Postgres internals from here.')
+    expect(display.detail).toBe('4 provider status notes. Observed only; StreamFlow cannot inspect Celery, Redis, Postgres internals from here.')
     expect(display.accounts).toHaveLength(3)
     expect(display.accounts[0]).toBe('Account 1: Processing (last message contains an error)')
   })

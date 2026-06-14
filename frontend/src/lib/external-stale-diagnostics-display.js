@@ -36,7 +36,7 @@ export function getExternalStaleDiagnosticsDisplay(diagnostics = {}) {
   const suspectCount = Number.isFinite(Number(m3uAccounts.stale_suspected_count))
     ? Number(m3uAccounts.stale_suspected_count)
     : staleSuspected.length
-  const conflictLabel = suspectCount === 1 ? 'provider status mismatch' : 'provider status mismatches'
+  const conflictLabel = suspectCount === 1 ? 'provider status note' : 'provider status notes'
 
   const externalChecks = diagnostics?.external_checks || {}
   const checkStatuses = Object.entries(CHECK_LABELS).map(([key, label]) => ({
@@ -49,10 +49,10 @@ export function getExternalStaleDiagnosticsDisplay(diagnostics = {}) {
     .map((check) => check.label)
 
   return {
-    title: 'Dispatcharr Provider Notice',
-    text: 'Provider status looks inconsistent, but checking can continue.',
+    title: 'Dispatcharr Provider Sync',
+    text: 'Checking can continue. Dispatcharr has a provider status that differs from its latest completion message.',
     detail: unknownChecks.length > 0
-      ? `${suspectCount} ${conflictLabel}. StreamFlow cannot inspect ${unknownChecks.join(', ')} internals from here.`
+      ? `${suspectCount} ${conflictLabel}. Observed only; StreamFlow cannot inspect ${unknownChecks.join(', ')} internals from here.`
       : `${suspectCount} ${conflictLabel}.`,
     accounts: staleSuspected.slice(0, 3).map(formatAccount),
     checks: checkStatuses.map((check) => `${check.label}: ${check.status}`),

@@ -598,24 +598,26 @@ export default function StreamChecker() {
       )}
 
       {externalStaleDisplay && (
-        <Alert
-          className="min-w-0 w-full overflow-hidden border-border bg-muted/30 text-muted-foreground"
+        <div
+          className="min-w-0 w-full overflow-hidden rounded-md border border-border bg-card/40 px-4 py-3 text-sm text-muted-foreground"
           style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
         >
-          <Info className="h-4 w-4 text-muted-foreground" />
-          <AlertTitle className="min-w-0 max-w-[calc(100%-1.75rem)] break-words text-foreground">{externalStaleDisplay.title}</AlertTitle>
-          <AlertDescription className="min-w-0 max-w-[calc(100%-1.75rem)] space-y-1 whitespace-normal [overflow-wrap:anywhere]">
-            <span className="block min-w-0 max-w-full break-words">{externalStaleDisplay.text}</span>
-            {externalStaleDisplay.detail && (
-              <span className="block min-w-0 max-w-full break-words">{externalStaleDisplay.detail}</span>
-            )}
-            {externalStaleDisplay.accounts.length > 0 && (
-              <span className="block min-w-0 max-w-full break-words text-xs">
-                {externalStaleDisplay.accounts.join(' | ')}
-              </span>
-            )}
-          </AlertDescription>
-        </Alert>
+          <div className="flex min-w-0 items-start gap-2">
+            <Info className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" />
+            <div className="min-w-0 space-y-1">
+              <p className="min-w-0 max-w-full break-words font-medium text-foreground">{externalStaleDisplay.title}</p>
+              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">{externalStaleDisplay.text}</p>
+              {externalStaleDisplay.detail && (
+                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">{externalStaleDisplay.detail}</p>
+              )}
+              {externalStaleDisplay.accounts.length > 0 && (
+                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">
+                  {externalStaleDisplay.accounts.join(' | ')}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Batch Progress — hidden during single channel checks to avoid showing

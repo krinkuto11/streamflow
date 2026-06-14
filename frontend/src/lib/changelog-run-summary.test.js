@@ -94,8 +94,8 @@ describe('changelog run summary', () => {
     })).toEqual([
       {
         key: 'stale-warning-dispatcharr_status_risk',
-        label: 'Dispatcharr Provider Notice',
-        value: '2 provider status mismatches / observed only',
+        label: 'Dispatcharr Provider Sync',
+        value: '2 provider status notes / observed only',
       },
     ])
   })
@@ -134,8 +134,8 @@ describe('changelog run summary', () => {
     })).toEqual([
       {
         key: 'stale-warning-dispatcharr_status_risk',
-        label: 'Dispatcharr Provider Notice',
-        value: '1 provider status mismatch / observed only',
+        label: 'Dispatcharr Provider Sync',
+        value: '1 provider status note / observed only',
       },
     ])
   })
