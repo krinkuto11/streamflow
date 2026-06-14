@@ -141,6 +141,41 @@ describe('Teamarr preflight event search helpers', () => {
     expect(filterTeamarrEventsByView(staticTeams, 'all', config)).toEqual(staticTeams)
   })
 
+  it('keeps non-checkable static team diagnostics out of the no-check view', () => {
+    const config = { preflight_offset_minutes: 20, poll_interval_seconds: 30 }
+    const staticTeams = [
+      {
+        preflight_kind: 'team',
+        event_name: 'Miami Marlins',
+        state: 'no_dispatcharr_channel',
+        event_date: '2026-06-14T16:15:00Z',
+        seconds_to_start: -3600,
+      },
+      {
+        preflight_kind: 'team',
+        event_name: 'Arizona Cardinals',
+        state: 'no_live_window',
+      },
+      {
+        preflight_kind: 'team',
+        event_name: 'Static Team Due',
+        state: 'due',
+        dispatcharr_channel_id: 459,
+      },
+      {
+        preflight_kind: 'event',
+        event_name: 'Managed Event Without Check',
+        state: 'past',
+      },
+    ]
+
+    expect(filterTeamarrEventsByView(staticTeams, 'no_check', config)).toEqual([
+      staticTeams[2],
+      staticTeams[3],
+    ])
+    expect(filterTeamarrEventsByView(staticTeams, 'all', config)).toEqual(staticTeams)
+  })
+
   it('does not hide scheduled managed events outside the static team window', () => {
     const managedEvent = {
       preflight_kind: 'event',

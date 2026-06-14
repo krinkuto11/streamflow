@@ -149,7 +149,14 @@ const formatElapsedSince = (timestamp) => {
 }
 
 const eventLabel = (type) => eventLabels[type] || type || 'Unknown'
-const stateLabel = (state) => stateLabels[state] || state || 'Unknown'
+const stateLabel = (state, event = null) => {
+  if (event?.preflight_kind === 'team') {
+    if (state === 'no_dispatcharr_channel') return 'Missing Channel'
+    if (state === 'no_live_window') return 'No Game Window'
+    if (state === 'no_event_window') return 'No Game Evidence'
+  }
+  return stateLabels[state] || state || 'Unknown'
+}
 const forceableStates = new Set(['due', 'scheduled', 'already_attempted', 'past'])
 const preflightKindLabel = (item) => (item?.preflight_kind === 'team' ? 'Teamarr Team' : 'Teamarr Event')
 const preflightKindShortLabel = (item) => (item?.preflight_kind === 'team' ? 'Team' : 'Event')
@@ -251,7 +258,7 @@ const connectorStatusDisplay = (connector = {}) => {
 const eventScheduleDiagnosticParts = (event, automaticCheckSummary, config) => {
   const parts = []
   const seconds = Number(event?.seconds_to_start)
-  parts.push({ label: 'State', value: stateLabel(event?.state) })
+  parts.push({ label: 'State', value: stateLabel(event?.state, event) })
   if (event?.trigger_bucket) parts.push({ label: 'Bucket', value: event.trigger_bucket })
   if (automaticCheckSummary) parts.push({ label: 'Schedule', value: automaticCheckSummary })
   if (!automaticCheckSummary && event?.state === 'past') parts.push({ label: 'Schedule', value: 'Outside automatic window' })
@@ -268,7 +275,11 @@ const eventScheduleDiagnosticParts = (event, automaticCheckSummary, config) => {
 }
 
 const forceEventTooltip = (event) => {
-  if (!event?.dispatcharr_channel_id) return 'No Dispatcharr channel'
+  if (!event?.dispatcharr_channel_id) {
+    return event?.preflight_kind === 'team'
+      ? 'No matching persistent Dispatcharr team channel'
+      : 'No Dispatcharr channel'
+  }
   if (event?.state === 'no_event_window') return 'No event evidence'
   if (event?.state === 'no_live_window') return 'No live window'
   if (event?.state === 'no_streams_yet') return 'No channel streams'
@@ -1295,7 +1306,7 @@ export default function TeamarrPreflight() {
                               {preflightKindShortLabel(event)}
                             </Badge>
                             <Badge variant={event.state === 'due' ? 'default' : 'secondary'}>
-                              {stateLabel(event.state)}
+                              {stateLabel(event.state, event)}
                             </Badge>
                             {lastPreflightEvent ? (
                               <Badge variant={recentEventBadgeVariant(lastPreflightEvent.type)}>
