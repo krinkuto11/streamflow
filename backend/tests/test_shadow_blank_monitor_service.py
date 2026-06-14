@@ -1099,6 +1099,74 @@ def test_continuous_probe_detects_open_blank_after_min_duration(tmp_path, monkey
     assert result["blank_ratio"] < 0.8
 
 
+def test_continuous_probe_detects_open_freeze_after_min_duration(tmp_path, monkeypatch):
+    processes = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO("[freezedetect @ 000] lavfi.freezedetect.freeze_start: 0\n")
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    def fake_popen(command, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    current_time = {"value": 100.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.1
+        return current_time["value"]
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "probe_duration_seconds": 60,
+        "freeze_detection_enabled": True,
+        "freeze_min_duration_seconds": 2,
+        "freeze_ratio_threshold": 0.8,
+    })
+
+    result = service._run_blank_probe_until_viewer_left(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+        udi,
+        {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "stream_id": 10,
+        },
+    )
+
+    assert processes
+    assert result["freeze_detected"] is True
+    assert result["freeze_duration_secs"] < 10
+    assert result["freeze_ratio"] < 0.8
+    assert result.get("blank_detected") is False
+
+
 def test_continuous_probe_detects_no_decodable_frames_after_min_duration(tmp_path, monkeypatch):
     processes = []
 
@@ -1373,6 +1441,90 @@ def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):
     assert status["switch_summary"]["dry_run_switches"] == 1
     assert status["switch_summary"]["successful_switches"] == 0
     assert status["switch_summary"]["last_switch_reason"] == "blank"
+
+
+def test_shadow_probe_mirrors_real_viewer_fmp4_output_format(tmp_path):
+    probe_urls = []
+
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[{"user_agent": "VLC", "output_format": "fmp4"}],
+            ),
+        }],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, _config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    service.update_config({"enabled": False, "dry_run": False})
+
+    status = service.run_once(force=True)
+
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=fmp4"]
+    assert status["watched_channels"][0]["viewer_output_format"] == "fmp4"
+
+
+def test_shadow_probe_mirrors_real_viewer_legacy_ts_output_format(tmp_path):
+    probe_urls = []
+
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[{"user_agent": "VLC", "output_format": "ts"}],
+            ),
+        }],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, _config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    service.update_config({"enabled": False, "dry_run": False})
+
+    status = service.run_once(force=True)
+
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=mpegts"]
+    assert status["watched_channels"][0]["viewer_output_format"] == "mpegts"
+
+
+def test_shadow_probe_does_not_mirror_watcher_or_invalid_output_format(tmp_path):
+    probe_urls = []
+
+    watcher_contaminated_status = active_status(
+        stream_id=10,
+        clients=[
+            {"user_agent": "VLC", "output_format": "hls"},
+            {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0", "output_format": "fmp4"},
+        ],
+    )
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[{"user_agent": "VLC", "output_format": "hls"}],
+            ),
+        }],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, _config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    service.update_config({"enabled": False, "dry_run": False})
+
+    assert service._real_viewer_output_format(watcher_contaminated_status, normalize_config({})) is None
+
+    status = service.run_once(force=True)
+
+    assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert "viewer_output_format" not in status["watched_channels"][0]
 
 
 def test_force_run_once_clears_stop_event_for_disabled_continuous_scan(monkeypatch, tmp_path):
@@ -2386,6 +2538,67 @@ def test_continuous_default_probe_open_silence_start_switches_as_silent_audio(mo
     assert status["recent_events"][0]["details"]["detection"]["measurements"]["silent_audio_duration_secs"] >= 2.0
     assert target["last_probe"]["silent_audio_detected"] is True
     assert target["last_probe"]["silent_audio_duration_secs"] >= 2.0
+
+
+def test_continuous_default_probe_open_freeze_start_switches_as_freeze(monkeypatch, tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+
+    def switch_stream(channel_id, stream_id=None, url=None):
+        switch_calls.append((channel_id, stream_id, url))
+        return True
+
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=switch_stream,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+    monkeypatch.setattr(
+        shadow_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: PersistentFakeProbeProcess([
+            "frame=10 time=00:00:00.50 bitrate=1000kbits/s speed=1x\n",
+            "[freezedetect @ 000] lavfi.freezedetect.freeze_start: 0\n",
+        ]),
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "freeze_detection_enabled": True,
+        "freeze_min_duration_seconds": 2,
+        "probe_duration_seconds": 5,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
+    assert status["recent_events"][0]["details"]["reason"] == "freeze"
+    assert status["recent_events"][0]["details"]["detection"]["measurements"]["freeze_duration_secs"] >= 2.0
+    assert target["last_probe"]["freeze_detected"] is True
+    assert target["last_probe"]["freeze_duration_secs"] >= 2.0
 
 
 def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp_path):

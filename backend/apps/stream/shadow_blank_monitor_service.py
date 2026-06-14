@@ -85,6 +85,12 @@ FFMPEG_STREAM_AUDIO_RE = re.compile(r"^\s*Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)
 FFMPEG_STREAM_VIDEO_RE = re.compile(r"^\s*Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]+\))?:\s*Video:", re.IGNORECASE)
 FFMPEG_STREAM_MAPPING_RE = re.compile(r"^\s*Stream mapping:", re.IGNORECASE)
 FFMPEG_ZERO_AUDIO_SUMMARY_RE = re.compile(r"\baudio:\s*0KiB\b", re.IGNORECASE)
+PROXY_OUTPUT_FORMAT_ALIASES = {
+    "fmp4": "fmp4",
+    "mp4": "fmp4",
+    "mpegts": "mpegts",
+    "ts": "mpegts",
+}
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -487,7 +493,10 @@ class ShadowBlankMonitorService:
                 "channel_ref": target.get("channel_ref"),
             }
 
-        capture = self._capture_offline_image_hash(self._channel_proxy_url(str(channel_uuid)), config)
+        capture = self._capture_offline_image_hash(
+            self._channel_proxy_url(str(channel_uuid), target.get("viewer_output_format")),
+            config,
+        )
         if not capture.get("success"):
             return {
                 "success": False,
@@ -742,6 +751,7 @@ class ShadowBlankMonitorService:
                 continue
             watcher_details = self._watcher_client_details(raw_status, config)
             watcher_clients = int(watcher_details.get("watcher_client_count") or 0)
+            viewer_output_format = self._real_viewer_output_format(raw_status, config)
 
             stream_id = self._extract_stream_id(raw_status)
             current_program = self._current_epg_program(channel, raw_status, numeric_id)
@@ -756,6 +766,8 @@ class ShadowBlankMonitorService:
                 "state": raw_status.get("state") or "active",
                 "cooldown_seconds": self._cooldown_remaining(channel_uuid),
             }
+            if viewer_output_format:
+                target["viewer_output_format"] = viewer_output_format
             if current_program:
                 target["current_program"] = current_program
             target.update(watcher_details)
@@ -914,6 +926,9 @@ class ShadowBlankMonitorService:
 
                 target = dict(target)
                 target["real_client_count"] = self._real_client_count(fresh_status, config)
+                viewer_output_format = self._real_viewer_output_format(fresh_status, config)
+                if viewer_output_format:
+                    target["viewer_output_format"] = viewer_output_format
                 target.update(self._watcher_client_details(fresh_status, config))
                 watcher_count = int(target.get("watcher_client_count") or 0)
                 target["watcher_state"] = "watching" if watcher_count > 0 else "reconnecting"
@@ -954,7 +969,7 @@ class ShadowBlankMonitorService:
         try:
             target.pop("media_recovery_guard_reason", None)
             target.pop("media_recovery_guard_bypass", None)
-            proxy_url = self._channel_proxy_url(channel_uuid)
+            proxy_url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
             use_continuous_blank_probe = (
                 config.get("watch_mode") == "continuous"
                 and self._uses_default_blank_probe
@@ -1844,11 +1859,15 @@ class ShadowBlankMonitorService:
             self._set_cooldown(channel_uuid, config)
         self._record_event("watcher_recovery_guard", target, guard_details)
 
-    def _channel_proxy_url(self, channel_uuid: str) -> str:
+    def _channel_proxy_url(self, channel_uuid: str, output_format: Optional[str] = None) -> str:
         base_url = (self.base_url_provider() or "").rstrip("/")
         if not base_url:
             raise RuntimeError("Dispatcharr base URL is not configured")
-        return f"{base_url}/proxy/ts/stream/{channel_uuid}"
+        url = f"{base_url}/proxy/ts/stream/{channel_uuid}"
+        canonical_format = self._normalize_proxy_output_format(output_format)
+        if canonical_format:
+            return f"{url}?output_format={canonical_format}"
+        return url
 
     @staticmethod
     def _blank_probe_command(url: str, config: Dict[str, Any], *, continuous: bool = False) -> tuple[List[str], int]:
@@ -2834,6 +2853,37 @@ class ShadowBlankMonitorService:
             return " ".join(str(value) for value in values if value is not None)
         return str(client)
 
+    @staticmethod
+    def _normalize_proxy_output_format(value: Any) -> Optional[str]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return None
+        # Dispatcharr can expose resolved format keys such as fmp4:p21.
+        text = text.split(":", 1)[0].strip()
+        return PROXY_OUTPUT_FORMAT_ALIASES.get(text)
+
+    def _real_viewer_output_format(self, status: Dict[str, Any], config: Dict[str, Any]) -> Optional[str]:
+        marker = str(config.get("watcher_user_agent") or "").lower()
+        clients = status.get("clients")
+        if isinstance(clients, dict):
+            clients = list(clients.values())
+        if isinstance(clients, list):
+            for client in clients:
+                if marker and marker in self._client_text(client).lower():
+                    continue
+                if not isinstance(client, dict):
+                    continue
+                for key in ("output_format", "resolved_output_format", "container", "format"):
+                    normalized = self._normalize_proxy_output_format(client.get(key))
+                    if normalized:
+                        return normalized
+
+        for key in ("output_format", "resolved_output_format", "container", "format"):
+            normalized = self._normalize_proxy_output_format(status.get(key))
+            if normalized:
+                return normalized
+        return None
+
     def _real_client_count(self, status: Dict[str, Any], config: Dict[str, Any]) -> int:
         marker = str(config.get("watcher_user_agent") or "").lower()
         clients = status.get("clients")
@@ -3328,6 +3378,7 @@ class ShadowBlankMonitorService:
             "state",
             "current_program",
             "cooldown_seconds",
+            "viewer_output_format",
             "last_probe",
             "last_event",
         }
