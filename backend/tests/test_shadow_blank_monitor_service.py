@@ -3386,8 +3386,12 @@ def test_continuous_default_probe_does_not_block_new_scans(tmp_path):
         "watch_mode": "continuous",
         "watcher_api_key": "test-watcher-key",
     })
+    config = service.get_config(include_secret=True)
+    service._stop_event.clear()
 
-    status = service.run_once(force=True)
+    targets = service.discover_active_targets(udi, config)
+    service._probe_targets(udi, targets, config)
+    status = service.get_status()
 
     assert status["watched_count"] == 1
     assert started.wait(0.5)

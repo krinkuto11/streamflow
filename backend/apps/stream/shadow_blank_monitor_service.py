@@ -681,7 +681,12 @@ class ShadowBlankMonitorService:
         try:
             udi = self.udi_provider()
             targets = self.discover_active_targets(udi, config)
-            self._probe_targets(udi, targets[: config["max_concurrent_watchers"]], config)
+            self._probe_targets(
+                udi,
+                targets[: config["max_concurrent_watchers"]],
+                config,
+                single_pass=force,
+            )
             self._last_error = None
         except Exception as exc:
             self._last_error = SHADOW_MONITOR_SCAN_ERROR_MESSAGE
@@ -827,10 +832,17 @@ class ShadowBlankMonitorService:
             self._record_event(event_type, event_target, details)
         return targets
 
-    def _probe_targets(self, udi: Any, targets: Iterable[Dict[str, Any]], config: Dict[str, Any]) -> None:
+    def _probe_targets(
+        self,
+        udi: Any,
+        targets: Iterable[Dict[str, Any]],
+        config: Dict[str, Any],
+        *,
+        single_pass: bool = False,
+    ) -> None:
         targets = list(targets)
         threads: List[threading.Thread] = []
-        wait_for_probes = not (
+        wait_for_probes = single_pass or not (
             config.get("watch_mode") == "continuous" and self._uses_default_blank_probe
         )
         for target in targets:
@@ -856,7 +868,7 @@ class ShadowBlankMonitorService:
 
             thread = threading.Thread(
                 target=self._probe_target,
-                args=(udi, target, dict(config)),
+                args=(udi, target, dict(config), single_pass),
                 name=f"ShadowBlankProbe-{channel_uuid[:8]}",
                 daemon=True,
             )
@@ -867,13 +879,21 @@ class ShadowBlankMonitorService:
             for thread in threads:
                 thread.join()
 
-    def _probe_target(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> None:
+    def _probe_target(
+        self,
+        udi: Any,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        single_pass: bool = False,
+    ) -> None:
         channel_uuid = target["channel_uuid"]
         try:
             first_probe = True
             while first_probe or not self._stop_event.is_set():
                 first_probe = False
                 should_continue = self._probe_target_once(udi, target, config)
+                if single_pass:
+                    break
                 if not (
                     should_continue
                     and config.get("watch_mode") == "continuous"
