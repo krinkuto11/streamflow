@@ -1255,15 +1255,31 @@ export default function ChannelConfiguration() {
   const handleAssignEpgProfile = async (channelId, profileId) => {
     try {
       await automationAPI.assignEpgChannel(channelId, profileId)
-      // Update channel state locally so the dropdown reflects the change immediately
-      setChannels(prev => prev.map(ch =>
+      const normalizedProfileId = profileId || null
+      const updateChannelEpgProfile = (ch) =>
         ch.id === channelId
-          ? { ...ch, channel_epg_scheduled_profile_id: profileId || null, epg_scheduled_profile_id: profileId || null }
+          ? { ...ch, channel_epg_scheduled_profile_id: normalizedProfileId, epg_scheduled_profile_id: normalizedProfileId }
           : ch
-      ))
+
+      // Keep both backing lists fresh: the Regex table renders from orderedChannels.
+      setChannels(prev => prev.map(updateChannelEpgProfile))
+      setOrderedChannels(prev => prev.map(updateChannelEpgProfile))
+
+      // Refresh the resolved profile line in the open row immediately after save.
+      const activeProfileKey = String(channelId)
+      activeProfilesRef.current = { ...activeProfilesRef.current, [activeProfileKey]: null }
+      setActiveProfiles({ ...activeProfilesRef.current })
+      try {
+        const res = await channelsAPI.getChannelActiveProfile(channelId)
+        activeProfilesRef.current = { ...activeProfilesRef.current, [activeProfileKey]: res.data }
+      } catch {
+        activeProfilesRef.current = { ...activeProfilesRef.current, [activeProfileKey]: { error: true } }
+      }
+      setActiveProfiles({ ...activeProfilesRef.current })
+
       toast({
         title: "Success",
-        description: profileId
+        description: normalizedProfileId
           ? "EPG scheduled profile assigned to channel"
           : "EPG scheduled profile removed from channel"
       })
