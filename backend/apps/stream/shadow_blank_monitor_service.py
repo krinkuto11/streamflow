@@ -670,6 +670,13 @@ class ShadowBlankMonitorService:
         if not config.get("enabled") and not force:
             return self.get_status()
 
+        restore_stop_event = False
+        if force and self._stop_event.is_set():
+            # Manual scans are allowed while the background monitor is disabled.
+            # The worker stop event must not abort the one-off continuous probe.
+            self._stop_event.clear()
+            restore_stop_event = True
+
         self._last_scan_at = self.clock()
         try:
             udi = self.udi_provider()
@@ -679,6 +686,11 @@ class ShadowBlankMonitorService:
         except Exception as exc:
             self._last_error = SHADOW_MONITOR_SCAN_ERROR_MESSAGE
             logger.error(f"Shadow blank monitor scan failed: {exc}", exc_info=True)
+        finally:
+            if restore_stop_event:
+                with self._lock:
+                    if not self._config.get("enabled"):
+                        self._stop_event.set()
         return self.get_status()
 
     def discover_active_targets(self, udi: Any, config: Dict[str, Any]) -> List[Dict[str, Any]]:

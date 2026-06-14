@@ -1375,6 +1375,66 @@ def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):
     assert status["switch_summary"]["last_switch_reason"] == "blank"
 
 
+def test_force_run_once_clears_stop_event_for_disabled_continuous_scan(monkeypatch, tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+
+    def switch_stream(channel_id, stream_id=None, url=None):
+        switch_calls.append((channel_id, stream_id, url))
+        return True
+
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: udi,
+        switch_stream=switch_stream,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+        clock=lambda: 1000.0,
+    )
+    with service._lock:
+        service._config["watcher_api_key"] = "test-watcher-key"
+        service._save_config()
+    service.update_config({
+        "enabled": False,
+        "dry_run": True,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "silent_audio_detection_enabled": True,
+        "next_stream_pre_probe_enabled": False,
+    })
+    assert service._stop_event.is_set()
+
+    stop_event_states = []
+
+    def continuous_probe(url, config, udi_arg, target):
+        stop_event_states.append(service._stop_event.is_set())
+        return {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "no_decodable_frames_detected": False,
+            "garbled_audio_detected": False,
+            "silent_audio_detected": True,
+            "silent_audio_duration_secs": 12.0,
+            "silent_audio_noise_db": -50,
+            "audio_stream_present": True,
+        }
+
+    monkeypatch.setattr(service, "_run_blank_probe_until_viewer_left", continuous_probe)
+
+    status = service.run_once(force=True)
+
+    assert stop_event_states == [False]
+    assert service._stop_event.is_set()
+    assert status["recent_events"][0]["type"] == "dry_run_switch"
+    assert status["recent_events"][0]["details"]["reason"] == "silent_audio"
+
+
 def test_disabling_monitor_clears_watched_snapshot(tmp_path):
     udi = FakeUdi(
         statuses=[{"uuid-1": active_status()}],
