@@ -2161,6 +2161,50 @@ def test_audio_detection_parser_detects_garbled_audio_after_threshold():
     assert "audio" in parsed["garbled_audio_error"].lower()
 
 
+def test_audio_detection_parser_detects_mpegts_aac_buffer_errors_as_garbled_audio():
+    config = normalize_config({
+        "garbled_audio_detection_enabled": True,
+        "garbled_audio_error_threshold": 2,
+    })
+    output = (
+        "[aac @ 000] Input buffer exhausted before END element found\n"
+        "[aac @ 000] channel element 0.2 is not allocated\n"
+    )
+
+    parsed = ShadowBlankMonitorService._parse_audio_detection(
+        output,
+        config,
+        observed_duration=8,
+    )
+
+    assert parsed["garbled_audio_detected"] is True
+    assert parsed["garbled_audio_error_count"] == 2
+    assert "input buffer exhausted" in parsed["garbled_audio_error"].lower()
+
+
+def test_audio_detection_parser_detects_fmp4_aac_artifact_warnings_as_garbled_audio():
+    config = normalize_config({
+        "garbled_audio_detection_enabled": True,
+        "garbled_audio_error_threshold": 2,
+    })
+    output = (
+        "[aac @ 000] If you heard an audible artifact, there may be a bug in the decoder. "
+        "Clipped noise gain (285 -> 155) is not implemented.\n"
+        "[aac @ 000] If you heard an audible artifact, there may be a bug in the decoder. "
+        "Clipped noise gain (279 -> 155) is not implemented.\n"
+    )
+
+    parsed = ShadowBlankMonitorService._parse_audio_detection(
+        output,
+        config,
+        observed_duration=8,
+    )
+
+    assert parsed["garbled_audio_detected"] is True
+    assert parsed["garbled_audio_error_count"] == 2
+    assert "audible artifact" in parsed["garbled_audio_error"].lower()
+
+
 def test_audio_detection_parser_detects_silent_audio_duration():
     config = normalize_config({
         "silent_audio_detection_enabled": True,

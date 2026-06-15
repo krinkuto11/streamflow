@@ -77,6 +77,9 @@ AUDIO_ERROR_PATTERNS = (
 AUDIO_DECODER_RE = re.compile(r"^\[(?:aac|ac3|eac3|mp2|mp3float|opus|vorbis|flac|truehd|dca)\s+@")
 AUDIO_DECODER_ERROR_PATTERNS = (
     "channel element",
+    "audible artifact",
+    "clipped noise gain",
+    "input buffer exhausted",
     "error decoding",
     "decode error",
     "invalid",

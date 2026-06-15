@@ -616,7 +616,7 @@ export const operatorHelpDetailTopics = [
         controlType: 'Visible UI setting',
         defaultValue: 'On',
         location: 'Shadow Monitor -> Configuration card -> Garbled Audio',
-        effect: 'Treats repeated audio decode errors as a media fault that can enter the guarded switch path.',
+        effect: 'Treats repeated FFmpeg audio decoder errors or audible artifact warnings as a media fault that can enter the guarded switch path.',
         useWhen: 'Keep on for providers that can leave video moving while audio is broken.',
         risk: 'Bad thresholds can confuse transient decoder noise with persistent audio failure, so keep confirmations and pre-probe enabled.',
       },
