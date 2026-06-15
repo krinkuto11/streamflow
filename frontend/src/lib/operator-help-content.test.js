@@ -227,8 +227,8 @@ describe('operatorHelpSections', () => {
     expect(troubleshooting.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Startup readiness',
       'Stream Checker status',
-      'Stale Progress',
-      'Dispatcharr Status Risk',
+      'Previous progress hidden',
+      'Dispatcharr status notice',
       'Dashboard and Changelog counters',
       'Quality reason details',
       'Hardware status',
@@ -237,8 +237,8 @@ describe('operatorHelpSections', () => {
       'Changelog and logs',
     ]))
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').effect).toMatch(/timeout, connectivity, endpoint/i)
-    expect(troubleshooting.settings.find(setting => setting.name === 'Stale Progress').effect).toMatch(/not a failed stream check/i)
-    expect(troubleshooting.settings.find(setting => setting.name === 'Dispatcharr Status Risk').effect).toMatch(/not automatically a quality-check failure/i)
+    expect(troubleshooting.settings.find(setting => setting.name === 'Previous progress hidden').effect).toMatch(/not a failed stream check/i)
+    expect(troubleshooting.settings.find(setting => setting.name === 'Dispatcharr status notice').effect).toMatch(/not automatically a quality-check failure/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Dashboard and Changelog counters').effect).toMatch(/Channels Restored/)
     expect(troubleshooting.settings.find(setting => setting.name === 'Dashboard and Changelog counters').effect).toMatch(/not the total number of visible channels/)
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').effect).toMatch(/elapsed\/limit/i)

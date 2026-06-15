@@ -831,7 +831,7 @@ export const operatorHelpDetailTopics = [
         risk: 'Starting overlapping work can hide the original reason behind capacity or busy states.',
       },
       {
-        name: 'Stale Progress',
+        name: 'Previous progress hidden',
         controlType: 'Status/API',
         defaultValue: 'Hidden during normal idle state',
         location: 'Stream Checker warning banner and /api/stream-checker/status -> progress_stale_details',
@@ -841,7 +841,7 @@ export const operatorHelpDetailTopics = [
         risk: 'Treating the idle stale-progress notice as a hard failure can lead to unnecessary restarts or duplicate runs.',
       },
       {
-        name: 'Dispatcharr Status Risk',
+        name: 'Dispatcharr status notice',
         controlType: 'Status/API',
         defaultValue: 'Hidden unless provider status evidence is contradictory or unavailable',
         location: 'Stream Checker warning banner and /api/stream-checker/status -> external_stale_diagnostics',
