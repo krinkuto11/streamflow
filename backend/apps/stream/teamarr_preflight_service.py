@@ -1033,7 +1033,9 @@ class TeamarrPreflightService:
         return sports
 
     def _build_filter_options(self, config: Dict[str, Any], events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-        fallback = self._event_filter_options(events)
+        event_list = list(events)
+        fallback = self._event_filter_options(event_list)
+        event_sports_by_league = self._event_sports_by_league(event_list)
         try:
             subscription = self._fetch_teamarr_json(config, "/api/v1/sports-subscription")
             sports_catalog = self._fetch_teamarr_json(config, "/api/v1/cache/sports")
@@ -1050,6 +1052,8 @@ class TeamarrPreflightService:
             for league_slug in selected_leagues:
                 league = leagues_by_slug.get(league_slug, {})
                 sport_slug = str(league.get("sport") or "").strip().lower()
+                if self._sport_is_unknown(sport_slug):
+                    sport_slug = event_sports_by_league.get(league_slug, "")
                 if sport_slug:
                     selected_sports.add(sport_slug)
                 elif league_slug in sports_by_slug:
@@ -1084,6 +1088,16 @@ class TeamarrPreflightService:
             logger.debug("Teamarr preflight filter options fell back to managed events: %s", exc)
             fallback["error"] = "Teamarr subscription options unavailable"
             return fallback
+
+    @classmethod
+    def _event_sports_by_league(cls, events: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+        sports_by_league: Dict[str, str] = {}
+        for event in events:
+            league = str(event.get("league") or "").strip().lower()
+            sport = str(event.get("sport") or "").strip().lower()
+            if league and not cls._sport_is_unknown(sport):
+                sports_by_league.setdefault(league, sport)
+        return sports_by_league
 
     @staticmethod
     def _event_filter_options(events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:

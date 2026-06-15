@@ -1357,6 +1357,33 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(league_labels["mlb"], "Major League Baseball")
         self.assertEqual(league_labels["uefa.europa"], "UEFA Europa League")
 
+    def test_filter_options_use_event_sport_when_subscription_league_catalog_is_unknown(self):
+        event = make_event(sport="soccer", league="usa.usl.1")
+
+        def http_get(url, **kwargs):
+            if url.endswith("/api/v1/channels/managed"):
+                return FakeResponse([event])
+            if url.endswith("/api/v1/sports-subscription"):
+                return FakeResponse({"leagues": ["usa.usl.1"]})
+            if url.endswith("/api/v1/cache/sports"):
+                return FakeResponse({"sports": {"soccer": "Soccer"}})
+            if url.endswith("/api/v1/cache/leagues"):
+                return FakeResponse({"leagues": [
+                    {"slug": "usa.usl.1", "name": "USL League One", "sport": "unknown"},
+                ]})
+            raise AssertionError(f"Unexpected URL {url}")
+
+        service, _, _ = self.make_service([event], http_get=Mock(side_effect=http_get))
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+
+        options = service.get_status()["filter_options"]
+        self.assertEqual(options["source"], "teamarr_subscription")
+        self.assertEqual(options["sports"], [{"value": "soccer", "label": "Soccer"}])
+        self.assertEqual(options["leagues"][0]["value"], "usa.usl.1")
+        self.assertEqual(options["leagues"][0]["sport"], "soccer")
+
     def test_default_automation_status_provider_uses_running_main_module(self):
         class FakeAutomationManager:
             def get_run_status(self):
