@@ -1054,6 +1054,8 @@ class TeamarrPreflightService:
                 sport_slug = str(league.get("sport") or "").strip().lower()
                 if self._sport_is_unknown(sport_slug):
                     sport_slug = event_sports_by_league.get(league_slug, "")
+                if self._sport_is_unknown(sport_slug):
+                    sport_slug = self._infer_sport_from_league_slug(league_slug)
                 if sport_slug:
                     selected_sports.add(sport_slug)
                 elif league_slug in sports_by_slug:
@@ -1098,6 +1100,37 @@ class TeamarrPreflightService:
             if league and not cls._sport_is_unknown(sport):
                 sports_by_league.setdefault(league, sport)
         return sports_by_league
+
+    @staticmethod
+    def _infer_sport_from_league_slug(league_slug: str) -> str:
+        slug = str(league_slug or "").strip().lower()
+        if slug in {"mlb"}:
+            return "baseball"
+        if slug in {"nba"}:
+            return "basketball"
+        if slug in {"nfl"}:
+            return "football"
+        if slug in {"nhl"}:
+            return "hockey"
+        if slug in {"ufc"}:
+            return "mma"
+        if slug == "boxing":
+            return "boxing"
+        soccer_prefixes = (
+            "eng.",
+            "esp.",
+            "fifa.",
+            "ger.",
+            "ita.",
+            "uefa.",
+            "usa.1",
+            "usa.nwsl",
+            "usa.usl.",
+            "usa.w.usl.",
+        )
+        if any(slug == prefix.rstrip(".") or slug.startswith(prefix) for prefix in soccer_prefixes):
+            return "soccer"
+        return ""
 
     @staticmethod
     def _event_filter_options(events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
