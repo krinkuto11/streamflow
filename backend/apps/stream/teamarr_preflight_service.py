@@ -38,6 +38,10 @@ STATIC_TEAM_MATCHUP_RE = re.compile(
     r"(^|\s)(?:@|at|vs\.?|v\.?|versus|bei|gegen)(?=\s|$)",
     re.IGNORECASE,
 )
+STATIC_TEAM_PREVIEW_WINDOW_RE = re.compile(
+    r"(^|\s)(?:coming\s+up|upcoming|preview|pre\s*game|pregame)(?=\s|:|$)",
+    re.IGNORECASE,
+)
 EVENT_DATETIME_KEYS = (
     "event_date",
     "start_time",
@@ -1387,6 +1391,8 @@ class TeamarrPreflightService:
             return False
         if not next_live_window.get("start"):
             return False
+        if next_live_window.get("is_live") is False:
+            return False
 
         title = TeamarrPreflightService._normalize_team_window_text(next_live_window.get("title"))
         sub_title = TeamarrPreflightService._normalize_team_window_text(next_live_window.get("sub_title"))
@@ -1404,7 +1410,11 @@ class TeamarrPreflightService:
         if text_values and all(value in team_terms for value in text_values):
             return False
 
-        return bool(STATIC_TEAM_MATCHUP_RE.search(" ".join(text_values)))
+        combined_text = " ".join(text_values)
+        if STATIC_TEAM_PREVIEW_WINDOW_RE.search(combined_text):
+            return False
+
+        return bool(STATIC_TEAM_MATCHUP_RE.search(combined_text))
 
     def _public_team(self, status: Dict[str, Any], now: datetime) -> Optional[Dict[str, Any]]:
         team = status.get("team") if isinstance(status.get("team"), dict) else {}

@@ -477,7 +477,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(service.get_status()["team_status"]["ready"], 1)
         self.assertEqual(service.get_status()["team_status"]["queueable"], 0)
 
-    def test_static_team_upcoming_matchup_window_is_queueable_before_live_flag(self):
+    def test_static_team_upcoming_matchup_preview_window_is_not_queueable(self):
         promo = make_team_status(
             next_live_window={
                 "found": True,
@@ -507,11 +507,13 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         result = service.run_once(force=True)
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["launched"], 1)
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
         team = service.get_status()["upcoming_teams"][0]
-        self.assertEqual(team["state"], "due")
-        self.assertTrue(team["live_window_event_evidence"])
-        self.assertEqual(service.get_status()["team_status"]["queueable"], 1)
+        self.assertEqual(team["state"], "no_event_window")
+        self.assertFalse(team["live_window_event_evidence"])
+        self.assertIn("team_event_evidence", team["missing"])
+        self.assertEqual(service.get_status()["team_status"]["queueable"], 0)
 
     def test_static_team_generic_upcoming_window_is_visible_but_not_queueable(self):
         promo = make_team_status(
