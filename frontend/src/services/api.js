@@ -163,6 +163,8 @@ export const regexAPI = {
    * The result can be passed directly to importPatterns for backup/restore.
    */
   exportPatterns: () => api.get('/regex-patterns/export'),
+  getGlobalSettings: () => api.get('/regex-patterns/global-settings'),
+  updateGlobalSettings: (settings) => api.put('/regex-patterns/global-settings', settings),
   bulkAddPatterns: (data) => api.post('/regex-patterns/bulk', data),
   bulkDeletePatterns: (data) => api.post('/regex-patterns/bulk-delete', data),
   getCommonPatterns: (data) => api.post('/regex-patterns/common', data),

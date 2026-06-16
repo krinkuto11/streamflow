@@ -53,6 +53,10 @@ const REGEX_TABLE_GRID_COLS = '32px 60px 48px 2fr 3fr 100px 80px 140px'
 
 // M3U account filtering - exclude 'custom' account as it's not a real source
 const CUSTOM_ACCOUNT_NAME = 'custom'
+const DEFAULT_REGEX_GLOBAL_SETTINGS = {
+  case_sensitive: true,
+  require_exact_match: false,
+}
 
 // Helper function to normalize pattern data (supports both old and new formats)
 const normalizePatternData = (channelPatterns) => {
@@ -414,6 +418,8 @@ function GroupAssignMatchingDialog({ open, onOpenChange, group, initialConfig, o
 export default function ChannelConfiguration() {
   const [channels, setChannels] = useState([])
   const [patterns, setPatterns] = useState({})
+  const [regexGlobalSettings, setRegexGlobalSettings] = useState(DEFAULT_REGEX_GLOBAL_SETTINGS)
+  const [savingRegexGlobalSettings, setSavingRegexGlobalSettings] = useState(false)
 
   const [loading, setLoading] = useState(true)
   const [checkingChannel, setCheckingChannel] = useState(null)
@@ -681,6 +687,10 @@ export default function ChannelConfiguration() {
 
       setChannels(channelsToLoad)
       setPatterns(patternsResponse.data.patterns || {})
+      setRegexGlobalSettings({
+        ...DEFAULT_REGEX_GLOBAL_SETTINGS,
+        ...(patternsResponse.data.global_settings || {}),
+      })
       setGroups(groupsResponse.data || [])
       setProfiles(profilesResponse.data || [])
 
@@ -1249,6 +1259,38 @@ export default function ChannelConfiguration() {
         description: "Failed to update match settings",
         variant: "destructive"
       })
+    }
+  }
+
+  const handleUpdateRegexGlobalSettings = async (settings) => {
+    const nextSettings = {
+      ...regexGlobalSettings,
+      ...settings,
+    }
+    const previousSettings = regexGlobalSettings
+    setRegexGlobalSettings(nextSettings)
+    setSavingRegexGlobalSettings(true)
+
+    try {
+      const response = await regexAPI.updateGlobalSettings(settings)
+      setRegexGlobalSettings({
+        ...DEFAULT_REGEX_GLOBAL_SETTINGS,
+        ...(response.data?.settings || nextSettings),
+      })
+      toast({
+        title: 'Success',
+        description: 'Regex global settings updated'
+      })
+    } catch (err) {
+      setRegexGlobalSettings(previousSettings)
+      console.error('Failed to update regex global settings:', err)
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Failed to update regex global settings',
+        variant: 'destructive'
+      })
+    } finally {
+      setSavingRegexGlobalSettings(false)
     }
   }
 
@@ -2452,6 +2494,26 @@ export default function ChannelConfiguration() {
                     {/* Section: Matching */}
                     <div className="flex items-center gap-3">
                       <div className="text-[10px] font-bold text-muted-foreground uppercase tracking-wider">Matching</div>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div className="flex items-center gap-2 rounded-md border px-2 py-1">
+                            <Switch
+                              id="regex-case-sensitive"
+                              checked={Boolean(regexGlobalSettings.case_sensitive)}
+                              disabled={savingRegexGlobalSettings}
+                              onCheckedChange={(checked) => handleUpdateRegexGlobalSettings({
+                                case_sensitive: Boolean(checked)
+                              })}
+                            />
+                            <Label htmlFor="regex-case-sensitive" className="text-xs font-medium cursor-pointer whitespace-nowrap">
+                              Case sensitive
+                            </Label>
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Use exact casing when matching regex patterns.</p>
+                        </TooltipContent>
+                      </Tooltip>
                       <Tooltip>
                         <TooltipTrigger asChild>
                           <Button

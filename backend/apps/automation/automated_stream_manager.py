@@ -66,9 +66,10 @@ class RefreshResult(tuple):
 def _compile_stream_search_regex(pattern: str, channel_name: str, case_sensitive: bool) -> re.Pattern:
     """Compile and cache stream-matching regex patterns for reuse."""
     substituted_pattern = pattern.replace('CHANNEL_NAME', re.escape(channel_name))
-    search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
+    search_pattern = substituted_pattern
     search_pattern = _WHITESPACE_PATTERN.sub(r'\\s+', search_pattern)
-    return re.compile(search_pattern)
+    flags = 0 if case_sensitive else re.IGNORECASE
+    return re.compile(search_pattern, flags)
 
 # Import croniter for cron expression support
 try:
@@ -93,6 +94,10 @@ from apps.automation.automation_config_manager import get_automation_config_mana
 from apps.automation.channel_visibility_automation import (
     ChannelVisibilityAutomation,
     resolve_channel_visibility_config,
+)
+from apps.automation.regex_settings import (
+    default_channel_regex_global_settings,
+    normalize_channel_regex_global_settings,
 )
 
 # Import channel settings manager
@@ -548,10 +553,7 @@ class RegexChannelMatcher:
         if self._config_file is not None and self._file_backed_compat and not self._config_file.exists():
             empty = {
                 "patterns": {},
-                "global_settings": {
-                    "case_sensitive": False,
-                    "require_exact_match": False,
-                },
+                "global_settings": default_channel_regex_global_settings(),
             }
             self._config_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self._config_file, 'w', encoding='utf-8') as fh:
@@ -564,8 +566,9 @@ class RegexChannelMatcher:
         configs = db.get_all_channel_regex_configs()
         global_settings = db.get_system_setting(
             'channel_regex_global_settings',
-            {'case_sensitive': True, 'require_exact_match': False},
+            default_channel_regex_global_settings(),
         )
+        global_settings = normalize_channel_regex_global_settings(global_settings)
 
         # --- One-time migration from legacy SystemSetting JSON blob ---
         if not configs:
@@ -577,7 +580,7 @@ class RegexChannelMatcher:
                     logger.warning(f"Migration errors: {errors}")
                 # Preserve global_settings from legacy blob
                 if 'global_settings' in legacy:
-                    global_settings = legacy['global_settings']
+                    global_settings = normalize_channel_regex_global_settings(legacy['global_settings'])
                     db.set_system_setting('channel_regex_global_settings', global_settings)
                 # Clear the old blob to avoid re-migration on next start
                 db.set_system_setting('channel_regex_config', None)
@@ -625,7 +628,7 @@ class RegexChannelMatcher:
         from apps.database.manager import get_db_manager
         db = get_db_manager()
         patterns_dict = patterns.get('patterns', {})
-        global_settings = patterns.get('global_settings', {})
+        global_settings = normalize_channel_regex_global_settings(patterns.get('global_settings', {}))
         imported, errors = db.import_channel_regex_configs_from_json(
             {'patterns': patterns_dict}, merge=False
         )
@@ -954,7 +957,7 @@ class RegexChannelMatcher:
         matches = []
         case_sensitive = self.channel_patterns.get("global_settings", {}).get("case_sensitive", True)
         
-        search_name = stream_name if case_sensitive else stream_name.lower()
+        search_name = stream_name
         
         channel_to_group_map = channel_to_group_map or {}
         channel_name_map = channel_name_map or {}
@@ -1079,7 +1082,7 @@ class RegexChannelMatcher:
         matches = []
         case_sensitive = self.channel_patterns.get("global_settings", {}).get("case_sensitive", True)
         
-        search_name = stream_name if case_sensitive else stream_name.lower()
+        search_name = stream_name
         
         channel_to_group_map = channel_to_group_map or {}
         channel_name_map = channel_name_map or {}

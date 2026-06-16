@@ -63,6 +63,7 @@ from apps.api.regex_handlers import (
     export_regex_patterns_response,
     get_group_regex_config_response,
     get_common_regex_patterns_response,
+    get_regex_global_settings_response,
     import_regex_patterns_response,
     get_regex_patterns_response,
     mass_edit_preview_response,
@@ -71,6 +72,7 @@ from apps.api.regex_handlers import (
     test_regex_pattern_response,
     update_channel_match_settings_response,
     update_group_match_settings_response,
+    update_regex_global_settings_response,
     upsert_group_regex_config_response,
 )
 from apps.api.automation_handlers import (
@@ -960,6 +962,19 @@ def bulk_edit_regex_pattern():
 def bulk_update_match_settings():
     """Update match settings (e.g., match_by_tvg_id) for multiple channels."""
     return bulk_update_match_settings_response(
+        payload=request.get_json(silent=True),
+        get_regex_matcher=get_regex_matcher,
+    )
+
+@app.route('/api/regex-patterns/global-settings', methods=['GET'])
+def get_regex_global_settings():
+    """Get global regex matching settings."""
+    return get_regex_global_settings_response()
+
+@app.route('/api/regex-patterns/global-settings', methods=['PUT'])
+def update_regex_global_settings():
+    """Update global regex matching settings."""
+    return update_regex_global_settings_response(
         payload=request.get_json(silent=True),
         get_regex_matcher=get_regex_matcher,
     )

@@ -86,7 +86,7 @@ def test_match_live_response(
                     if matched:
                         continue
 
-                    search_name = stream_name if case_sensitive else stream_name.lower()
+                    search_name = stream_name
                     regex_matched = False
                     best_regex_priority = 0
                     best_pattern_str = None
@@ -109,13 +109,14 @@ def test_match_live_response(
                         escaped_channel_name = re.escape(channel_name)
                         substituted_pattern = pattern.replace("CHANNEL_NAME", escaped_channel_name)
 
-                        search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
+                        search_pattern = substituted_pattern
                         search_pattern = whitespace_pattern.sub(r"\\s+", search_pattern)
+                        flags = 0 if case_sensitive else re.IGNORECASE
 
                         try:
                             if is_dangerous_regex(search_pattern):
                                 continue
-                            if re.search(search_pattern, search_name):
+                            if re.search(search_pattern, search_name, flags):
                                 regex_matched = True
                                 if pattern_priority >= best_regex_priority:
                                     best_regex_priority = pattern_priority
@@ -263,7 +264,7 @@ def bulk_match_count_response(
                             matched = True
 
                     elif match_type == "regex" and has_regex:
-                        search_name = stream_name if case_sensitive else stream_name.lower()
+                        search_name = stream_name
 
                         for pattern_obj in normalized_patterns:
                             pattern = pattern_obj.get("pattern", "")
@@ -280,13 +281,14 @@ def bulk_match_count_response(
 
                             escaped_channel_name = re.escape(channel_name)
                             substituted_pattern = pattern.replace("CHANNEL_NAME", escaped_channel_name)
-                            search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
+                            search_pattern = substituted_pattern
                             search_pattern = whitespace_pattern.sub(r"\\s+", search_pattern)
+                            flags = 0 if case_sensitive else re.IGNORECASE
 
                             try:
                                 if is_dangerous_regex(search_pattern):
                                     continue
-                                if re.search(search_pattern, search_name):
+                                if re.search(search_pattern, search_name, flags):
                                     matched = True
                                     break
                             except re.error:

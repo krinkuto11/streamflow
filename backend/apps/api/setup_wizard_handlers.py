@@ -1,11 +1,13 @@
 """Setup wizard API handler functions extracted from web_api."""
 
+import json
 import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from flask import jsonify
 
+from apps.automation.regex_settings import default_channel_regex_global_settings
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
@@ -99,14 +101,13 @@ def ensure_wizard_config_response(
             regex_file = config_dir / "channel_regex_config.json"
             if not regex_file.exists():
                 regex_file.write_text(
-                    """{
-  "patterns": {},
-  "global_settings": {
-    "case_sensitive": false,
-    "require_exact_match": false
-  }
-}
-""",
+                    json.dumps(
+                        {
+                            "patterns": {},
+                            "global_settings": default_channel_regex_global_settings(),
+                        },
+                        indent=2,
+                    ),
                     encoding="utf-8",
                 )
 
@@ -127,10 +128,7 @@ def ensure_wizard_config_response(
         if db.get_system_setting("channel_regex_global_settings", None) is None:
             db.set_system_setting(
                 "channel_regex_global_settings",
-                {
-                    "case_sensitive": False,
-                    "require_exact_match": False,
-                },
+                default_channel_regex_global_settings(),
             )
 
         return jsonify({"message": "Configuration files ensured"})
@@ -167,10 +165,7 @@ def create_sample_patterns_response():
                     "enabled": True,
                 },
             },
-            "global_settings": {
-                "case_sensitive": False,
-                "require_exact_match": False,
-            },
+            "global_settings": default_channel_regex_global_settings(),
         }
 
         imported, errors = db.import_channel_regex_configs_from_json(patterns, merge=False)
