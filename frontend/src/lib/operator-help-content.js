@@ -247,6 +247,15 @@ export const operatorHelpDetailTopics = [
         risk: 'Unneeded refreshes can make runs slower and hide whether a quality issue is real.',
       },
       {
+        name: 'Case Sensitive Regex Matching',
+        controlType: 'Visible UI setting',
+        defaultValue: 'On',
+        location: 'Settings -> Profiles tab -> Global Automation Settings -> Case Sensitive Regex Matching',
+        effect: 'Controls whether channel regex patterns require exact uppercase and lowercase letters. When off, regex syntax is preserved and matching uses case-insensitive regex evaluation.',
+        useWhen: 'Leave on for imported/provider-split regex files; turn off only when manually entered patterns should ignore casing.',
+        risk: 'Turning it off can make broad manual regexes match more streams than expected, so preview or test regex changes after toggling it.',
+      },
+      {
         name: 'Retry failed M3U providers',
         controlType: 'Visible UI setting',
         defaultValue: 'Off',

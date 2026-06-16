@@ -184,11 +184,14 @@ describe('operatorHelpSections', () => {
       'Maintenance window',
       'Teamarr event window',
       'Retry failed M3U providers',
+      'Case Sensitive Regex Matching',
     ]))
     expect(automation.settings.find(setting => setting.name === 'Maintenance window').location).toBe('Settings -> Scheduling tab -> Automation Run Policy -> Maintenance window/start/end')
     expect(automation.settings.find(setting => setting.name === 'Retry failed M3U providers').effect).toMatch(/only providers/i)
     expect(automation.settings.find(setting => setting.name === 'Channel Visibility').location).toBe('Settings -> Profiles tab -> Edit profile -> Channel Visibility')
     expect(automation.settings.find(setting => setting.name === 'Channel Visibility').risk).toMatch(/never deletes channels/i)
+    expect(automation.settings.find(setting => setting.name === 'Case Sensitive Regex Matching').location).toBe('Settings -> Profiles tab -> Global Automation Settings -> Case Sensitive Regex Matching')
+    expect(automation.settings.find(setting => setting.name === 'Case Sensitive Regex Matching').effect).toMatch(/case-insensitive regex evaluation/i)
     const streamChecker = getOperatorHelpDetailTopic('stream-checker')
     expect(streamChecker.settings.find(setting => setting.name === 'Direct Stream Check').effect).toMatch(/without requiring that stream to be assigned to a channel/i)
     expect(streamChecker.settings.find(setting => setting.name === 'Check on update').controlType).toBe('Status/API')
