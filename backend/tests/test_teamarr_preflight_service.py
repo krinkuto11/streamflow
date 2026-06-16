@@ -226,7 +226,8 @@ def make_team_status(**overrides):
             "found": True,
             "start": "2026-05-28T22:20:00+00:00",
             "stop": "2026-05-29T01:20:00+00:00",
-            "title": "Static Test Team Live",
+            "title": "Live: MLB",
+            "sub_title": "Static Test Team at Fixture Opponent",
             "is_live": True,
             "source": "team_epg_xmltv",
         },
@@ -419,6 +420,137 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         service.run_once(force=True)
         self.assertEqual(len(checker.queued), 1)
 
+    def test_static_team_placeholder_window_is_visible_but_not_queueable(self):
+        base_status = make_team_status()
+        placeholder = make_team_status(
+            team={
+                **base_status["team"],
+                "primary_league": "nfl",
+                "leagues": ["nfl"],
+                "sport": "football",
+                "team_name": "Arizona Cardinals",
+                "team_abbrev": "ARI",
+                "channel_id": "ArizonaCardinals.nfl",
+            },
+            dispatcharr_channel={
+                **base_status["dispatcharr_channel"],
+                "id": 645,
+                "name": "Arizona Cardinals",
+                "tvg_id": "ArizonaCardinals.nfl",
+                "stream_count": 1,
+                "streams": [645001],
+            },
+            next_live_window={
+                "found": True,
+                "start": "2026-05-28T22:03:00+00:00",
+                "stop": "2026-05-29T01:03:00+00:00",
+                "title": "ARIZONA CARDINALS",
+                "is_live": True,
+                "source": "team_epg_xmltv",
+            },
+            status="ready",
+            missing=[],
+        )
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [placeholder["team"]],
+            "/api/v1/teams/501/channel-status": placeholder,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = FakeChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+        team = service.get_status()["upcoming_teams"][0]
+        self.assertEqual(team["state"], "no_event_window")
+        self.assertFalse(team["live_window_event_evidence"])
+        self.assertIn("team_event_evidence", team["missing"])
+        self.assertEqual(service.get_status()["team_status"]["ready"], 1)
+        self.assertEqual(service.get_status()["team_status"]["queueable"], 0)
+
+    def test_static_team_upcoming_matchup_preview_window_is_not_queueable(self):
+        promo = make_team_status(
+            next_live_window={
+                "found": True,
+                "start": "2026-05-28T22:03:00+00:00",
+                "stop": "2026-05-29T01:03:00+00:00",
+                "title": "Coming up Tonight: Static Test Team @ Fixture Opponent",
+                "is_live": False,
+                "source": "team_epg_xmltv",
+            },
+            status="ready",
+            missing=[],
+        )
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [promo["team"]],
+            "/api/v1/teams/501/channel-status": promo,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = FakeChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+        team = service.get_status()["upcoming_teams"][0]
+        self.assertEqual(team["state"], "no_event_window")
+        self.assertFalse(team["live_window_event_evidence"])
+        self.assertIn("team_event_evidence", team["missing"])
+        self.assertEqual(service.get_status()["team_status"]["queueable"], 0)
+
+    def test_static_team_generic_upcoming_window_is_visible_but_not_queueable(self):
+        promo = make_team_status(
+            next_live_window={
+                "found": True,
+                "start": "2026-05-28T22:03:00+00:00",
+                "stop": "2026-05-29T01:03:00+00:00",
+                "title": "Coming up Tonight",
+                "is_live": False,
+                "source": "team_epg_xmltv",
+            },
+            status="ready",
+            missing=[],
+        )
+        http_get = RouteHttpGet({
+            "/api/v1/teams?active_only=true": [promo["team"]],
+            "/api/v1/teams/501/channel-status": promo,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        })
+        checker = FakeChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 0)
+        self.assertEqual(checker.calls, [])
+        team = service.get_status()["upcoming_teams"][0]
+        self.assertEqual(team["state"], "no_event_window")
+        self.assertFalse(team["live_window_event_evidence"])
+
     def test_static_team_queue_uses_selected_preflight_profile(self):
         team_status = make_team_status()
         http_get = RouteHttpGet({
@@ -477,7 +609,8 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
                 "found": True,
                 "start": "2026-05-28T23:00:00+00:00",
                 "stop": "2026-05-29T02:00:00+00:00",
-                "title": "Static Test Team Live",
+                "title": "Live: MLB",
+                "sub_title": "Static Test Team at Fixture Opponent",
                 "is_live": True,
                 "source": "team_epg_xmltv",
             },
@@ -1226,6 +1359,39 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(league_labels["mlb"], "Major League Baseball")
         self.assertEqual(league_labels["uefa.europa"], "UEFA Europa League")
 
+    def test_filter_options_use_event_sport_when_subscription_league_catalog_is_unknown(self):
+        event = make_event(sport="soccer", league="usa.usl.1")
+
+        def http_get(url, **kwargs):
+            if url.endswith("/api/v1/channels/managed"):
+                return FakeResponse([event])
+            if url.endswith("/api/v1/sports-subscription"):
+                return FakeResponse({"leagues": ["usa.usl.1", "usa.usl.1.cup", "fifa.cwc", "uefa.europa_qual"]})
+            if url.endswith("/api/v1/cache/sports"):
+                return FakeResponse({"sports": {"soccer": "Soccer"}})
+            if url.endswith("/api/v1/cache/leagues"):
+                return FakeResponse({"leagues": [
+                    {"slug": "usa.usl.1", "name": "USL League One", "sport": "unknown"},
+                    {"slug": "usa.usl.1.cup", "name": "USL Cup", "sport": "unknown"},
+                    {"slug": "fifa.cwc", "name": "FIFA Club World Cup", "sport": "unknown"},
+                    {"slug": "uefa.europa_qual", "name": "UEFA Europa League Qualifying", "sport": "unknown"},
+                ]})
+            raise AssertionError(f"Unexpected URL {url}")
+
+        service, _, _ = self.make_service([event], http_get=Mock(side_effect=http_get))
+
+        result = service.run_once(force=True)
+        self.assertTrue(result["success"])
+
+        options = service.get_status()["filter_options"]
+        self.assertEqual(options["source"], "teamarr_subscription")
+        self.assertEqual(options["sports"], [{"value": "soccer", "label": "Soccer"}])
+        league_sports = {item["value"]: item["sport"] for item in options["leagues"]}
+        self.assertEqual(league_sports["usa.usl.1"], "soccer")
+        self.assertEqual(league_sports["usa.usl.1.cup"], "soccer")
+        self.assertEqual(league_sports["fifa.cwc"], "soccer")
+        self.assertEqual(league_sports["uefa.europa_qual"], "soccer")
+
     def test_default_automation_status_provider_uses_running_main_module(self):
         class FakeAutomationManager:
             def get_run_status(self):
@@ -1326,6 +1492,34 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
 
         upcoming = service.get_status()["upcoming_events"]
         self.assertEqual(upcoming[0]["state"], "filtered")
+
+    def test_unknown_managed_event_sport_uses_teamarr_league_catalog(self):
+        event = make_event(sport="unknown", league="usa.usl.1")
+        http_get = RouteHttpGet({
+            "/api/v1/channels/managed": [event],
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {
+                "leagues": [
+                    {"slug": "usa.usl.1", "sport": "soccer", "name": "USL Championship"},
+                ],
+            },
+        })
+        checker = FakeChecker()
+        service, _, _ = self.make_service([], checker=checker, http_get=http_get)
+        service.update_config({"include_sports": ["soccer"]})
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["launched"], 1)
+        deadline = time.time() + 2
+        while time.time() < deadline and not checker.calls:
+            time.sleep(0.01)
+        self.assertEqual(len(checker.calls), 1)
+        upcoming = service.get_status()["upcoming_events"]
+        self.assertEqual(upcoming[0]["sport"], "soccer")
+        self.assertNotEqual(upcoming[0]["state"], "filtered")
 
     def test_manual_force_launches_scheduled_event_with_manual_bucket(self):
         checker = FakeChecker()

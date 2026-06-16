@@ -88,6 +88,7 @@ from apps.core.api_utils import (
 
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
+from apps.stream.stale_status_snapshot import build_dispatcharr_stale_snapshot, build_stale_warnings
 from apps.automation.automation_config_manager import get_automation_config_manager
 from apps.automation.channel_visibility_automation import (
     ChannelVisibilityAutomation,
@@ -296,6 +297,27 @@ class ChangelogManager:
             'avg_resolution': check_stats.get('avg_resolution', 'N/A'),
             'avg_bitrate': check_stats.get('avg_bitrate', 'N/A')
         }
+        v7_detail_fields = (
+            'avg_fps',
+            'duration',
+            'duration_seconds',
+            'run_mode',
+            'run_profile_id',
+            'run_profile_name',
+            'run_profile_source',
+            'quality_profile_id',
+            'quality_profile_name',
+            'quality_profile_source',
+            'capacity_profile_name',
+            'capacity_profile_source',
+            'channels_hidden',
+            'channels_ready',
+            'channel_visibility_changed',
+            'run_snapshot',
+        )
+        for field in v7_detail_fields:
+            if field in check_stats:
+                details[field] = check_stats.get(field)
         
         # Add program name if provided (for scheduled EPG checks)
         if program_name:
@@ -1330,6 +1352,11 @@ class AutomatedStreamManager:
         ("quality_checking", "Quality Check"),
         ("finalizing", "Finalizing"),
     ]
+
+    RUN_SNAPSHOT_HISTORY_KEY = "streamflow_run_snapshots"
+    RUN_SNAPSHOT_SETTINGS_KEY = "streamflow_run_snapshot_settings"
+    RUN_SNAPSHOT_DEFAULT_MAX_BYTES = 50 * 1024
+    RUN_SNAPSHOT_DEFAULT_RETENTION = 50
     
     def __init__(self, config_file=None):
         self._explicit_config_file = config_file is not None
@@ -1626,6 +1653,314 @@ class AutomatedStreamManager:
             "last_error": None,
         }
 
+    @staticmethod
+    def _coerce_positive_int(value: Any, default: int, *, min_value: int = 1, max_value: int = 1000) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return default
+        if number < min_value or number > max_value:
+            return default
+        return number
+
+    def _run_snapshot_limits(self) -> Dict[str, int]:
+        settings = {}
+        try:
+            from apps.database.manager import get_db_manager
+
+            settings = get_db_manager().get_system_setting(self.RUN_SNAPSHOT_SETTINGS_KEY, {}) or {}
+        except Exception as exc:
+            logger.debug("Could not load run snapshot settings: %s", exc)
+            settings = {}
+        if not isinstance(settings, dict):
+            settings = {}
+        return {
+            "max_bytes": self._coerce_positive_int(
+                settings.get("max_bytes"),
+                self.RUN_SNAPSHOT_DEFAULT_MAX_BYTES,
+                min_value=1024,
+                max_value=512 * 1024,
+            ),
+            "retention_count": self._coerce_positive_int(
+                settings.get("retention_count"),
+                self.RUN_SNAPSHOT_DEFAULT_RETENTION,
+                min_value=1,
+                max_value=500,
+            ),
+        }
+
+    @staticmethod
+    def _snapshot_size_bytes(snapshot: Dict[str, Any]) -> int:
+        try:
+            return len(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            return 0
+
+    def _bound_run_snapshot(self, snapshot: Dict[str, Any], *, max_bytes: Optional[int] = None) -> Dict[str, Any]:
+        limits = self._run_snapshot_limits()
+        byte_limit = max_bytes or limits["max_bytes"]
+        bounded = copy.deepcopy(snapshot or {})
+        if self._snapshot_size_bytes(bounded) <= byte_limit:
+            bounded["snapshot_size_bytes"] = self._snapshot_size_bytes(bounded)
+            bounded["snapshot_truncated"] = False
+            return bounded
+
+        for key in ("effective_profiles", "quality_rules", "feature_flags", "dispatcharr_status", "teamarr_status", "stale_warnings"):
+            value = bounded.get(key)
+            if isinstance(value, list):
+                bounded[f"{key}_omitted_count"] = max(0, len(value) - 5)
+                bounded[key] = value[:5]
+            elif isinstance(value, dict):
+                bounded[f"{key}_omitted"] = True
+                bounded[key] = {}
+            bounded["snapshot_truncated"] = True
+            if self._snapshot_size_bytes(bounded) <= byte_limit:
+                bounded["snapshot_size_bytes"] = self._snapshot_size_bytes(bounded)
+                return bounded
+
+        minimal = {
+            "schema_version": bounded.get("schema_version", 1),
+            "run_id": bounded.get("run_id"),
+            "run_mode": bounded.get("run_mode"),
+            "start_source": bounded.get("start_source"),
+            "started_at": bounded.get("started_at"),
+            "streamflow_version": bounded.get("streamflow_version"),
+            "streamflow_commit": bounded.get("streamflow_commit"),
+            "snapshot_truncated": True,
+            "snapshot_omitted_reason": "max_bytes_exceeded",
+        }
+        minimal["snapshot_size_bytes"] = self._snapshot_size_bytes(minimal)
+        return minimal
+
+    @staticmethod
+    def _streamflow_version_context() -> Dict[str, Optional[str]]:
+        version = os.getenv("STREAMFLOW_VERSION")
+        if not version:
+            current_file = Path(__file__)
+            for version_file in (
+                current_file.parent / "version.txt",
+                current_file.parents[2] / "version.txt",
+                current_file.parents[2] / "static" / "version.txt",
+            ):
+                try:
+                    if version_file.exists():
+                        value = version_file.read_text(encoding="utf-8").strip()
+                        if value:
+                            version = value
+                            break
+                except Exception:
+                    continue
+        commit = (
+            os.getenv("STREAMFLOW_COMMIT")
+            or os.getenv("STREAMFLOW_REVISION")
+            or os.getenv("GITHUB_SHA")
+        )
+        return {
+            "version": version or "dev-unknown",
+            "commit": commit or None,
+        }
+
+    @staticmethod
+    def _run_mode_for_start(*, forced: bool, forced_period_id: Optional[str]) -> str:
+        if forced_period_id:
+            return "manual_period_run"
+        if forced:
+            return "manual_full_run"
+        return "scheduler_run"
+
+    def _safe_feature_flags(self, global_settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        flags = {}
+        config = getattr(self, "config", {}) if isinstance(getattr(self, "config", {}), dict) else {}
+        enabled_features = config.get("enabled_features", {})
+        if isinstance(enabled_features, dict):
+            flags["enabled_features"] = {
+                str(key): value
+                for key, value in enabled_features.items()
+                if isinstance(value, (bool, int, float, str, type(None)))
+            }
+        if isinstance(global_settings, dict):
+            for key in (
+                "regular_automation_enabled",
+                "run_all_due_periods",
+                "catch_up_cap",
+                "automation_run_policy",
+            ):
+                value = global_settings.get(key)
+                if isinstance(value, (bool, int, float, str, type(None))):
+                    flags[key] = value
+        return flags
+
+    def _initial_run_snapshot(self, status: Dict[str, Any], *, forced: bool, forced_period_id: Optional[str]) -> Dict[str, Any]:
+        version_context = self._streamflow_version_context()
+        limits = self._run_snapshot_limits()
+        snapshot = {
+            "schema_version": 1,
+            "run_id": status.get("run_id"),
+            "run_mode": self._run_mode_for_start(forced=forced, forced_period_id=forced_period_id),
+            "start_source": "manual" if forced or forced_period_id else "scheduler",
+            "forced": bool(forced),
+            "forced_period_id": forced_period_id,
+            "started_at": status.get("started_at"),
+            "streamflow_version": version_context["version"],
+            "streamflow_commit": version_context["commit"],
+            "feature_flags": self._safe_feature_flags(),
+            "effective_profiles": [],
+            "quality_rules": [],
+            "capacity_profile_context": {
+                "type": "not_discovered",
+                "description": "Profile and account capacity is resolved after schedule discovery.",
+            },
+            "dispatcharr_status": {},
+            "teamarr_status": {},
+            "limits": limits,
+        }
+        return self._bound_run_snapshot(snapshot, max_bytes=limits["max_bytes"])
+
+    def _profile_snapshot_items(
+        self,
+        active_periods: Dict[Tuple[str, str], Dict[str, Any]],
+        automation_config: Any,
+    ) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+        for (period_id, period_name), data in sorted(active_periods.items(), key=lambda item: str(item[0])):
+            profile_id = data.get("profile_id")
+            profile = automation_config.get_profile(profile_id) if profile_id else None
+            stream_checking = profile.get("stream_checking", {}) if isinstance(profile, dict) else {}
+            items.append({
+                "period_id": period_id,
+                "period_name": period_name,
+                "profile_id": str(profile_id) if profile_id is not None else None,
+                "profile_name": data.get("profile_name") or (profile.get("name") if isinstance(profile, dict) else None) or "Default",
+                "channel_count": len(data.get("channels") or []),
+                "quality_rules_enabled": bool(stream_checking.get("enabled", False)),
+                "quality_rules_name": (profile.get("name") if isinstance(profile, dict) else None) or data.get("profile_name") or "Default",
+                "check_all_streams": bool(stream_checking.get("check_all_streams", False)),
+                "stream_limit": stream_checking.get("stream_limit", 0),
+            })
+        return items
+
+    def _store_run_snapshot(self, snapshot: Optional[Dict[str, Any]]) -> None:
+        if not snapshot or not snapshot.get("run_id"):
+            return
+        limits = self._run_snapshot_limits()
+        try:
+            from apps.database.manager import get_db_manager
+
+            db = get_db_manager()
+            history = db.get_system_setting(self.RUN_SNAPSHOT_HISTORY_KEY, []) or []
+            if not isinstance(history, list):
+                history = []
+            run_id = snapshot.get("run_id")
+            history = [
+                item for item in history
+                if not isinstance(item, dict) or item.get("run_id") != run_id
+            ]
+            history.append(copy.deepcopy(snapshot))
+            history = history[-limits["retention_count"]:]
+            db.set_system_setting(self.RUN_SNAPSHOT_HISTORY_KEY, history)
+        except Exception as exc:
+            logger.debug("Could not store run snapshot: %s", exc)
+
+    def _finalize_run_snapshot(
+        self,
+        active_periods: Dict[Tuple[str, str], Dict[str, Any]],
+        automation_config: Any,
+        global_settings: Optional[Dict[str, Any]],
+        *,
+        udi: Optional[Any] = None,
+        teamarr_event_window: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            if self._run_status.get("run_snapshot_finalized"):
+                return
+            base_snapshot = copy.deepcopy(self._run_status.get("run_snapshot") or {})
+            started_at = self._run_status.get("started_at")
+            run_id = self._run_status.get("run_id")
+
+        profile_items = self._profile_snapshot_items(active_periods, automation_config)
+        quality_rules = [
+            {
+                "profile_id": item.get("profile_id"),
+                "profile_name": item.get("quality_rules_name"),
+                "period_id": item.get("period_id"),
+                "enabled": item.get("quality_rules_enabled"),
+            }
+            for item in profile_items
+        ]
+        channel_count = sum(item.get("channel_count", 0) for item in profile_items)
+        dispatcharr_status = {}
+        network_ready: Optional[bool] = None
+        m3u_accounts: Optional[List[Dict[str, Any]]] = None
+        try:
+            if udi and hasattr(udi, "is_network_ready"):
+                network_ready = bool(udi.is_network_ready())
+                dispatcharr_status["network_ready"] = network_ready
+        except Exception as exc:
+            dispatcharr_status["network_ready_error"] = type(exc).__name__
+        try:
+            account_getter = getattr(udi, "get_m3u_accounts", None)
+            if callable(account_getter):
+                candidate_accounts = account_getter()
+                if isinstance(candidate_accounts, list):
+                    m3u_accounts = candidate_accounts
+        except Exception as exc:
+            dispatcharr_status["m3u_accounts_error"] = type(exc).__name__
+        dispatcharr_status["stale_status"] = build_dispatcharr_stale_snapshot(
+            network_ready=network_ready,
+            accounts=m3u_accounts,
+        )
+        stale_warnings = build_stale_warnings(dispatcharr_stale=dispatcharr_status["stale_status"])
+
+        snapshot = {
+            **base_snapshot,
+            "run_id": run_id or base_snapshot.get("run_id"),
+            "started_at": started_at or base_snapshot.get("started_at"),
+            "effective_profiles": profile_items,
+            "effective_profile_count": len(profile_items),
+            "channel_count": channel_count,
+            "quality_rules": quality_rules,
+            "capacity_profile_context": {
+                "type": "provider_account_profiles",
+                "description": "Capacity is enforced by account limits and active provider profiles.",
+                "profile_limited": any(item.get("quality_rules_enabled") for item in profile_items),
+            },
+            "feature_flags": self._safe_feature_flags(global_settings),
+            "dispatcharr_status": dispatcharr_status,
+            "stale_warnings": stale_warnings,
+            "teamarr_status": {
+                "event_window_active": bool(teamarr_event_window),
+            },
+        }
+        bounded = self._bound_run_snapshot(snapshot)
+        with self._run_status_lock:
+            self._run_status["run_snapshot"] = bounded
+            self._run_status["run_snapshot_finalized"] = True
+        self._store_run_snapshot(bounded)
+
+    @staticmethod
+    def _summarize_channel_visibility_events(events: Optional[List[Dict[str, Any]]]) -> Dict[str, int]:
+        hidden_channels = set()
+        ready_channels = set()
+        changed_events = 0
+        for event in events or []:
+            if not isinstance(event, dict) or not event.get("changed"):
+                continue
+            changed_events += 1
+            channel_key = event.get("channel_id") or event.get("channel_ref")
+            if channel_key in (None, ""):
+                channel_key = f"event-{changed_events}"
+            action = event.get("action")
+            if action == "hidden":
+                hidden_channels.add(str(channel_key))
+            elif action == "unhidden":
+                ready_channels.add(str(channel_key))
+        return {
+            "channels_hidden": len(hidden_channels),
+            "channels_ready": len(ready_channels),
+            "channel_visibility_changed": changed_events,
+        }
+
     def _stage_label(self, stage_key: str) -> str:
         return dict(self.RUN_STAGES).get(stage_key, stage_key.replace("_", " ").title())
 
@@ -1660,6 +1995,12 @@ class AutomatedStreamManager:
                 forced=forced,
                 forced_period_id=forced_period_id,
             )
+            self._run_status["run_snapshot"] = self._initial_run_snapshot(
+                self._run_status,
+                forced=forced,
+                forced_period_id=forced_period_id,
+            )
+            self._run_status["run_snapshot_finalized"] = False
 
     def _update_run_status(
         self,
@@ -2357,6 +2698,7 @@ class AutomatedStreamManager:
         final_state = state or status or "completed"
         final_stage = stage or final_state
         final_stage_label = stage_label or self._stage_label(final_stage)
+        snapshot_to_store = None
         with self._run_status_lock:
             status_data = self._run_status
             active_stage = status_data.get("stage")
@@ -2398,6 +2740,8 @@ class AutomatedStreamManager:
                         if final_state in {"completed", "completed_degraded"}
                         else final_state
                     )
+            snapshot_to_store = copy.deepcopy(status_data.get("run_snapshot"))
+        self._store_run_snapshot(snapshot_to_store)
 
     def _queue_run_status(self, message: str) -> None:
         """Mark the current automation intent as queued, not completed."""
@@ -4838,7 +5182,14 @@ class AutomatedStreamManager:
                 for entry in active_periods.values()
                 if entry.get('profile_id') is not None
             }
-            
+            self._finalize_run_snapshot(
+                active_periods,
+                automation_config,
+                global_settings,
+                udi=udi,
+                teamarr_event_window=teamarr_event_window,
+            )
+
             if not active_periods:
                 logger.debug("No channels with active automation periods found. Skipping cycle.")
                 self.last_playlist_update = datetime.now()
@@ -4920,7 +5271,8 @@ class AutomatedStreamManager:
             pre_refresh_stream_count = 0
             post_refresh_stream_count = 0
             check_results = {}
-            
+            channel_visibility_events = []
+
             start_time = datetime.now()
             m3u_refresh_started = time.time()
 
@@ -5341,14 +5693,17 @@ class AutomatedStreamManager:
                     assign_res = self.discover_and_assign_streams(force=forced, skip_check_trigger=True, forced_period_id=forced_period_id, skip_changelog=True)
                     assignment_details = assign_res.get("assignment_details", [])
                     assigned_stream_ids = assign_res.get("assigned_stream_ids", {})
+                    channel_visibility_events.extend(assign_res.get("channel_visibility_events", []) or [])
                 except Exception as e:
                     logger.error(f"✗ Failed to assign streams: {e}")
                     assigned_stream_ids = {}
 
+                visibility_summary = self._summarize_channel_visibility_events(channel_visibility_events)
                 self._update_run_status(
                     counts={
                         "validated_channels": len(validation_details),
                         "assigned_channels": len(assignment_details),
+                        **visibility_summary,
                     },
                     durations={"stream_matching_seconds": time.time() - matching_started},
                     message="Stream matching completed",
@@ -5481,6 +5836,7 @@ class AutomatedStreamManager:
                                 force_check=forced,
                                 target_stream_ids=target_stream_ids,
                                 progress_callback=_quality_progress_callback,
+                                run_mode="automation_quality_check",
                             )
                             self._update_run_progress(
                                 stage_key="quality_checking",
@@ -5546,10 +5902,12 @@ class AutomatedStreamManager:
             end_time = datetime.now()
             duration_sec = (end_time - start_time).total_seconds()
             duration_str = f"{int(duration_sec)}s"
-            
+            run_snapshot = copy.deepcopy((self.get_run_status() or {}).get("run_snapshot") or {})
+
             run_results = {
                 'duration': duration_str,
                 'total_channels': channels_with_periods,
+                'run_snapshot': run_snapshot,
                 'periods': [],
                 'total_streams': 0,
                 'streams_analyzed': 0,
@@ -5578,6 +5936,7 @@ class AutomatedStreamManager:
             revived_streams_count = 0
             added_streams_count = 0
             removed_streams_count = 0
+            quality_visibility_events = []
             
             # Map channel IDs to their results
             val_map = {str(d['channel_id']): d for d in validation_details}
@@ -5657,6 +6016,8 @@ class AutomatedStreamManager:
                         ch_revived = c_result.get('revived_streams_count', 0)
                         ch_analyzed = len(c_result.get('checked_streams', []))
                         checked_streams = c_result.get('checked_streams', [])
+                        if isinstance(c_result.get('channel_visibility'), dict):
+                            quality_visibility_events.append(c_result.get('channel_visibility'))
                         ch_good = max(
                             int(c_result.get('good_streams_count', 0) or 0),
                             sum(
@@ -5762,6 +6123,8 @@ class AutomatedStreamManager:
                     run_results['periods'].append(period_entry)
 
             # Finalize aggregate stats
+            all_visibility_events = list(channel_visibility_events) + quality_visibility_events
+            visibility_summary = self._summarize_channel_visibility_events(all_visibility_events)
             run_results['total_streams'] = total_streams_count
             run_results['streams_analyzed'] = streams_analyzed_count
             run_results['good_streams'] = good_streams_count
@@ -5771,6 +6134,14 @@ class AutomatedStreamManager:
             run_results['streams_revived'] = revived_streams_count
             run_results['added_streams'] = added_streams_count
             run_results['removed_streams'] = removed_streams_count
+            run_results['channels_hidden'] = visibility_summary['channels_hidden']
+            run_results['channels_ready'] = visibility_summary['channels_ready']
+            run_results['channel_visibility_changed'] = visibility_summary['channel_visibility_changed']
+            if all_visibility_events:
+                run_results['channel_visibility_events'] = [
+                    event for event in all_visibility_events
+                    if isinstance(event, dict) and event.get('changed')
+                ]
             
             from apps.core.stream_stats_utils import format_bitrate, format_fps
             from collections import Counter
@@ -5833,6 +6204,9 @@ class AutomatedStreamManager:
                     "streams_revived": revived_streams_count,
                     "added_streams": added_streams_count,
                     "removed_streams": removed_streams_count,
+                    "channels_hidden": visibility_summary["channels_hidden"],
+                    "channels_ready": visibility_summary["channels_ready"],
+                    "channel_visibility_changed": visibility_summary["channel_visibility_changed"],
                     "failed_refresh_requests": len(failed_refresh_requests),
                     "provider_refresh_failed_count": provider_refresh_failed_count,
                     "degraded_count": degraded_count,

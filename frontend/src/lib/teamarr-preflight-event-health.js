@@ -8,6 +8,19 @@ const plural = (count, singular, pluralLabel = `${singular}s`) => (
 )
 
 export const getTeamarrEventHealthAlert = (event = {}, lastPreflightEvent = null, automaticCheckSummary = '') => {
+  if (
+    event?.preflight_kind === 'team'
+    && String(event?.state || '') === 'no_dispatcharr_channel'
+    && event?.event_date
+  ) {
+    const teamChannelId = event?.team_channel_id || event?.channel_name || 'the Teamarr team tvg-id'
+    return {
+      severity: 'warning',
+      label: 'Team channel missing',
+      detail: `Teamarr found a game window, but no matching Dispatcharr team channel exists for ${teamChannelId}. Create or sync that persistent team channel before StreamFlow can run a team preflight check.`,
+    }
+  }
+
   const stats = lastPreflightEvent?.details?.stats || {}
   const totalStreams = numberOrNull(stats.total_streams)
   const deadStreams = numberOrNull(stats.dead_streams)

@@ -49,6 +49,53 @@ const numericSecondsToStart = (event = {}) => {
   return Number.isFinite(seconds) ? seconds : Number.MAX_SAFE_INTEGER
 }
 
+const DEFAULT_PREFLIGHT_OFFSET_MINUTES = 20
+const DEFAULT_POLL_INTERVAL_SECONDS = 60
+const staticTeamHiddenStates = new Set([
+  'filtered',
+  'incomplete_team',
+  'no_dispatcharr_channel',
+  'no_event_window',
+  'no_live_window',
+  'no_streams_yet',
+  'past',
+  'waiting_for_channel_sync',
+])
+
+const positiveNumberOrDefault = (value, fallback) => {
+  const number = Number(value)
+  return Number.isFinite(number) && number > 0 ? number : fallback
+}
+
+const staticTeamUpcomingWindowSeconds = (config = {}) => {
+  const offsetMinutes = positiveNumberOrDefault(
+    config.preflight_offset_minutes,
+    DEFAULT_PREFLIGHT_OFFSET_MINUTES,
+  )
+  const pollSeconds = positiveNumberOrDefault(
+    config.poll_interval_seconds,
+    DEFAULT_POLL_INTERVAL_SECONDS,
+  )
+  return offsetMinutes * 60 + pollSeconds
+}
+
+const isStaticTeamDefaultUpcoming = (event = {}, config = {}) => {
+  if (String(event?.preflight_kind || '') !== 'team') return true
+
+  const state = String(event?.state || '')
+  if (state === 'due' || state === 'already_attempted') return true
+  if (staticTeamHiddenStates.has(state)) return false
+  if (state !== 'scheduled') return false
+  if (!event?.event_date || !event?.dispatcharr_channel_id) return false
+  if (Number(event?.stream_count ?? 1) <= 0) return false
+  if (String(event?.team_status || 'ready') !== 'ready') return false
+
+  const seconds = Number(event.seconds_to_start)
+  if (!Number.isFinite(seconds)) return false
+  if (seconds < 0) return true
+  return seconds <= staticTeamUpcomingWindowSeconds(config)
+}
+
 export const sortTeamarrManagedEvents = (events = []) => (
   [...events].sort((a, b) => {
     const aSeconds = numericSecondsToStart(a)
@@ -65,12 +112,20 @@ export const sortTeamarrManagedEvents = (events = []) => (
   })
 )
 
-export const filterTeamarrEventsByView = (events = [], view = 'upcoming') => {
+export const filterTeamarrEventsByView = (events = [], view = 'upcoming', config = {}) => {
   if (view === 'all') return events
   if (view === 'past') return events.filter(event => String(event?.state || '') === 'past')
-  if (view === 'no_check') return events.filter(event => !event?.last_preflight_event)
+  if (view === 'no_check') {
+    return events.filter(event => (
+      !event?.last_preflight_event
+      && isStaticTeamDefaultUpcoming(event, config)
+    ))
+  }
   if (view === 'due') return events.filter(event => String(event?.state || '') === 'due')
-  return events.filter(event => String(event?.state || '') !== 'past')
+  return events.filter(event => (
+    String(event?.state || '') !== 'past'
+    && isStaticTeamDefaultUpcoming(event, config)
+  ))
 }
 
 export const paginateTeamarrEvents = (events = [], page = 1, pageSize = 10) => {

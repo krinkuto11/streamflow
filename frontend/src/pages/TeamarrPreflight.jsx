@@ -74,6 +74,7 @@ const stateLabels = {
   scheduled: 'Scheduled',
   already_attempted: 'Attempted',
   no_dispatcharr_channel: 'No Channel',
+  no_event_window: 'No Event',
   no_live_window: 'No Window',
   no_streams_yet: 'No Streams',
   incomplete_team: 'Incomplete',
@@ -148,7 +149,14 @@ const formatElapsedSince = (timestamp) => {
 }
 
 const eventLabel = (type) => eventLabels[type] || type || 'Unknown'
-const stateLabel = (state) => stateLabels[state] || state || 'Unknown'
+const stateLabel = (state, event = null) => {
+  if (event?.preflight_kind === 'team') {
+    if (state === 'no_dispatcharr_channel') return 'Missing Channel'
+    if (state === 'no_live_window') return 'No Game Window'
+    if (state === 'no_event_window') return 'No Game Evidence'
+  }
+  return stateLabels[state] || state || 'Unknown'
+}
 const forceableStates = new Set(['due', 'scheduled', 'already_attempted', 'past'])
 const preflightKindLabel = (item) => (item?.preflight_kind === 'team' ? 'Teamarr Team' : 'Teamarr Event')
 const preflightKindShortLabel = (item) => (item?.preflight_kind === 'team' ? 'Team' : 'Event')
@@ -250,7 +258,7 @@ const connectorStatusDisplay = (connector = {}) => {
 const eventScheduleDiagnosticParts = (event, automaticCheckSummary, config) => {
   const parts = []
   const seconds = Number(event?.seconds_to_start)
-  parts.push({ label: 'State', value: stateLabel(event?.state) })
+  parts.push({ label: 'State', value: stateLabel(event?.state, event) })
   if (event?.trigger_bucket) parts.push({ label: 'Bucket', value: event.trigger_bucket })
   if (automaticCheckSummary) parts.push({ label: 'Schedule', value: automaticCheckSummary })
   if (!automaticCheckSummary && event?.state === 'past') parts.push({ label: 'Schedule', value: 'Outside automatic window' })
@@ -267,7 +275,12 @@ const eventScheduleDiagnosticParts = (event, automaticCheckSummary, config) => {
 }
 
 const forceEventTooltip = (event) => {
-  if (!event?.dispatcharr_channel_id) return 'No Dispatcharr channel'
+  if (!event?.dispatcharr_channel_id) {
+    return event?.preflight_kind === 'team'
+      ? 'No matching persistent Dispatcharr team channel'
+      : 'No Dispatcharr channel'
+  }
+  if (event?.state === 'no_event_window') return 'No event evidence'
   if (event?.state === 'no_live_window') return 'No live window'
   if (event?.state === 'no_streams_yet') return 'No channel streams'
   if (event?.state === 'incomplete_team') return 'Incomplete team status'
@@ -397,13 +410,14 @@ export default function TeamarrPreflight() {
     () => sortTeamarrManagedEvents(sourceFilteredPreflightItems),
     [sourceFilteredPreflightItems]
   )
+  const effectivePreflightConfig = status?.config || config || editedConfig || null
   const upcomingViewEvents = useMemo(
-    () => filterTeamarrEventsByView(sortedUpcomingEvents, 'upcoming'),
-    [sortedUpcomingEvents]
+    () => filterTeamarrEventsByView(sortedUpcomingEvents, 'upcoming', effectivePreflightConfig || {}),
+    [sortedUpcomingEvents, effectivePreflightConfig]
   )
   const viewFilteredUpcomingEvents = useMemo(
-    () => filterTeamarrEventsByView(sortedUpcomingEvents, managedEventView),
-    [sortedUpcomingEvents, managedEventView]
+    () => filterTeamarrEventsByView(sortedUpcomingEvents, managedEventView, effectivePreflightConfig || {}),
+    [sortedUpcomingEvents, managedEventView, effectivePreflightConfig]
   )
   const filteredUpcomingEvents = useMemo(
     () => filterTeamarrEventsBySearch(viewFilteredUpcomingEvents, eventSearch),
@@ -439,13 +453,13 @@ export default function TeamarrPreflight() {
   const allManagedEventsCount = upcomingEvents.length
   const allStaticTeamsCount = upcomingTeams.length
   const allPreflightItemsCount = preflightItems.length
-  const pastEventsCount = allPreflightItemsCount - upcomingViewCount
+  const pastEventsCount = preflightItems.filter(item => String(item?.state || '') === 'past').length
   const teamStatus = status?.team_status || {}
   const managedCandidates = Number(status?.managed_candidates ?? upcomingEvents.length)
   const managedEventsSeen = Number(status?.managed_events_seen ?? managedCandidates)
   const managedEventsReturned = Number(status?.managed_events_returned ?? upcomingEvents.length)
   const managedEventsTruncated = Boolean(status?.managed_events_truncated)
-  const nextEvent = useMemo(() => preflightItems.find(event => event.state !== 'past') || null, [preflightItems])
+  const nextEvent = useMemo(() => upcomingViewEvents[0] || null, [upcomingViewEvents])
   const connectorDisplay = connectorStatusDisplay(status?.teamarr_connector || {})
   const ConnectorIcon = connectorDisplay.icon
   const queuedChecksDetail = queuedChecksCount > 0
@@ -1003,7 +1017,9 @@ export default function TeamarrPreflight() {
               <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
                 <div className="min-w-0 space-y-1">
                   <Label className="text-base">Static Teams</Label>
-                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">Reads active Teamarr teams and queues only ready single-channel team checks</p>
+                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">
+                    Uses Teamarr teams with matching Dispatcharr channels; queues only when Teamarr shows a real upcoming or live game window
+                  </p>
                 </div>
                 <Switch
                   className="mt-1 shrink-0"
@@ -1290,7 +1306,7 @@ export default function TeamarrPreflight() {
                               {preflightKindShortLabel(event)}
                             </Badge>
                             <Badge variant={event.state === 'due' ? 'default' : 'secondary'}>
-                              {stateLabel(event.state)}
+                              {stateLabel(event.state, event)}
                             </Badge>
                             {lastPreflightEvent ? (
                               <Badge variant={recentEventBadgeVariant(lastPreflightEvent.type)}>

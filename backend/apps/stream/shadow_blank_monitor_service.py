@@ -34,6 +34,7 @@ from apps.stream.stream_check_utils import (
     _parse_blank_detection,
     _parse_ffmpeg_progress_time,
     _parse_freeze_detection,
+    _probe_stream_for_loops,
 )
 from apps.udi import get_udi_manager
 
@@ -42,6 +43,8 @@ logger = setup_logging(__name__)
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/data"))
 CONFIG_FILE = CONFIG_DIR / "shadow_blank_monitor_config.json"
 MAX_EVENTS = 100
+LOOP_SWITCH_REQUIRES_PRE_PROBE = True
+AGGREGATE_ONLY_VIEWER_GRACE_SECONDS = 2.0
 WATCHER_API_KEY_REQUIRED_CODE = "watcher_api_key_required"
 WATCHER_API_KEY_REQUIRED_MESSAGE = "Watcher API Key is required before Shadow Monitor can start."
 SHADOW_MONITOR_LOOP_ERROR_MESSAGE = "Shadow monitor loop failed; see server logs."
@@ -74,11 +77,24 @@ AUDIO_ERROR_PATTERNS = (
 AUDIO_DECODER_RE = re.compile(r"^\[(?:aac|ac3|eac3|mp2|mp3float|opus|vorbis|flac|truehd|dca)\s+@")
 AUDIO_DECODER_ERROR_PATTERNS = (
     "channel element",
+    "audible artifact",
+    "clipped noise gain",
+    "input buffer exhausted",
     "error decoding",
     "decode error",
     "invalid",
     "not allocated",
 )
+FFMPEG_STREAM_AUDIO_RE = re.compile(r"^\s*Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]+\))?:\s*Audio:", re.IGNORECASE)
+FFMPEG_STREAM_VIDEO_RE = re.compile(r"^\s*Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]+\))?:\s*Video:", re.IGNORECASE)
+FFMPEG_STREAM_MAPPING_RE = re.compile(r"^\s*Stream mapping:", re.IGNORECASE)
+FFMPEG_ZERO_AUDIO_SUMMARY_RE = re.compile(r"\baudio:\s*0KiB\b", re.IGNORECASE)
+PROXY_OUTPUT_FORMAT_ALIASES = {
+    "fmp4": "fmp4",
+    "mp4": "fmp4",
+    "mpegts": "mpegts",
+    "ts": "mpegts",
+}
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -105,6 +121,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "offline_image_reference_hashes": [],
     "offline_image_hash_threshold": 4,
     "offline_image_capture_offset_seconds": 3,
+    "loop_detection_enabled": False,
+    "loop_probe_duration_seconds": 360,
     "next_stream_pre_probe_enabled": False,
     "next_stream_pre_probe_duration_seconds": 8,
     "confirmation_count": 2,
@@ -120,9 +138,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 CONFIG_KEYS = set(DEFAULT_CONFIG)
 WATCH_MODES = {"periodic", "continuous"}
 MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
+    "freeze",
     "offline_image",
     "garbled_audio",
     "silent_audio",
+    "loop",
 }
 DETECTION_REASONS = {
     "blank",
@@ -131,7 +151,13 @@ DETECTION_REASONS = {
     "garbled_audio",
     "silent_audio",
     "offline_image",
+    "loop",
 }
+VIDEO_FAULT_CONFIRMATION_REASONS = {
+    "blank",
+    "freeze",
+}
+VIDEO_FAULT_CONFIRMATION_KEY = "video_fault"
 PENDING_EVENT_REASONS = {
     f"{reason}_pending": reason
     for reason in DETECTION_REASONS
@@ -144,8 +170,9 @@ DETECTION_MEASUREMENT_KEYS = {
         "no_decodable_frames_error",
     ),
     "garbled_audio": ("garbled_audio_error_count", "garbled_audio_error"),
-    "silent_audio": ("silent_audio_duration_secs", "silent_audio_noise_db"),
+    "silent_audio": ("silent_audio_duration_secs", "silent_audio_noise_db", "audio_stream_present"),
     "offline_image": ("offline_image_distance", "offline_image_hash"),
+    "loop": ("loop_duration_secs", "loop_frames_processed"),
 }
 DETECTION_THRESHOLD_KEYS = {
     "blank": (
@@ -165,6 +192,7 @@ DETECTION_THRESHOLD_KEYS = {
         "silent_audio_noise_db",
     ),
     "offline_image": ("offline_image_hash_threshold",),
+    "loop": ("loop_probe_duration_seconds",),
 }
 SWITCH_EVENT_TYPES = {"dry_run_switch", "switch_success", "switch_failed"}
 PRE_PROBE_EVENT_TYPES = {"pre_probe_unavailable", "pre_probe_rejected"}
@@ -180,6 +208,7 @@ PRE_PROBE_METRICS = {
 }
 GUARD_EVENT_TYPES = {
     "cooldown",
+    "loop_pre_probe_required",
     "stale_stream_guard",
     "switch_rate_limited",
     "quality_check_active",
@@ -199,6 +228,7 @@ INT_BOUNDS = {
     "silent_audio_noise_db": (-90, -20),
     "offline_image_hash_threshold": (0, 20),
     "offline_image_capture_offset_seconds": (0, 30),
+    "loop_probe_duration_seconds": (60, 720),
     "next_stream_pre_probe_duration_seconds": (3, 60),
 }
 
@@ -243,6 +273,25 @@ def _coerce_list(value: Any) -> List[Any]:
     if value in (None, ""):
         return []
     return [value]
+
+
+def _coerce_int_set(value: Any) -> set[int]:
+    items: set[int] = set()
+    for item in _coerce_list(value):
+        try:
+            items.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return items
+
+
+def _coerce_text_set(value: Any) -> set[str]:
+    items: set[str] = set()
+    for item in _coerce_list(value):
+        text = str(item).strip()
+        if text:
+            items.add(text)
+    return items
 
 
 def _offline_image_hashes(value: Any) -> List[str]:
@@ -314,6 +363,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["garbled_audio_detection_enabled"] = bool(config.get("garbled_audio_detection_enabled"))
     config["silent_audio_detection_enabled"] = bool(config.get("silent_audio_detection_enabled"))
     config["offline_image_detection_enabled"] = bool(config.get("offline_image_detection_enabled"))
+    config["loop_detection_enabled"] = bool(config.get("loop_detection_enabled"))
     config["next_stream_pre_probe_enabled"] = bool(config.get("next_stream_pre_probe_enabled"))
     config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
     if config["watch_mode"] not in WATCH_MODES:
@@ -362,6 +412,7 @@ class ShadowBlankMonitorService:
         switch_stream: Callable[..., bool] = change_channel_stream,
         base_url_provider: Optional[Callable[[], Optional[str]]] = None,
         blank_probe: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
+        loop_probe: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
         stream_checker_provider: Optional[Callable[[], Any]] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -370,6 +421,7 @@ class ShadowBlankMonitorService:
         self.switch_stream = switch_stream
         self.base_url_provider = base_url_provider or (lambda: get_dispatcharr_config().get_base_url())
         self.blank_probe = blank_probe or self._run_blank_probe
+        self.loop_probe = loop_probe or self._run_loop_probe
         self._uses_default_blank_probe = blank_probe is None
         self.stream_checker_provider = stream_checker_provider or self._default_stream_checker_provider
         self.clock = clock
@@ -380,6 +432,7 @@ class ShadowBlankMonitorService:
         self._config = self._load_config()
         self._events: deque[Dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._watched: Dict[str, Dict[str, Any]] = {}
+        self._last_excluded_active_targets: List[Dict[str, Any]] = []
         self._watcher_absences: Dict[str, Dict[str, Any]] = {}
         self._blank_counts: Dict[str, int] = defaultdict(int)
         self._cooldowns: Dict[str, float] = {}
@@ -470,7 +523,10 @@ class ShadowBlankMonitorService:
                 "channel_ref": target.get("channel_ref"),
             }
 
-        capture = self._capture_offline_image_hash(self._channel_proxy_url(str(channel_uuid)), config)
+        capture = self._capture_offline_image_hash(
+            self._channel_proxy_url(str(channel_uuid), target.get("viewer_output_format")),
+            config,
+        )
         if not capture.get("success"):
             return {
                 "success": False,
@@ -574,6 +630,10 @@ class ShadowBlankMonitorService:
             now = self.clock()
             issue = _watcher_configuration_issue(self._config)
             watched_channels = [self._public_target(target) for target in self._watched.values()]
+            excluded_active_channels = [
+                self._public_excluded_target(target)
+                for target in self._last_excluded_active_targets
+            ]
             cooldowns = []
             for channel_uuid, until in self._cooldowns.items():
                 if until <= now:
@@ -584,17 +644,32 @@ class ShadowBlankMonitorService:
                     "cooldown_seconds": max(0, int(until - now)),
                 })
             recent_events = list(self._events)
+            loop_gate_status = self._loop_detection_gate_status(self._config)
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
                 "dry_run": bool(self._config.get("dry_run")),
+                "watch_mode": self._config.get("watch_mode"),
+                "freeze_detection_enabled": bool(self._config.get("freeze_detection_enabled")),
+                "garbled_audio_detection_enabled": bool(self._config.get("garbled_audio_detection_enabled")),
+                "silent_audio_detection_enabled": bool(self._config.get("silent_audio_detection_enabled")),
+                "offline_image_detection_enabled": bool(self._config.get("offline_image_detection_enabled")),
+                "next_stream_pre_probe_enabled": bool(self._config.get("next_stream_pre_probe_enabled")),
+                "loop_detection_enabled": bool(self._config.get("loop_detection_enabled")),
+                "loop_probe_duration_seconds": int(self._config.get("loop_probe_duration_seconds") or 0),
+                "loop_switch_requires_pre_probe": LOOP_SWITCH_REQUIRES_PRE_PROBE,
+                "loop_switch_gate_satisfied": bool(loop_gate_status.get("switch_gate_satisfied")),
+                "loop_detection_gates": loop_gate_status,
                 "configuration_required": bool(issue),
                 "configuration_issue": issue["code"] if issue else None,
                 "configuration_message": issue["message"] if issue else None,
+                "has_watcher_api_key": bool(str(self._config.get("watcher_api_key") or "").strip()),
                 "last_scan_at": self._last_scan_at,
                 "last_error": self._last_error,
                 "watched_count": len(watched_channels),
                 "watched_channels": watched_channels,
+                "excluded_active_count": len(excluded_active_channels),
+                "excluded_active_channels": excluded_active_channels,
                 "cooldowns": cooldowns,
                 "recent_events": recent_events,
                 "decision_history": recent_events,
@@ -629,7 +704,13 @@ class ShadowBlankMonitorService:
             return int(config.get("watch_gap_seconds") or DEFAULT_CONFIG["watch_gap_seconds"])
         return int(config.get("poll_interval_seconds") or DEFAULT_CONFIG["poll_interval_seconds"])
 
-    def run_once(self, *, force: bool = False) -> Dict[str, Any]:
+    def run_once(
+        self,
+        *,
+        force: bool = False,
+        include_channel_ids: Any = None,
+        include_channel_uuids: Any = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             config = dict(self._config)
         issue = _watcher_configuration_issue(config)
@@ -640,26 +721,59 @@ class ShadowBlankMonitorService:
         if not config.get("enabled") and not force:
             return self.get_status()
 
+        restore_stop_event = False
+        if force and self._stop_event.is_set():
+            # Manual scans are allowed while the background monitor is disabled.
+            # The worker stop event must not abort the one-off continuous probe.
+            self._stop_event.clear()
+            restore_stop_event = True
+
         self._last_scan_at = self.clock()
         try:
             udi = self.udi_provider()
-            targets = self.discover_active_targets(udi, config)
-            self._probe_targets(udi, targets[: config["max_concurrent_watchers"]], config)
+            targets = self.discover_active_targets(
+                udi,
+                config,
+                include_channel_ids=include_channel_ids,
+                include_channel_uuids=include_channel_uuids,
+            )
+            self._probe_targets(
+                udi,
+                targets[: config["max_concurrent_watchers"]],
+                config,
+                single_pass=force,
+            )
             self._last_error = None
         except Exception as exc:
             self._last_error = SHADOW_MONITOR_SCAN_ERROR_MESSAGE
             logger.error(f"Shadow blank monitor scan failed: {exc}", exc_info=True)
+        finally:
+            if restore_stop_event:
+                with self._lock:
+                    if not self._config.get("enabled"):
+                        self._stop_event.set()
         return self.get_status()
 
-    def discover_active_targets(self, udi: Any, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def discover_active_targets(
+        self,
+        udi: Any,
+        config: Dict[str, Any],
+        *,
+        include_channel_ids: Any = None,
+        include_channel_uuids: Any = None,
+    ) -> List[Dict[str, Any]]:
         proxy_status = udi.get_proxy_status() or {}
         channels = udi.get_channels() if hasattr(udi, "get_channels") else []
         by_uuid, by_id = self._index_channels(channels)
         excluded_ids = {int(item) for item in config.get("excluded_channel_ids", [])}
         excluded_uuids = {str(item) for item in config.get("excluded_channel_uuids", [])}
+        included_ids = _coerce_int_set(include_channel_ids)
+        included_uuids = _coerce_text_set(include_channel_uuids)
+        limit_to_included = bool(included_ids or included_uuids)
 
         targets: List[Dict[str, Any]] = []
         watched: Dict[str, Dict[str, Any]] = {}
+        excluded_active_targets: List[Dict[str, Any]] = []
         continuity_events: List[tuple[str, Dict[str, Any], Dict[str, Any]]] = []
         continuous_mode = config.get("watch_mode") == "continuous"
         now = self.clock()
@@ -687,7 +801,7 @@ class ShadowBlankMonitorService:
                 channel = by_uuid[channel_uuid]
 
             numeric_id = self._extract_channel_id(channel, raw_status)
-            if numeric_id in excluded_ids or channel_uuid in excluded_uuids:
+            if limit_to_included and numeric_id not in included_ids and channel_uuid not in included_uuids:
                 continue
 
             real_clients = self._real_client_count(raw_status, config)
@@ -695,13 +809,34 @@ class ShadowBlankMonitorService:
                 continue
             watcher_details = self._watcher_client_details(raw_status, config)
             watcher_clients = int(watcher_details.get("watcher_client_count") or 0)
+            viewer_output_format = self._real_viewer_output_format(raw_status, config)
 
             stream_id = self._extract_stream_id(raw_status)
             current_program = self._current_epg_program(channel, raw_status, numeric_id)
+            if numeric_id in excluded_ids or channel_uuid in excluded_uuids:
+                excluded_target = {
+                    "channel_uuid": channel_uuid,
+                    "channel_id": numeric_id,
+                    "channel_ref": _ref("channel", numeric_id or channel_uuid),
+                    "channel_name": self._channel_display_name(channel, raw_status),
+                    "stream_id": stream_id,
+                    "stream_ref": _ref("stream", stream_id),
+                    "real_client_count": real_clients,
+                    "watcher_client_count": watcher_clients,
+                    "state": raw_status.get("state") or "active",
+                    "exclude_reason": "channel_excluded",
+                }
+                if viewer_output_format:
+                    excluded_target["viewer_output_format"] = viewer_output_format
+                if current_program:
+                    excluded_target["current_program"] = current_program
+                excluded_active_targets.append(excluded_target)
+                continue
             target = {
                 "channel_uuid": channel_uuid,
                 "channel_id": numeric_id,
                 "channel_ref": _ref("channel", numeric_id or channel_uuid),
+                "channel_name": self._channel_display_name(channel, raw_status),
                 "stream_id": stream_id,
                 "stream_ref": _ref("stream", stream_id),
                 "real_client_count": real_clients,
@@ -709,6 +844,8 @@ class ShadowBlankMonitorService:
                 "state": raw_status.get("state") or "active",
                 "cooldown_seconds": self._cooldown_remaining(channel_uuid),
             }
+            if viewer_output_format:
+                target["viewer_output_format"] = viewer_output_format
             if current_program:
                 target["current_program"] = current_program
             target.update(watcher_details)
@@ -777,6 +914,7 @@ class ShadowBlankMonitorService:
 
         with self._lock:
             self._watched = watched
+            self._last_excluded_active_targets = excluded_active_targets
             self._watcher_absences = next_absences if continuous_mode else {}
         for event_type, event_target, details in continuity_events:
             if event_type == "watcher_recovered":
@@ -785,10 +923,17 @@ class ShadowBlankMonitorService:
             self._record_event(event_type, event_target, details)
         return targets
 
-    def _probe_targets(self, udi: Any, targets: Iterable[Dict[str, Any]], config: Dict[str, Any]) -> None:
+    def _probe_targets(
+        self,
+        udi: Any,
+        targets: Iterable[Dict[str, Any]],
+        config: Dict[str, Any],
+        *,
+        single_pass: bool = False,
+    ) -> None:
         targets = list(targets)
         threads: List[threading.Thread] = []
-        wait_for_probes = not (
+        wait_for_probes = single_pass or not (
             config.get("watch_mode") == "continuous" and self._uses_default_blank_probe
         )
         for target in targets:
@@ -814,7 +959,7 @@ class ShadowBlankMonitorService:
 
             thread = threading.Thread(
                 target=self._probe_target,
-                args=(udi, target, dict(config)),
+                args=(udi, target, dict(config), single_pass),
                 name=f"ShadowBlankProbe-{channel_uuid[:8]}",
                 daemon=True,
             )
@@ -825,13 +970,21 @@ class ShadowBlankMonitorService:
             for thread in threads:
                 thread.join()
 
-    def _probe_target(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> None:
+    def _probe_target(
+        self,
+        udi: Any,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        single_pass: bool = False,
+    ) -> None:
         channel_uuid = target["channel_uuid"]
         try:
             first_probe = True
             while first_probe or not self._stop_event.is_set():
                 first_probe = False
                 should_continue = self._probe_target_once(udi, target, config)
+                if single_pass:
+                    break
                 if not (
                     should_continue
                     and config.get("watch_mode") == "continuous"
@@ -842,7 +995,7 @@ class ShadowBlankMonitorService:
                     break
 
                 fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                if self._real_client_count(fresh_status, config) <= 0:
+                if self._real_client_count(fresh_status, config, target) <= 0:
                     self._reset_blank_count(channel_uuid)
                     self._clear_switch_attempts(channel_uuid)
                     self._record_event("viewer_left", target, {})
@@ -851,7 +1004,10 @@ class ShadowBlankMonitorService:
                     break
 
                 target = dict(target)
-                target["real_client_count"] = self._real_client_count(fresh_status, config)
+                target["real_client_count"] = self._real_client_count(fresh_status, config, target)
+                viewer_output_format = self._real_viewer_output_format(fresh_status, config)
+                if viewer_output_format:
+                    target["viewer_output_format"] = viewer_output_format
                 target.update(self._watcher_client_details(fresh_status, config))
                 watcher_count = int(target.get("watcher_client_count") or 0)
                 target["watcher_state"] = "watching" if watcher_count > 0 else "reconnecting"
@@ -892,8 +1048,14 @@ class ShadowBlankMonitorService:
         try:
             target.pop("media_recovery_guard_reason", None)
             target.pop("media_recovery_guard_bypass", None)
-            proxy_url = self._channel_proxy_url(channel_uuid)
-            if config.get("watch_mode") == "continuous" and self._uses_default_blank_probe:
+            target["active_probe_started_at"] = self.clock()
+            proxy_url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
+            use_continuous_blank_probe = (
+                config.get("watch_mode") == "continuous"
+                and self._uses_default_blank_probe
+                and not config.get("loop_detection_enabled")
+            )
+            if use_continuous_blank_probe:
                 result = self._run_blank_probe_until_viewer_left(proxy_url, config, udi, target)
             else:
                 result = self.blank_probe(proxy_url, config)
@@ -912,6 +1074,7 @@ class ShadowBlankMonitorService:
                 config.get("offline_image_detection_enabled")
                 and result.get("offline_image_detected")
             )
+            loop = False
             detection_reason = next(
                 (
                     reason
@@ -943,9 +1106,15 @@ class ShadowBlankMonitorService:
                 "silent_audio_detected": silent_audio,
                 "silent_audio_duration_secs": result.get("silent_audio_duration_secs"),
                 "silent_audio_noise_db": result.get("silent_audio_noise_db"),
+                "audio_stream_present": result.get("audio_stream_present"),
                 "offline_image_detected": offline_image,
                 "offline_image_hash": result.get("offline_image_hash"),
                 "offline_image_distance": result.get("offline_image_distance"),
+                "loop_probe_ran": bool(result.get("loop_probe_ran")),
+                "loop_detected": loop,
+                "loop_duration_secs": result.get("loop_duration_secs"),
+                "loop_frames_processed": result.get("loop_frames_processed"),
+                "loop_probe_error": result.get("loop_probe_error"),
             }
             target["last_probe_thresholds"] = self._detection_thresholds(config)
 
@@ -954,7 +1123,7 @@ class ShadowBlankMonitorService:
             else:
                 fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
 
-            if result.get("viewer_left") or self._real_client_count(fresh_status, config) <= 0:
+            if result.get("viewer_left") or self._real_client_count(fresh_status, config, target) <= 0:
                 self._reset_blank_count(channel_uuid)
                 self._clear_switch_attempts(channel_uuid)
                 target.pop("media_recovery_guard_observed", None)
@@ -962,6 +1131,30 @@ class ShadowBlankMonitorService:
                 with self._lock:
                     self._watched.pop(channel_uuid, None)
                 return False
+
+            if not detection_reason:
+                loop_result = self._run_loop_probe_if_enabled(proxy_url, target, config)
+                if loop_result:
+                    result.update(loop_result)
+                    loop = bool(loop_result.get("loop_detected"))
+                    target["last_probe"].update({
+                        "loop_probe_ran": bool(loop_result.get("loop_probe_ran")),
+                        "loop_detected": loop,
+                        "loop_duration_secs": loop_result.get("loop_duration_secs"),
+                        "loop_frames_processed": loop_result.get("loop_frames_processed"),
+                        "loop_probe_error": loop_result.get("loop_probe_error"),
+                    })
+                    if loop:
+                        detection_reason = "loop"
+                    fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                    if self._real_client_count(fresh_status, config, target) <= 0:
+                        self._reset_blank_count(channel_uuid)
+                        self._clear_switch_attempts(channel_uuid)
+                        target.pop("media_recovery_guard_observed", None)
+                        self._record_event("viewer_left", target, {})
+                        with self._lock:
+                            self._watched.pop(channel_uuid, None)
+                        return False
 
             if not detection_reason:
                 self._reset_blank_count(channel_uuid)
@@ -1038,7 +1231,7 @@ class ShadowBlankMonitorService:
     def _handle_confirmed_blank(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any], *, reason: str = "blank") -> None:
         channel_uuid = target["channel_uuid"]
         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-        if self._real_client_count(fresh_status, config) <= 0:
+        if self._real_client_count(fresh_status, config, target) <= 0:
             self._reset_blank_count(channel_uuid)
             self._clear_switch_attempts(channel_uuid)
             self._record_event("viewer_left", target, {})
@@ -1093,7 +1286,24 @@ class ShadowBlankMonitorService:
             self._record_event(
                 "stale_stream_guard",
                 target,
-                {"current_stream_ref": _ref("stream", fresh_stream_id)},
+                {
+                    "reason": reason,
+                    "current_stream_ref": _ref("stream", fresh_stream_id),
+                },
+            )
+            return
+
+        if self._loop_switch_pre_probe_required(config, reason):
+            self._set_cooldown(channel_uuid, config)
+            self._reset_blank_count(channel_uuid)
+            self._record_event(
+                "loop_pre_probe_required",
+                target,
+                {
+                    "reason": reason,
+                    "next_stream_pre_probe_enabled": False,
+                    "operator_action": "enable_next_stream_pre_probe",
+                },
             )
             return
 
@@ -1222,6 +1432,35 @@ class ShadowBlankMonitorService:
             None,
         )
 
+    @staticmethod
+    def _loop_switch_pre_probe_required(config: Dict[str, Any], reason: str) -> bool:
+        return (
+            str(reason or "") == "loop"
+            and LOOP_SWITCH_REQUIRES_PRE_PROBE
+            and not bool(config.get("next_stream_pre_probe_enabled"))
+        )
+
+    @staticmethod
+    def _loop_detection_gate_status(config: Dict[str, Any]) -> Dict[str, Any]:
+        loop_enabled = bool(config.get("loop_detection_enabled"))
+        pre_probe_enabled = bool(config.get("next_stream_pre_probe_enabled"))
+        return {
+            "enabled": loop_enabled,
+            "active_real_viewer_required": True,
+            "confirmation_required": True,
+            "cooldown_required": True,
+            "switch_rate_limit_required": True,
+            "stale_stream_guard_required": True,
+            "watcher_recovery_guard_required": True,
+            "next_stream_pre_probe_required": LOOP_SWITCH_REQUIRES_PRE_PROBE,
+            "next_stream_pre_probe_enabled": pre_probe_enabled,
+            "switch_gate_satisfied": not (
+                loop_enabled
+                and LOOP_SWITCH_REQUIRES_PRE_PROBE
+                and not pre_probe_enabled
+            ),
+        }
+
     def _choose_preprobed_alternative_stream(
         self,
         udi: Any,
@@ -1288,7 +1527,11 @@ class ShadowBlankMonitorService:
                 "no_decodable_frames_detected": bool(probe_result.get("no_decodable_frames_detected")),
                 "garbled_audio_detected": bool(probe_result.get("garbled_audio_detected")),
                 "silent_audio_detected": bool(probe_result.get("silent_audio_detected")),
+                "audio_stream_present": probe_result.get("audio_stream_present"),
                 "offline_image_detected": bool(probe_result.get("offline_image_detected")),
+                "loop_probe_ran": bool(probe_result.get("loop_probe_ran")),
+                "loop_detected": bool(probe_result.get("loop_detected")),
+                "loop_duration_secs": probe_result.get("loop_duration_secs"),
             })
             last_details = details
             if rejection_reason:
@@ -1479,7 +1722,11 @@ class ShadowBlankMonitorService:
         pre_probe_config["probe_duration_seconds"] = int(
             config.get("next_stream_pre_probe_duration_seconds", 8)
         )
-        return self._run_blank_probe(url, pre_probe_config)
+        result = self._run_blank_probe(url, pre_probe_config)
+        if self._pre_probe_rejection_reason(result):
+            return result
+        result.update(self._run_loop_probe_if_enabled(url, {"channel_ref": "pre_probe"}, pre_probe_config))
+        return result
 
     @staticmethod
     def _pre_probe_rejection_reason(result: Dict[str, Any]) -> Optional[str]:
@@ -1492,6 +1739,7 @@ class ShadowBlankMonitorService:
             "no_decodable_frames",
             "garbled_audio",
             "silent_audio",
+            "loop",
         ):
             if result.get(f"{reason}_detected"):
                 return reason
@@ -1501,30 +1749,66 @@ class ShadowBlankMonitorService:
     def _detection_count_key(channel_uuid: str, reason: str) -> str:
         return f"{channel_uuid}:{reason or 'blank'}"
 
+    @staticmethod
+    def _confirmation_count_reason(reason: str) -> str:
+        if reason in VIDEO_FAULT_CONFIRMATION_REASONS:
+            return VIDEO_FAULT_CONFIRMATION_KEY
+        return reason or "blank"
+
     def _reset_blank_count(self, channel_uuid: str) -> None:
         with self._lock:
             self._blank_counts.pop(channel_uuid, None)
+            self._blank_counts.pop(
+                self._detection_count_key(channel_uuid, VIDEO_FAULT_CONFIRMATION_KEY),
+                None,
+            )
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "blank"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "freeze"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "garbled_audio"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "silent_audio"), None)
             self._blank_counts.pop(self._detection_count_key(channel_uuid, "offline_image"), None)
+            self._blank_counts.pop(self._detection_count_key(channel_uuid, "loop"), None)
 
     def _reset_detection_state(self, channel_uuid: str) -> None:
         self._reset_blank_count(channel_uuid)
         self._clear_switch_attempts(channel_uuid)
 
     def _increment_blank_count(self, channel_uuid: str, reason: str = "blank") -> int:
-        key = self._detection_count_key(channel_uuid, reason)
+        count_reason = self._confirmation_count_reason(reason)
+        key = self._detection_count_key(channel_uuid, count_reason)
         with self._lock:
+            if count_reason == VIDEO_FAULT_CONFIRMATION_KEY and not self._blank_counts.get(key):
+                self._blank_counts[key] = max(
+                    int(
+                        self._blank_counts.get(self._detection_count_key(channel_uuid, "blank"))
+                        or 0
+                    ),
+                    int(
+                        self._blank_counts.get(self._detection_count_key(channel_uuid, "freeze"))
+                        or 0
+                    ),
+                )
             self._blank_counts[key] += 1
             return self._blank_counts[key]
 
     def _current_detection_count(self, channel_uuid: str, reason: str = "blank") -> int:
-        key = self._detection_count_key(channel_uuid, reason)
+        count_reason = self._confirmation_count_reason(reason)
+        key = self._detection_count_key(channel_uuid, count_reason)
         with self._lock:
-            return int(self._blank_counts.get(key) or 0)
+            current_count = int(self._blank_counts.get(key) or 0)
+            if current_count or count_reason != VIDEO_FAULT_CONFIRMATION_KEY:
+                return current_count
+            return max(
+                int(
+                    self._blank_counts.get(self._detection_count_key(channel_uuid, "blank"))
+                    or 0
+                ),
+                int(
+                    self._blank_counts.get(self._detection_count_key(channel_uuid, "freeze"))
+                    or 0
+                ),
+            )
 
     @staticmethod
     def _required_confirmations(
@@ -1560,6 +1844,8 @@ class ShadowBlankMonitorService:
             }
         else:
             fresh_details = self._watcher_client_details(fresh_status, config)
+            if self._watcher_client_started_with_current_probe(target, fresh_details):
+                return None
             target_watcher_ref = target.get("watcher_client_ref")
             fresh_watcher_ref = fresh_details.get("watcher_client_ref")
             if target_watcher_ref and fresh_watcher_ref and fresh_watcher_ref != target_watcher_ref:
@@ -1576,6 +1862,18 @@ class ShadowBlankMonitorService:
                 }
 
         return guard_details
+
+    @staticmethod
+    def _watcher_client_started_with_current_probe(
+        target: Dict[str, Any],
+        watcher_details: Dict[str, Any],
+    ) -> bool:
+        try:
+            probe_started = float(target.get("active_probe_started_at"))
+            watcher_connected = float(watcher_details.get("watcher_connected_at"))
+        except (TypeError, ValueError):
+            return False
+        return watcher_connected >= probe_started - 0.5
 
     def _media_recovery_guard_bypass_details(
         self,
@@ -1597,7 +1895,7 @@ class ShadowBlankMonitorService:
             return None
         if require_confirmed and confirmed_count < required_confirmations:
             return None
-        if self._real_client_count(fresh_status, config) <= 0:
+        if self._real_client_count(fresh_status, config, target) <= 0:
             return None
 
         target_stream_id = target.get("stream_id")
@@ -1690,11 +1988,15 @@ class ShadowBlankMonitorService:
             self._set_cooldown(channel_uuid, config)
         self._record_event("watcher_recovery_guard", target, guard_details)
 
-    def _channel_proxy_url(self, channel_uuid: str) -> str:
+    def _channel_proxy_url(self, channel_uuid: str, output_format: Optional[str] = None) -> str:
         base_url = (self.base_url_provider() or "").rstrip("/")
         if not base_url:
             raise RuntimeError("Dispatcharr base URL is not configured")
-        return f"{base_url}/proxy/ts/stream/{channel_uuid}"
+        url = f"{base_url}/proxy/ts/stream/{channel_uuid}"
+        canonical_format = self._normalize_proxy_output_format(output_format)
+        if canonical_format:
+            return f"{url}?output_format={canonical_format}"
+        return url
 
     @staticmethod
     def _blank_probe_command(url: str, config: Dict[str, Any], *, continuous: bool = False) -> tuple[List[str], int]:
@@ -1750,6 +2052,40 @@ class ShadowBlankMonitorService:
         lowered = (line or "").lower()
         return any(pattern in lowered for pattern in AUDIO_MISSING_PATTERNS) and (
             "audio" in lowered or ":a" in lowered
+        )
+
+    @staticmethod
+    def _line_has_audio_stream(line: str) -> bool:
+        return FFMPEG_STREAM_AUDIO_RE.search(line or "") is not None
+
+    @staticmethod
+    def _line_has_video_stream(line: str) -> bool:
+        return FFMPEG_STREAM_VIDEO_RE.search(line or "") is not None
+
+    @staticmethod
+    def _line_marks_stream_mapping(line: str) -> bool:
+        return FFMPEG_STREAM_MAPPING_RE.search(line or "") is not None
+
+    @staticmethod
+    def _output_has_video_without_audio(output: str) -> bool:
+        saw_video_stream = False
+        saw_audio_stream = False
+        saw_stream_mapping = False
+        saw_frame_progress = False
+        saw_zero_audio_summary = False
+        for line in (output or "").splitlines():
+            if ShadowBlankMonitorService._line_has_audio_stream(line):
+                saw_audio_stream = True
+            if ShadowBlankMonitorService._line_has_video_stream(line):
+                saw_video_stream = True
+            if ShadowBlankMonitorService._line_marks_stream_mapping(line):
+                saw_stream_mapping = True
+            if FFMPEG_FRAME_RE.search(line):
+                saw_frame_progress = True
+            if FFMPEG_ZERO_AUDIO_SUMMARY_RE.search(line):
+                saw_zero_audio_summary = True
+        return saw_video_stream and not saw_audio_stream and (
+            saw_stream_mapping or saw_frame_progress or saw_zero_audio_summary
         )
 
     @staticmethod
@@ -1827,11 +2163,18 @@ class ShadowBlankMonitorService:
                     pass
                 active_silence_start = None
 
+        if not audio_missing and ShadowBlankMonitorService._output_has_video_without_audio(output):
+            audio_missing = True
+
         if active_silence_start is not None:
             longest_silence = max(longest_silence, max(0.0, float(observed_duration or 0.0) - active_silence_start))
 
         result["audio_stream_present"] = not audio_missing if (audio_missing or garbled_count or longest_silence) else None
         if audio_missing:
+            if config.get("silent_audio_detection_enabled"):
+                result["silent_audio_detected"] = True
+                result["silent_audio_duration_secs"] = round(max(0.0, float(observed_duration or 0.0)), 3)
+                result["silent_audio_noise_db"] = int(config.get("silent_audio_noise_db", DEFAULT_CONFIG["silent_audio_noise_db"]))
             return result
 
         if config.get("garbled_audio_detection_enabled"):
@@ -1961,6 +2304,54 @@ class ShadowBlankMonitorService:
         if best_distance <= int(config.get("offline_image_hash_threshold", 4)):
             result["offline_image_detected"] = True
         return result
+
+    @staticmethod
+    def _watcher_probe_headers(config: Dict[str, Any]) -> str:
+        api_key = config.get("watcher_api_key")
+        if not api_key:
+            return ""
+        return f"X-API-Key: {api_key}\r\nAuthorization: ApiKey {api_key}\r\n"
+
+    def _run_loop_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        stream_tag = _ref("shadow-loop-url", url)
+        loop_detected, loop_duration, frames = _probe_stream_for_loops(
+            url=url,
+            stream_tag=stream_tag,
+            probe_duration=int(config.get("loop_probe_duration_seconds", 120)),
+            user_agent=config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"],
+            headers=self._watcher_probe_headers(config) or None,
+        )
+        return {
+            "loop_probe_ran": True,
+            "loop_detected": bool(loop_detected),
+            "loop_duration_secs": loop_duration,
+            "loop_frames_processed": frames,
+        }
+
+    def _run_loop_probe_if_enabled(
+        self,
+        url: str,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not config.get("loop_detection_enabled"):
+            return {}
+        try:
+            result = dict(self.loop_probe(url, config) or {})
+            result.setdefault("loop_probe_ran", True)
+            result["loop_detected"] = bool(result.get("loop_detected"))
+            return result
+        except Exception as exc:
+            logger.warning(
+                "Shadow loop probe failed for %s: %s",
+                target.get("channel_ref") or _ref("channel", target.get("channel_uuid")),
+                exc,
+            )
+            return {
+                "loop_probe_ran": False,
+                "loop_detected": False,
+                "loop_probe_error": type(exc).__name__,
+            }
 
     @staticmethod
     def _parse_no_decodable_frames_detection(
@@ -2182,6 +2573,9 @@ class ShadowBlankMonitorService:
             active_freeze_start: Optional[float] = None
             active_freeze_wall: Optional[float] = None
             last_viewer_poll = 0.0
+            saw_audio_stream = False
+            saw_video_stream = False
+            saw_stream_mapping = False
 
             def observed_duration(media_start: Optional[float], wall_start: Optional[float]) -> float:
                 media_duration = 0.0
@@ -2213,6 +2607,13 @@ class ShadowBlankMonitorService:
                         break
                     lines.append(line)
 
+                    if self._line_has_audio_stream(line):
+                        saw_audio_stream = True
+                    if self._line_has_video_stream(line):
+                        saw_video_stream = True
+                    if self._line_marks_stream_mapping(line):
+                        saw_stream_mapping = True
+
                     progress_time = _parse_ffmpeg_progress_time(line)
                     if progress_time is not None:
                         last_media_time = max(last_media_time, progress_time)
@@ -2231,6 +2632,12 @@ class ShadowBlankMonitorService:
                                 break
 
                     if config.get("silent_audio_detection_enabled"):
+                        if saw_video_stream and not saw_audio_stream and (
+                            saw_stream_mapping or FFMPEG_FRAME_RE.search(line)
+                        ):
+                            if mark_detection("silent_audio", max(0.0, now - probe_started_wall)):
+                                break
+
                         silence_start = SILENCE_START_RE.search(line)
                         if silence_start:
                             try:
@@ -2376,7 +2783,7 @@ class ShadowBlankMonitorService:
                     if now - last_viewer_poll >= 1.0:
                         last_viewer_poll = now
                         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                        if self._real_client_count(fresh_status, config) <= 0:
+                        if self._real_client_count(fresh_status, config, target) <= 0:
                             viewer_left = True
                             process.terminate()
                             break
@@ -2396,6 +2803,7 @@ class ShadowBlankMonitorService:
                 process.wait(timeout=5)
                 stopped = True
 
+            reader.join(timeout=1.0)
             while True:
                 try:
                     lines.append(line_queue.get_nowait())
@@ -2431,7 +2839,7 @@ class ShadowBlankMonitorService:
                 while no_decodable_probe_duration < no_decodable_required and not self._stop_event.is_set():
                     try:
                         fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
-                        if self._real_client_count(fresh_status, config) <= 0:
+                        if self._real_client_count(fresh_status, config, target) <= 0:
                             viewer_left = True
                             break
                     except Exception as exc:
@@ -2562,6 +2970,19 @@ class ShadowBlankMonitorService:
             return None
 
     @staticmethod
+    def _channel_display_name(channel: Optional[Dict[str, Any]], status: Dict[str, Any]) -> Optional[str]:
+        for value in (
+            (channel or {}).get("name"),
+            (channel or {}).get("channel_name"),
+            status.get("channel_name"),
+            status.get("name"),
+        ):
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
     def _client_text(client: Any) -> str:
         if isinstance(client, dict):
             values = [
@@ -2574,7 +2995,43 @@ class ShadowBlankMonitorService:
             return " ".join(str(value) for value in values if value is not None)
         return str(client)
 
-    def _real_client_count(self, status: Dict[str, Any], config: Dict[str, Any]) -> int:
+    @staticmethod
+    def _normalize_proxy_output_format(value: Any) -> Optional[str]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return None
+        # Dispatcharr can expose resolved format keys such as fmp4:p21.
+        text = text.split(":", 1)[0].strip()
+        return PROXY_OUTPUT_FORMAT_ALIASES.get(text)
+
+    def _real_viewer_output_format(self, status: Dict[str, Any], config: Dict[str, Any]) -> Optional[str]:
+        marker = str(config.get("watcher_user_agent") or "").lower()
+        clients = status.get("clients")
+        if isinstance(clients, dict):
+            clients = list(clients.values())
+        if isinstance(clients, list):
+            for client in clients:
+                if marker and marker in self._client_text(client).lower():
+                    continue
+                if not isinstance(client, dict):
+                    continue
+                for key in ("output_format", "resolved_output_format", "container", "format"):
+                    normalized = self._normalize_proxy_output_format(client.get(key))
+                    if normalized:
+                        return normalized
+
+        for key in ("output_format", "resolved_output_format", "container", "format"):
+            normalized = self._normalize_proxy_output_format(status.get(key))
+            if normalized:
+                return normalized
+        return None
+
+    def _real_client_count(
+        self,
+        status: Dict[str, Any],
+        config: Dict[str, Any],
+        target: Optional[Dict[str, Any]] = None,
+    ) -> int:
         marker = str(config.get("watcher_user_agent") or "").lower()
         clients = status.get("clients")
         if isinstance(clients, dict):
@@ -2588,13 +3045,39 @@ class ShadowBlankMonitorService:
                 real += 1
             return real
 
+        aggregate_count: Optional[int] = None
         for key in ("real_client_count", "client_count", "current_viewers", "viewer_count"):
             try:
                 count = int(status.get(key))
-                if count > 0:
-                    return count
             except (TypeError, ValueError):
                 continue
+            if count >= 0:
+                aggregate_count = count
+                break
+
+        if target is None:
+            if aggregate_count is not None:
+                return aggregate_count
+            return 1 if self._is_status_active(status) else 0
+
+        probe_started = target.get("active_probe_started_at")
+        try:
+            probe_age = self.clock() - float(probe_started)
+        except (TypeError, ValueError):
+            probe_age = 0.0
+        probe_is_established = probe_started is not None and probe_age >= AGGREGATE_ONLY_VIEWER_GRACE_SECONDS
+
+        if aggregate_count is not None:
+            if not probe_is_established:
+                return aggregate_count
+            # When Dispatcharr does not expose per-client details, a continuous
+            # Shadow probe can be the only remaining downstream client. In that
+            # ambiguous state we fail closed: one aggregate client means watcher
+            # only, two or more means at least one real viewer remains.
+            return max(0, aggregate_count - 1)
+
+        if probe_is_established and self._is_status_active(status):
+            return 0
         return 1 if self._is_status_active(status) else 0
 
     def _watcher_client_count(self, status: Dict[str, Any], config: Dict[str, Any]) -> int:
@@ -2754,6 +3237,7 @@ class ShadowBlankMonitorService:
             "dry_run_switches": 0,
             "skipped_switches": 0,
             "pre_probe_prevented_switches": 0,
+            "loop_pre_probe_required_skips": 0,
             "recovery_guard_prevented_switches": 0,
             "stale_stream_guard_skips": 0,
             "cooldown_skips": 0,
@@ -2790,6 +3274,9 @@ class ShadowBlankMonitorService:
             elif event_type == "watcher_recovery_guard":
                 summary["skipped_switches"] += 1
                 summary["recovery_guard_prevented_switches"] += 1
+            elif event_type == "loop_pre_probe_required":
+                summary["skipped_switches"] += 1
+                summary["loop_pre_probe_required_skips"] += 1
             elif event_type == "stale_stream_guard":
                 summary["skipped_switches"] += 1
                 summary["stale_stream_guard_skips"] += 1
@@ -2808,6 +3295,7 @@ class ShadowBlankMonitorService:
 
         summary["prevented_false_switches"] = (
             summary["pre_probe_prevented_switches"]
+            + summary["loop_pre_probe_required_skips"]
             + summary["recovery_guard_prevented_switches"]
             + summary["stale_stream_guard_skips"]
             + summary["rate_limited_skips"]
@@ -3049,6 +3537,7 @@ class ShadowBlankMonitorService:
     def _public_target(target: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {
             "channel_ref",
+            "channel_id",
             "stream_ref",
             "real_client_count",
             "watcher_client_count",
@@ -3062,9 +3551,27 @@ class ShadowBlankMonitorService:
             "last_watcher_client_ref",
             "state",
             "current_program",
+            "channel_name",
             "cooldown_seconds",
+            "viewer_output_format",
             "last_probe",
             "last_event",
+        }
+        return {key: value for key, value in target.items() if key in allowed}
+
+    @staticmethod
+    def _public_excluded_target(target: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = {
+            "channel_ref",
+            "channel_id",
+            "channel_name",
+            "stream_ref",
+            "real_client_count",
+            "watcher_client_count",
+            "state",
+            "current_program",
+            "viewer_output_format",
+            "exclude_reason",
         }
         return {key: value for key, value in target.items() if key in allowed}
 

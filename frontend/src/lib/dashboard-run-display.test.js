@@ -179,6 +179,39 @@ describe('dashboard stream checker run display', () => {
     expect(display.displayStageId).toBe('settings')
   })
 
+  it('does not revive stale single-channel progress as an active dashboard run', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'skipped',
+      runStage: 'skipped',
+      batchTotal: 0,
+      completed: 0,
+      now: Date.parse('2026-05-29T18:25:41Z'),
+      streamCheckerStatus: {
+        checking: false,
+        stream_checking_mode: false,
+        progress_stale: true,
+        queue: {
+          queue_size: 0,
+          in_progress: 0,
+          current_channel: null,
+        },
+        progress: {
+          is_single_channel_check: true,
+          stale: true,
+          stale_reason: 'no_active_worker',
+          timestamp: '2026-05-29T18:04:41Z',
+          channel_name: 'Single Channel',
+          step: 'Starting single channel check',
+        },
+      },
+    })
+
+    expect(display.isProcessing).toBe(false)
+    expect(display.streamCheckerOnlyActive).toBe(false)
+    expect(display.streamQueueActive).toBe(false)
+    expect(display.stageCards).toEqual([])
+  })
+
   it('maps single-channel matching progress without reusing stale completed queue totals', () => {
     const display = getStreamCheckerRunDisplay({
       runState: 'skipped',

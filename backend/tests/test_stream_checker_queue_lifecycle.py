@@ -572,6 +572,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             program_name='Home vs Away',
             is_epg_scheduled=True,
             forced_profile_id='42',
+            run_mode='teamarr_preflight',
         )
         teamarr_service.record_queued_check_result.assert_called_once()
         queued_metadata, result = teamarr_service.record_queued_check_result.call_args.args
@@ -735,6 +736,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             is_epg_scheduled=True,
             forced_profile_id='42',
             provider_limit_override=True,
+            run_mode='teamarr_preflight',
         )
         service.check_queue.mark_completed.assert_called_once_with(8441)
 
@@ -849,7 +851,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['queue']['started_at'], '2026-05-29T18:03:41')
         self.assertTrue(status['stream_checking_mode'])
 
-    def test_get_status_clears_stale_progress_when_no_check_is_active(self):
+    def _service_for_idle_progress_status(self, progress_payload):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.check_queue = StreamCheckQueue(max_size=10)
         service.lock = threading.Lock()
@@ -860,19 +862,155 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.config.get.side_effect = lambda key, default=None: default
         service.connectivity_guard_status = {'ok': True}
         service.progress = Mock()
-        service.progress.get.return_value = {
-            'status': 'analyzing',
-            'channel_id': 1946,
-            'streams_detail': [{'id': 1, 'status': 'checking'}],
-        }
+        service.progress.get.return_value = progress_payload
         service.update_tracker = Mock()
         service.update_tracker.get_last_global_check.return_value = None
+        return service
+
+    def test_get_status_marks_stale_batch_progress_when_no_check_is_active(self):
+        service = self._service_for_idle_progress_status({
+            'status': 'analyzing',
+            'channel_id': 1946,
+            'timestamp': datetime.now().isoformat(),
+            'streams_detail': [{'id': 1, 'status': 'checking'}],
+        })
 
         status = service.get_status()
 
         self.assertFalse(status['stream_checking_mode'])
-        self.assertIsNone(status['progress'])
-        service.progress.clear.assert_called_once()
+        self.assertTrue(status['progress_stale'])
+        self.assertEqual(status['progress_stale_details']['reason'], 'idle_batch_progress')
+        self.assertTrue(status['progress']['stale'])
+        self.assertEqual(status['progress']['stale_reason'], 'idle_batch_progress')
+        service.progress.clear.assert_not_called()
+
+    def test_get_status_keeps_recent_single_channel_progress_active_when_mode_lags(self):
+        service = self._service_for_idle_progress_status({
+            'status': 'preparing',
+            'channel_id': 1946,
+            'is_single_channel_check': True,
+            'timestamp': (datetime.now() - timedelta(seconds=60)).isoformat(),
+            'streams_detail': [{'id': 1, 'status': 'pending'}],
+        })
+
+        status = service.get_status()
+
+        self.assertTrue(status['stream_checking_mode'])
+        self.assertFalse(status['progress_stale'])
+        self.assertFalse(status['progress_stale_details'])
+        self.assertFalse(status['progress'].get('stale', False))
+        service.progress.clear.assert_not_called()
+
+    def test_get_status_marks_old_single_channel_progress_stale(self):
+        service = self._service_for_idle_progress_status({
+            'status': 'checking',
+            'channel_id': 1946,
+            'is_single_channel_check': True,
+            'timestamp': (datetime.now() - timedelta(minutes=20)).isoformat(),
+            'streams_detail': [{'id': 1, 'status': 'checking'}],
+        })
+
+        status = service.get_status()
+
+        self.assertFalse(status['stream_checking_mode'])
+        self.assertTrue(status['progress_stale'])
+        self.assertEqual(status['progress_stale_details']['reason'], 'no_active_worker')
+        self.assertTrue(status['progress']['stale'])
+        self.assertEqual(status['progress']['stale_reason'], 'no_active_worker')
+        self.assertGreater(status['progress']['stale_age_seconds'], status['progress']['stale_after_seconds'])
+        service.progress.clear.assert_not_called()
+
+    def test_get_status_reports_read_only_dispatcharr_status_stale_risk(self):
+        service = self._service_for_idle_progress_status(None)
+
+        class FakeUdi:
+            def is_network_ready(self):
+                return True
+
+            def is_automation_busy(self):
+                return False
+
+            def get_observability_status(self):
+                return {
+                    'network_ready': True,
+                    'init_in_progress': False,
+                    'refresh_running': False,
+                    'last_refresh_time': '2026-06-13T12:07:27',
+                    'last_refresh_age_seconds': 60,
+                }
+
+            def get_m3u_accounts(self):
+                return [
+                    {
+                        'id': 5,
+                        'name': 'Provider A',
+                        'is_active': True,
+                        'status': 'fetching',
+                        'last_message': 'Processing completed in 168.5 seconds. Streams: 0 created, 10 updated.',
+                        'updated_at': '2026-06-13T08:02:50Z',
+                    },
+                    {
+                        'id': 7,
+                        'name': 'Provider B',
+                        'is_active': True,
+                        'status': 'success',
+                        'last_message': 'Processing completed in 140.9 seconds.',
+                        'updated_at': '2026-06-13T10:02:28Z',
+                    },
+                ]
+
+        with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=FakeUdi()):
+            status = service.get_status()
+
+        diagnostics = status['external_stale_diagnostics']
+        self.assertEqual(diagnostics['status'], 'stale_risk')
+        self.assertTrue(diagnostics['read_only'])
+        self.assertTrue(diagnostics['stale_status_suspected'])
+        self.assertFalse(diagnostics['actions']['dispatcharr_mutated'])
+        self.assertFalse(diagnostics['actions']['dispatcharr_restart_attempted'])
+        self.assertTrue(diagnostics['actions']['repair_requires_operator_approval'])
+        self.assertEqual(diagnostics['m3u_accounts']['status_counts'], {'fetching': 1, 'success': 1})
+        self.assertEqual(diagnostics['m3u_accounts']['stale_suspected_count'], 1)
+        self.assertEqual(
+            diagnostics['m3u_accounts']['stale_suspected'][0]['conflict'],
+            'active_status_with_completed_message',
+        )
+        self.assertEqual(diagnostics['external_checks']['celery']['status'], 'unknown')
+        self.assertEqual(diagnostics['external_checks']['redis']['status'], 'unknown')
+        self.assertEqual(diagnostics['external_checks']['postgres']['status'], 'unknown')
+
+    def test_external_stale_diagnostics_waits_for_udi_network_refresh(self):
+        service = self._service_for_idle_progress_status(None)
+
+        class FakeUdi:
+            def __init__(self):
+                self.accounts_called = False
+
+            def is_network_ready(self):
+                return False
+
+            def is_automation_busy(self):
+                return False
+
+            def get_observability_status(self):
+                return {
+                    'network_ready': False,
+                    'init_in_progress': True,
+                    'refresh_running': False,
+                }
+
+            def get_m3u_accounts(self):
+                self.accounts_called = True
+                return []
+
+        fake_udi = FakeUdi()
+        with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=fake_udi):
+            status = service.get_status()
+
+        diagnostics = status['external_stale_diagnostics']
+        self.assertEqual(diagnostics['status'], 'insufficient_evidence')
+        self.assertFalse(diagnostics['stale_status_suspected'])
+        self.assertFalse(fake_udi.accounts_called)
 
     def test_sync_batch_invokes_progress_callback_after_each_channel(self):
         service = StreamCheckerService.__new__(StreamCheckerService)

@@ -41,6 +41,48 @@ def _get_stream_m3u_account_id(stream: Dict[str, Any]) -> Optional[Any]:
         return account_id
 
 
+def _safe_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def _mapping_value(mapping: Dict[Any, Any], key: Any) -> Any:
+    candidates = [key, str(key)]
+    try:
+        candidates.append(int(key))
+    except (TypeError, ValueError):
+        pass
+
+    for candidate in candidates:
+        if candidate in mapping:
+            return mapping.get(candidate)
+    return 0
+
+
+def _usage_context(mapping: Dict[Any, Any], key: Any) -> Dict[str, int]:
+    value = _mapping_value(mapping, key)
+    if isinstance(value, dict):
+        active_streams = _safe_int(
+            value.get('active_streams', value.get('active_viewers', value.get('count', 0)))
+        )
+        real_viewers = _safe_int(value.get('real_viewers', value.get('real_clients', 0)))
+        shadow_watchers = _safe_int(value.get('shadow_watchers', value.get('watcher_clients', 0)))
+        return {
+            'active_streams': active_streams,
+            'real_viewers': real_viewers,
+            'shadow_watchers': shadow_watchers,
+        }
+    active_streams = _safe_int(value)
+    return {
+        'active_streams': active_streams,
+        'real_viewers': active_streams,
+        'shadow_watchers': 0,
+    }
+
+
 class AcquireResult(tuple):
     """Tuple-compatible acquire result that remains truthy/falsey by success."""
 
@@ -319,16 +361,23 @@ class AccountStreamLimiter:
             return (True, 'acquired', None)
 
         try:
-            usage_getter = getattr(self.udi_manager, 'get_active_streams_count_per_profile', None)
-            active_usage = usage_getter(account_id) if callable(usage_getter) else {}
-            if not isinstance(active_usage, dict):
-                active_usage = {}
+            active_usage = {}
+            context_getter = getattr(self.udi_manager, 'get_active_stream_context_per_profile', None)
+            if callable(context_getter):
+                context_usage = context_getter(account_id)
+                if isinstance(context_usage, dict):
+                    active_usage = context_usage
+            if not active_usage:
+                usage_getter = getattr(self.udi_manager, 'get_active_streams_count_per_profile', None)
+                count_usage = usage_getter(account_id) if callable(usage_getter) else {}
+                active_usage = count_usage if isinstance(count_usage, dict) else {}
         except Exception as e:
             logger.warning(f"Could not get active profile usage for account {account_id}: {e}")
             active_usage = {}
 
         checker_blocked = False
         external_blocked = False
+        external_block_reason = None
 
         with self.lock:
             for profile in profiles:
@@ -351,10 +400,8 @@ class AccountStreamLimiter:
                     )
                     return (True, 'acquired', profile)
 
-                try:
-                    active_count = int(active_usage.get(profile_id, 0) or 0)
-                except (TypeError, ValueError):
-                    active_count = 0
+                usage_context = _usage_context(active_usage, profile_id)
+                active_count = usage_context['active_streams']
                 checking_count = self.profile_checking_counts.get(profile_id, 0)
 
                 if active_count + checking_count < max_streams:
@@ -370,11 +417,18 @@ class AccountStreamLimiter:
                     checker_blocked = True
                 if active_count >= max_streams:
                     external_blocked = True
+                    if usage_context.get('real_viewers', 0) > 0:
+                        external_block_reason = 'active_viewers'
+                    elif (
+                        usage_context.get('shadow_watchers', 0) > 0
+                        and external_block_reason != 'active_viewers'
+                    ):
+                        external_block_reason = 'shadow_watchers'
 
         if checker_blocked:
             return (False, 'checking_capacity', None)
         if external_blocked:
-            return (False, 'active_viewers', None)
+            return (False, external_block_reason or 'active_viewers', None)
         return (False, 'provider_capacity', None)
 
     def release_profile(self, profile: Optional[Dict[str, Any]]):
@@ -430,31 +484,22 @@ class AccountStreamLimiter:
             return []
 
         try:
-            usage_getter = getattr(self.udi_manager, 'get_active_streams_count_per_profile', None)
-            active_usage = usage_getter(account_id) if callable(usage_getter) else {}
-            if not isinstance(active_usage, dict):
-                active_usage = {}
+            active_usage = {}
+            context_getter = getattr(self.udi_manager, 'get_active_stream_context_per_profile', None)
+            if callable(context_getter):
+                context_usage = context_getter(account_id)
+                if isinstance(context_usage, dict):
+                    active_usage = context_usage
+            if not active_usage:
+                usage_getter = getattr(self.udi_manager, 'get_active_streams_count_per_profile', None)
+                count_usage = usage_getter(account_id) if callable(usage_getter) else {}
+                active_usage = count_usage if isinstance(count_usage, dict) else {}
         except Exception as e:
             logger.warning(f"Could not get active profile usage for account {account_id}: {e}")
             active_usage = {}
 
         with self.lock:
             checking_counts = dict(self.profile_checking_counts)
-
-        def read_count(mapping: Dict[Any, Any], key: Any) -> int:
-            candidates = [key, str(key)]
-            try:
-                candidates.append(int(key))
-            except (TypeError, ValueError):
-                pass
-
-            for candidate in candidates:
-                if candidate in mapping:
-                    try:
-                        return int(mapping.get(candidate, 0) or 0)
-                    except (TypeError, ValueError):
-                        return 0
-            return 0
 
         snapshots: List[Dict[str, Any]] = []
         for profile in profiles:
@@ -470,8 +515,9 @@ class AccountStreamLimiter:
             except (TypeError, ValueError):
                 max_streams = 0
 
-            active_count = read_count(active_usage, profile_id)
-            checking_count = read_count(checking_counts, profile_id)
+            usage_context = _usage_context(active_usage, profile_id)
+            active_count = usage_context['active_streams']
+            checking_count = _safe_int(_mapping_value(checking_counts, profile_id))
             used = active_count + checking_count
             unlimited = max_streams == 0
             available = None if unlimited else max(0, max_streams - used)
@@ -482,6 +528,8 @@ class AccountStreamLimiter:
                 'limit': max_streams,
                 'unlimited': unlimited,
                 'active_viewers': active_count,
+                'real_viewers': usage_context['real_viewers'],
+                'shadow_watchers': usage_context['shadow_watchers'],
                 'checking': checking_count,
                 'used': used,
                 'available': available,
@@ -506,17 +554,28 @@ class AccountStreamLimiter:
         if max_streams == 0:
             return False
 
-        active_getter = getattr(self.udi_manager, 'get_active_streams_for_profile', None)
-        if not callable(active_getter):
-            return False
-
         try:
-            active_count = int(active_getter(profile_id) or 0)
+            context_getter = getattr(self.udi_manager, 'get_active_stream_context_per_profile', None)
+            real_count = None
+            if callable(context_getter):
+                account_id = _get_stream_m3u_account_id({'m3u_account_id': profile.get('m3u_account_id')})
+                if account_id is None:
+                    finder = getattr(self.udi_manager, '_find_account_for_profile', None)
+                    account_id = finder(profile_id) if callable(finder) else None
+                if account_id is not None:
+                    context = context_getter(account_id)
+                    if isinstance(context, dict):
+                        real_count = _usage_context(context, profile_id)['real_viewers']
+            if real_count is None:
+                active_getter = getattr(self.udi_manager, 'get_active_streams_for_profile', None)
+                if not callable(active_getter):
+                    return False
+                real_count = _safe_int(active_getter(profile_id))
         except Exception as e:
             logger.warning(f"Could not check active viewers for profile {profile_id}: {e}")
             return False
 
-        return active_count + 1 > max_streams
+        return real_count + 1 > max_streams
     
     def clear(self):
         """Clear all account limits and checking counts."""
@@ -555,11 +614,16 @@ class SmartStreamScheduler:
         if reason == 'timeout':
             # AccountStreamLimiter uses "timeout" when checker-owned slots are full.
             return 'checking_capacity'
+        if reason == 'shadow_watchers':
+            return 'shadow_watchers'
         if isinstance(reason, str):
             reason_lower = reason.lower()
+            if 'shadow' in reason_lower and 'watcher' in reason_lower:
+                return 'shadow_watchers'
             if 'profile' in reason_lower and 'capacity' in reason_lower:
-                # UDI profile capacity only counts real proxy viewers. StreamFlow-owned
-                # checker reservations are classified by AccountStreamLimiter.
+                # Legacy UDI profile capacity strings do not carry client class
+                # context. StreamFlow-owned checker reservations are classified
+                # by AccountStreamLimiter before this fallback is used.
                 return 'active_viewers'
         return reason or 'provider_capacity'
 
@@ -674,6 +738,7 @@ class SmartStreamScheduler:
 
                     skipped_reason = {
                         'active_viewers': 'quota_consumed_by_active_viewers',
+                        'shadow_watchers': 'shadow_watcher_capacity',
                         'viewer_preempted': 'viewer_preempted',
                     }.get(reason_detail, 'provider_capacity_unavailable')
                     return {

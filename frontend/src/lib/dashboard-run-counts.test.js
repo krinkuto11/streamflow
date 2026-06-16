@@ -13,6 +13,8 @@ describe('dashboard run counts', () => {
         dead_streams: 1,
         blank_streams: 2,
         freeze_streams: 3,
+        channels_hidden: 2,
+        channels_ready: 1,
       },
     })
 
@@ -25,6 +27,8 @@ describe('dashboard run counts', () => {
       dead: 1,
       blank: 2,
       freeze: 3,
+      hidden: 2,
+      ready: 1,
     })
   })
 
@@ -47,6 +51,8 @@ describe('dashboard run counts', () => {
       dead: 0,
       blank: 0,
       freeze: 0,
+      hidden: 0,
+      ready: 0,
     })
   })
 
@@ -104,6 +110,27 @@ describe('dashboard run counts', () => {
     expect(counts.freeze).toBe(2)
   })
 
+  it('uses stream-checker queue visibility counts while a batch is active', () => {
+    const counts = getDashboardRunCounts({
+      streamQueueActive: true,
+      batchTotal: 4,
+      completed: 2,
+      runCounts: {
+        channels_hidden: 1,
+        channels_ready: 1,
+      },
+      streamCheckerStatus: {
+        queue: {
+          channels_hidden_count: 3,
+          channels_ready_count: 2,
+        },
+      },
+    })
+
+    expect(counts.hidden).toBe(3)
+    expect(counts.ready).toBe(2)
+  })
+
   it('does not let stale zero queue problem counts hide active stream details', () => {
     const counts = getDashboardRunCounts({
       streamQueueActive: true,
@@ -144,6 +171,8 @@ describe('dashboard run counts', () => {
         dead_streams: 0,
         blank_streams: 0,
         freeze_streams: 0,
+        channels_hidden: 2,
+        channels_ready: 1,
       },
       streamCheckerStatus: {
         queue: {
@@ -166,8 +195,64 @@ describe('dashboard run counts', () => {
       ['dead', 'Dead Streams', 1],
       ['blank', 'Blank Streams', 1],
       ['freeze', 'Frozen Streams', 0],
+      ['hidden', 'Channels Hidden', 2],
+      ['ready', 'Channels Restored', 1],
     ])
     expect(metrics.find(metric => metric.key === 'dead').description).toMatch(/last completed Stream Checker batch/i)
+  })
+
+  it('uses active single-channel visibility counters without stale automation counts', () => {
+    const metrics = getDashboardRunMetrics({
+      streamQueueActive: false,
+      streamCheckerOnlyActive: true,
+      runCounts: {
+        channels_hidden: 9,
+        channels_ready: 8,
+      },
+      streamCheckerStatus: {
+        progress: {
+          is_single_channel_check: true,
+          channel_id: 8442,
+          channels_hidden: 1,
+          channels_ready: 0,
+          streams_detail: [],
+        },
+      },
+    })
+
+    expect(metrics.find(metric => metric.key === 'hidden')).toMatchObject({
+      label: 'Channels Hidden',
+      value: 1,
+    })
+    expect(metrics.find(metric => metric.key === 'ready')).toMatchObject({
+      label: 'Channels Restored',
+      value: 0,
+    })
+  })
+
+  it('falls back to active single-channel snapshot visibility counters', () => {
+    const counts = getDashboardRunCounts({
+      streamCheckerOnlyActive: true,
+      runCounts: {
+        channels_hidden: 9,
+        channels_ready: 8,
+      },
+      streamCheckerStatus: {
+        progress: {
+          is_single_channel_check: true,
+          channel_id: 8442,
+          run_snapshot: {
+            result_summary: {
+              channels_hidden: 0,
+              channels_ready: 1,
+            },
+          },
+        },
+      },
+    })
+
+    expect(counts.hidden).toBe(0)
+    expect(counts.ready).toBe(1)
   })
 
   it('does not carry playlist or matching counts into manual quality-only metrics', () => {
@@ -179,6 +264,8 @@ describe('dashboard run counts', () => {
       runCounts: {
         refreshed_playlists: 9,
         assigned_channels: 8,
+        channels_hidden: 7,
+        channels_ready: 6,
       },
       streamCheckerStatus: {
         progress: {
@@ -201,6 +288,8 @@ describe('dashboard run counts', () => {
       ['dead', 'Dead Streams', 1],
       ['blank', 'Blank Streams', 1],
       ['freeze', 'Frozen Streams', 1],
+      ['hidden', 'Channels Hidden', 0],
+      ['ready', 'Channels Restored', 0],
     ])
   })
 
@@ -260,6 +349,8 @@ describe('dashboard run counts', () => {
       ['dead', 'Dead Streams', 1],
       ['blank', 'Blank Streams', 0],
       ['freeze', 'Frozen Streams', 1],
+      ['hidden', 'Channels Hidden', 0],
+      ['ready', 'Channels Restored', 0],
     ])
   })
 })

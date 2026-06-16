@@ -15,9 +15,17 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { useToast } from '@/hooks/use-toast.js'
 import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
 import { formatDuration } from '@/lib/time-format.js'
+import { getExternalStaleDiagnosticsDisplay } from '@/lib/external-stale-diagnostics-display.js'
 import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
+import { getCurrentProgressDisplay } from '@/lib/stream-checker-progress-display.js'
 import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
-import { getParallelProgressBadgeText, getProfileSlotDisplay, getProfileSlotMatrixRows, getProviderWaitReasonDisplay } from '@/lib/provider-progress-display.js'
+import {
+  getParallelProgressBadgeText,
+  getProfileSlotDisplay,
+  getProfileSlotMatrixRows,
+  getProviderCapacityExplanationDisplay,
+  getProviderWaitReasonDisplay,
+} from '@/lib/provider-progress-display.js'
 import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import {
   Activity,
@@ -32,6 +40,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   RefreshCw,
+  Info,
   List,
   Save
 } from 'lucide-react'
@@ -69,12 +78,17 @@ export default function StreamChecker() {
   useEffect(() => {
     loadData()
     // Poll for updates - use shorter interval when checking is active
-    const pollInterval = (status?.checking || (status?.queue?.queue_size > 0)) ? 1000 : 3000
+    const pollInterval = (
+      status?.stream_checking_mode ||
+      status?.checking ||
+      (status?.queue?.queue_size > 0) ||
+      (status?.queue?.in_progress > 0)
+    ) ? 1000 : 3000
     const interval = setInterval(() => {
       loadData()
     }, pollInterval)
     return () => clearInterval(interval)
-  }, [status?.checking, status?.queue?.queue_size])
+  }, [status?.stream_checking_mode, status?.checking, status?.queue?.queue_size, status?.queue?.in_progress])
 
   useEffect(() => {
     loadStartChannels()
@@ -364,9 +378,25 @@ export default function StreamChecker() {
     )
   }
 
-  const isChecking = status?.checking || (status?.queue?.queue_size > 0)
-  const queueSize = status?.queue?.queue_size || 0
-  const inProgress = status?.queue?.in_progress || 0
+  const currentProgressDisplay = getCurrentProgressDisplay(status, progress)
+  const {
+    queueSize,
+    inProgress,
+    progressStale,
+    progressStaleAge,
+    isChecking,
+    statusLabel,
+    staleNoticeTitle,
+    staleNoticeText,
+    progressRunMode,
+    runProfileName,
+    runProfileSource,
+    qualityProfileName,
+    qualityProfileSource,
+    capacityProfileName,
+    showQualityRules,
+    showCurrentProgress,
+  } = currentProgressDisplay
   const completed = status?.queue?.completed || 0
   const failed = status?.queue?.failed || 0
   const queued = status?.queue?.queued || 0
@@ -395,17 +425,18 @@ export default function StreamChecker() {
   const analysisPathDisplay = getHardwareAnalysisPathDisplay(hardwareStatus)
   const hardwareOperatorNote = getHardwareOperatorNote(hardwareStatus)
   const queueEtaDisplay = getQueueEtaDisplay(status?.queue)
+  const externalStaleDisplay = getExternalStaleDiagnosticsDisplay(status?.external_stale_diagnostics)
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-start">
-        <div>
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
           <h1 className="text-3xl font-bold tracking-tight">Stream Checker</h1>
           <p className="text-muted-foreground">
             Monitor and manage stream quality checking
           </p>
         </div>
-        <div className="flex flex-col sm:flex-row sm:items-end gap-2 min-w-0">
+        <div className="flex w-full min-w-0 flex-col gap-2 sm:flex-row sm:items-end lg:w-auto lg:flex-nowrap">
           <div className="w-full sm:w-44 space-y-1">
             <Label htmlFor="queue-start-mode" className="text-xs text-muted-foreground">Run Start</Label>
             <Select
@@ -449,7 +480,7 @@ export default function StreamChecker() {
             variant="outline"
             onClick={() => persistQueueStart(queueStartMode, queueStartChannelId)}
             disabled={isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start'}
-            className="gap-2"
+            className="w-full gap-2 sm:w-auto"
           >
             {actionLoading === 'queue-start' ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -461,7 +492,7 @@ export default function StreamChecker() {
           <Button
             onClick={handleQueueAllChannels}
             disabled={queueAllDisabled}
-            className="sm:min-w-44"
+            className="w-full sm:w-auto sm:min-w-44"
           >
             {actionLoading === 'queue-all' ? (
               <Loader2 className="mr-2 h-4 w-4 animate-spin" />
@@ -487,7 +518,7 @@ export default function StreamChecker() {
           <CardContent>
             <div className="flex items-center gap-2">
               <Badge variant={isChecking ? "default" : "secondary"}>
-                {isChecking ? "Active" : "Idle"}
+                {statusLabel}
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
@@ -546,6 +577,51 @@ export default function StreamChecker() {
         </Alert>
       )}
 
+      {progressStale && (
+        <div
+          className="min-w-0 w-full overflow-hidden rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground"
+          style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
+        >
+          <div className="flex min-w-0 items-start gap-2">
+            <Info className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" />
+            <div className="min-w-0 space-y-1">
+              <p className="min-w-0 max-w-full break-words font-medium text-foreground">{staleNoticeTitle}</p>
+              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+                {staleNoticeText}
+                {Number.isFinite(Number(progressStaleAge)) && (
+                  <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {externalStaleDisplay && (
+        <div
+          className="min-w-0 w-fit max-w-full overflow-hidden rounded-md border border-border/60 bg-transparent px-3 py-2 text-xs text-muted-foreground"
+          style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
+        >
+          <div className="flex min-w-0 items-start gap-2">
+            <Info className="mt-0.5 h-3.5 w-3.5 flex-none text-muted-foreground" />
+            <div className="min-w-0 space-y-1">
+              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+                <span className="font-medium text-foreground">{externalStaleDisplay.title}.</span>{' '}
+                {externalStaleDisplay.text}
+              </p>
+              {externalStaleDisplay.detail && (
+                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">{externalStaleDisplay.detail}</p>
+              )}
+              {externalStaleDisplay.accounts.length > 0 && (
+                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">
+                  {externalStaleDisplay.accounts.join(' | ')}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Batch Progress — hidden during single channel checks to avoid showing
            stale counters from the previous automation run */}
       {isChecking && totalBatch > 0 && !progress?.is_single_channel_check && (
@@ -579,7 +655,7 @@ export default function StreamChecker() {
       )}
 
       {/* Current Progress */}
-      {progress && isChecking && (
+      {showCurrentProgress && (
         <Card>
           <CardHeader>
             <CardTitle>Current Progress</CardTitle>
@@ -597,11 +673,26 @@ export default function StreamChecker() {
               <p className="text-xs text-muted-foreground">{progress.step_detail}</p>
             </div>
 
-            <div className="flex items-center gap-2 text-sm pb-2 border-b">
+            <div className="flex flex-wrap items-center gap-2 text-sm pb-2 border-b">
               <Badge variant="outline">{progress.status}</Badge>
-              {progress.automation_profile_name && (
-                <Badge variant={progress.automation_profile_source === 'forced' ? 'default' : 'outline'}>
-                  Quality Profile: {progress.automation_profile_name}
+              {progressRunMode && (
+                <Badge variant="secondary">
+                  Run Mode: {progressRunMode}
+                </Badge>
+              )}
+              {runProfileName && (
+                <Badge variant={runProfileSource === 'forced' ? 'default' : 'outline'}>
+                  Run Profile: {runProfileName}
+                </Badge>
+              )}
+              {showQualityRules && (
+                <Badge variant={qualityProfileSource === 'forced' ? 'default' : 'outline'}>
+                  Quality Rules: {qualityProfileName}
+                </Badge>
+              )}
+              {capacityProfileName && (
+                <Badge variant="outline">
+                  Capacity Profile: {capacityProfileName}
                 </Badge>
               )}
               {parallelProgressBadgeText && (
@@ -643,6 +734,7 @@ export default function StreamChecker() {
                       const finishedPercent = provider.total > 0 ? Math.round((provider.finished / provider.total) * 100) : 0
                       const waitReason = getProviderWaitReasonDisplay(provider)
                       const profileSlots = (provider.profile_slots || []).map(getProfileSlotDisplay)
+                      const capacityExplanation = getProviderCapacityExplanationDisplay(provider)
                       return (
                         <div key={provider.account_id ?? provider.name} className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 px-3 py-2 text-sm">
                           <div className="min-w-0">
@@ -692,6 +784,17 @@ export default function StreamChecker() {
                                   <span className="rounded border px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
                                     +{profileSlots.length - 5}
                                   </span>
+                                )}
+                              </div>
+                            )}
+                            {capacityExplanation && (
+                              <div
+                                className="mt-1 max-w-full text-[10px] leading-snug text-muted-foreground"
+                                title={capacityExplanation.title}
+                              >
+                                <span className="font-medium text-foreground/80">{capacityExplanation.text}</span>
+                                {capacityExplanation.detail && (
+                                  <span className="ml-1">{capacityExplanation.detail}</span>
                                 )}
                               </div>
                             )}
@@ -969,8 +1072,8 @@ export default function StreamChecker() {
 
       {/* Configuration Section */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <div>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
             <CardTitle>Stream Checker Configuration</CardTitle>
             <CardDescription>
               Configure stream analysis and checking parameters
@@ -980,6 +1083,7 @@ export default function StreamChecker() {
             variant="outline"
             size="sm"
             onClick={() => setConfigEditing(!configEditing)}
+            className="self-start sm:shrink-0"
           >
             <Settings className="mr-2 h-4 w-4" />
             {configEditing ? 'Cancel' : 'Edit'}

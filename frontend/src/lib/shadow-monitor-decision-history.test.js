@@ -12,10 +12,14 @@ import {
 describe('shadow monitor decision history helpers', () => {
   it('labels switch reasons and legacy event groups', () => {
     expect(formatShadowEventType({ type: 'no_decodable_frames_pending' })).toBe('Decoder Stall Pending')
+    expect(formatShadowEventType({ type: 'loop_pending' })).toBe('Loop Pending')
+    expect(formatShadowEventType({ type: 'loop_pre_probe_required' })).toBe('Loop Pre-Probe Required')
     expect(formatShadowEventReason('offline_image')).toBe('Offline Image')
+    expect(formatShadowEventReason('loop')).toBe('Loop')
     expect(getShadowEventDecisionGroup({ type: 'dry_run_switch' })).toBe('switch')
     expect(getShadowEventDecisionGroup({ type: 'pre_probe_rejected' })).toBe('pre_probe')
     expect(getShadowEventDecisionGroup({ type: 'blank_pending' })).toBe('probe')
+    expect(getShadowEventDecisionGroup({ type: 'loop_pre_probe_required' })).toBe('guard')
   })
 
   it('filters events by backend decision group', () => {
@@ -84,6 +88,74 @@ describe('shadow monitor decision history helpers', () => {
       'pre-probe rejected: Provider Slot',
       'cooldown 1m 5s',
       '2 real viewers',
+    ])
+  })
+
+  it('shows missing audio stream context for silent-audio switches', () => {
+    expect(getShadowEventDetailParts({
+      type: 'switch_success',
+      trigger_reason: 'silent_audio',
+      details: {
+        trigger_reason: 'silent_audio',
+        detection: {
+          reason: 'silent_audio',
+          confirmations: 1,
+          required: 1,
+          measurements: {
+            audio_stream_present: false,
+            silent_audio_duration_secs: 0.25,
+            silent_audio_noise_db: -50,
+          },
+          thresholds: {
+            silent_audio_min_duration_seconds: 10,
+          },
+        },
+      },
+    })).toEqual([
+      'Silent Audio',
+      'no audio stream',
+      '1/1 confirmations',
+    ])
+  })
+
+  it('summarizes loop detection context', () => {
+    expect(getShadowEventDetailParts({
+      type: 'loop_pending',
+      details: {
+        reason: 'loop',
+        detection: {
+          reason: 'loop',
+          confirmations: 1,
+          required: 2,
+          measurements: {
+            loop_duration_secs: 12.5,
+            loop_frames_processed: 240,
+          },
+          thresholds: {
+            loop_probe_duration_seconds: 180,
+          },
+        },
+      },
+    })).toEqual([
+      'Loop',
+      'loop 12.5s, probe 3m, 240 frames',
+      '1/2 confirmations',
+    ])
+  })
+
+  it('summarizes the loop pre-probe guard', () => {
+    expect(getShadowEventDetailParts({
+      type: 'loop_pre_probe_required',
+      trigger_reason: 'loop',
+      details: {
+        trigger_reason: 'loop',
+        operator_action: 'enable_next_stream_pre_probe',
+        viewer_context: { real_client_count: 1 },
+      },
+    })).toEqual([
+      'Loop',
+      'next-stream pre-probe required',
+      '1 real viewer',
     ])
   })
 

@@ -367,7 +367,8 @@ export const getStreamCheckerRunDisplay = ({
   const queueActive = Number(queue?.queue_size || 0) > 0
     || Number(queue?.in_progress || 0) > 0
     || (queue?.current_channel !== null && queue?.current_channel !== undefined)
-  const singleChannelProgressActive = Boolean(progress?.is_single_channel_check)
+  const progressStale = Boolean(streamCheckerStatus?.progress_stale || progress?.stale)
+  const singleChannelProgressActive = Boolean(progress?.is_single_channel_check && !progressStale)
   const isProcessing = Boolean(
     streamCheckerStatus?.stream_checking_mode
     || streamCheckerStatus?.checking

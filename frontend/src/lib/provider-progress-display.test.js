@@ -5,6 +5,7 @@ import {
   getParallelProgressBadgeText,
   getProfileSlotDisplay,
   getProfileSlotMatrixRows,
+  getProviderCapacityExplanationDisplay,
   getProviderWaitReasonDisplay,
 } from './provider-progress-display'
 
@@ -76,6 +77,45 @@ describe('getProviderWaitReasonDisplay', () => {
     })
   })
 
+  it('keeps Shadow watcher slots separate from real viewers', () => {
+    expect(getProfileSlotDisplay({
+      id: 52,
+      name: 'Shadow',
+      active_viewers: 1,
+      real_viewers: 0,
+      shadow_watchers: 1,
+      checking: 0,
+      used: 1,
+      limit: 1,
+      available: 0,
+      full: false,
+    })).toMatchObject({
+      text: 'Shadow: 1/1',
+      title: 'Shadow, ID 52, 0 real viewer, 1 shadow watcher, 0 checking, 0 free',
+      realViewers: 0,
+      shadowWatchers: 1,
+      status: 'Shadow watcher',
+    })
+  })
+
+  it('surfaces Teamarr and quality checker slot context', () => {
+    expect(getProfileSlotDisplay({
+      id: 53,
+      name: 'Preflight',
+      checking: 1,
+      teamarr_preflight: 1,
+      quality_checks: 0,
+      used: 1,
+      limit: 2,
+      available: 1,
+    })).toMatchObject({
+      title: 'Preflight, ID 53, 0 viewer, 1 Teamarr preflight, 1 checking, 1 free',
+      teamarrPreflight: 1,
+      qualityChecks: 0,
+      status: 'Teamarr Preflight',
+    })
+  })
+
   it('builds safe profile matrix rows from provider progress', () => {
     expect(getProfileSlotMatrixRows([
       {
@@ -118,6 +158,77 @@ describe('getProviderWaitReasonDisplay', () => {
         status: 'Available',
       }),
     ])
+  })
+
+  it('formats provider capacity explanations with source and action details', () => {
+    expect(getProviderCapacityExplanationDisplay({
+      capacity_explanation: {
+        state: 'viewer_protected',
+        message: 'Real viewer capacity is protected before StreamFlow probes use the slot.',
+        operator_action: 'wait_for_viewer_capacity',
+        primary_reason: 'active_viewers',
+        capacity_sources: ['real_viewers', 'provider_profile', 'streamflow_workers'],
+        profile_slot_summary: {
+          full: 1,
+          open: 1,
+          with_real_viewers: 1,
+          with_streamflow_workers: 1,
+        },
+      },
+    })).toEqual({
+      state: 'viewer_protected',
+      text: 'Real viewer capacity is protected before StreamFlow probes use the slot.',
+      detail: 'Sources: Real viewers, Provider profile, StreamFlow probes | Wait for viewer capacity | Slots: 1 full, 1 open, 1 viewer, 1 probing',
+      title: 'Reason: active_viewers | Sources: Real viewers, Provider profile, StreamFlow probes | Wait for viewer capacity | Slots: 1 full, 1 open, 1 viewer, 1 probing',
+      sources: ['Real viewers', 'Provider profile', 'StreamFlow probes'],
+      action: 'Wait for viewer capacity',
+      slotParts: ['1 full', '1 open', '1 viewer', '1 probing'],
+    })
+  })
+
+  it('formats Shadow and specialized checker capacity sources', () => {
+    expect(getProviderCapacityExplanationDisplay({
+      waiting: 1,
+      capacity_explanation: {
+        state: 'shadow_watcher_capacity',
+        message: 'A Shadow Monitor watcher is using the provider profile slot without being counted as a real viewer.',
+        operator_action: 'wait_for_shadow_watcher',
+        primary_reason: 'shadow_watchers',
+        capacity_sources: ['shadow_watchers', 'provider_profile', 'teamarr_preflight', 'quality_checks'],
+        profile_slot_summary: {
+          full: 1,
+          open: 0,
+          with_shadow_watchers: 1,
+          with_streamflow_workers: 2,
+          with_teamarr_preflight: 1,
+          with_quality_checks: 1,
+        },
+      },
+    })).toEqual(expect.objectContaining({
+      state: 'shadow_watcher_capacity',
+      sources: ['Shadow watchers', 'Provider profile', 'Teamarr Preflight', 'Quality checks'],
+      action: 'Wait for Shadow watcher',
+      slotParts: ['1 full', '1 shadow', '1 preflight', '1 quality'],
+    }))
+  })
+
+  it('returns null for missing capacity explanations', () => {
+    expect(getProviderCapacityExplanationDisplay({})).toBeNull()
+  })
+
+  it('does not render idle capacity explanations without active pressure', () => {
+    expect(getProviderCapacityExplanationDisplay({
+      checking: 0,
+      waiting: 0,
+      skipped: 0,
+      capacity_explanation: {
+        state: 'idle',
+        message: 'No provider capacity wait is active.',
+        operator_action: 'none',
+        capacity_sources: [],
+        profile_slot_summary: {},
+      },
+    })).toBeNull()
   })
 
   it('does not render a zero-worker parallel badge while active checks are visible', () => {

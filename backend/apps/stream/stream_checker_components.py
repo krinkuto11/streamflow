@@ -1141,7 +1141,16 @@ class StreamCheckerProgress:
             else:
                 state = 'idle'
 
-            provider_progress.append({
+            profile_slots = []
+            if provider_profile_slots:
+                account_id = provider.get('account_id')
+                profile_slots = provider_profile_slots.get(str(account_id)) if account_id not in (None, '') else None
+                if not profile_slots:
+                    profile_slots = provider_profile_slots.get(provider['name'])
+                if not isinstance(profile_slots, list):
+                    profile_slots = []
+
+            provider_row = {
                 'account_id': provider.get('account_id'),
                 'name': provider['name'],
                 'total': provider['total'],
@@ -1156,14 +1165,16 @@ class StreamCheckerProgress:
                 'status_counts': dict(sorted(counts.items())),
                 'wait_reason_counts': dict(sorted(wait_reason_counts.items())),
                 'dominant_wait_reason': dominant_wait_reason,
-            })
-            if provider_profile_slots:
-                account_id = provider.get('account_id')
-                profile_slots = provider_profile_slots.get(str(account_id)) if account_id not in (None, '') else None
-                if not profile_slots:
-                    profile_slots = provider_profile_slots.get(provider['name'])
-                if profile_slots:
-                    provider_progress[-1]['profile_slots'] = profile_slots
+            }
+            if profile_slots:
+                provider_row['profile_slots'] = profile_slots
+            provider_row['capacity_explanation'] = StreamCheckerProgress._build_capacity_explanation(
+                provider_row,
+                profile_slots=profile_slots,
+                dominant_wait_reason=dominant_wait_reason,
+                wait_reason_counts=wait_reason_counts,
+            )
+            provider_progress.append(provider_row)
 
         return sorted(
             provider_progress,
@@ -1178,6 +1189,11 @@ class StreamCheckerProgress:
     @staticmethod
     def _build_provider_summary(provider_progress: List[Dict[str, Any]]) -> Dict[str, int]:
         """Build aggregate provider scheduling counters for the progress API."""
+        capacity_summaries = [
+            item.get('capacity_explanation', {}).get('profile_slot_summary', {})
+            for item in provider_progress
+            if isinstance(item.get('capacity_explanation'), dict)
+        ]
         return {
             'total_providers': len(provider_progress),
             'active_providers': sum(1 for item in provider_progress if item.get('checking', 0) > 0),
@@ -1188,6 +1204,194 @@ class StreamCheckerProgress:
             'completed_streams': sum(item.get('completed', 0) for item in provider_progress),
             'skipped_streams': sum(item.get('skipped', 0) for item in provider_progress),
             'failed_streams': sum(item.get('failed', 0) for item in provider_progress),
+            'profile_slots_total': sum(item.get('total', 0) for item in capacity_summaries),
+            'profile_slots_full': sum(item.get('full', 0) for item in capacity_summaries),
+            'profile_slots_open': sum(item.get('open', 0) for item in capacity_summaries),
+            'profile_slots_with_real_viewers': sum(item.get('with_real_viewers', 0) for item in capacity_summaries),
+            'profile_slots_with_shadow_watchers': sum(item.get('with_shadow_watchers', 0) for item in capacity_summaries),
+            'profile_slots_with_streamflow_workers': sum(item.get('with_streamflow_workers', 0) for item in capacity_summaries),
+            'profile_slots_with_teamarr_preflight': sum(item.get('with_teamarr_preflight', 0) for item in capacity_summaries),
+            'profile_slots_with_quality_checks': sum(item.get('with_quality_checks', 0) for item in capacity_summaries),
+        }
+
+    @staticmethod
+    def _build_capacity_explanation(
+        provider: Dict[str, Any],
+        *,
+        profile_slots: Optional[List[Dict[str, Any]]] = None,
+        dominant_wait_reason: Optional[str] = None,
+        wait_reason_counts: Optional[Counter] = None,
+    ) -> Dict[str, Any]:
+        """Build a compact operator-facing capacity explanation without private stream data."""
+        slots = profile_slots or []
+
+        def safe_count(value: Any) -> int:
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        explicit_viewer_context = any(
+            isinstance(slot, dict)
+            and ('real_viewers' in slot or 'shadow_watchers' in slot)
+            for slot in slots
+        )
+
+        def slot_real_viewer_count(slot: Dict[str, Any]) -> int:
+            if 'real_viewers' in slot or 'shadow_watchers' in slot:
+                return safe_count(slot.get('real_viewers'))
+            return safe_count(slot.get('active_viewers'))
+
+        total_slots = len(slots)
+        full_slots = sum(1 for slot in slots if slot.get('full'))
+        checking_slots = sum(1 for slot in slots if safe_count(slot.get('checking')) > 0)
+        real_viewer_slots = sum(
+            1
+            for slot in slots
+            if slot_real_viewer_count(slot) > 0
+        )
+        shadow_watcher_slots = sum(1 for slot in slots if safe_count(slot.get('shadow_watchers')) > 0)
+        teamarr_preflight_slots = sum(1 for slot in slots if safe_count(slot.get('teamarr_preflight')) > 0)
+        quality_check_slots = sum(
+            1
+            for slot in slots
+            if safe_count(slot.get('quality_checks', slot.get('quality_checking'))) > 0
+        )
+        unlimited_slots = sum(1 for slot in slots if slot.get('unlimited'))
+        open_slots = sum(
+            1
+            for slot in slots
+            if slot.get('unlimited') or int(slot.get('available') or 0) > 0
+        )
+        limited_slots = max(0, total_slots - unlimited_slots)
+        counts = dict(sorted((wait_reason_counts or Counter()).items()))
+        sources = []
+
+        account_capacity_reasons = {'provider_capacity', 'provider_capacity_unavailable', 'max_streams_reached'}
+        worker_capacity_reasons = {'checking_capacity', 'global_worker_limit'}
+        viewer_capacity_reasons = {'active_viewers', 'quota_consumed_by_active_viewers', 'viewer_preempted'}
+        shadow_capacity_reasons = {'shadow_watchers', 'shadow_watcher_capacity'}
+        capacity_reasons = (
+            account_capacity_reasons
+            | worker_capacity_reasons
+            | viewer_capacity_reasons
+            | shadow_capacity_reasons
+        )
+
+        if dominant_wait_reason in viewer_capacity_reasons and (
+            real_viewer_slots > 0 or not explicit_viewer_context
+        ):
+            sources.append('real_viewers')
+        if dominant_wait_reason in shadow_capacity_reasons:
+            sources.append('shadow_watchers')
+        if dominant_wait_reason in worker_capacity_reasons:
+            sources.append('streamflow_workers')
+        if dominant_wait_reason in account_capacity_reasons:
+            sources.append('provider_account')
+        if total_slots:
+            sources.append('provider_profile')
+        if shadow_watcher_slots:
+            sources.append('shadow_watchers')
+        if checking_slots:
+            sources.append('streamflow_workers')
+        if teamarr_preflight_slots:
+            sources.append('teamarr_preflight')
+        if quality_check_slots:
+            sources.append('quality_checks')
+        if real_viewer_slots:
+            sources.append('real_viewers')
+        if full_slots:
+            sources.append('profile_limit')
+
+        deduped_sources = []
+        for source in sources:
+            if source not in deduped_sources:
+                deduped_sources.append(source)
+
+        if dominant_wait_reason == 'viewer_preempted':
+            state = 'viewer_preempted'
+            message = 'A live viewer needed the slot; the probe yielded and can be retried later.'
+            action = 'retry_later'
+        elif dominant_wait_reason in shadow_capacity_reasons:
+            state = 'shadow_watcher_capacity'
+            message = 'A Shadow Monitor watcher is using the provider profile slot without being counted as a real viewer.'
+            action = 'wait_for_shadow_watcher'
+        elif dominant_wait_reason in {'active_viewers', 'quota_consumed_by_active_viewers'} or real_viewer_slots:
+            state = 'viewer_protected'
+            message = 'Real viewer capacity is protected before StreamFlow probes use the slot.'
+            action = 'wait_for_viewer_capacity'
+        elif provider.get('waiting', 0) > 0:
+            state = 'waiting_for_capacity'
+            if full_slots:
+                message = 'Waiting for a provider profile slot to free up.'
+            elif provider.get('checking', 0) > 0:
+                message = 'Waiting behind active StreamFlow probes for this provider.'
+            else:
+                message = 'Waiting for provider account capacity.'
+            action = 'wait_for_slot'
+        elif provider.get('skipped', 0) > 0 and (full_slots or dominant_wait_reason in capacity_reasons):
+            state = 'capacity_timeout'
+            if full_slots:
+                message = 'Provider profile capacity did not free up before the wait timeout.'
+            elif dominant_wait_reason in worker_capacity_reasons:
+                message = 'StreamFlow worker capacity did not free up before the wait timeout.'
+            else:
+                message = 'Provider account capacity did not free up before the wait timeout.'
+            action = 'review_capacity_or_retry'
+        elif provider.get('checking', 0) > 0:
+            state = 'checking'
+            message = 'StreamFlow has active probes using provider capacity.'
+            action = 'watch_progress'
+        elif open_slots > 0:
+            state = 'available'
+            message = 'At least one provider profile slot is available.'
+            action = 'none'
+        else:
+            state = 'idle'
+            message = 'No provider capacity wait is active.'
+            action = 'none'
+
+        return {
+            'state': state,
+            'message': message,
+            'operator_action': action,
+            'primary_reason': dominant_wait_reason,
+            'wait_reason_counts': counts,
+            'capacity_sources': deduped_sources,
+            'has_free_profile_slot': open_slots > 0,
+            'has_full_profile_slot': full_slots > 0,
+            'has_real_viewer_usage': (
+                real_viewer_slots > 0
+                or dominant_wait_reason in {
+                    'active_viewers',
+                    'quota_consumed_by_active_viewers',
+                    'viewer_preempted',
+                }
+                and not (explicit_viewer_context and shadow_watcher_slots > 0 and real_viewer_slots == 0)
+            ),
+            'has_shadow_watcher_usage': (
+                shadow_watcher_slots > 0
+                or dominant_wait_reason in shadow_capacity_reasons
+            ),
+            'has_streamflow_worker_usage': (
+                checking_slots > 0
+                or provider.get('checking', 0) > 0
+                or dominant_wait_reason in {'checking_capacity', 'global_worker_limit'}
+            ),
+            'has_teamarr_preflight_usage': teamarr_preflight_slots > 0,
+            'has_quality_check_usage': quality_check_slots > 0,
+            'profile_slot_summary': {
+                'total': total_slots,
+                'limited': limited_slots,
+                'unlimited': unlimited_slots,
+                'full': full_slots,
+                'open': open_slots,
+                'with_real_viewers': real_viewer_slots,
+                'with_shadow_watchers': shadow_watcher_slots,
+                'with_streamflow_workers': checking_slots,
+                'with_teamarr_preflight': teamarr_preflight_slots,
+                'with_quality_checks': quality_check_slots,
+            },
         }
     
     def update(self, channel_id: int, channel_name: str, current: int, total: int,
@@ -1197,10 +1401,26 @@ class StreamCheckerProgress:
                provider_profile_slots: Optional[Dict[str, List[Dict[str, Any]]]] = None,
                automation_profile_id: Optional[str] = None,
                automation_profile_name: Optional[str] = None,
-               automation_profile_source: Optional[str] = None):
+               automation_profile_source: Optional[str] = None,
+               run_mode: Optional[str] = None,
+               run_profile_id: Optional[str] = None,
+               run_profile_name: Optional[str] = None,
+               run_profile_source: Optional[str] = None,
+               quality_profile_id: Optional[str] = None,
+               quality_profile_name: Optional[str] = None,
+               quality_profile_source: Optional[str] = None,
+               capacity_profile_name: Optional[str] = None,
+               capacity_profile_source: Optional[str] = None):
         """Update progress information."""
         from apps.database.manager import get_db_manager
         with self.lock:
+            resolved_run_mode = run_mode or ("single_channel_check" if is_single_channel_check else "stream_checker")
+            resolved_run_profile_id = run_profile_id if run_profile_id not in (None, '') else automation_profile_id
+            resolved_run_profile_name = run_profile_name if run_profile_name not in (None, '') else automation_profile_name
+            resolved_run_profile_source = run_profile_source if run_profile_source not in (None, '') else automation_profile_source
+            resolved_quality_profile_id = quality_profile_id if quality_profile_id not in (None, '') else automation_profile_id
+            resolved_quality_profile_name = quality_profile_name if quality_profile_name not in (None, '') else automation_profile_name
+            resolved_quality_profile_source = quality_profile_source if quality_profile_source not in (None, '') else automation_profile_source
             progress_data = {
                 'channel_id': channel_id,
                 'channel_name': channel_name,
@@ -1213,12 +1433,21 @@ class StreamCheckerProgress:
                 'step_detail': step_detail,
                 'stream_duration': stream_duration,
                 'is_single_channel_check': is_single_channel_check,
+                'run_mode': resolved_run_mode,
                 'timestamp': datetime.now().isoformat()
             }
             for key, value in {
                 'automation_profile_id': automation_profile_id,
                 'automation_profile_name': automation_profile_name,
                 'automation_profile_source': automation_profile_source,
+                'run_profile_id': resolved_run_profile_id,
+                'run_profile_name': resolved_run_profile_name,
+                'run_profile_source': resolved_run_profile_source,
+                'quality_profile_id': resolved_quality_profile_id,
+                'quality_profile_name': resolved_quality_profile_name,
+                'quality_profile_source': resolved_quality_profile_source,
+                'capacity_profile_name': capacity_profile_name,
+                'capacity_profile_source': capacity_profile_source,
             }.items():
                 if value not in (None, ''):
                     progress_data[key] = value
@@ -1238,6 +1467,15 @@ class StreamCheckerProgress:
                         'automation_profile_id',
                         'automation_profile_name',
                         'automation_profile_source',
+                        'run_mode',
+                        'run_profile_id',
+                        'run_profile_name',
+                        'run_profile_source',
+                        'quality_profile_id',
+                        'quality_profile_name',
+                        'quality_profile_source',
+                        'capacity_profile_name',
+                        'capacity_profile_source',
                     ):
                         if key not in progress_data and existing.get(key) not in (None, ''):
                             progress_data[key] = existing.get(key)

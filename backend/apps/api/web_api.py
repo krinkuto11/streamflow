@@ -132,6 +132,7 @@ from apps.api.match_preview_handlers import test_match_live_response, bulk_match
 from apps.api.stream_checker_handlers import (
     add_to_stream_checker_queue_response,
     check_single_channel_now_response,
+    check_single_stream_now_response,
     check_specific_channel_response,
     clear_stream_checker_queue_response,
     get_stream_checker_status_response,
@@ -1324,6 +1325,17 @@ def get_stream_last_quality_stats(stream_id):
     )
 
 
+@app.route('/api/stream-checker/streams/<int:stream_id>/check', methods=['POST'])
+def check_single_stream_by_id_now(stream_id):
+    """Immediately check one stream synchronously and return measured stats."""
+    return check_single_stream_now_response(
+        payload=request.get_json(silent=True),
+        stream_id=stream_id,
+        get_stream_checker_service=get_stream_checker_service,
+        get_automation_manager=get_automation_manager,
+    )
+
+
 @app.route('/api/quality-stats/v2/streams/<int:stream_id>', methods=['GET'])
 def get_quality_stats_v2_stream(stream_id):
     """Get normalized V2 quality stats and markers for one stream."""
@@ -1364,6 +1376,15 @@ def check_specific_channel():
 def check_single_channel_now():
     """Immediately check a single channel synchronously and return results."""
     return check_single_channel_now_response(
+        payload=request.get_json(silent=True),
+        get_stream_checker_service=get_stream_checker_service,
+        get_automation_manager=get_automation_manager,
+    )
+
+@app.route('/api/stream-checker/check-stream', methods=['POST'])
+def check_single_stream_now():
+    """Immediately check one stream synchronously and return measured stats."""
+    return check_single_stream_now_response(
         payload=request.get_json(silent=True),
         get_stream_checker_service=get_stream_checker_service,
         get_automation_manager=get_automation_manager,
@@ -1429,6 +1450,7 @@ def stop_shadow_blank_monitor():
 def run_shadow_blank_monitor_once():
     """Run one active-viewer shadow blank monitor scan."""
     return run_shadow_blank_monitor_once_response(
+        payload=request.get_json(silent=True),
         get_service=get_shadow_blank_monitor_service,
     )
 

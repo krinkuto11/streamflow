@@ -6,11 +6,13 @@ export const shadowEventLabels = {
   garbled_audio_pending: 'Garbled Audio Pending',
   silent_audio_pending: 'Silent Audio Pending',
   offline_image_pending: 'Offline Image Pending',
+  loop_pending: 'Loop Pending',
   dry_run_switch: 'Dry Run Switch',
   switch_success: 'Switch Success',
   switch_failed: 'Switch Failed',
   no_alternative: 'No Alternative',
   cooldown: 'Cooldown',
+  loop_pre_probe_required: 'Loop Pre-Probe Required',
   stale_stream_guard: 'Stale Stream',
   switch_rate_limited: 'Rate Limited',
   viewer_left: 'Viewer Left',
@@ -42,6 +44,8 @@ const reasonLabels = {
   garbled_audio: 'Garbled Audio',
   silent_audio: 'Silent Audio',
   offline_image: 'Offline Image',
+  loop: 'Loop',
+  loop_pre_probe_required: 'Loop Pre-Probe Required',
   manual: 'Manual',
   pre_probe: 'Pre-Probe',
   provider_capacity: 'Provider Slot',
@@ -131,6 +135,7 @@ export const getShadowEventDecisionGroup = (event = {}) => {
   if (type === 'offline_image_learned') return 'learn'
   if ([
     'cooldown',
+    'loop_pre_probe_required',
     'stale_stream_guard',
     'switch_rate_limited',
     'quality_check_active',
@@ -192,6 +197,9 @@ const detectionParts = (detection = {}) => {
   }
 
   if (reason === 'silent_audio') {
+    if (measurements.audio_stream_present === false) {
+      return ['no audio stream']
+    }
     const duration = formatSeconds(measurements.silent_audio_duration_secs)
     const minimum = formatSeconds(thresholds.silent_audio_min_duration_seconds)
     return [
@@ -203,6 +211,16 @@ const detectionParts = (detection = {}) => {
   if (reason === 'offline_image') {
     return [
       measurements.offline_image_distance !== undefined ? `pHash gap ${measurements.offline_image_distance}` : null,
+    ].filter(Boolean)
+  }
+
+  if (reason === 'loop') {
+    const duration = formatSeconds(measurements.loop_duration_secs)
+    const probeDuration = formatSeconds(thresholds.loop_probe_duration_seconds)
+    return [
+      duration ? `loop ${duration}` : null,
+      probeDuration ? `probe ${probeDuration}` : null,
+      measurements.loop_frames_processed !== undefined ? `${measurements.loop_frames_processed} frames` : null,
     ].filter(Boolean)
   }
 
@@ -219,6 +237,9 @@ export const getShadowEventDetailParts = (event = {}) => {
   if (details.pre_probe_metric && !details.pre_probe) {
     const metricLabel = preProbeMetricLabels[details.pre_probe_metric] || titleizeCode(details.pre_probe_metric)
     parts.push(`pre-probe ${metricLabel}`)
+  }
+  if (event.type === 'loop_pre_probe_required') {
+    parts.push('next-stream pre-probe required')
   }
   if (event.type === 'offline_image_learned') {
     parts.push(details.deduplicated ? 'deduplicated' : 'reference added')

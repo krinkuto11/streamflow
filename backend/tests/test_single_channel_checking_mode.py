@@ -514,6 +514,41 @@ class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
         self.assertEqual(data.get('error'), 'stream_checker_active')
         mock_service.check_single_channel.assert_not_called()
 
+    def test_handler_allows_immediate_check_when_only_progress_is_stale(self):
+        """Stale single-channel progress must not block a new immediate full check."""
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_channel_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {
+            'checking': False,
+            'stream_checking_mode': False,
+            'progress_stale': True,
+            'queue': {'queue_size': 0, 'in_progress': 0, 'current_channel': None},
+            'progress': {
+                'is_single_channel_check': True,
+                'stale': True,
+                'stale_reason': 'no_active_worker',
+            },
+        }
+        mock_service.check_single_channel.return_value = {'success': True, 'channel_id': 1}
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_channel_now_response(
+                payload={'channel_id': 1},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(response.get_json().get('success'), True)
+        mock_service.check_single_channel.assert_called_once_with(
+            1,
+            forced_profile_id=None,
+            force_check=False,
+        )
+
     def test_handler_sanitizes_unexpected_service_errors(self):
         """Handler must not expose internal exception details from service results."""
         from flask import Flask
@@ -540,6 +575,191 @@ class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
         data = json_mod.loads(response.get_data(as_text=True))
         self.assertEqual(data.get('error'), 'Internal Server Error')
         self.assertNotIn('secret', response.get_data(as_text=True))
+
+
+class TestSingleStreamCheckHandler(unittest.TestCase):
+    """Tests for one-off stream checks that do not require channel assignment."""
+
+    def test_handler_accepts_stream_reference_and_forwards_options(self):
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_stream_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {'checking': False, 'queue': {}, 'progress': {}}
+        mock_service.check_single_stream.return_value = {
+            'success': True,
+            'stream_id': 456,
+            'stats_payload': {'resolution': '1920x1080'},
+        }
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_stream_now_response(
+                payload={
+                    'stream_reference': 'stream-456',
+                    'persist': 'false',
+                    'detect_blank': 'true',
+                    'detect_freeze': True,
+                    'detect_loop': 'false',
+                },
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(response.get_json().get('stream_id'), 456)
+        mock_service.check_single_stream.assert_called_once_with(
+            456,
+            persist=False,
+            blank_check_enabled=True,
+            freeze_check_enabled=True,
+            loop_check_enabled=False,
+        )
+
+    def test_handler_rejects_missing_stream_id(self):
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_stream_now_response
+
+        mock_service = Mock()
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_stream_now_response(
+                payload={'stream_reference': 'not-a-stream'},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 400)
+        self.assertEqual(response.get_json().get('error'), 'stream_id required')
+        mock_service.check_single_stream.assert_not_called()
+
+    def test_handler_blocks_during_active_stream_checker(self):
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_stream_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {
+            'checking': True,
+            'queue': {'queue_size': 0, 'in_progress': 0},
+            'progress': {},
+        }
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_stream_now_response(
+                payload={'stream_id': 456},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 409)
+        self.assertEqual(response.get_json().get('error'), 'stream_checker_active')
+        mock_service.check_single_stream.assert_not_called()
+
+    def test_handler_maps_stream_not_found_to_404(self):
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_stream_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {'checking': False, 'queue': {}, 'progress': {}}
+        mock_service.check_single_stream.return_value = {
+            'success': False,
+            'error': 'stream_not_found',
+            'stream_id': 999,
+        }
+
+        app = Flask(__name__)
+        with app.app_context():
+            result = check_single_stream_now_response(
+                payload={'stream_id': 999},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        response, status_code = result if isinstance(result, tuple) else (result, 200)
+        self.assertEqual(status_code, 404)
+        self.assertEqual(response.get_json().get('error'), 'stream_not_found')
+
+
+class TestSingleStreamCheckService(unittest.TestCase):
+    """Service-level one-off stream check contract."""
+
+    @patch('apps.stream.stream_checker_service.analyze_stream')
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_check_single_stream_measures_unassigned_udi_stream(self, mock_get_udi, mock_analyze):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service = object.__new__(StreamCheckerService)
+        service.abort_current_check = Mock()
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._is_stream_dead = Mock(return_value=(False, 'none'))
+        service._apply_quality_classification = (
+            lambda stream_data, result: StreamCheckerService._apply_quality_classification(stream_data, result)
+        )
+        service._calculate_stream_score = Mock(return_value=0.93)
+        service._run_loop_probes = Mock()
+        service._prepare_stream_stats_for_batch = Mock(return_value={
+            'stream_id': 456,
+            'stream_stats': {
+                'resolution': '1920x1080',
+                'quality_score': 0.93,
+            },
+        })
+        service._update_stream_stats = Mock(return_value=True)
+
+        mock_config = Mock()
+        mock_config.get.side_effect = lambda key, default=None: {
+            'stream_analysis': {
+                'ffmpeg_duration': 7,
+                'timeout': 8,
+                'retries': 2,
+                'retry_delay': 1,
+                'user_agent': 'StreamFlow-Test',
+                'stream_startup_buffer': 3,
+            },
+            'dead_stream_handling': {'enabled': True},
+        }.get(key, default)
+        service.config = mock_config
+
+        mock_udi = Mock()
+        mock_udi.get_stream_by_id.return_value = {
+            'id': 456,
+            'name': 'Loose Stream',
+            'url': 'http://example.invalid/live.m3u8',
+            'm3u_account_id': 12,
+        }
+        mock_get_udi.return_value = mock_udi
+
+        mock_analyze.return_value = {
+            'stream_id': 456,
+            'name': 'Loose Stream',
+            'resolution': '1920x1080',
+            'fps': 59.94,
+            'video_codec': 'h264',
+            'audio_codec': 'aac',
+            'bitrate_kbps': 6000,
+        }
+
+        result = StreamCheckerService.check_single_stream(
+            service,
+            456,
+            persist=True,
+            blank_check_enabled=True,
+            freeze_check_enabled=True,
+            loop_check_enabled=True,
+        )
+
+        self.assertTrue(result['success'])
+        self.assertEqual(result['stream_id'], 456)
+        self.assertEqual(result['run_mode'], 'single_stream_check')
+        self.assertTrue(result['persisted'])
+        self.assertEqual(result['stats_payload']['resolution'], '1920x1080')
+        mock_analyze.assert_called_once()
+        analyze_kwargs = mock_analyze.call_args.kwargs
+        self.assertTrue(analyze_kwargs['blank_check_enabled'])
+        self.assertTrue(analyze_kwargs['freeze_check_enabled'])
+        service._run_loop_probes.assert_called_once()
+        service._update_stream_stats.assert_called_once()
 
 
 

@@ -25,6 +25,22 @@ describe('Teamarr event health alert helpers', () => {
     })
   })
 
+  it('explains static team game windows that cannot run without a Dispatcharr channel', () => {
+    const alert = getTeamarrEventHealthAlert({
+      preflight_kind: 'team',
+      state: 'no_dispatcharr_channel',
+      event_date: '2026-06-14T16:15:00Z',
+      team_channel_id: 'MiamiMarlins.mlb',
+    })
+
+    expect(alert).toMatchObject({
+      severity: 'warning',
+      label: 'Team channel missing',
+    })
+    expect(alert.detail).toMatch(/MiamiMarlins\.mlb/)
+    expect(alert.detail).toMatch(/before StreamFlow can run/i)
+  })
+
   it('marks all-dead results as critical after event start', () => {
     const alert = getTeamarrEventHealthAlert(
       { seconds_to_start: -600 },

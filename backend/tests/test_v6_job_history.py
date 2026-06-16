@@ -1,3 +1,5 @@
+import json
+
 from flask import Flask
 from werkzeug.datastructures import MultiDict
 
@@ -156,6 +158,141 @@ def test_changelog_run_export_is_scoped_to_single_run():
     skipped = next(row for row in payload["streams"] if row["stream_id"] == 101)
     assert skipped["bucket"] == "skipped"
     assert skipped["reason"] == "active_viewer_protected"
+
+
+def test_changelog_run_json_export_includes_sanitized_v7_run_snapshot():
+    save_generic_telemetry(
+        "single_channel_check",
+        {
+            "channel_id": 11,
+            "channel_name": "Fixture Snapshot",
+            "success": True,
+            "run_snapshot": {
+                "schema_version": 1,
+                "run_id": "v7-export-1",
+                "run_mode": "single_channel_check",
+                "start_source": "manual",
+                "started_at": "2026-06-13T13:00:00",
+                "completed_at": "2026-06-13T13:01:00",
+                "duration_seconds": 60,
+                "streamflow_version": "test-version",
+                "streamflow_commit": None,
+                "channel_id": 11,
+                "channel_name": "Fixture Snapshot",
+                "forced_profile_id": None,
+                "effective_profiles": [
+                    {
+                        "profile_id": "profile-a",
+                        "profile_name": "V7 Export Profile",
+                        "stream_url": "http://snapshot-secret.example/live",
+                    }
+                ],
+                "quality_rules": [
+                    {
+                        "profile_id": "profile-a",
+                        "enabled": True,
+                        "stream_limit": 4,
+                    }
+                ],
+                "capacity_profile_context": {
+                    "type": "provider_account_profiles",
+                    "provider_url": "http://snapshot-secret.example/provider",
+                },
+                "feature_flags": {
+                    "stream_checking_enabled": True,
+                    "api_key": "snapshot-secret-api-key",
+                },
+                "dispatcharr_status": {
+                    "network_ready": True,
+                    "stale_status": {
+                        "status": "stale_risk",
+                        "read_only": True,
+                        "stale_status_suspected": True,
+                        "stale_suspected_count": 1,
+                        "m3u_status_counts": {"fetching": 1},
+                        "external_checks": {"celery": "unknown", "redis": "unknown", "postgres": "unknown"},
+                        "actions": {
+                            "dispatcharr_mutated": False,
+                            "dispatcharr_restart_attempted": False,
+                            "repair_requires_operator_approval": True,
+                        },
+                    },
+                    "base_url": "http://snapshot-secret.example/dispatcharr",
+                    "headers": {"Authorization": "Bearer snapshot-secret-token"},
+                },
+                "stale_warnings": [
+                    {
+                        "type": "dispatcharr_status_risk",
+                        "label": "Dispatcharr Provider Sync",
+                        "count": 1,
+                        "read_only": True,
+                    }
+                ],
+                "teamarr_status": {"preflight_context": False},
+                "m3u_refresh": {
+                    "scope": "none",
+                    "account_count": 0,
+                    "url": "http://snapshot-secret.example/m3u",
+                },
+                "result_summary": {
+                    "total_streams": 2,
+                    "dead_streams": 1,
+                    "stream_details": [{"stream_url": "http://snapshot-secret.example/raw"}],
+                },
+                "credentials": {"password": "snapshot-secret-password"},
+                "raw_details": {"stream_url": "http://snapshot-secret.example/raw-details"},
+                "logs": ["snapshot-secret-log"],
+                "limits": {"max_bytes": 51200},
+                "snapshot_size_bytes": 2048,
+                "snapshot_truncated": False,
+            },
+            "checked_streams": [
+                {
+                    "stream_id": 110,
+                    "stream_name": "Snapshot Export Stream",
+                    "status": "completed",
+                    "url": "http://row-secret.example/live",
+                }
+            ],
+        },
+    )
+
+    session = get_session()
+    try:
+        run = session.query(Run).filter(Run.job_subject_ref == "channel:11").one()
+        run_id = run.id
+    finally:
+        session.close()
+
+    app = Flask(__name__)
+    with app.app_context():
+        response = export_changelog_run_response(
+            run_id=run_id,
+            request_args=MultiDict({"format": "json", "include_url": "false"}),
+        )
+
+    payload = response.get_json()
+    snapshot = payload["run_snapshot"]
+    snapshot_json = json.dumps(snapshot)
+
+    assert payload["total_stream_rows"] == 1
+    assert "url" not in payload["fields"]
+    assert "url" not in payload["streams"][0]
+    assert snapshot["run_id"] == "v7-export-1"
+    assert snapshot["run_mode"] == "single_channel_check"
+    assert snapshot["forced_profile_id"] is None
+    assert snapshot["effective_profiles"][0]["profile_name"] == "V7 Export Profile"
+    assert snapshot["result_summary"]["total_streams"] == 2
+    assert snapshot["result_summary"]["dead_streams"] == 1
+    assert snapshot["stale_warnings"][0]["type"] == "dispatcharr_status_risk"
+    assert snapshot["dispatcharr_status"]["stale_status"]["stale_suspected_count"] == 1
+    assert snapshot["limits"]["max_bytes"] == 51200
+    assert "snapshot-secret" not in snapshot_json
+    assert "stream_url" not in snapshot_json
+    assert "provider_url" not in snapshot_json
+    assert "credentials" not in snapshot_json
+    assert "raw_details" not in snapshot_json
+    assert "stream_details" not in snapshot_json
 
 
 def test_changelog_run_export_dead_scope_enriches_reasons_and_profiles():

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -33,6 +34,14 @@ MAX_UPCOMING_EVENTS = 1000
 TEAMARR_PREFLIGHT_QUEUE_PRIORITY = 100
 
 READY_SYNC_STATES = {"in_sync", "synced", "ready"}
+STATIC_TEAM_MATCHUP_RE = re.compile(
+    r"(^|\s)(?:@|at|vs\.?|v\.?|versus|bei|gegen)(?=\s|$)",
+    re.IGNORECASE,
+)
+STATIC_TEAM_PREVIEW_WINDOW_RE = re.compile(
+    r"(^|\s)(?:coming\s+up|upcoming|preview|pre\s*game|pregame)(?=\s|:|$)",
+    re.IGNORECASE,
+)
 EVENT_DATETIME_KEYS = (
     "event_date",
     "start_time",
@@ -68,6 +77,7 @@ MANUAL_FORCE_ERROR_MESSAGES = {
     "filtered": "Managed event is filtered by the current preflight configuration",
     "no_dispatcharr_channel": "Managed event has no Dispatcharr channel yet",
     "no_live_window": "Static team has no live window yet",
+    "no_event_window": "Static team live window has no event evidence",
     "no_streams_yet": "Static team channel has no streams yet",
     "incomplete_team": "Static team channel status is incomplete",
     "past": "Managed event is outside the post-start grace window",
@@ -731,6 +741,7 @@ class TeamarrPreflightService:
 
         if config.get("managed_event_preflight_enabled", True):
             raw_events = self._fetch_managed_events(config)
+            raw_events = self._events_with_catalog_sports(raw_events, config)
             event_candidates = self._build_candidates(raw_events, config, now)
 
         if config.get("static_team_preflight_enabled"):
@@ -975,8 +986,60 @@ class TeamarrPreflightService:
         response.raise_for_status()
         return response.json()
 
+    def _events_with_catalog_sports(
+        self,
+        events: Iterable[Dict[str, Any]],
+        config: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        event_list = [dict(event) for event in events]
+        missing_league_sport = {
+            str(event.get("league") or "").strip().lower()
+            for event in event_list
+            if self._sport_is_unknown(event.get("sport")) and str(event.get("league") or "").strip()
+        }
+        if not missing_league_sport:
+            return event_list
+
+        try:
+            league_sports = self._league_sports_from_catalog(
+                self._fetch_teamarr_json(config, "/api/v1/cache/leagues")
+            )
+        except Exception as exc:
+            logger.debug("Teamarr league catalog sport enrichment unavailable: %s", exc)
+            return event_list
+
+        for event in event_list:
+            league = str(event.get("league") or "").strip().lower()
+            catalog_sport = league_sports.get(league)
+            if catalog_sport and self._sport_is_unknown(event.get("sport")):
+                event["teamarr_original_sport"] = event.get("sport")
+                event["sport"] = catalog_sport
+        return event_list
+
+    @staticmethod
+    def _sport_is_unknown(value: Any) -> bool:
+        text = str(value or "").strip().lower()
+        return text in {"", "none", "unknown", "n/a", "na"}
+
+    @staticmethod
+    def _league_sports_from_catalog(payload: Any) -> Dict[str, str]:
+        leagues = payload.get("leagues") if isinstance(payload, dict) else []
+        if not isinstance(leagues, list):
+            return {}
+        sports: Dict[str, str] = {}
+        for league in leagues:
+            if not isinstance(league, dict):
+                continue
+            slug = str(league.get("slug") or "").strip().lower()
+            sport = str(league.get("sport") or "").strip().lower()
+            if slug and sport and sport not in {"unknown", "none"}:
+                sports[slug] = sport
+        return sports
+
     def _build_filter_options(self, config: Dict[str, Any], events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
-        fallback = self._event_filter_options(events)
+        event_list = list(events)
+        fallback = self._event_filter_options(event_list)
+        event_sports_by_league = self._event_sports_by_league(event_list)
         try:
             subscription = self._fetch_teamarr_json(config, "/api/v1/sports-subscription")
             sports_catalog = self._fetch_teamarr_json(config, "/api/v1/cache/sports")
@@ -993,6 +1056,10 @@ class TeamarrPreflightService:
             for league_slug in selected_leagues:
                 league = leagues_by_slug.get(league_slug, {})
                 sport_slug = str(league.get("sport") or "").strip().lower()
+                if self._sport_is_unknown(sport_slug):
+                    sport_slug = event_sports_by_league.get(league_slug, "")
+                if self._sport_is_unknown(sport_slug):
+                    sport_slug = self._infer_sport_from_league_slug(league_slug)
                 if sport_slug:
                     selected_sports.add(sport_slug)
                 elif league_slug in sports_by_slug:
@@ -1027,6 +1094,47 @@ class TeamarrPreflightService:
             logger.debug("Teamarr preflight filter options fell back to managed events: %s", exc)
             fallback["error"] = "Teamarr subscription options unavailable"
             return fallback
+
+    @classmethod
+    def _event_sports_by_league(cls, events: Iterable[Dict[str, Any]]) -> Dict[str, str]:
+        sports_by_league: Dict[str, str] = {}
+        for event in events:
+            league = str(event.get("league") or "").strip().lower()
+            sport = str(event.get("sport") or "").strip().lower()
+            if league and not cls._sport_is_unknown(sport):
+                sports_by_league.setdefault(league, sport)
+        return sports_by_league
+
+    @staticmethod
+    def _infer_sport_from_league_slug(league_slug: str) -> str:
+        slug = str(league_slug or "").strip().lower()
+        if slug in {"mlb"}:
+            return "baseball"
+        if slug in {"nba"}:
+            return "basketball"
+        if slug in {"nfl"}:
+            return "football"
+        if slug in {"nhl"}:
+            return "hockey"
+        if slug in {"ufc"}:
+            return "mma"
+        if slug == "boxing":
+            return "boxing"
+        soccer_prefixes = (
+            "eng.",
+            "esp.",
+            "fifa.",
+            "ger.",
+            "ita.",
+            "uefa.",
+            "usa.1",
+            "usa.nwsl",
+            "usa.usl.",
+            "usa.w.usl.",
+        )
+        if any(slug == prefix.rstrip(".") or slug.startswith(prefix) for prefix in soccer_prefixes):
+            return "soccer"
+        return ""
 
     @staticmethod
     def _event_filter_options(events: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1166,6 +1274,12 @@ class TeamarrPreflightService:
                 state, bucket = "no_live_window", None
             elif str(candidate.get("team_status") or "") != "ready":
                 state, bucket = "incomplete_team", None
+            elif not candidate.get("live_window_event_evidence"):
+                state, bucket = "no_event_window", None
+                missing = list(candidate.get("missing") or [])
+                if "team_event_evidence" not in missing:
+                    missing.append("team_event_evidence")
+                candidate["missing"] = missing
             else:
                 state, bucket = self._classify_event(candidate, config, now)
 
@@ -1263,6 +1377,45 @@ class TeamarrPreflightService:
         )
         return f"team:{team_id}:{event_date or 'no-window'}:{channel_ref}"
 
+    @staticmethod
+    def _normalize_team_window_text(value: Any) -> str:
+        text = re.sub(r"[\._-]+", " ", str(value or ""))
+        return re.sub(r"\s+", " ", text).strip().casefold()
+
+    @staticmethod
+    def _static_team_live_window_has_event_evidence(
+        team: Dict[str, Any],
+        next_live_window: Dict[str, Any],
+    ) -> bool:
+        if not next_live_window.get("found"):
+            return False
+        if not next_live_window.get("start"):
+            return False
+        if next_live_window.get("is_live") is False:
+            return False
+
+        title = TeamarrPreflightService._normalize_team_window_text(next_live_window.get("title"))
+        sub_title = TeamarrPreflightService._normalize_team_window_text(next_live_window.get("sub_title"))
+
+        text_values = [value for value in (title, sub_title) if value]
+        if not text_values:
+            return False
+
+        team_terms = {
+            TeamarrPreflightService._normalize_team_window_text(team.get("team_name")),
+            TeamarrPreflightService._normalize_team_window_text(team.get("team_abbrev")),
+            TeamarrPreflightService._normalize_team_window_text(team.get("channel_id")),
+        }
+        team_terms = {value for value in team_terms if value}
+        if text_values and all(value in team_terms for value in text_values):
+            return False
+
+        combined_text = " ".join(text_values)
+        if STATIC_TEAM_PREVIEW_WINDOW_RE.search(combined_text):
+            return False
+
+        return bool(STATIC_TEAM_MATCHUP_RE.search(combined_text))
+
     def _public_team(self, status: Dict[str, Any], now: datetime) -> Optional[Dict[str, Any]]:
         team = status.get("team") if isinstance(status.get("team"), dict) else {}
         if not team:
@@ -1308,6 +1461,10 @@ class TeamarrPreflightService:
             "seconds_to_start": seconds_to_start,
             "team_status": status.get("status") or "incomplete",
             "missing": list(status.get("missing") or []),
+            "live_window_event_evidence": self._static_team_live_window_has_event_evidence(
+                team,
+                next_live_window,
+            ),
             "next_live_window": {
                 key: value
                 for key, value in next_live_window.items()
@@ -1338,6 +1495,7 @@ class TeamarrPreflightService:
             "sport": event.get("sport"),
             "league": event.get("league"),
             "team_status": event.get("team_status"),
+            "live_window_event_evidence": event.get("live_window_event_evidence"),
             "state": state or event.get("state"),
             "trigger_bucket": bucket if bucket is not None else event.get("trigger_bucket"),
             "may_start_full_run": False,

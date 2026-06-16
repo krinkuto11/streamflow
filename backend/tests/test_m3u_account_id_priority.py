@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import sys
+import time
 import unittest
 from unittest.mock import Mock, patch
 
@@ -213,6 +214,8 @@ class TestM3uAccountIdPriority(unittest.TestCase):
                     "limit": 2,
                     "unlimited": False,
                     "active_viewers": 1,
+                    "real_viewers": 1,
+                    "shadow_watchers": 0,
                     "checking": 1,
                     "used": 2,
                     "available": 0,
@@ -224,12 +227,88 @@ class TestM3uAccountIdPriority(unittest.TestCase):
                     "limit": 1,
                     "unlimited": False,
                     "active_viewers": 0,
+                    "real_viewers": 0,
+                    "shadow_watchers": 0,
                     "checking": 0,
                     "used": 0,
                     "available": 1,
                     "full": False,
                 },
             ],
+        )
+
+    def test_udi_profile_usage_context_splits_shadow_watcher_clients(self):
+        from apps.udi.manager import UDIManager
+
+        udi = UDIManager()
+        udi._m3u_accounts_cache = [
+            {
+                "id": 7,
+                "name": "Provider",
+                "profiles": [
+                    {"id": 70, "name": "Primary", "max_streams": 1, "is_active": True},
+                ],
+            }
+        ]
+        udi._initialized = True
+        udi._build_indexes()
+        udi._proxy_status_cache = {
+            "channel-1": {
+                "state": "active",
+                "m3u_profile_id": 70,
+                "clients": [
+                    {"user_agent": "VLC", "username": "viewer"},
+                    {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"},
+                ],
+            }
+        }
+        udi._proxy_status_last_fetch = time.time()
+
+        context = udi.get_active_stream_context_per_profile(7)
+
+        self.assertEqual(context[70]["active_streams"], 1)
+        self.assertEqual(context[70]["real_viewers"], 1)
+        self.assertEqual(context[70]["shadow_watchers"], 1)
+        self.assertEqual(udi.get_active_streams_count_per_profile(7), {70: 1})
+
+    def test_profile_slot_snapshot_and_reservation_expose_shadow_context(self):
+        from apps.stream.concurrent_stream_limiter import AccountStreamLimiter
+
+        udi = Mock()
+        udi.get_m3u_account_by_id.return_value = {
+            "id": 7,
+            "name": "Provider",
+            "profiles": [
+                {"id": 70, "name": "Primary", "max_streams": 1, "is_active": True},
+            ],
+        }
+        udi.get_active_stream_context_per_profile.return_value = {
+            70: {
+                "active_streams": 1,
+                "real_viewers": 0,
+                "shadow_watchers": 1,
+            }
+        }
+        udi.get_active_streams_count_per_profile.return_value = {70: 1}
+        udi._find_account_for_profile.return_value = 7
+        limiter = AccountStreamLimiter(udi_manager=udi)
+
+        snapshot = limiter.get_profile_slot_snapshot(7)
+        acquired, reason, profile = limiter.reserve_profile_for_stream(
+            {"id": 200, "m3u_account_id": "7"}
+        )
+
+        self.assertEqual(snapshot[0]["active_viewers"], 1)
+        self.assertEqual(snapshot[0]["real_viewers"], 0)
+        self.assertEqual(snapshot[0]["shadow_watchers"], 1)
+        self.assertTrue(snapshot[0]["full"])
+        self.assertFalse(acquired)
+        self.assertEqual(reason, "shadow_watchers")
+        self.assertIsNone(profile)
+        self.assertFalse(
+            limiter.should_preempt_profile_for_viewer(
+                {"id": 70, "name": "Primary", "max_streams": 1}
+            )
         )
 
 

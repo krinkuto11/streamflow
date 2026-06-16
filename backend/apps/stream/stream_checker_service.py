@@ -50,6 +50,12 @@ from apps.stream.stream_check_utils import analyze_stream
 from apps.stream.queue_start import order_channels_for_queue_start
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
 from apps.stream.stream_session_manager import get_session_manager
+from apps.stream.stale_status_snapshot import (
+    build_dispatcharr_stale_snapshot,
+    build_stale_warnings,
+    external_m3u_account_risk,
+    external_message_class,
+)
 from apps.automation.automation_config_manager import get_automation_config_manager
 from apps.automation.channel_visibility_automation import (
     ChannelVisibilityAutomation,
@@ -253,6 +259,7 @@ def _resolve_single_channel_m3u_refresh_scope(
 
 class StreamCheckerService:
     """Main service for managing stream checking operations."""
+    SINGLE_CHANNEL_RUN_SNAPSHOT_MAX_BYTES = 50 * 1024
     
     def __init__(self):
         log_function_call(logger, "__init__")
@@ -553,6 +560,8 @@ class StreamCheckerService:
             'is_epg_scheduled': bool(queue_metadata.get('is_epg_scheduled')),
             'forced_profile_id': forced_profile_id,
         }
+        if queue_metadata.get('source') == 'teamarr_preflight':
+            single_check_kwargs['run_mode'] = 'teamarr_preflight'
         if queue_metadata.get('provider_limit_override'):
             single_check_kwargs['provider_limit_override'] = True
 
@@ -1691,11 +1700,13 @@ class StreamCheckerService:
         channel_id: Optional[int] = None,
         channel_name: Optional[str] = None,
         update_progress: bool = True,
+        progress_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[ConnectivityCheckResult]:
         """Return a failed result when destructive quality work must abort."""
         result = self._run_connectivity_guard(phase)
         if result.ok:
             return None
+        progress_context = dict(progress_context or {})
 
         recoverable_phases = {
             'mark_dead_stream',
@@ -1744,6 +1755,7 @@ class StreamCheckerService:
                             step_detail=(
                                 f"{result.message}; retrying for up to {int(remaining)}s"
                             ),
+                            **progress_context,
                         )
                     except Exception as exc:
                         logger.debug("Failed to publish connectivity recovery progress: %s", exc)
@@ -1774,6 +1786,7 @@ class StreamCheckerService:
                     status='aborted',
                     step='Connectivity check failed',
                     step_detail=result.message,
+                    **progress_context,
                 )
             except Exception as exc:
                 logger.debug("Failed to publish connectivity abort progress: %s", exc)
@@ -1786,6 +1799,8 @@ class StreamCheckerService:
         skip_batch_changelog: bool = False,
         forced_profile_id: Optional[str] = None,
         provider_limit_override: bool = False,
+        run_mode: Optional[str] = None,
+        is_single_channel_check: bool = False,
     ):
         """Check and reorder streams for a specific channel.
         
@@ -1796,10 +1811,22 @@ class StreamCheckerService:
             skip_batch_changelog: If True, don't add this check to the batch changelog
             provider_limit_override: If True, bypass provider/profile capacity
                 skips while still protecting active viewers.
+            run_mode: Optional progress context label for specialized callers.
+            is_single_channel_check: If True, preserve single-channel progress
+                semantics through the internal quality-analysis phases.
         """
+        connectivity_progress_context: Dict[str, Any] = {}
+        if run_mode:
+            connectivity_progress_context['run_mode'] = run_mode
+        elif is_single_channel_check:
+            connectivity_progress_context['run_mode'] = 'single_channel_check'
+        if is_single_channel_check:
+            connectivity_progress_context['is_single_channel_check'] = True
+
         failed_connectivity = self._require_quality_check_connectivity(
             phase='quality_check_preflight',
             channel_id=channel_id,
+            progress_context=connectivity_progress_context,
         )
         if failed_connectivity is not None:
             return self._fail_channel_for_connectivity(
@@ -1815,6 +1842,8 @@ class StreamCheckerService:
                 skip_batch_changelog=skip_batch_changelog,
                 forced_profile_id=forced_profile_id,
                 provider_limit_override=provider_limit_override,
+                run_mode=run_mode,
+                is_single_channel_check=is_single_channel_check,
             )
         else:
             return self._check_channel_sequential(
@@ -1822,6 +1851,8 @@ class StreamCheckerService:
                 skip_batch_changelog=skip_batch_changelog,
                 forced_profile_id=forced_profile_id,
                 provider_limit_override=provider_limit_override,
+                run_mode=run_mode,
+                is_single_channel_check=is_single_channel_check,
             )
 
     def _complete_channel_check(self, channel_id: int, on_completed=None) -> bool:
@@ -1985,6 +2016,8 @@ class StreamCheckerService:
         target_stream_ids: Optional[List[str]] = None,
         forced_profile_id: Optional[str] = None,
         provider_limit_override: bool = False,
+        run_mode: Optional[str] = None,
+        is_single_channel_check: bool = False,
     ):
         """Check and reorder streams for a specific channel using parallel thread pool.
         
@@ -1995,6 +2028,9 @@ class StreamCheckerService:
                                streams will be checked, bypassing all other logic.
             provider_limit_override: If True, bypass provider/profile capacity
                                      skips while still protecting active viewers.
+            run_mode: Optional progress context label for specialized callers.
+            is_single_channel_check: If True, keep Current Progress in
+                                     single-channel mode for every phase update.
         """
         import time as time_module
         from apps.stream.concurrent_stream_limiter import get_smart_scheduler, get_account_limiter, initialize_account_limits
@@ -2100,6 +2136,11 @@ class StreamCheckerService:
             profile,
             forced_profile_id=forced_profile_id,
         )
+        profile_progress_context['run_mode'] = run_mode or (
+            'single_channel_check' if is_single_channel_check else 'stream_checker'
+        )
+        if is_single_channel_check:
+            profile_progress_context['is_single_channel_check'] = True
         
         try:
             # Get channel information from UDI
@@ -2136,7 +2177,8 @@ class StreamCheckerService:
                 total=0,
                 status='initializing',
                 step='Fetching streams',
-                step_detail=f'Loading streams for {channel_name}'
+                step_detail=f'Loading streams for {channel_name}',
+                **profile_progress_context,
             )
             
             streams = fetch_channel_streams(channel_id)
@@ -2414,10 +2456,23 @@ class StreamCheckerService:
 
             def build_provider_profile_slots():
                 snapshots = {}
+                run_mode_name = str(profile_progress_context.get('run_mode') or '').lower()
+                checking_context_key = (
+                    'teamarr_preflight'
+                    if run_mode_name == 'teamarr_preflight'
+                    else 'quality_checks'
+                )
                 limiter = get_account_limiter()
                 for account_id in profile_slot_account_ids:
                     try:
                         slots = limiter.get_profile_slot_snapshot(account_id)
+                        for slot in slots:
+                            try:
+                                checking_count = int(slot.get('checking') or 0)
+                            except (TypeError, ValueError):
+                                checking_count = 0
+                            if checking_count > 0 and checking_context_key not in slot:
+                                slot[checking_context_key] = checking_count
                     except Exception as exc:
                         logger.debug(
                             "Could not build profile slot snapshot for account %s: %s",
@@ -2457,6 +2512,7 @@ class StreamCheckerService:
                         streams_detail=list(stream_statuses.values()),
                         stream_duration=analysis_params.get('ffmpeg_duration', 30),
                         provider_profile_slots=build_provider_profile_slots(),
+                        **profile_progress_context,
                     )
             
             def progress_callback(completed, total, result):
@@ -2540,6 +2596,7 @@ class StreamCheckerService:
                     streams_detail=list(stream_statuses.values()),
                     stream_duration=analysis_params.get('ffmpeg_duration', 30),
                     provider_profile_slots=build_provider_profile_slots(),
+                    **profile_progress_context,
                 )
 
             def defer_callback(stream, reason):
@@ -2562,6 +2619,7 @@ class StreamCheckerService:
                         streams_detail=list(stream_statuses.values()),
                         stream_duration=analysis_params.get('ffmpeg_duration', 30),
                         provider_profile_slots=build_provider_profile_slots(),
+                        **profile_progress_context,
                     )
             
             if streams_to_check:
@@ -2574,7 +2632,8 @@ class StreamCheckerService:
                     total=total_streams,
                     status='analyzing',
                     step='Analyzing streams with account limits',
-                    step_detail=f'Using smart scheduler with per-account limits'
+                    step_detail=f'Using smart scheduler with per-account limits',
+                    **profile_progress_context,
                 )
 
                 # Heartbeat thread: pushes current stream_statuses to the frontend
@@ -2597,6 +2656,7 @@ class StreamCheckerService:
                                 streams_detail=list(stream_statuses.values()),
                                 stream_duration=analysis_params.get('ffmpeg_duration', 30),
                                 provider_profile_slots=build_provider_profile_slots(),
+                                **profile_progress_context,
                             )
                         except Exception:
                             pass  # never let the heartbeat crash the check
@@ -2690,6 +2750,7 @@ class StreamCheckerService:
                             phase='mark_dead_stream',
                             channel_id=channel_id,
                             channel_name=channel_name,
+                            progress_context=profile_progress_context,
                         )
                         if failed_connectivity is not None:
                             return self._fail_channel_for_connectivity(
@@ -2739,6 +2800,7 @@ class StreamCheckerService:
                                 phase='keep_dead_stream_marked',
                                 channel_id=channel_id,
                                 channel_name=channel_name,
+                                progress_context=profile_progress_context,
                             )
                             if failed_connectivity is not None:
                                 return self._fail_channel_for_connectivity(
@@ -2860,6 +2922,7 @@ class StreamCheckerService:
                     channel_id=channel_id,
                     channel_name=channel_name,
                     streams_detail=list(stream_statuses.values()),
+                    profile_progress_context=profile_progress_context,
                 )
             else:
                 logger.debug("[loop-probe] Loop checking disabled by profile — skipping")
@@ -2890,7 +2953,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='processing',
                 step='Calculating scores',
-                step_detail='Sorting streams by quality score'
+                step_detail='Sorting streams by quality score',
+                **profile_progress_context,
             )
             # Sort streams using tiered sort keys (lexicographical ranking)
             for analyzed in analyzed_streams:
@@ -2931,7 +2995,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='updating',
                 step='Reordering streams',
-                step_detail='Applying new stream order to channel'
+                step_detail='Applying new stream order to channel',
+                **profile_progress_context,
             )
             reordered_ids = [s.get('stream_id') for s in analyzed_streams if s.get('stream_id') is not None]
             reordered_ids = self._merge_protected_stream_order(
@@ -2966,6 +3031,7 @@ class StreamCheckerService:
                     phase='channel_stream_update',
                     channel_id=channel_id,
                     channel_name=channel_name,
+                    progress_context=profile_progress_context,
                 )
                 if failed_connectivity is not None:
                     return self._fail_channel_for_connectivity(
@@ -2989,7 +3055,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='verifying',
                 step='Verifying update',
-                step_detail='Confirming stream order was applied'
+                step_detail='Confirming stream order was applied',
+                **profile_progress_context,
             )
             
             # Only verify if enabled in configuration
@@ -3261,6 +3328,8 @@ class StreamCheckerService:
         target_stream_ids: Optional[List[str]] = None,
         forced_profile_id: Optional[str] = None,
         provider_limit_override: bool = False,
+        run_mode: Optional[str] = None,
+        is_single_channel_check: bool = False,
     ):
         """Check and reorder streams for a specific channel using sequential checking.
         
@@ -3271,6 +3340,9 @@ class StreamCheckerService:
                                streams will be checked, bypassing all other logic.
             provider_limit_override: If True, bypass provider/profile capacity
                                      skips while still protecting active viewers.
+            run_mode: Optional progress context label for specialized callers.
+            is_single_channel_check: If True, keep Current Progress in
+                                     single-channel mode for every phase update.
         """
         import time as time_module
         start_time = time_module.time()
@@ -3367,6 +3439,11 @@ class StreamCheckerService:
             profile,
             forced_profile_id=forced_profile_id,
         )
+        profile_progress_context['run_mode'] = run_mode or (
+            'single_channel_check' if is_single_channel_check else 'stream_checker'
+        )
+        if is_single_channel_check:
+            profile_progress_context['is_single_channel_check'] = True
         
         try:
             # Get channel information from UDI
@@ -3403,7 +3480,8 @@ class StreamCheckerService:
                 total=0,
                 status='initializing',
                 step='Fetching streams',
-                step_detail=f'Loading streams for {channel_name}'
+                step_detail=f'Loading streams for {channel_name}',
+                **profile_progress_context,
             )
             
             streams = fetch_channel_streams(channel_id)
@@ -3629,7 +3707,8 @@ class StreamCheckerService:
                     status='analyzing',
                     step='Analyzing stream quality',
                     step_detail=f'Checking bitrate, resolution, codec ({idx}/{total_streams})',
-                    streams_detail=list(stream_statuses.values())
+                    streams_detail=list(stream_statuses.values()),
+                    **profile_progress_context,
                 )
                 
                 if stream['id'] in stream_statuses:
@@ -3651,7 +3730,8 @@ class StreamCheckerService:
                     step='Analyzing stream quality',
                     step_detail=f'Checking bitrate, resolution, codec ({idx}/{total_streams})',
                     streams_detail=list(stream_statuses.values()),
-                    stream_duration=analysis_params.get('ffmpeg_duration', 20)
+                    stream_duration=analysis_params.get('ffmpeg_duration', 20),
+                    **profile_progress_context,
                 )
                 
                 # Apply URL transformation if using M3U profile with search/replace patterns
@@ -3697,6 +3777,7 @@ class StreamCheckerService:
                         phase='mark_dead_stream',
                         channel_id=channel_id,
                         channel_name=channel_name,
+                        progress_context=profile_progress_context,
                     )
                     if failed_connectivity is not None:
                         return self._fail_channel_for_connectivity(
@@ -3747,6 +3828,7 @@ class StreamCheckerService:
                             phase='keep_dead_stream_marked',
                             channel_id=channel_id,
                             channel_name=channel_name,
+                            progress_context=profile_progress_context,
                         )
                         if failed_connectivity is not None:
                             return self._fail_channel_for_connectivity(
@@ -3967,6 +4049,7 @@ class StreamCheckerService:
                     channel_id=channel_id,
                     channel_name=channel_name,
                     streams_detail=list(stream_statuses.values()),
+                    profile_progress_context=profile_progress_context,
                 )
                 # Write stats for all probed streams so loop fields
                 # (loop_probe_ran, loop_detected, loop_duration_secs) are
@@ -3991,7 +4074,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='processing',
                 step='Calculating scores',
-                step_detail='Sorting streams by quality score'
+                step_detail='Sorting streams by quality score',
+                **profile_progress_context,
             )
             # Sort streams using tiered sort keys (lexicographical ranking)
             for analyzed in analyzed_streams:
@@ -4037,7 +4121,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='updating',
                 step='Reordering streams',
-                step_detail='Applying new stream order to channel'
+                step_detail='Applying new stream order to channel',
+                **profile_progress_context,
             )
             reordered_ids = [s.get('stream_id') for s in analyzed_streams if s.get('stream_id') is not None]
             reordered_ids = self._merge_protected_stream_order(
@@ -4072,6 +4157,7 @@ class StreamCheckerService:
                     phase='channel_stream_update',
                     channel_id=channel_id,
                     channel_name=channel_name,
+                    progress_context=profile_progress_context,
                 )
                 if failed_connectivity is not None:
                     return self._fail_channel_for_connectivity(
@@ -4095,7 +4181,8 @@ class StreamCheckerService:
                 total=len(streams),
                 status='verifying',
                 step='Verifying update',
-                step_detail='Confirming stream order was applied'
+                step_detail='Confirming stream order was applied',
+                **profile_progress_context,
             )
             
             # Only verify if enabled in configuration
@@ -4346,7 +4433,8 @@ class StreamCheckerService:
     def _run_loop_probes(self, analyzed_streams: list, user_agent: str = 'VLC/3.0.14', loop_penalty: float = 0.0,
                          probe_duration: int = 360, hardware_acceleration: Optional[dict] = None,
                          channel_id: int = 0, channel_name: str = '',
-                         streams_detail: Optional[list] = None) -> None:
+                         streams_detail: Optional[list] = None,
+                         profile_progress_context: Optional[Dict[str, Any]] = None) -> None:
         """
         Run loop detection probes on eligible streams in parallel with
         per-account concurrent limits, then write results back into each
@@ -4391,6 +4479,8 @@ class StreamCheckerService:
                               check method. Used to build probe_detail for live
                               frontend grid updates. None on paths where
                               stream_statuses is not available.
+            profile_progress_context: Optional Current Progress context to
+                              preserve across loop-probe UI updates.
         """
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -4434,6 +4524,7 @@ class StreamCheckerService:
         udi = get_udi_manager()
         results_lock = threading.Lock()
         completed = [0]
+        progress_context = dict(profile_progress_context or {})
 
         # Build probe_detail from the streams_detail snapshot passed in by the
         # calling check method. Keyed by integer stream id (same as stream_statuses).
@@ -4466,6 +4557,7 @@ class StreamCheckerService:
                 step_detail=f'Probing {total} stream(s) for looping content',
                 streams_detail=list(probe_detail.values()),
                 stream_duration=probe_duration,
+                **progress_context,
             )
 
         def _probe_one(stream: dict) -> None:
@@ -4545,6 +4637,7 @@ class StreamCheckerService:
                             step_detail=f'Completed {completed[0]}/{total}: {stream_name}',
                             streams_detail=list(probe_detail.values()),
                             stream_duration=probe_duration,
+                            **progress_context,
                         )
                     logger.info(
                         f"[loop-probe] Completed {completed[0]}/{total}: {stream_audit_ref}"
@@ -4849,6 +4942,199 @@ class StreamCheckerService:
 
         return {'active': max(0, active), 'waiting': max(0, waiting)}
 
+    def _current_progress_stale_after_seconds(self) -> int:
+        analysis_duration = self._queue_number(self.config.get('stream_analysis.ffmpeg_duration', 30)) or 30.0
+        analysis_timeout = self._queue_number(self.config.get('stream_analysis.timeout', 30)) or 30.0
+        startup_buffer = self._queue_number(self.config.get('stream_analysis.stream_startup_buffer', 10)) or 10.0
+        retries = self._queue_number(self.config.get('stream_analysis.retries', 1))
+        retry_delay = self._queue_number(self.config.get('stream_analysis.retry_delay', 10)) or 10.0
+        loop_duration = self._queue_number(self.config.get('stream_analysis.max_loop_duration', 120)) or 120.0
+        provider_wait = self._queue_number(self.config.get('concurrent_streams.provider_wait_timeout', 180)) or 180.0
+
+        attempts = max(1.0, retries + 1.0)
+        probe_budget = attempts * (analysis_duration + analysis_timeout + startup_buffer)
+        retry_budget = max(0.0, retries) * retry_delay
+        loop_budget = loop_duration * 3.0
+        stale_after = probe_budget + retry_budget + loop_budget + provider_wait + 60.0
+        return int(max(300.0, min(stale_after, 1800.0)))
+
+    def _current_progress_cleanup_after_seconds(self) -> int:
+        return int(max(3600, min(self._current_progress_stale_after_seconds() * 6, 21600)))
+
+    def _current_progress_age_seconds(self, progress: Optional[Dict[str, Any]]) -> Optional[int]:
+        if not isinstance(progress, dict) or not progress.get('timestamp'):
+            return None
+        return int(self._elapsed_seconds_since(progress.get('timestamp')))
+
+    def _current_progress_stale_gate(
+        self,
+        progress: Optional[Dict[str, Any]],
+        *,
+        worker_or_queue_active: bool,
+    ) -> Optional[Dict[str, Any]]:
+        if not isinstance(progress, dict) or not progress:
+            return None
+        if worker_or_queue_active:
+            return None
+
+        age_seconds = self._current_progress_age_seconds(progress)
+        stale_after_seconds = self._current_progress_stale_after_seconds()
+        is_single_channel = bool(progress.get('is_single_channel_check'))
+        if is_single_channel and age_seconds is not None and age_seconds <= stale_after_seconds:
+            return None
+
+        reason = 'missing_progress_timestamp' if age_seconds is None else 'no_active_worker'
+        if not is_single_channel:
+            reason = 'idle_batch_progress'
+
+        stale_state = {
+            'stale': True,
+            'reason': reason,
+            'age_seconds': age_seconds,
+            'stale_after_seconds': stale_after_seconds,
+            'cleanup_after_seconds': self._current_progress_cleanup_after_seconds(),
+            'detected_at': datetime.now().isoformat(),
+            'channel_id': progress.get('channel_id'),
+            'channel_name': progress.get('channel_name'),
+            'is_single_channel_check': is_single_channel,
+        }
+        return stale_state
+
+    @staticmethod
+    def _external_message_class(message: Any) -> str:
+        """Classify Dispatcharr status text without exposing the raw message."""
+        return external_message_class(message)
+
+    @staticmethod
+    def _external_m3u_account_risk(account: Dict[str, Any]) -> Dict[str, Any]:
+        """Return a UI-safe M3U account status summary and stale-risk classification."""
+        return external_m3u_account_risk(account)
+
+    def _build_external_stale_diagnostics(
+        self,
+        *,
+        stream_checking_mode: bool,
+        queue_status: Dict[str, Any],
+        progress: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build read-only diagnostics for external Dispatcharr stale-status risks.
+
+        StreamFlow cannot safely inspect Dispatcharr's Celery/Redis/Postgres internals from
+        inside this container, so unavailable signals are reported as unknown instead of
+        being inferred. This method only reads StreamFlow's UDI cache/status and never
+        mutates Dispatcharr state.
+        """
+        base = {
+            "status": "unknown",
+            "read_only": True,
+            "generated_at": datetime.now().isoformat(),
+            "stale_status_suspected": False,
+            "operator_note": "External Dispatcharr stale-state diagnostics are read-only.",
+            "m3u_accounts": {
+                "available": False,
+                "total": 0,
+                "active": 0,
+                "status_counts": {},
+                "stale_suspected": [],
+            },
+            "streamflow_activity": {
+                "stream_checking_mode": bool(stream_checking_mode),
+                "queue_active": bool(
+                    queue_status.get("queue_size", 0) > 0
+                    or queue_status.get("in_progress", 0) > 0
+                    or queue_status.get("current_channel") is not None
+                ),
+                "progress_present": isinstance(progress, dict) and bool(progress),
+            },
+            "external_checks": {
+                "celery": {
+                    "status": "unknown",
+                    "operator_note": "Not available from the StreamFlow container; verify directly in Dispatcharr before treating active provider status as real work.",
+                },
+                "redis": {
+                    "status": "unknown",
+                    "operator_note": "Not available from the StreamFlow container; verify Dispatcharr refresh or M3U locks directly if needed.",
+                },
+                "postgres": {
+                    "status": "unknown",
+                    "operator_note": "Not available from the StreamFlow container; verify database locks directly if needed.",
+                },
+            },
+            "actions": {
+                "dispatcharr_mutated": False,
+                "dispatcharr_restart_attempted": False,
+                "repair_requires_operator_approval": True,
+            },
+        }
+
+        try:
+            udi = get_udi_manager()
+            observability = {}
+            getter = getattr(udi, "get_observability_status", None)
+            if callable(getter):
+                observability = getter() or {}
+            network_ready = bool(getattr(udi, "is_network_ready", lambda: False)())
+            automation_busy = bool(getattr(udi, "is_automation_busy", lambda: False)())
+            base["streamflow_activity"].update({
+                "udi_network_ready": network_ready,
+                "udi_init_in_progress": bool(observability.get("init_in_progress")),
+                "udi_refresh_running": bool(observability.get("refresh_running")),
+                "udi_automation_busy": automation_busy,
+                "udi_last_refresh_time": observability.get("last_refresh_time"),
+                "udi_last_refresh_age_seconds": observability.get("last_refresh_age_seconds"),
+            })
+
+            if not network_ready:
+                base["status"] = "insufficient_evidence"
+                base["operator_note"] = "UDI has not completed a live Dispatcharr refresh yet, so external stale-state diagnostics are incomplete."
+                return base
+
+            account_getter = getattr(udi, "get_m3u_accounts", None)
+            accounts = account_getter() if callable(account_getter) else []
+            if not isinstance(accounts, list):
+                accounts = []
+
+            status_counts: Counter = Counter()
+            active_count = 0
+            stale_suspected = []
+            for account in accounts:
+                if not isinstance(account, dict):
+                    continue
+                if account.get("is_active") is False:
+                    continue
+                active_count += 1
+                risk = self._external_m3u_account_risk(account)
+                status_counts[risk["status"]] += 1
+                if risk["stale_status_suspected"]:
+                    stale_suspected.append(risk)
+
+            base["m3u_accounts"] = {
+                "available": True,
+                "total": len(accounts),
+                "active": active_count,
+                "status_counts": dict(sorted(status_counts.items())),
+                "stale_suspected": stale_suspected[:10],
+                "stale_suspected_count": len(stale_suspected),
+            }
+
+            if stale_suspected:
+                base["status"] = "stale_risk"
+                base["stale_status_suspected"] = True
+                base["operator_note"] = (
+                    "Dispatcharr has a provider status that differs from its latest completion message. "
+                    "StreamFlow will keep checking and only reports this as an observed sync note."
+                )
+            else:
+                base["status"] = "ok"
+                base["operator_note"] = "No Dispatcharr provider status/message contradiction was detected in the current UDI cache."
+        except Exception as exc:
+            logger.debug("Could not build external stale diagnostics: %s", exc, exc_info=True)
+            base["status"] = "error"
+            base["operator_note"] = "External stale-state diagnostics could not be built."
+            base["error"] = exc.__class__.__name__
+
+        return base
+
     @staticmethod
     def _clear_active_stream_reason(stream_status: Dict) -> None:
         for key in (
@@ -5031,21 +5317,48 @@ class StreamCheckerService:
             
         queue_status['eta_seconds'] = self._calculate_queue_eta_seconds(queue_status)
         
-        single_channel_progress_active = bool(progress and progress.get('is_single_channel_check'))
+        worker_or_queue_active = bool(
+            self.checking or
+            queue_status.get('queue_size', 0) > 0 or
+            queue_status.get('in_progress', 0) > 0 or
+            queue_status.get('current_channel') is not None or
+            sync_state.get('active', False)
+        )
+        progress_stale = self._current_progress_stale_gate(
+            progress,
+            worker_or_queue_active=worker_or_queue_active,
+        )
+        if progress_stale:
+            progress = {
+                **progress,
+                'stale': True,
+                'stale_reason': progress_stale.get('reason'),
+                'stale_age_seconds': progress_stale.get('age_seconds'),
+                'stale_after_seconds': progress_stale.get('stale_after_seconds'),
+            }
+            cleanup_after = progress_stale.get('cleanup_after_seconds')
+            age_seconds = progress_stale.get('age_seconds')
+            if age_seconds is None or (cleanup_after is not None and age_seconds >= cleanup_after):
+                self.progress.clear()
+                progress_stale['cleared'] = True
+                progress = None
+
+        single_channel_progress_active = bool(
+            progress and
+            progress.get('is_single_channel_check') and
+            not progress.get('stale')
+        )
 
         # Stream checking mode is active when:
         # - An individual channel is being checked or preparing to be checked, OR
         # - There are channels in the queue waiting to be checked
         stream_checking_mode = (
-            self.checking or 
-            queue_status.get('queue_size', 0) > 0 or
-            queue_status.get('in_progress', 0) > 0 or
-            queue_status.get('current_channel') is not None or
+            worker_or_queue_active or
             single_channel_progress_active or
             sync_state.get('active', False)
         )
 
-        if not stream_checking_mode and progress:
+        if not stream_checking_mode and progress and not progress.get('stale'):
             self.progress.clear()
             progress = None
 
@@ -5054,6 +5367,11 @@ class StreamCheckerService:
         guard_failed = connectivity_guard_status.get('ok') is False
         connectivity_guard_status['active_failure'] = bool(guard_failed and stream_checking_mode)
         connectivity_guard_status['stale_failure'] = bool(guard_failed and not stream_checking_mode)
+        external_stale_diagnostics = self._build_external_stale_diagnostics(
+            stream_checking_mode=stream_checking_mode,
+            queue_status=queue_status,
+            progress=progress,
+        )
         
         return {
             'running': self.running,
@@ -5062,7 +5380,10 @@ class StreamCheckerService:
             'enabled': self.config.get('enabled', True),
             'queue': queue_status,
             'progress': progress,
+            'progress_stale': bool(progress_stale),
+            'progress_stale_details': progress_stale or {},
             'connectivity_guard': connectivity_guard_status,
+            'external_stale_diagnostics': external_stale_diagnostics,
             'last_global_check': self.update_tracker.get_last_global_check(),
             'config': {
                 'automation_controls': self.config.get('automation_controls', {}),
@@ -5096,7 +5417,232 @@ class StreamCheckerService:
         if profile_name:
             context['automation_profile_name'] = str(profile_name)
         context['automation_profile_source'] = 'forced' if forced_profile_id else 'resolved'
+        context['run_profile_id'] = context.get('automation_profile_id')
+        context['run_profile_name'] = context.get('automation_profile_name')
+        context['run_profile_source'] = context.get('automation_profile_source')
+        context['quality_profile_id'] = context.get('automation_profile_id')
+        context['quality_profile_name'] = context.get('automation_profile_name')
+        context['quality_profile_source'] = context.get('automation_profile_source')
+        context['capacity_profile_name'] = 'Provider account profiles'
+        context['capacity_profile_source'] = 'm3u_account_profiles'
         return context
+
+    @staticmethod
+    def _single_channel_snapshot_size_bytes(snapshot: Dict[str, Any]) -> int:
+        try:
+            return len(json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            return 0
+
+    def _bound_single_channel_run_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        bounded = dict(snapshot or {})
+        if self._single_channel_snapshot_size_bytes(bounded) <= self.SINGLE_CHANNEL_RUN_SNAPSHOT_MAX_BYTES:
+            bounded["snapshot_size_bytes"] = self._single_channel_snapshot_size_bytes(bounded)
+            bounded["snapshot_truncated"] = False
+            return bounded
+
+        for key in ("effective_profiles", "quality_rules", "feature_flags", "dispatcharr_status", "result_summary", "stale_warnings"):
+            value = bounded.get(key)
+            if isinstance(value, list):
+                bounded[f"{key}_omitted_count"] = max(0, len(value) - 3)
+                bounded[key] = value[:3]
+            elif isinstance(value, dict):
+                bounded[f"{key}_omitted"] = True
+                bounded[key] = {}
+            bounded["snapshot_truncated"] = True
+            if self._single_channel_snapshot_size_bytes(bounded) <= self.SINGLE_CHANNEL_RUN_SNAPSHOT_MAX_BYTES:
+                bounded["snapshot_size_bytes"] = self._single_channel_snapshot_size_bytes(bounded)
+                return bounded
+
+        minimal = {
+            "schema_version": bounded.get("schema_version", 1),
+            "run_id": bounded.get("run_id"),
+            "run_mode": bounded.get("run_mode"),
+            "start_source": bounded.get("start_source"),
+            "started_at": bounded.get("started_at"),
+            "completed_at": bounded.get("completed_at"),
+            "streamflow_version": bounded.get("streamflow_version"),
+            "streamflow_commit": bounded.get("streamflow_commit"),
+            "snapshot_truncated": True,
+            "snapshot_omitted_reason": "max_bytes_exceeded",
+        }
+        minimal["snapshot_size_bytes"] = self._single_channel_snapshot_size_bytes(minimal)
+        return minimal
+
+    @staticmethod
+    def _single_channel_visibility_summary(visibility_result: Optional[Dict[str, Any]]) -> Dict[str, int]:
+        if not isinstance(visibility_result, dict) or not visibility_result.get("changed"):
+            return {
+                "channels_hidden": 0,
+                "channels_ready": 0,
+                "channel_visibility_changed": 0,
+            }
+        action = visibility_result.get("action")
+        return {
+            "channels_hidden": 1 if action == "hidden" else 0,
+            "channels_ready": 1 if action == "unhidden" else 0,
+            "channel_visibility_changed": 1,
+        }
+
+    @staticmethod
+    def _streamflow_version_context() -> Dict[str, Optional[str]]:
+        version = os.getenv("STREAMFLOW_VERSION")
+        if not version:
+            current_file = Path(__file__)
+            for version_file in (
+                current_file.parent / "version.txt",
+                current_file.parents[2] / "version.txt",
+                current_file.parents[2] / "static" / "version.txt",
+            ):
+                try:
+                    if version_file.exists():
+                        value = version_file.read_text(encoding="utf-8").strip()
+                        if value:
+                            version = value
+                            break
+                except Exception:
+                    continue
+        commit = (
+            os.getenv("STREAMFLOW_COMMIT")
+            or os.getenv("STREAMFLOW_REVISION")
+            or os.getenv("GITHUB_SHA")
+        )
+        return {
+            "version": version or "dev-unknown",
+            "commit": commit or None,
+        }
+
+    def _build_single_channel_run_snapshot(
+        self,
+        *,
+        channel_id: int,
+        channel_name: str,
+        start_time: float,
+        completed_at: datetime,
+        duration_seconds: int,
+        profile: Optional[Dict[str, Any]],
+        profile_progress_context: Dict[str, Any],
+        check_stats: Dict[str, Any],
+        visibility_summary: Dict[str, int],
+        checking_enabled: bool,
+        matching_enabled: bool,
+        m3u_update_enabled: bool,
+        forced_profile_id: Optional[str],
+        force_check: bool,
+        provider_limit_override: bool,
+        is_epg_scheduled: bool,
+        m3u_refresh_scope: str,
+        m3u_refresh_account_count: int,
+        udi: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        run_mode = profile_progress_context.get("run_mode") or "single_channel_check"
+        if run_mode == "teamarr_preflight":
+            start_source = "teamarr_preflight"
+        elif is_epg_scheduled:
+            start_source = "epg_scheduled"
+        elif forced_profile_id:
+            start_source = "manual_forced_profile"
+        else:
+            start_source = "manual"
+
+        version_context = self._streamflow_version_context()
+        stream_checking = profile.get("stream_checking", {}) if isinstance(profile, dict) else {}
+        dispatcharr_status: Dict[str, Any] = {}
+        network_ready: Optional[bool] = None
+        m3u_accounts: Optional[List[Dict[str, Any]]] = None
+        try:
+            if udi and hasattr(udi, "is_network_ready"):
+                network_ready = bool(udi.is_network_ready())
+                dispatcharr_status["network_ready"] = network_ready
+        except Exception as exc:
+            dispatcharr_status["network_ready_error"] = type(exc).__name__
+        try:
+            account_getter = getattr(udi, "get_m3u_accounts", None)
+            if callable(account_getter):
+                candidate_accounts = account_getter()
+                if isinstance(candidate_accounts, list):
+                    m3u_accounts = candidate_accounts
+        except Exception as exc:
+            dispatcharr_status["m3u_accounts_error"] = type(exc).__name__
+        dispatcharr_status["stale_status"] = build_dispatcharr_stale_snapshot(
+            network_ready=network_ready,
+            accounts=m3u_accounts,
+        )
+        stale_warnings = build_stale_warnings(dispatcharr_stale=dispatcharr_status["stale_status"])
+
+        profile_id = profile_progress_context.get("run_profile_id")
+        profile_name = profile_progress_context.get("run_profile_name")
+        snapshot = {
+            "schema_version": 1,
+            "run_id": f"{run_mode}-{channel_id}-{int(start_time)}",
+            "run_mode": run_mode,
+            "start_source": start_source,
+            "started_at": datetime.fromtimestamp(start_time).isoformat(),
+            "completed_at": completed_at.isoformat(),
+            "duration_seconds": duration_seconds,
+            "streamflow_version": version_context["version"],
+            "streamflow_commit": version_context["commit"],
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "forced_profile_id": str(forced_profile_id) if forced_profile_id else None,
+            "force_check": bool(force_check),
+            "provider_limit_override": bool(provider_limit_override),
+            "is_epg_scheduled": bool(is_epg_scheduled),
+            "effective_profiles": [{
+                "profile_id": profile_id,
+                "profile_name": profile_name,
+                "profile_source": profile_progress_context.get("run_profile_source"),
+                "channel_count": 1,
+                "quality_rules_enabled": bool(checking_enabled),
+                "check_all_streams": bool(stream_checking.get("check_all_streams", False)),
+                "stream_limit": stream_checking.get("stream_limit", 0),
+            }],
+            "effective_profile_count": 1 if profile_name or profile_id else 0,
+            "channel_count": 1,
+            "quality_rules": [{
+                "profile_id": profile_progress_context.get("quality_profile_id"),
+                "profile_name": profile_progress_context.get("quality_profile_name"),
+                "enabled": bool(checking_enabled),
+                "check_all_streams": bool(stream_checking.get("check_all_streams", False)),
+                "stream_limit": stream_checking.get("stream_limit", 0),
+            }],
+            "capacity_profile_context": {
+                "type": "provider_account_profiles",
+                "description": "Capacity is enforced by account limits and active provider profiles.",
+                "profile_limited": not bool(provider_limit_override),
+            },
+            "feature_flags": {
+                "single_channel_checking": True,
+                "m3u_update_enabled": bool(m3u_update_enabled),
+                "stream_matching_enabled": bool(matching_enabled),
+                "stream_checking_enabled": bool(checking_enabled),
+                "force_check": bool(force_check),
+                "provider_limit_override": bool(provider_limit_override),
+            },
+            "dispatcharr_status": dispatcharr_status,
+            "stale_warnings": stale_warnings,
+            "teamarr_status": {
+                "preflight_context": run_mode == "teamarr_preflight",
+            },
+            "m3u_refresh": {
+                "scope": m3u_refresh_scope,
+                "account_count": int(m3u_refresh_account_count or 0),
+            },
+            "result_summary": {
+                "total_streams": check_stats.get("total_streams", 0),
+                "dead_streams": check_stats.get("dead_streams", 0),
+                "avg_resolution": check_stats.get("avg_resolution"),
+                "avg_bitrate": check_stats.get("avg_bitrate"),
+                "avg_fps": check_stats.get("avg_fps"),
+                "channels_hidden": visibility_summary.get("channels_hidden", 0),
+                "channels_ready": visibility_summary.get("channels_ready", 0),
+                "channel_visibility_changed": visibility_summary.get("channel_visibility_changed", 0),
+            },
+            "limits": {
+                "max_bytes": self.SINGLE_CHANNEL_RUN_SNAPSHOT_MAX_BYTES,
+            },
+        }
+        return self._bound_single_channel_run_snapshot(snapshot)
 
     def _apply_channel_visibility_after_check(
         self,
@@ -5269,6 +5815,7 @@ class StreamCheckerService:
         force_check: bool = False,
         target_stream_ids: Optional[Dict[int, List[str]]] = None,
         progress_callback: Optional[Callable[[int, int, Dict], None]] = None,
+        run_mode: Optional[str] = None,
     ) -> Dict[int, Dict]:
         """Check multiple channels synchronously and return results.
         
@@ -5380,9 +5927,9 @@ class StreamCheckerService:
                         stream_id_whitelist = None
                         
                     if concurrent_enabled:
-                        channel_result = self._check_channel_concurrent(channel_id, skip_batch_changelog=True, target_stream_ids=stream_id_whitelist)
+                        channel_result = self._check_channel_concurrent(channel_id, skip_batch_changelog=True, target_stream_ids=stream_id_whitelist, run_mode=run_mode)
                     else:
-                        channel_result = self._check_channel_sequential(channel_id, skip_batch_changelog=True, target_stream_ids=stream_id_whitelist)
+                        channel_result = self._check_channel_sequential(channel_id, skip_batch_changelog=True, target_stream_ids=stream_id_whitelist, run_mode=run_mode)
                         
                     results[channel_id] = channel_result
                     with self.lock:
@@ -5460,6 +6007,7 @@ class StreamCheckerService:
         forced_profile_id: Optional[str] = None,
         force_check: bool = False,
         provider_limit_override: bool = False,
+        run_mode: Optional[str] = None,
     ) -> Dict:
         """Check a single channel immediately and return results.
         
@@ -5487,6 +6035,7 @@ class StreamCheckerService:
             force_check: If True, bypass stream-check immunity and re-analyze all streams
             provider_limit_override: If True, bypass provider/profile capacity
                 skips while still protecting active viewers.
+            run_mode: Optional progress context label for specialized callers.
             
         Returns:
             Dict with check results and statistics
@@ -5632,6 +6181,7 @@ class StreamCheckerService:
                 profile,
                 forced_profile_id=_effective_profile_id_for_context if forced_profile_id else None,
             )
+            profile_progress_context['run_mode'] = run_mode or 'single_channel_check'
             m3u_refresh_scope = "disabled"
             m3u_refresh_account_ids: List[int] = []
 
@@ -5648,6 +6198,7 @@ class StreamCheckerService:
                     phase='single_channel_preflight',
                     channel_id=channel_id,
                     channel_name=channel_name,
+                    progress_context=profile_progress_context,
                 )
                 if failed_connectivity is not None:
                     return self._connectivity_abort_payload(
@@ -5948,6 +6499,7 @@ class StreamCheckerService:
                         phase='single_channel_validation_removal',
                         channel_id=channel_id,
                         channel_name=channel_name,
+                        progress_context=profile_progress_context,
                     )
                     if failed_connectivity is not None:
                         self.progress.clear()
@@ -6008,6 +6560,7 @@ class StreamCheckerService:
                         phase='single_channel_matching_update',
                         channel_id=channel_id,
                         channel_name=channel_name,
+                        progress_context=profile_progress_context,
                     )
                     if failed_connectivity is not None:
                         self.progress.clear()
@@ -6084,7 +6637,11 @@ class StreamCheckerService:
                 # Perform the check using normal profile logic.
                 # Returns dict with dead_streams_count and revived_streams_count
                 # Skip batch changelog since this is a single channel check
-                _check_kwargs = {'skip_batch_changelog': True}
+                _check_kwargs = {
+                    'skip_batch_changelog': True,
+                    'run_mode': profile_progress_context.get('run_mode') or 'single_channel_check',
+                    'is_single_channel_check': True,
+                }
                 if _effective_profile_id:
                     _check_kwargs['forced_profile_id'] = _effective_profile_id
                 if provider_limit_override:
@@ -6349,6 +6906,45 @@ class StreamCheckerService:
             # Add duration to check stats
             check_stats['duration'] = duration_str
             check_stats['duration_seconds'] = duration_seconds
+            visibility_summary = self._single_channel_visibility_summary(
+                check_result.get('channel_visibility') if checking_enabled else None
+            )
+            check_stats.update({
+                'run_mode': profile_progress_context.get('run_mode') or 'single_channel_check',
+                'run_profile_id': profile_progress_context.get('run_profile_id'),
+                'run_profile_name': profile_progress_context.get('run_profile_name'),
+                'run_profile_source': profile_progress_context.get('run_profile_source'),
+                'quality_profile_id': profile_progress_context.get('quality_profile_id'),
+                'quality_profile_name': profile_progress_context.get('quality_profile_name'),
+                'quality_profile_source': profile_progress_context.get('quality_profile_source'),
+                'capacity_profile_name': profile_progress_context.get('capacity_profile_name'),
+                'capacity_profile_source': profile_progress_context.get('capacity_profile_source'),
+                'channels_hidden': visibility_summary['channels_hidden'],
+                'channels_ready': visibility_summary['channels_ready'],
+                'channel_visibility_changed': visibility_summary['channel_visibility_changed'],
+            })
+            completed_at = datetime.now()
+            check_stats['run_snapshot'] = self._build_single_channel_run_snapshot(
+                channel_id=channel_id,
+                channel_name=channel_name,
+                start_time=start_time,
+                completed_at=completed_at,
+                duration_seconds=duration_seconds,
+                profile=profile,
+                profile_progress_context=profile_progress_context,
+                check_stats=check_stats,
+                visibility_summary=visibility_summary,
+                checking_enabled=checking_enabled,
+                matching_enabled=matching_enabled,
+                m3u_update_enabled=m3u_update_enabled,
+                forced_profile_id=forced_profile_id,
+                force_check=force_check,
+                provider_limit_override=provider_limit_override,
+                is_epg_scheduled=is_epg_scheduled,
+                m3u_refresh_scope=m3u_refresh_scope,
+                m3u_refresh_account_count=len(m3u_refresh_account_ids),
+                udi=udi,
+            )
             
             # Add changelog entry
             if self.changelog:
@@ -6410,6 +7006,11 @@ class StreamCheckerService:
                 'automation_profile_id': profile_progress_context.get('automation_profile_id'),
                 'automation_profile_name': profile_progress_context.get('automation_profile_name'),
                 'automation_profile_source': profile_progress_context.get('automation_profile_source'),
+                'run_mode': check_stats.get('run_mode'),
+                'run_snapshot': check_stats.get('run_snapshot'),
+                'channels_hidden': check_stats.get('channels_hidden'),
+                'channels_ready': check_stats.get('channels_ready'),
+                'channel_visibility_changed': check_stats.get('channel_visibility_changed'),
                 'stats': check_stats
             }
             
@@ -6420,6 +7021,158 @@ class StreamCheckerService:
         finally:
             if udi is not None:
                 udi.clear_automation_busy()
+
+    def check_single_stream(
+        self,
+        stream_id: int,
+        *,
+        persist: bool = True,
+        blank_check_enabled: bool = False,
+        freeze_check_enabled: bool = False,
+        loop_check_enabled: bool = False,
+    ) -> Dict[str, Any]:
+        """Run a one-off quality probe for one Dispatcharr stream.
+
+        This intentionally does not require the stream to be assigned to a
+        channel. It measures and optionally persists stream_stats only; it does
+        not run regex matching, channel reordering, channel visibility changes,
+        or dead-stream removal.
+        """
+        import time as time_module
+
+        start_time = time_module.time()
+        self.abort_current_check.clear()
+
+        try:
+            try:
+                stream_id_int = int(stream_id)
+            except (TypeError, ValueError):
+                return {
+                    'success': False,
+                    'error': 'invalid_stream_id',
+                    'message': 'stream_id must be an integer',
+                }
+
+            failed_connectivity = self._require_quality_check_connectivity(
+                phase='single_stream_preflight',
+                update_progress=False,
+            )
+            if failed_connectivity is not None:
+                payload = self._connectivity_abort_payload(failed_connectivity)
+                payload.update({
+                    'success': False,
+                    'stream_id': stream_id_int,
+                    'run_mode': 'single_stream_check',
+                })
+                return payload
+
+            udi = get_udi_manager()
+            stream_data = udi.get_stream_by_id(stream_id_int)
+            if not stream_data:
+                return {
+                    'success': False,
+                    'error': 'stream_not_found',
+                    'message': f'Stream {stream_id_int} was not found in the Dispatcharr stream cache',
+                    'stream_id': stream_id_int,
+                }
+
+            stream_url = stream_data.get('url') or stream_data.get('stream_url')
+            if not stream_url:
+                return {
+                    'success': False,
+                    'error': 'stream_missing_url',
+                    'message': f'Stream {stream_id_int} has no URL to probe',
+                    'stream_id': stream_id_int,
+                }
+
+            stream_name = stream_data.get('name') or stream_data.get('stream_name') or f'Stream {stream_id_int}'
+            analysis_params = self.config.get('stream_analysis', {}) or {}
+
+            logger.info(
+                "Starting one-off stream check for stream_ref=%s (persist=%s, blank=%s, freeze=%s, loop=%s)",
+                _audit_ref('stream', stream_id_int),
+                bool(persist),
+                bool(blank_check_enabled),
+                bool(freeze_check_enabled),
+                bool(loop_check_enabled),
+            )
+
+            analyzed = analyze_stream(
+                stream_url,
+                stream_id_int,
+                stream_name,
+                ffmpeg_duration=analysis_params.get('ffmpeg_duration', 30),
+                timeout=analysis_params.get('timeout', 30),
+                retries=analysis_params.get('retries', 1),
+                retry_delay=analysis_params.get('retry_delay', 10),
+                user_agent=analysis_params.get('user_agent', 'VLC/3.0.14'),
+                stream_startup_buffer=analysis_params.get('stream_startup_buffer', 10),
+                blank_check_enabled=bool(blank_check_enabled),
+                blank_check_min_duration=analysis_params.get('blank_check_min_duration', 2.0),
+                blank_check_pixel_threshold=analysis_params.get('blank_check_pixel_threshold', 0.10),
+                blank_check_ratio_threshold=analysis_params.get('blank_check_ratio_threshold', 0.80),
+                freeze_check_enabled=bool(freeze_check_enabled),
+                freeze_check_min_duration=analysis_params.get('freeze_check_min_duration', 5.0),
+                freeze_check_noise_threshold=analysis_params.get('freeze_check_noise_threshold', 0.001),
+                freeze_check_ratio_threshold=analysis_params.get('freeze_check_ratio_threshold', 0.80),
+                hardware_acceleration=analysis_params.get('hardware_acceleration'),
+            )
+
+            analyzed['m3u_account_id'] = (
+                stream_data.get('m3u_account_id')
+                or stream_data.get('m3u_account')
+                or stream_data.get('m3u_account_id_id')
+            )
+            analyzed['run_mode'] = 'single_stream_check'
+
+            threshold_config = dict(self.config.get('dead_stream_handling', {}) or {})
+            if blank_check_enabled:
+                threshold_config['treat_blank_as_dead'] = True
+            if freeze_check_enabled:
+                threshold_config['treat_freeze_as_dead'] = True
+
+            dead_result = self._is_stream_dead(analyzed, threshold_config=threshold_config)
+            self._apply_quality_classification(analyzed, dead_result)
+            is_dead, dead_reason = dead_result
+            analyzed['score'] = self._calculate_stream_score(analyzed)
+
+            if loop_check_enabled:
+                analysis_params_lp = self.config.get('stream_analysis', {}) or {}
+                self._run_loop_probes(
+                    [analyzed],
+                    user_agent=analysis_params_lp.get('user_agent', 'VLC/3.0.14'),
+                    loop_penalty=0.0,
+                    probe_duration=analysis_params_lp.get('max_loop_duration', 120) * 3,
+                    hardware_acceleration=analysis_params_lp.get('hardware_acceleration'),
+                )
+
+            stats_payload = self._prepare_stream_stats_for_batch(analyzed)
+            persisted = False
+            if persist:
+                persisted = self._update_stream_stats(analyzed)
+
+            duration_seconds = round(time_module.time() - start_time, 2)
+            return {
+                'success': True,
+                'stream_id': stream_id_int,
+                'stream_name': stream_name,
+                'run_mode': 'single_stream_check',
+                'persisted': bool(persisted),
+                'persist_requested': bool(persist),
+                'duration_seconds': duration_seconds,
+                'dead': bool(is_dead),
+                'dead_reason': dead_reason,
+                'stats_payload': stats_payload.get('stream_stats', {}) if stats_payload else {},
+                'analysis': analyzed,
+            }
+
+        except Exception as exc:
+            logger.error("Error checking single stream %s: %s", stream_id, exc, exc_info=True)
+            return {
+                'success': False,
+                'error': 'single_stream_check_failed',
+                'stream_id': stream_id,
+            }
     
     def clear_queue(self):
         """Clear the checking queue."""

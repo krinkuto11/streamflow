@@ -1,5 +1,6 @@
 """Stream checker API handler functions extracted from web_api."""
 
+import re
 from typing import Any, Callable, Dict, Optional
 
 from flask import jsonify
@@ -13,6 +14,46 @@ from apps.stream.queue_start import (
 from apps.telemetry.last_quality_stats import get_last_quality_stats
 
 logger = setup_logging(__name__)
+
+
+def _coerce_bool(value: Any, default: bool = False) -> bool:
+    """Coerce common JSON/form boolean values without treating "false" as True."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "enabled"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "disabled"}:
+            return False
+    return bool(value)
+
+
+def _coerce_stream_id_from_payload(payload: Any) -> Optional[int]:
+    """Resolve a Dispatcharr stream id from supported payload keys/references."""
+    if not isinstance(payload, dict):
+        return None
+
+    for key in ("stream_id", "id", "stream_reference", "stream_ref"):
+        candidate = payload.get(key)
+        if isinstance(candidate, int):
+            return candidate
+        if isinstance(candidate, str):
+            value = candidate.strip()
+            if value.isdigit():
+                return int(value)
+            match = re.fullmatch(
+                r"(?:stream|stream_id|dispatcharr[-_ ]?stream)[-_: ]+(\d+)",
+                value,
+                flags=re.IGNORECASE,
+            )
+            if match:
+                return int(match.group(1))
+    return None
 
 
 def _automation_run_is_active(manager: Any) -> bool:
@@ -55,7 +96,11 @@ def _stream_checker_work_is_active(service: Any) -> bool:
     if not isinstance(status, dict):
         return False
     progress = status.get("progress") if isinstance(status.get("progress"), dict) else {}
-    if progress.get("is_single_channel_check"):
+    if (
+        progress.get("is_single_channel_check")
+        and not progress.get("stale")
+        and not status.get("progress_stale")
+    ):
         return True
     queue = status.get("queue") if isinstance(status.get("queue"), dict) else {}
     queue_active = (
@@ -481,6 +526,93 @@ def check_single_channel_now_response(
 
     except Exception as exc:
         logger.error(f"Error checking single channel: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def check_single_stream_now_response(
+    *,
+    payload: Any,
+    get_stream_checker_service: Callable[[], Any],
+    get_automation_manager: Optional[Callable[[], Any]] = None,
+    stream_id: Optional[int] = None,
+):
+    """Handle an immediate synchronous check for one Dispatcharr stream.
+
+    Unlike check_single_channel_now_response, this path does not require the
+    stream to be assigned to any channel and never mutates channel membership.
+    It only probes the stream and can optionally persist its stream_stats.
+    """
+    try:
+        data = payload if isinstance(payload, dict) else {}
+        resolved_stream_id = stream_id if stream_id is not None else _coerce_stream_id_from_payload(data)
+        if resolved_stream_id is None:
+            return jsonify({"success": False, "error": "stream_id required"}), 400
+
+        service = get_stream_checker_service()
+        if get_automation_manager is not None:
+            try:
+                if _automation_run_is_active(get_automation_manager()):
+                    return jsonify(
+                        {
+                            "success": False,
+                            "error": "automation_run_active",
+                            "message": (
+                                "A single-stream check cannot run while an automation run is active. "
+                                "Wait until the automation run finishes."
+                            ),
+                        }
+                    ), 409
+            except Exception as exc:
+                logger.warning("Could not enforce automation-run guard for single-stream check: %s", exc)
+
+        if _stream_checker_work_is_active(service):
+            return jsonify(
+                {
+                    "success": False,
+                    "error": "stream_checker_active",
+                    "message": (
+                        "A single-stream check cannot run while Stream Checker is already active. "
+                        "Wait for the active run to finish."
+                    ),
+                }
+            ), 409
+
+        result = service.check_single_stream(
+            resolved_stream_id,
+            persist=_coerce_bool(data.get("persist"), True),
+            blank_check_enabled=_coerce_bool(
+                data.get("blank_check_enabled", data.get("detect_blank")),
+                False,
+            ),
+            freeze_check_enabled=_coerce_bool(
+                data.get("freeze_check_enabled", data.get("detect_freeze")),
+                False,
+            ),
+            loop_check_enabled=_coerce_bool(
+                data.get("loop_check_enabled", data.get("detect_loop")),
+                False,
+            ),
+        )
+
+        if result.get("success"):
+            return jsonify(result), 200
+
+        error_code = result.get("error")
+        if error_code == "stream_not_found":
+            return jsonify(result), 404
+        if error_code in {"invalid_stream_id", "stream_missing_url"}:
+            return jsonify(result), 400
+        if error_code == "connectivity_guard":
+            return jsonify(result), 503
+
+        logger.warning(
+            "Single-stream check failed; returning sanitized error response for stream %s",
+            resolved_stream_id,
+        )
+        return jsonify({"success": False, "error": "Internal Server Error"}), 500
+
+    except Exception as exc:
+        logger.error("Error checking single stream: %s", exc, exc_info=True)
         return jsonify({"error": "Internal Server Error"}), 500
 
 

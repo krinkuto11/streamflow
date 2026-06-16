@@ -78,9 +78,27 @@ def stop_shadow_blank_monitor_response(*, get_service: Callable[[], Any]):
         return error_response("Internal Server Error", status_code=500, code="internal_error")
 
 
-def run_shadow_blank_monitor_once_response(*, get_service: Callable[[], Any]):
+def run_shadow_blank_monitor_once_response(
+    *,
+    payload: Optional[Dict[str, Any]] = None,
+    get_service: Callable[[], Any],
+):
     try:
-        status = get_service().run_once(force=True)
+        payload = payload or {}
+        include_channel_ids = payload.get("include_channel_ids") or payload.get("channel_ids")
+        include_channel_uuids = (
+            payload.get("include_channel_uuids")
+            or payload.get("channel_uuids")
+            or payload.get("channel_uuid")
+        )
+        if include_channel_ids or include_channel_uuids:
+            status = get_service().run_once(
+                force=True,
+                include_channel_ids=include_channel_ids,
+                include_channel_uuids=include_channel_uuids,
+            )
+        else:
+            status = get_service().run_once(force=True)
         if status.get("configuration_required"):
             return error_response(
                 status.get("configuration_message") or "Shadow monitor scan could not start",
