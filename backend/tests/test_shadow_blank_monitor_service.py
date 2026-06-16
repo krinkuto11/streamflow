@@ -183,7 +183,7 @@ def test_watch_mode_controls_scan_delay():
     assert defaults["offline_image_reference_hashes"] == []
     assert defaults["offline_image_hash_threshold"] == 4
     assert defaults["loop_detection_enabled"] is False
-    assert defaults["loop_probe_duration_seconds"] == 120
+    assert defaults["loop_probe_duration_seconds"] == 360
     assert defaults["next_stream_pre_probe_enabled"] is False
     assert defaults["next_stream_pre_probe_duration_seconds"] == 8
     assert defaults["confirmation_count"] == 2

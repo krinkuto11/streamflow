@@ -8,20 +8,24 @@ essential quality metrics using ffmpeg/ffprobe.
 
 import unittest
 from unittest.mock import patch, MagicMock
+import io
 import json
 import subprocess
 import sys
 import os
+from time import monotonic as real_monotonic, sleep as real_sleep
 
 # Add backend to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from apps.stream import stream_check_utils
 from apps.stream.stream_check_utils import (
     check_ffmpeg_installed,
     get_stream_info,
     get_stream_info_and_bitrate,
     get_stream_bitrate,
-    analyze_stream
+    analyze_stream,
+    _probe_stream_for_loops,
 )
 
 
@@ -39,6 +43,76 @@ class TestFFmpegInstalled(unittest.TestCase):
         """Test handling when ffmpeg/ffprobe not found."""
         mock_run.side_effect = FileNotFoundError()
         self.assertFalse(check_ffmpeg_installed())
+
+
+class TestLoopProbeSampling(unittest.TestCase):
+    """Loop probe tests for high-FPS FFmpeg frame pipes."""
+
+    @staticmethod
+    def _ppm_frame(seed):
+        width, height = 32, 32
+        pixels = bytearray()
+        for y in range(height):
+            for x in range(width):
+                pixels.extend((
+                    (x * 7 + seed * 13) % 256,
+                    (y * 11 + seed * 17) % 256,
+                    (((x ^ y) * 19) + seed * 23) % 256,
+                ))
+        return f"P6\n{width} {height}\n255\n".encode() + bytes(pixels)
+
+    def test_loop_probe_samples_high_fps_frames_before_buffering(self):
+        frames_per_second = 25
+        loop_period_seconds = 20
+        total_seconds = 45
+        raw_frames = [
+            self._ppm_frame((frame_index // frames_per_second) % loop_period_seconds)
+            for frame_index in range(frames_per_second * total_seconds)
+        ]
+        pipe_bytes = b"".join(raw_frames)
+
+        class FakeProcess:
+            def __init__(self, payload):
+                self.stdout = io.BytesIO(payload)
+                self.stderr = io.BytesIO(b"")
+                self._size = len(payload)
+
+            def wait(self, timeout=None):
+                deadline = real_monotonic() + 5
+                while real_monotonic() < deadline:
+                    try:
+                        if self.stdout.tell() >= self._size:
+                            break
+                    except ValueError:
+                        break
+                    real_sleep(0.001)
+                return 0
+
+            def kill(self):
+                return None
+
+        monotonic_value = {"value": 100.0}
+
+        def fake_monotonic():
+            monotonic_value["value"] += 0.04
+            return monotonic_value["value"]
+
+        with patch.object(
+            stream_check_utils.subprocess,
+            "Popen",
+            return_value=FakeProcess(pipe_bytes),
+        ), patch.object(stream_check_utils.time, "monotonic", side_effect=fake_monotonic):
+            loop_detected, loop_duration, frames_processed = _probe_stream_for_loops(
+                url="http://example.invalid/loop.ts",
+                stream_tag="test-loop",
+                probe_duration=60,
+            )
+
+        self.assertTrue(loop_detected)
+        self.assertIsNotNone(loop_duration)
+        self.assertGreaterEqual(loop_duration, 10.0)
+        self.assertLess(frames_processed, len(raw_frames))
+        self.assertGreaterEqual(frames_processed, 20)
 
 
 class TestGetStreamInfo(unittest.TestCase):

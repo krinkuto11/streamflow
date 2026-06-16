@@ -68,6 +68,7 @@ _LOOP_PROBE_HAMMING_TOLERANCE = 3
 _LOOP_PROBE_DURATION          = 360   # 6 minutes — catches loops up to 3 min period
 _LOOP_PROBE_DURATION_MIN      = 60    # enforced floor
 _LOOP_PROBE_DURATION_MAX      = 720   # 12 minutes — ceiling for future flexibility
+_LOOP_PROBE_SAMPLE_INTERVAL   = 1.0   # SidecarLoopDetector buffer is sized for ~1 FPS
 
 # Constants for error detection and logging
 FFMPEG_HWACCEL_MODES = {
@@ -1884,7 +1885,8 @@ def _probe_stream_for_loops(
     logger.info(
         f"[loop-probe:{stream_tag}] Starting {clamped}s probe "
         f"(hamming_tolerance={_LOOP_PROBE_HAMMING_TOLERANCE}, "
-        f"sequence_length=3, duration_threshold=10.0s)"
+        f"sequence_length=3, duration_threshold=10.0s, "
+        f"sample_interval={_LOOP_PROBE_SAMPLE_INTERVAL:.1f}s)"
     )
 
     hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
@@ -1957,6 +1959,7 @@ def _probe_stream_for_loops(
     def _reader():
         nonlocal loop_detected, loop_duration
         logger.debug(f"[loop-probe:{stream_tag}] Reader thread started")
+        last_process_time = 0.0
         try:
             while not detector.is_closed:
                 frame_data = detector._read_ppm_frame()
@@ -1966,6 +1969,9 @@ def _probe_stream_for_loops(
 
                 ts = time.monotonic()
                 detector.last_frame_time = ts
+                if ts - last_process_time < _LOOP_PROBE_SAMPLE_INTERVAL:
+                    continue
+                last_process_time = ts
 
                 try:
                     img = Image.open(io.BytesIO(frame_data))

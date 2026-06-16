@@ -216,7 +216,7 @@ describe('operatorHelpSections', () => {
     expect(shadowSettings.find(setting => setting.name === 'Next Stream Pre-Probe').risk).toMatch(/loop-triggered live switches are blocked/i)
     expect(shadowSettings.find(setting => setting.name === 'Loop Detection').risk).toMatch(/real viewers/i)
     expect(shadowSettings.find(setting => setting.name === 'Loop Detection').risk).toMatch(/next-stream pre-probe/i)
-    expect(shadowSettings.find(setting => setting.name === 'Loop Probe Duration').defaultValue).toBe('120 seconds')
+    expect(shadowSettings.find(setting => setting.name === 'Loop Probe Duration').defaultValue).toBe('360 seconds')
     expect(shadowSettings.find(setting => setting.name === 'Probe Duration').defaultValue).toBe('60 seconds')
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')

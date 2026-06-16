@@ -668,10 +668,10 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Loop Probe Duration',
         controlType: 'Visible UI setting',
-        defaultValue: '120 seconds',
+        defaultValue: '360 seconds',
         location: 'Shadow Monitor -> Configuration card -> Loop Probe Duration',
-        effect: 'Bounds how long Shadow compares frame signatures before confirming repeated content.',
-        useWhen: 'Use longer durations only when provider loops are slow enough that the default misses them.',
+        effect: 'Bounds how long Shadow compares sampled frame signatures before confirming repeated content.',
+        useWhen: 'Keep the default for slow provider loops; increase only for loops with a longer repeat period.',
         risk: 'Too long keeps watcher probes occupied; too short can miss slow loops or increase false positives.',
       },
       {

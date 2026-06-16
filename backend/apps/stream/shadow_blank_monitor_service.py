@@ -122,7 +122,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "offline_image_hash_threshold": 4,
     "offline_image_capture_offset_seconds": 3,
     "loop_detection_enabled": False,
-    "loop_probe_duration_seconds": 120,
+    "loop_probe_duration_seconds": 360,
     "next_stream_pre_probe_enabled": False,
     "next_stream_pre_probe_duration_seconds": 8,
     "confirmation_count": 2,

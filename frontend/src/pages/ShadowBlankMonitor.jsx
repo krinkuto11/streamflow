@@ -551,16 +551,16 @@ export default function ShadowBlankMonitor() {
                     type="number"
                     min={60}
                     max={720}
-                    value={editedConfig.loop_probe_duration_seconds ?? 120}
+                    value={editedConfig.loop_probe_duration_seconds ?? 360}
                     onChange={(event) => updateConfigValue(
                       'loop_probe_duration_seconds',
-                      Math.min(720, Math.max(60, Number(event.target.value) || 120)),
+                      Math.min(720, Math.max(60, Number(event.target.value) || 360)),
                     )}
                   />
                   <span className="w-16 shrink-0 text-xs text-muted-foreground">sec</span>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Loop probes are gated by active real viewers, confirmations, cooldowns, switch budget, stale-stream checks, watcher recovery, and required next-stream pre-probe.
+                  Uses sampled frames over the probe window; keep the default for slow provider loops. Gated by active real viewers, confirmations, cooldowns, switch budget, stale-stream checks, watcher recovery, and required next-stream pre-probe.
                 </p>
               </div>
 
