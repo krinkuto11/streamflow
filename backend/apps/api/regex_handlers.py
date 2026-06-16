@@ -16,6 +16,7 @@ from apps.automation.regex_settings import (
     default_channel_regex_global_settings,
     normalize_channel_regex_global_settings,
 )
+from apps.automation.regex_validation import search_user_regex
 from apps.channels.repository import UdiChannelRepository
 from apps.core.api_responses import error_response
 from apps.core.exceptions import ValidationError
@@ -1045,14 +1046,16 @@ def test_regex_pattern_response(
 
         search_pattern = pattern
         search_pattern = whitespace_pattern.sub(r"\\s+", search_pattern)
-        flags = 0 if case_sensitive else re.IGNORECASE
-
         try:
             if is_dangerous_regex(search_pattern):
                 return jsonify(
                     {"error": "Regex pattern contains dangerous nested quantifiers (ReDoS risk)"}
                 ), 400
-            match = re.search(search_pattern, stream_name, flags)
+            match = search_user_regex(
+                search_pattern,
+                stream_name,
+                case_sensitive=case_sensitive,
+            )
             return jsonify(
                 {
                     "matches": bool(match),
@@ -1142,13 +1145,15 @@ def test_regex_pattern_live_response(
                     substituted_pattern = pattern.replace("CHANNEL_NAME", escaped_channel_name)
                     search_pattern = substituted_pattern
                     search_pattern = whitespace_pattern.sub(r"\\s+", search_pattern)
-                    flags = 0 if case_sensitive else re.IGNORECASE
-
                     try:
                         if is_dangerous_regex(search_pattern):
                             logger.warning(f"Invalid regex pattern '{pattern}': ReDoS risk")
                             continue
-                        if re.search(search_pattern, stream_name, flags):
+                        if search_user_regex(
+                            search_pattern,
+                            stream_name,
+                            case_sensitive=case_sensitive,
+                        ):
                             matched = True
                             matched_pattern = pattern
                             break
