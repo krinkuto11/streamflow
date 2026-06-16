@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 from flask import jsonify
 
-from apps.automation.regex_validation import search_user_regex
+from apps.automation.intentional_user_regex import search_user_regex
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)

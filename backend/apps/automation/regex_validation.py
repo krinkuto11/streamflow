@@ -1,9 +1,6 @@
 """Regex validation helpers for channel matching."""
 
-import re
-from typing import Any, Iterable, List, Optional, Tuple
-
-_REGEX_COMPILE = getattr(re, "compile")
+from typing import Any, Iterable, List, Tuple
 
 
 def is_dangerous_regex(pattern: str) -> bool:
@@ -43,17 +40,3 @@ def validate_regex_patterns(patterns: Iterable[Any]) -> Tuple[bool, List[str]]:
             errors.append(f"Pattern at index {index} contains dangerous nested quantifiers")
 
     return len(errors) == 0, errors
-
-
-def search_user_regex(
-    pattern: str,
-    value: str,
-    *,
-    case_sensitive: bool = True,
-) -> Optional[re.Match[str]]:
-    """Run a user-configured regex after callers have applied safety validation."""
-    flags = 0 if case_sensitive else re.IGNORECASE
-    # User regex is an intentional StreamFlow matching feature; callers validate
-    # known ReDoS patterns before reaching this shared execution helper.
-    compiled = _REGEX_COMPILE(pattern, flags)
-    return compiled.search(value)

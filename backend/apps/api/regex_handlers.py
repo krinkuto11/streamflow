@@ -16,7 +16,7 @@ from apps.automation.regex_settings import (
     default_channel_regex_global_settings,
     normalize_channel_regex_global_settings,
 )
-from apps.automation.regex_validation import search_user_regex
+from apps.automation.intentional_user_regex import search_user_regex
 from apps.channels.repository import UdiChannelRepository
 from apps.core.api_responses import error_response
 from apps.core.exceptions import ValidationError
