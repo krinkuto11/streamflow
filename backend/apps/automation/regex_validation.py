@@ -51,4 +51,7 @@ def search_user_regex(
 ) -> Optional[re.Match[str]]:
     """Run a user-configured regex after callers have applied safety validation."""
     flags = 0 if case_sensitive else re.IGNORECASE
-    return re.search(pattern, value, flags)  # lgtm [py/regex-injection]
+    # User regex is an intentional StreamFlow matching feature; callers validate
+    # known ReDoS patterns before reaching this shared execution helper.
+    # codeql[py/regex-injection]
+    return re.search(pattern, value, flags)
