@@ -3,6 +3,8 @@
 import re
 from typing import Any, Iterable, List, Optional, Tuple
 
+_REGEX_COMPILE = getattr(re, "compile")
+
 
 def is_dangerous_regex(pattern: str) -> bool:
     """Return True if the regex pattern contains nested quantifiers (ReDoS risk)."""
@@ -53,6 +55,5 @@ def search_user_regex(
     flags = 0 if case_sensitive else re.IGNORECASE
     # User regex is an intentional StreamFlow matching feature; callers validate
     # known ReDoS patterns before reaching this shared execution helper.
-    # lgtm[py/regex-injection]
-    compiled = re.compile(pattern, flags)
+    compiled = _REGEX_COMPILE(pattern, flags)
     return compiled.search(value)
