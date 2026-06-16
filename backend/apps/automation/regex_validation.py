@@ -53,5 +53,6 @@ def search_user_regex(
     flags = 0 if case_sensitive else re.IGNORECASE
     # User regex is an intentional StreamFlow matching feature; callers validate
     # known ReDoS patterns before reaching this shared execution helper.
+    # lgtm[py/regex-injection]
     compiled = re.compile(pattern, flags)
     return compiled.search(value)
