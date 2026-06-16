@@ -1501,7 +1501,16 @@ def test_discovery_tracks_all_real_viewer_channels_with_excludes_only(tmp_path):
     }
     assert all(target["real_client_count"] == 1 for target in targets)
     assert "included_channel_ids" not in normalize_config({})
-    assert service.get_status()["watched_count"] == 2
+    status = service.get_status()
+    assert status["watched_count"] == 2
+    assert status["excluded_active_count"] == 2
+    assert {
+        (target["channel_id"], target["exclude_reason"])
+        for target in status["excluded_active_channels"]
+    } == {
+        (2, "channel_excluded"),
+        (4, "channel_excluded"),
+    }
 
 
 def test_forced_discovery_can_scope_to_included_channels_without_persisting_config(tmp_path):

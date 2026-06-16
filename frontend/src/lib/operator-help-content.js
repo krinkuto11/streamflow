@@ -132,7 +132,7 @@ export const operatorHelpQuickChecks = [
   'Teamarr post-start window is intentional',
   'Hardware path and fallback state are visible',
   'Stream Checker is idle or intentionally running',
-  'Shadow Monitor excludes are intentional',
+  'Shadow Monitor excludes are intentional and no active viewer channel is accidentally excluded',
 ]
 
 export const operatorHelpDetailGuidePrinciples = [
@@ -569,12 +569,21 @@ export const operatorHelpDetailTopics = [
     },
     steps: [
       'Use Continuous mode for normal viewer-following behavior.',
-      'Use Exclude Channel IDs or UUIDs to keep specific viewer-visible channels out of watcher checks.',
+      'Use Exclude Channel IDs or UUIDs only for deliberate suppression; active excluded viewer channels appear as a warning instead of silently showing as unwatched.',
       'Watch Watched Now for real viewer and shadow watcher counts before changing thresholds.',
       'Confirm viewer output format context when diagnosing a switch, because Shadow probes match fMP4 or MPEGTS viewer sessions.',
       'Treat Channel Switch Limit as a flapping guard; tune it only after reading recent events.',
     ],
     settings: [
+      {
+        name: 'Exclude Channel IDs / UUIDs',
+        controlType: 'Visible UI setting',
+        defaultValue: 'None',
+        location: 'Shadow Monitor -> Configuration card -> Exclude Channel IDs / Exclude Channel UUIDs',
+        effect: 'Prevents Shadow from starting watchers on the listed active viewer channels and reports them as active excluded channels in status.',
+        useWhen: 'Use only to suppress a channel that must not be shadow-watched during a temporary live event or maintenance window.',
+        risk: 'Leaving broad test excludes in place makes Shadow look healthy while real viewer channels receive no watcher; clear the fields after the test.',
+      },
       {
         name: 'Viewer Output Format',
         controlType: 'Status/API',
@@ -723,6 +732,7 @@ export const operatorHelpDetailTopics = [
     smokeChecks: [
       'Shadow Monitor status shows running and no last error.',
       'Watched Now separates real viewer count from shadow watcher count.',
+      'If active viewer channels are excluded, the Shadow Monitor page shows the exclusion warning and the channel names/IDs that must be cleared before watchers can start.',
       'Recent Events explain pending, cooldown, recovered, rate-limited, or switch outcomes.',
     ],
     links: [

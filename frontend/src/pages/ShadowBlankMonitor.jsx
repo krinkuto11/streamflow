@@ -98,6 +98,8 @@ export default function ShadowBlankMonitor() {
   }, [])
 
   const watchedChannels = status?.watched_channels || []
+  const excludedActiveChannels = status?.excluded_active_channels || []
+  const excludedActiveCount = Number(status?.excluded_active_count || excludedActiveChannels.length || 0)
   const recentEvents = status?.recent_events || []
   const decisionHistory = status?.decision_history || recentEvents
   const lastPreProbe = status?.pre_probe?.last || null
@@ -374,6 +376,18 @@ export default function ShadowBlankMonitor() {
         </div>
       ) : null}
 
+      {excludedActiveCount > 0 ? (
+        <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-100">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">Active viewer channels are excluded</p>
+            <p className="mt-1">
+              {excludedActiveCount} active real-viewer {excludedActiveCount === 1 ? 'channel is' : 'channels are'} ignored by the Shadow Monitor exclude list.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
@@ -401,7 +415,9 @@ export default function ShadowBlankMonitor() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{status?.watched_count || watchedChannels.length}</div>
-            <p className="text-xs text-muted-foreground">Active channels with viewers</p>
+            <p className="text-xs text-muted-foreground">
+              {excludedActiveCount > 0 ? `${excludedActiveCount} active excluded` : 'Active channels with viewers'}
+            </p>
           </CardContent>
         </Card>
 
@@ -740,7 +756,31 @@ export default function ShadowBlankMonitor() {
             </CardHeader>
             <CardContent>
               {watchedChannels.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No watched channels</p>
+                excludedActiveCount > 0 ? (
+                  <div className="space-y-3">
+                    <p className="text-sm font-medium text-amber-700 dark:text-amber-200">
+                      Active viewer channels are excluded from monitoring.
+                    </p>
+                    {excludedActiveChannels.map(channel => (
+                      <div key={channel.channel_ref} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">
+                              {channel.channel_name || channel.channel_ref}
+                            </p>
+                            <p className="mt-1 font-mono text-xs text-muted-foreground">{channel.channel_ref}</p>
+                          </div>
+                          <Badge variant="outline">{formatViewerClientCount(channel.real_client_count)}</Badge>
+                        </div>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          Remove this channel from Exclude Channel IDs/UUIDs to let Shadow start its watcher.
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No watched channels</p>
+                )
               ) : (
                 <div className="space-y-3">
                   {watchedChannels.map(channel => {

@@ -432,6 +432,7 @@ class ShadowBlankMonitorService:
         self._config = self._load_config()
         self._events: deque[Dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._watched: Dict[str, Dict[str, Any]] = {}
+        self._last_excluded_active_targets: List[Dict[str, Any]] = []
         self._watcher_absences: Dict[str, Dict[str, Any]] = {}
         self._blank_counts: Dict[str, int] = defaultdict(int)
         self._cooldowns: Dict[str, float] = {}
@@ -629,6 +630,10 @@ class ShadowBlankMonitorService:
             now = self.clock()
             issue = _watcher_configuration_issue(self._config)
             watched_channels = [self._public_target(target) for target in self._watched.values()]
+            excluded_active_channels = [
+                self._public_excluded_target(target)
+                for target in self._last_excluded_active_targets
+            ]
             cooldowns = []
             for channel_uuid, until in self._cooldowns.items():
                 if until <= now:
@@ -663,6 +668,8 @@ class ShadowBlankMonitorService:
                 "last_error": self._last_error,
                 "watched_count": len(watched_channels),
                 "watched_channels": watched_channels,
+                "excluded_active_count": len(excluded_active_channels),
+                "excluded_active_channels": excluded_active_channels,
                 "cooldowns": cooldowns,
                 "recent_events": recent_events,
                 "decision_history": recent_events,
@@ -766,6 +773,7 @@ class ShadowBlankMonitorService:
 
         targets: List[Dict[str, Any]] = []
         watched: Dict[str, Dict[str, Any]] = {}
+        excluded_active_targets: List[Dict[str, Any]] = []
         continuity_events: List[tuple[str, Dict[str, Any], Dict[str, Any]]] = []
         continuous_mode = config.get("watch_mode") == "continuous"
         now = self.clock()
@@ -795,8 +803,6 @@ class ShadowBlankMonitorService:
             numeric_id = self._extract_channel_id(channel, raw_status)
             if limit_to_included and numeric_id not in included_ids and channel_uuid not in included_uuids:
                 continue
-            if numeric_id in excluded_ids or channel_uuid in excluded_uuids:
-                continue
 
             real_clients = self._real_client_count(raw_status, config)
             if real_clients <= 0:
@@ -807,10 +813,30 @@ class ShadowBlankMonitorService:
 
             stream_id = self._extract_stream_id(raw_status)
             current_program = self._current_epg_program(channel, raw_status, numeric_id)
+            if numeric_id in excluded_ids or channel_uuid in excluded_uuids:
+                excluded_target = {
+                    "channel_uuid": channel_uuid,
+                    "channel_id": numeric_id,
+                    "channel_ref": _ref("channel", numeric_id or channel_uuid),
+                    "channel_name": self._channel_display_name(channel, raw_status),
+                    "stream_id": stream_id,
+                    "stream_ref": _ref("stream", stream_id),
+                    "real_client_count": real_clients,
+                    "watcher_client_count": watcher_clients,
+                    "state": raw_status.get("state") or "active",
+                    "exclude_reason": "channel_excluded",
+                }
+                if viewer_output_format:
+                    excluded_target["viewer_output_format"] = viewer_output_format
+                if current_program:
+                    excluded_target["current_program"] = current_program
+                excluded_active_targets.append(excluded_target)
+                continue
             target = {
                 "channel_uuid": channel_uuid,
                 "channel_id": numeric_id,
                 "channel_ref": _ref("channel", numeric_id or channel_uuid),
+                "channel_name": self._channel_display_name(channel, raw_status),
                 "stream_id": stream_id,
                 "stream_ref": _ref("stream", stream_id),
                 "real_client_count": real_clients,
@@ -888,6 +914,7 @@ class ShadowBlankMonitorService:
 
         with self._lock:
             self._watched = watched
+            self._last_excluded_active_targets = excluded_active_targets
             self._watcher_absences = next_absences if continuous_mode else {}
         for event_type, event_target, details in continuity_events:
             if event_type == "watcher_recovered":
@@ -2943,6 +2970,19 @@ class ShadowBlankMonitorService:
             return None
 
     @staticmethod
+    def _channel_display_name(channel: Optional[Dict[str, Any]], status: Dict[str, Any]) -> Optional[str]:
+        for value in (
+            (channel or {}).get("name"),
+            (channel or {}).get("channel_name"),
+            status.get("channel_name"),
+            status.get("name"),
+        ):
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
     def _client_text(client: Any) -> str:
         if isinstance(client, dict):
             values = [
@@ -3497,6 +3537,7 @@ class ShadowBlankMonitorService:
     def _public_target(target: Dict[str, Any]) -> Dict[str, Any]:
         allowed = {
             "channel_ref",
+            "channel_id",
             "stream_ref",
             "real_client_count",
             "watcher_client_count",
@@ -3510,10 +3551,27 @@ class ShadowBlankMonitorService:
             "last_watcher_client_ref",
             "state",
             "current_program",
+            "channel_name",
             "cooldown_seconds",
             "viewer_output_format",
             "last_probe",
             "last_event",
+        }
+        return {key: value for key, value in target.items() if key in allowed}
+
+    @staticmethod
+    def _public_excluded_target(target: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = {
+            "channel_ref",
+            "channel_id",
+            "channel_name",
+            "stream_ref",
+            "real_client_count",
+            "watcher_client_count",
+            "state",
+            "current_program",
+            "viewer_output_format",
+            "exclude_reason",
         }
         return {key: value for key, value in target.items() if key in allowed}
 
