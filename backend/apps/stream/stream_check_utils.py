@@ -1841,6 +1841,7 @@ def _probe_stream_for_loops(
     user_agent: str = 'VLC/3.0.14',
     hardware_acceleration: Optional[Dict[str, Any]] = None,
     headers: Optional[str] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
 ) -> 'tuple[bool, float | None, int]':
     """
     Probe a stream for looping content using a single lightweight FFmpeg process.
@@ -1863,6 +1864,8 @@ def _probe_stream_for_loops(
         user_agent:     HTTP User-Agent forwarded to FFmpeg.
         hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default.
         headers:        Optional HTTP headers forwarded to FFmpeg.
+        should_abort:   Optional callback polled while FFmpeg is running. When
+                        it returns True, the probe terminates early.
 
     Returns:
         (loop_detected, loop_duration_secs, frames_processed)
@@ -2020,6 +2023,44 @@ def _probe_stream_for_loops(
     )
     reader.start()
 
+    abort_watcher_stop = threading.Event()
+    abort_watcher_thread: Optional[threading.Thread] = None
+
+    if callable(should_abort):
+        def _abort_watcher() -> None:
+            while not abort_watcher_stop.wait(0.5):
+                try:
+                    if not should_abort():
+                        continue
+                except Exception as abort_exc:
+                    logger.warning(f"[loop-probe:{stream_tag}] Abort callback failed: {abort_exc}")
+                    return
+                logger.info(f"[loop-probe:{stream_tag}] Abort requested; terminating probe")
+                try:
+                    proc.terminate()
+                except Exception as terminate_exc:
+                    logger.warning(f"[loop-probe:{stream_tag}] Abort terminate failed: {terminate_exc}")
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                return
+
+        abort_watcher_thread = threading.Thread(
+            target=_abort_watcher,
+            daemon=True,
+            name=f"LoopProbe-AbortWatcher[{stream_tag}]",
+        )
+        abort_watcher_thread.start()
+
+        try:
+            if should_abort():
+                logger.info(f"[loop-probe:{stream_tag}] Abort requested before wait; terminating probe")
+                proc.terminate()
+        except Exception as abort_exc:
+            logger.warning(f"[loop-probe:{stream_tag}] Abort callback failed: {abort_exc}")
+            should_abort = None
+
     # Wait for FFmpeg; hard-kill if it overshoots
     try:
         proc.wait(timeout=clamped + 20)
@@ -2029,6 +2070,10 @@ def _probe_stream_for_loops(
         )
         proc.kill()
         proc.wait()
+
+    abort_watcher_stop.set()
+    if abort_watcher_thread is not None:
+        abort_watcher_thread.join(timeout=1)
 
     detector.is_closed = True
     reader.join(timeout=10)
@@ -2053,6 +2098,7 @@ def _probe_stream_for_loops(
             user_agent=user_agent,
             hardware_acceleration={'enabled': False},
             headers=headers,
+            should_abort=should_abort,
         )
 
     if n == 0:

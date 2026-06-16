@@ -114,6 +114,44 @@ class TestLoopProbeSampling(unittest.TestCase):
         self.assertLess(frames_processed, len(raw_frames))
         self.assertGreaterEqual(frames_processed, 20)
 
+    def test_loop_probe_abort_callback_terminates_ffmpeg(self):
+        class BlockingProcess:
+            def __init__(self):
+                self.stdout = io.BytesIO(b"")
+                self.stderr = io.BytesIO(b"")
+                self.terminated = False
+                self.killed = False
+
+            def wait(self, timeout=None):
+                if self.terminated or self.killed:
+                    return 0
+                raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=timeout)
+
+            def terminate(self):
+                self.terminated = True
+
+            def kill(self):
+                self.killed = True
+
+        process = BlockingProcess()
+
+        with patch.object(
+            stream_check_utils.subprocess,
+            "Popen",
+            return_value=process,
+        ):
+            loop_detected, loop_duration, frames_processed = _probe_stream_for_loops(
+                url="http://example.invalid/loop.ts",
+                stream_tag="test-loop-abort",
+                probe_duration=60,
+                should_abort=lambda: True,
+            )
+
+        self.assertFalse(loop_detected)
+        self.assertIsNone(loop_duration)
+        self.assertEqual(frames_processed, 0)
+        self.assertTrue(process.terminated)
+
 
 class TestGetStreamInfo(unittest.TestCase):
     """Test extracting stream information with ffprobe."""
