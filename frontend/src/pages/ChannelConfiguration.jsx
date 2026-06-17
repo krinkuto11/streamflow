@@ -414,7 +414,6 @@ function GroupAssignMatchingDialog({ open, onOpenChange, group, initialConfig, o
 export default function ChannelConfiguration() {
   const [channels, setChannels] = useState([])
   const [patterns, setPatterns] = useState({})
-
   const [loading, setLoading] = useState(true)
   const [checkingChannel, setCheckingChannel] = useState(null)
   const [profilePickerOpen, setProfilePickerOpen] = useState(false)
@@ -2446,8 +2445,6 @@ export default function ChannelConfiguration() {
                         </Label>
                       </div>
                     </div>
-
-                    <Separator orientation="vertical" className="h-6 hidden lg:block" />
 
                     {/* Section: Matching */}
                     <div className="flex items-center gap-3">

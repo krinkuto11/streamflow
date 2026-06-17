@@ -71,7 +71,7 @@ class TestWizardEnsureConfig(unittest.TestCase):
         self.assertIn('patterns', config)
         self.assertIn('global_settings', config)
         self.assertEqual(config['patterns'], {})
-        self.assertEqual(config['global_settings']['case_sensitive'], False)
+        self.assertEqual(config['global_settings']['case_sensitive'], True)
         self.assertEqual(config['global_settings']['require_exact_match'], False)
     
     def test_ensure_config_preserves_existing_file(self):

@@ -998,7 +998,9 @@ class ShadowBlankMonitorService:
                 if self._real_client_count(fresh_status, config, target) <= 0:
                     self._reset_blank_count(channel_uuid)
                     self._clear_switch_attempts(channel_uuid)
-                    self._record_event("viewer_left", target, {})
+                    event_target = dict(target)
+                    event_target["real_client_count"] = 0
+                    self._record_event("viewer_left", event_target, {})
                     with self._lock:
                         self._watched.pop(channel_uuid, None)
                     break
@@ -1053,10 +1055,15 @@ class ShadowBlankMonitorService:
             use_continuous_blank_probe = (
                 config.get("watch_mode") == "continuous"
                 and self._uses_default_blank_probe
-                and not config.get("loop_detection_enabled")
             )
             if use_continuous_blank_probe:
-                result = self._run_blank_probe_until_viewer_left(proxy_url, config, udi, target)
+                result = self._run_blank_probe_until_viewer_left(
+                    proxy_url,
+                    config,
+                    udi,
+                    target,
+                    continuous=not bool(config.get("loop_detection_enabled")),
+                )
             else:
                 result = self.blank_probe(proxy_url, config)
             blank = bool(result.get("blank_detected"))
@@ -1127,13 +1134,15 @@ class ShadowBlankMonitorService:
                 self._reset_blank_count(channel_uuid)
                 self._clear_switch_attempts(channel_uuid)
                 target.pop("media_recovery_guard_observed", None)
-                self._record_event("viewer_left", target, {})
+                event_target = dict(target)
+                event_target["real_client_count"] = 0
+                self._record_event("viewer_left", event_target, {})
                 with self._lock:
                     self._watched.pop(channel_uuid, None)
                 return False
 
             if not detection_reason:
-                loop_result = self._run_loop_probe_if_enabled(proxy_url, target, config)
+                loop_result = self._run_loop_probe_if_enabled(proxy_url, target, config, udi=udi)
                 if loop_result:
                     result.update(loop_result)
                     loop = bool(loop_result.get("loop_detected"))
@@ -1144,6 +1153,16 @@ class ShadowBlankMonitorService:
                         "loop_frames_processed": loop_result.get("loop_frames_processed"),
                         "loop_probe_error": loop_result.get("loop_probe_error"),
                     })
+                    if loop_result.get("viewer_left"):
+                        self._reset_blank_count(channel_uuid)
+                        self._clear_switch_attempts(channel_uuid)
+                        target.pop("media_recovery_guard_observed", None)
+                        event_target = dict(target)
+                        event_target["real_client_count"] = 0
+                        self._record_event("viewer_left", event_target, {})
+                        with self._lock:
+                            self._watched.pop(channel_uuid, None)
+                        return False
                     if loop:
                         detection_reason = "loop"
                     fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
@@ -1151,7 +1170,9 @@ class ShadowBlankMonitorService:
                         self._reset_blank_count(channel_uuid)
                         self._clear_switch_attempts(channel_uuid)
                         target.pop("media_recovery_guard_observed", None)
-                        self._record_event("viewer_left", target, {})
+                        event_target = dict(target)
+                        event_target["real_client_count"] = 0
+                        self._record_event("viewer_left", event_target, {})
                         with self._lock:
                             self._watched.pop(channel_uuid, None)
                         return False
@@ -2320,6 +2341,7 @@ class ShadowBlankMonitorService:
             probe_duration=int(config.get("loop_probe_duration_seconds", 120)),
             user_agent=config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"],
             headers=self._watcher_probe_headers(config) or None,
+            should_abort=config.get("_shadow_loop_abort_check"),
         )
         return {
             "loop_probe_ran": True,
@@ -2333,13 +2355,33 @@ class ShadowBlankMonitorService:
         url: str,
         target: Dict[str, Any],
         config: Dict[str, Any],
+        *,
+        udi: Any = None,
     ) -> Dict[str, Any]:
         if not config.get("loop_detection_enabled"):
             return {}
+        loop_config = dict(config)
+        abort_state = {"viewer_left": False}
+        if udi is not None and config.get("watch_mode") == "continuous":
+            def _abort_when_viewer_left() -> bool:
+                try:
+                    fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                    viewer_left = self._real_client_count(fresh_status, config, target) <= 0
+                except Exception as exc:
+                    logger.warning(f"Shadow loop probe viewer poll failed: {exc}")
+                    viewer_left = False
+                if viewer_left:
+                    abort_state["viewer_left"] = True
+                    return True
+                return self._stop_event.is_set()
+
+            loop_config["_shadow_loop_abort_check"] = _abort_when_viewer_left
         try:
-            result = dict(self.loop_probe(url, config) or {})
+            result = dict(self.loop_probe(url, loop_config) or {})
             result.setdefault("loop_probe_ran", True)
             result["loop_detected"] = bool(result.get("loop_detected"))
+            if abort_state.get("viewer_left"):
+                result["viewer_left"] = True
             return result
         except Exception as exc:
             logger.warning(
@@ -2486,8 +2528,10 @@ class ShadowBlankMonitorService:
         config: Dict[str, Any],
         udi: Any,
         target: Dict[str, Any],
+        *,
+        continuous: bool = True,
     ) -> Dict[str, Any]:
-        command, duration = self._blank_probe_command(url, config, continuous=True)
+        command, duration = self._blank_probe_command(url, config, continuous=continuous)
         offline_image_probe = self._run_offline_image_probe(url, config)
         if offline_image_probe.get("offline_image_detected"):
             return {

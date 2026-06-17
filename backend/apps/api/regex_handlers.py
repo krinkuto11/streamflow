@@ -12,6 +12,11 @@ from apps.api.schemas import (
     GroupRegexConfigSchema,
     RegexPatternCreateSchema,
 )
+from apps.automation.regex_settings import (
+    default_channel_regex_global_settings,
+    normalize_channel_regex_global_settings,
+)
+from apps.automation.intentional_user_regex import search_user_regex
 from apps.channels.repository import UdiChannelRepository
 from apps.core.api_responses import error_response
 from apps.core.exceptions import ValidationError
@@ -29,6 +34,55 @@ def get_regex_patterns_response(*, get_regex_matcher: Callable[[], Any]):
         return jsonify(patterns)
     except Exception as exc:
         logger.error(f"Error getting regex patterns: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def get_regex_global_settings_response():
+    """Handle fetching global regex matching settings."""
+    try:
+        from apps.database.manager import get_db_manager
+
+        db = get_db_manager()
+        settings = db.get_system_setting(
+            "channel_regex_global_settings",
+            default_channel_regex_global_settings(),
+        )
+        return jsonify(normalize_channel_regex_global_settings(settings))
+    except Exception as exc:
+        logger.error(f"Error getting regex global settings: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def update_regex_global_settings_response(*, payload: Any, get_regex_matcher: Callable[[], Any]):
+    """Handle updates to global regex matching settings."""
+    try:
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Invalid JSON format: must be an object"}), 400
+
+        allowed_keys = set(default_channel_regex_global_settings().keys())
+        unknown_keys = sorted(str(key) for key in payload.keys() if key not in allowed_keys)
+        if unknown_keys:
+            return jsonify({"error": "Unknown global regex setting", "keys": unknown_keys}), 400
+
+        from apps.database.manager import get_db_manager
+
+        db = get_db_manager()
+        existing = db.get_system_setting(
+            "channel_regex_global_settings",
+            default_channel_regex_global_settings(),
+        )
+        settings = normalize_channel_regex_global_settings(payload, base=existing)
+        if not db.set_system_setting("channel_regex_global_settings", settings):
+            return jsonify({"error": "Failed to update regex global settings"}), 500
+
+        matcher = get_regex_matcher()
+        matcher.reload_patterns()
+        return jsonify({
+            "message": "Global regex settings updated successfully",
+            "settings": settings,
+        })
+    except Exception as exc:
+        logger.error(f"Error updating regex global settings: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500
 
 
@@ -988,18 +1042,20 @@ def test_regex_pattern_response(
 
         pattern = payload["pattern"]
         stream_name = payload["stream_name"]
-        case_sensitive = payload.get("case_sensitive", False)
+        case_sensitive = payload.get("case_sensitive", True)
 
-        search_pattern = pattern if case_sensitive else pattern.lower()
-        search_name = stream_name if case_sensitive else stream_name.lower()
+        search_pattern = pattern
         search_pattern = whitespace_pattern.sub(r"\\s+", search_pattern)
-
         try:
             if is_dangerous_regex(search_pattern):
                 return jsonify(
                     {"error": "Regex pattern contains dangerous nested quantifiers (ReDoS risk)"}
                 ), 400
-            match = re.search(search_pattern, search_name)
+            match = search_user_regex(
+                search_pattern,
+                stream_name,
+                case_sensitive=case_sensitive,
+            )
             return jsonify(
                 {
                     "matches": bool(match),
@@ -1081,21 +1137,23 @@ def test_regex_pattern_live_response(
                 if not stream_name:
                     continue
 
-                search_name = stream_name if case_sensitive else stream_name.lower()
                 matched = False
                 matched_pattern = None
 
                 for pattern in regex_patterns:
                     escaped_channel_name = re.escape(channel_name)
                     substituted_pattern = pattern.replace("CHANNEL_NAME", escaped_channel_name)
-                    search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
+                    search_pattern = substituted_pattern
                     search_pattern = whitespace_pattern.sub(r"\\s+", search_pattern)
-
                     try:
                         if is_dangerous_regex(search_pattern):
                             logger.warning(f"Invalid regex pattern '{pattern}': ReDoS risk")
                             continue
-                        if re.search(search_pattern, search_name):
+                        if search_user_regex(
+                            search_pattern,
+                            stream_name,
+                            case_sensitive=case_sensitive,
+                        ):
                             matched = True
                             matched_pattern = pattern
                             break

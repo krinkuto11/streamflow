@@ -5,6 +5,7 @@ from typing import Any, Callable
 
 from flask import jsonify
 
+from apps.automation.intentional_user_regex import search_user_regex
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
@@ -86,7 +87,7 @@ def test_match_live_response(
                     if matched:
                         continue
 
-                    search_name = stream_name if case_sensitive else stream_name.lower()
+                    search_name = stream_name
                     regex_matched = False
                     best_regex_priority = 0
                     best_pattern_str = None
@@ -109,13 +110,16 @@ def test_match_live_response(
                         escaped_channel_name = re.escape(channel_name)
                         substituted_pattern = pattern.replace("CHANNEL_NAME", escaped_channel_name)
 
-                        search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
+                        search_pattern = substituted_pattern
                         search_pattern = whitespace_pattern.sub(r"\\s+", search_pattern)
-
                         try:
                             if is_dangerous_regex(search_pattern):
                                 continue
-                            if re.search(search_pattern, search_name):
+                            if search_user_regex(
+                                search_pattern,
+                                search_name,
+                                case_sensitive=case_sensitive,
+                            ):
                                 regex_matched = True
                                 if pattern_priority >= best_regex_priority:
                                     best_regex_priority = pattern_priority
@@ -263,7 +267,7 @@ def bulk_match_count_response(
                             matched = True
 
                     elif match_type == "regex" and has_regex:
-                        search_name = stream_name if case_sensitive else stream_name.lower()
+                        search_name = stream_name
 
                         for pattern_obj in normalized_patterns:
                             pattern = pattern_obj.get("pattern", "")
@@ -280,13 +284,16 @@ def bulk_match_count_response(
 
                             escaped_channel_name = re.escape(channel_name)
                             substituted_pattern = pattern.replace("CHANNEL_NAME", escaped_channel_name)
-                            search_pattern = substituted_pattern if case_sensitive else substituted_pattern.lower()
+                            search_pattern = substituted_pattern
                             search_pattern = whitespace_pattern.sub(r"\\s+", search_pattern)
-
                             try:
                                 if is_dangerous_regex(search_pattern):
                                     continue
-                                if re.search(search_pattern, search_name):
+                                if search_user_regex(
+                                    search_pattern,
+                                    search_name,
+                                    case_sensitive=case_sensitive,
+                                ):
                                     matched = True
                                     break
                             except re.error:
