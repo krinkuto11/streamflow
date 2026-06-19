@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   getChangelogRunContextBadges,
   getChangelogStaleWarnings,
+  getChangelogVisibilityEvents,
   getChangelogVisibilityMetrics,
 } from './changelog-run-summary.js'
 
@@ -147,6 +148,60 @@ describe('changelog run summary', () => {
     })).toEqual([
       { key: 'channels-hidden', label: 'Channels Hidden', value: 0, className: 'text-amber-500' },
       { key: 'channels-ready', label: 'Channels Restored', value: 0, className: 'text-green-500' },
+    ])
+  })
+
+  it('maps visibility events back to channel names from automation periods', () => {
+    expect(getChangelogVisibilityEvents({
+      channel_visibility_events: [
+        {
+          action: 'hidden',
+          channel_id: 8092,
+          reason: 'all_failed',
+          details: { good_streams_count: 0, dead_streams_count: 2, total_streams: 2 },
+        },
+        {
+          action: 'unhidden',
+          channel_id: 2154,
+          reason: 'recovered',
+          details: { good_streams_count: 1, dead_streams_count: 0, total_streams: 8 },
+        },
+      ],
+      periods: [
+        {
+          channels: [
+            { channel_id: 8092, channel_name: 'BBC News', logo_url: '/logos/bbc.png' },
+            { channel_id: 2154, channel_name: 'TalkTV' },
+          ],
+        },
+      ],
+    })).toEqual([
+      {
+        key: 'hidden-8092',
+        action: 'hidden',
+        channel_id: '8092',
+        channel_ref: null,
+        channel_name: 'BBC News',
+        logo_url: '/logos/bbc.png',
+        logo_id: null,
+        reason: 'all_failed',
+        good_streams_count: 0,
+        dead_streams_count: 2,
+        total_streams: 2,
+      },
+      {
+        key: 'unhidden-2154',
+        action: 'unhidden',
+        channel_id: '2154',
+        channel_ref: null,
+        channel_name: 'TalkTV',
+        logo_url: null,
+        logo_id: null,
+        reason: 'recovered',
+        good_streams_count: 1,
+        dead_streams_count: 0,
+        total_streams: 8,
+      },
     ])
   })
 })

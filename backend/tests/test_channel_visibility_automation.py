@@ -57,6 +57,7 @@ def test_no_regex_hide_marks_channel_and_records_streamflow_state():
 
     assert result["action"] == "hidden"
     assert result["changed"] is True
+    assert result["channel_name"] == "Test Channel"
     patch.assert_called_once_with(
         "http://dispatcharr.test/api/channels/channels/10/",
         {"hidden_from_output": True},
@@ -65,6 +66,7 @@ def test_no_regex_hide_marks_channel_and_records_streamflow_state():
     assert state["hidden_by"] == "streamflow"
     assert state["reason"] == "no_regex"
     assert state["channel_ref"] == "channel-10"
+    assert state["channel_name"] == "Test Channel"
     assert udi.updated[0][1]["hidden_from_output"] is True
 
 

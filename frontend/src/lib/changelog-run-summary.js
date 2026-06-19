@@ -175,3 +175,63 @@ export function getChangelogVisibilityMetrics(details = {}) {
   }
   return metrics
 }
+
+const channelIndexEntries = (details = {}) => {
+  const entries = []
+  for (const period of asArray(details.periods)) {
+    for (const channel of asArray(period?.channels)) {
+      if (!channel || typeof channel !== 'object') continue
+      entries.push(channel)
+    }
+  }
+  return entries
+}
+
+const buildVisibilityChannelIndex = (details = {}) => {
+  const index = new Map()
+  for (const channel of channelIndexEntries(details)) {
+    const keys = [
+      channel.channel_id,
+      channel.id,
+      channel.channel_ref,
+      channel.channel_uuid,
+    ]
+    for (const key of keys) {
+      if (isPresent(key)) index.set(String(key), channel)
+    }
+  }
+  return index
+}
+
+export function getChangelogVisibilityEvents(details = {}) {
+  const channelIndex = buildVisibilityChannelIndex(details)
+  return asArray(details.channel_visibility_events)
+    .filter(event => event && typeof event === 'object')
+    .filter(event => ['hidden', 'unhidden'].includes(event.action))
+    .map((event, index) => {
+      const lookup = firstPresent(event.channel_id, event.channel_ref)
+      const channel = lookup ? channelIndex.get(String(lookup)) : null
+      const eventDetails = event.details && typeof event.details === 'object' ? event.details : {}
+      const channelId = firstPresent(event.channel_id, channel?.channel_id, channel?.id)
+      const channelRef = firstPresent(event.channel_ref, channel?.channel_ref)
+      return {
+        key: `${event.action}-${channelId || channelRef || index}`,
+        action: event.action,
+        channel_id: channelId,
+        channel_ref: channelRef,
+        channel_name: firstPresent(
+          event.channel_name,
+          channel?.channel_name,
+          channel?.name,
+          channelRef,
+          channelId ? `Channel ${channelId}` : null
+        ),
+        logo_url: firstPresent(event.logo_url, channel?.logo_url),
+        logo_id: firstPresent(event.logo_id, channel?.logo_id),
+        reason: firstPresent(event.reason, eventDetails.reason),
+        good_streams_count: numericCount(event.good_streams_count ?? eventDetails.good_streams_count),
+        dead_streams_count: numericCount(event.dead_streams_count ?? eventDetails.dead_streams_count),
+        total_streams: numericCount(event.total_streams ?? eventDetails.total_streams),
+      }
+    })
+}
