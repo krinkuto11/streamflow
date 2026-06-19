@@ -15,6 +15,7 @@ describe('shadowMonitorNumberFields', () => {
       suffix: 'sec',
     })
     expect(cooldown.help).toMatch(/same channel/i)
+    expect(cooldown.help).toMatch(/watcher probes/i)
 
     expect(switchLimit).toMatchObject({
       label: 'Channel Switch Limit',

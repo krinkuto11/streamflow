@@ -10,6 +10,7 @@ export const shadowEventLabels = {
   dry_run_switch: 'Dry Run Switch',
   switch_success: 'Switch Success',
   switch_failed: 'Switch Failed',
+  external_stream_change: 'External Stream Change',
   no_alternative: 'No Alternative',
   cooldown: 'Cooldown',
   loop_pre_probe_required: 'Loop Pre-Probe Required',
@@ -130,6 +131,7 @@ export const getShadowEventDecisionGroup = (event = {}) => {
   if (event?.decision_group) return event.decision_group
   const type = String(event?.type || '')
   if (['switch_success', 'switch_failed', 'dry_run_switch'].includes(type)) return 'switch'
+  if (type === 'external_stream_change') return 'switch'
   if (['pre_probe_unavailable', 'pre_probe_rejected'].includes(type)) return 'pre_probe'
   if (type.endsWith('_pending') || type === 'probe_ok') return 'probe'
   if (type === 'offline_image_learned') return 'learn'
@@ -268,6 +270,10 @@ export const getShadowEventDetailParts = (event = {}) => {
     const result = details.result || 'unknown'
     const rejection = details.rejection_reason
     parts.push(rejection ? `pre-probe ${result}: ${formatShadowEventReason(rejection)}` : `pre-probe ${result}`)
+  }
+
+  if (details.switch_source === 'external') {
+    parts.push('outside StreamFlow')
   }
 
   if (details.origin_stream_ref && details.target_stream_ref) {

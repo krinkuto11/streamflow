@@ -11,7 +11,7 @@ export const shadowMonitorNumberFields = [
     suffix: 'sec',
     min: 30,
     max: 86400,
-    help: 'Wait before another switch attempt on the same channel.',
+    help: 'Wait before another switch attempt on the same channel; watcher probes still run.',
   },
   {
     key: 'max_switches_per_hour',

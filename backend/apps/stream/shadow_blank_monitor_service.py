@@ -194,7 +194,7 @@ DETECTION_THRESHOLD_KEYS = {
     "offline_image": ("offline_image_hash_threshold",),
     "loop": ("loop_probe_duration_seconds",),
 }
-SWITCH_EVENT_TYPES = {"dry_run_switch", "switch_success", "switch_failed"}
+SWITCH_EVENT_TYPES = {"dry_run_switch", "switch_success", "switch_failed", "external_stream_change"}
 PRE_PROBE_EVENT_TYPES = {"pre_probe_unavailable", "pre_probe_rejected"}
 PRE_PROBE_METRICS = {
     "preprobe_attempted",
@@ -855,6 +855,37 @@ class ShadowBlankMonitorService:
                 previous_watcher_count = int(previous_target.get("watcher_client_count") or 0)
                 previous_watcher_ref = previous_target.get("watcher_client_ref")
                 watcher_ref = target.get("watcher_client_ref")
+                previous_stream_id = previous_target.get("stream_id")
+                if (
+                    previous_stream_id is not None
+                    and stream_id is not None
+                    and str(previous_stream_id) != str(stream_id)
+                ):
+                    expected_shadow_switch = self._switch_attempt_matches(
+                        channel_uuid,
+                        previous_stream_id,
+                        stream_id,
+                    )
+                    self._reset_detection_state(channel_uuid)
+                    self._clear_cooldown(channel_uuid)
+                    if not expected_shadow_switch:
+                        continuity_events.append((
+                            "external_stream_change",
+                            {
+                                **dict(target),
+                                "stream_id": previous_stream_id,
+                                "stream_ref": _ref("stream", previous_stream_id),
+                            },
+                            {
+                                "target_stream_ref": _ref("stream", stream_id),
+                                "observed_stream_ref": _ref("stream", stream_id),
+                                "switch_source": "external",
+                                "operator_note": (
+                                    "Active stream changed outside the Shadow Monitor switch path. "
+                                    "Dispatcharr did not provide actor details."
+                                ),
+                            },
+                        ))
                 if watcher_clients > 0:
                     target["watcher_state"] = "watching"
                     if previous_absence:
@@ -919,7 +950,6 @@ class ShadowBlankMonitorService:
         for event_type, event_target, details in continuity_events:
             if event_type == "watcher_recovered":
                 self._reset_detection_state(event_target["channel_uuid"])
-                self._set_cooldown(event_target["channel_uuid"], config)
             self._record_event(event_type, event_target, details)
         return targets
 
@@ -939,14 +969,6 @@ class ShadowBlankMonitorService:
         for target in targets:
             channel_uuid = target["channel_uuid"]
             if int(target.get("watcher_client_count") or 0) > 0:
-                continue
-            cooldown_remaining = self._cooldown_remaining(channel_uuid)
-            reconnecting_watcher = (
-                config.get("watch_mode") == "continuous"
-                and target.get("watcher_state") == "reconnecting"
-            )
-            if cooldown_remaining > 0 and not reconnecting_watcher:
-                self._record_event("cooldown", target, {"cooldown_seconds": cooldown_remaining})
                 continue
             if self._quality_checker_conflicts(target, config):
                 self._record_event("quality_check_active", target, {})
@@ -2005,8 +2027,6 @@ class ShadowBlankMonitorService:
         config: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._reset_detection_state(channel_uuid)
-        if config is not None:
-            self._set_cooldown(channel_uuid, config)
         self._record_event("watcher_recovery_guard", target, guard_details)
 
     def _channel_proxy_url(self, channel_uuid: str, output_format: Optional[str] = None) -> str:
@@ -3173,6 +3193,10 @@ class ShadowBlankMonitorService:
         with self._lock:
             self._cooldowns[channel_uuid] = self.clock() + int(config["channel_cooldown_seconds"])
 
+    def _clear_cooldown(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._cooldowns.pop(channel_uuid, None)
+
     def _attempted_switch_targets(
         self,
         channel_uuid: str,
@@ -3215,6 +3239,18 @@ class ShadowBlankMonitorService:
             targets = entry.setdefault("target_stream_ids", [])
             if target not in targets:
                 targets.append(target)
+
+    def _switch_attempt_matches(
+        self,
+        channel_uuid: str,
+        origin_stream_id: Optional[int],
+        target_stream_id: Optional[int],
+    ) -> bool:
+        try:
+            target = int(target_stream_id) if target_stream_id is not None else None
+        except (TypeError, ValueError):
+            return False
+        return target in self._attempted_switch_targets(channel_uuid, origin_stream_id)
 
     def _clear_switch_attempts(self, channel_uuid: str) -> None:
         with self._lock:
@@ -3279,6 +3315,7 @@ class ShadowBlankMonitorService:
             "successful_switches": 0,
             "failed_switches": 0,
             "dry_run_switches": 0,
+            "external_stream_changes": 0,
             "skipped_switches": 0,
             "pre_probe_prevented_switches": 0,
             "loop_pre_probe_required_skips": 0,
@@ -3311,6 +3348,8 @@ class ShadowBlankMonitorService:
                 summary["failed_switches"] += 1
             elif event_type == "dry_run_switch":
                 summary["dry_run_switches"] += 1
+            elif event_type == "external_stream_change":
+                summary["external_stream_changes"] = int(summary.get("external_stream_changes", 0)) + 1
             elif event_type == "no_alternative":
                 summary["skipped_switches"] += 1
                 if isinstance(details.get("pre_probe"), dict):
