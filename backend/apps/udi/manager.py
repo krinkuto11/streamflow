@@ -59,6 +59,7 @@ UDI_INTEGRITY_THRESHOLD = 0.9
 UDI_DELTA_FALLBACK_THRESHOLD = 0.20
 SHADOW_MONITOR_DEFAULT_USER_AGENT = 'StreamFlow-Shadow-Blank-Monitor/1.0'
 SHADOW_MONITOR_CONFIG_FILE = Path(os.environ.get("CONFIG_DIR", "/app/data")) / "shadow_blank_monitor_config.json"
+STREAMFLOW_CHANNEL_VISIBILITY_STATE_KEY = "streamflow_channel_visibility_state"
 
 
 def _safe_positive_int(value: Any) -> int:
@@ -407,6 +408,114 @@ class UDIManager:
             gid = ch.get('channel_group_id')
             if gid is not None:
                 self._channels_by_group_id.setdefault(gid, []).append(ch)
+
+    @staticmethod
+    def _extract_managed_hidden_channel_ids(state: Any) -> Set[int]:
+        """Return StreamFlow-owned hidden channel IDs from the persisted visibility state."""
+        if not isinstance(state, dict):
+            return set()
+
+        channel_ids: Set[int] = set()
+        for raw_key, entry in state.items():
+            if not isinstance(entry, dict) or entry.get("hidden_by") != "streamflow":
+                continue
+            raw_id = entry.get("channel_id", raw_key)
+            try:
+                channel_ids.add(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+        return channel_ids
+
+    def _get_managed_hidden_channel_ids(self) -> Set[int]:
+        """Read StreamFlow-managed hidden channel IDs from system settings."""
+        try:
+            from apps.database.manager import get_db_manager
+
+            state = get_db_manager().get_system_setting(
+                STREAMFLOW_CHANNEL_VISIBILITY_STATE_KEY,
+                {},
+            )
+            return self._extract_managed_hidden_channel_ids(state)
+        except Exception as exc:
+            logger.debug("Could not read channel visibility state for UDI rehydrate: %s", exc)
+            return set()
+
+    @staticmethod
+    def _merge_channel_list_with_rehydrated(
+        channels: List[Dict[str, Any]],
+        rehydrated: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Merge individually fetched hidden channels into a channel list by ID."""
+        if not rehydrated:
+            return channels, 0
+
+        merged = list(channels)
+        positions: Dict[Any, int] = {
+            channel.get("id"): index
+            for index, channel in enumerate(merged)
+            if channel.get("id") is not None
+        }
+        changed = 0
+        for channel in rehydrated:
+            channel_id = channel.get("id")
+            if channel_id is None:
+                continue
+            if channel_id in positions:
+                merged[positions[channel_id]] = channel
+            else:
+                positions[channel_id] = len(merged)
+                merged.append(channel)
+            changed += 1
+        return merged, changed
+
+    def _rehydrate_managed_hidden_channels(
+        self,
+        channels: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Keep StreamFlow-hidden Dispatcharr channels in UDI even when list APIs hide them.
+
+        Dispatcharr's normal channel list and ids endpoints can omit channels
+        hidden from output. StreamFlow must still know about channels it hid so
+        later automation can match/check them and unhide them after recovery.
+        """
+        managed_ids = self._get_managed_hidden_channel_ids()
+        if not managed_ids:
+            return channels, 0
+
+        cached_ids = {
+            channel.get("id")
+            for channel in channels
+            if channel.get("id") is not None
+        }
+        missing_ids = sorted(managed_ids - cached_ids)
+        if not missing_ids:
+            return channels, 0
+
+        rehydrated = self.fetcher.fetch_channels_by_ids(missing_ids)
+        if not rehydrated:
+            logger.warning(
+                "UDI could not rehydrate %s StreamFlow-managed hidden channel(s): %s",
+                len(missing_ids),
+                missing_ids[:10],
+            )
+            return channels, 0
+
+        merged, changed = self._merge_channel_list_with_rehydrated(channels, rehydrated)
+        fetched_ids = {channel.get("id") for channel in rehydrated}
+        still_missing = [channel_id for channel_id in missing_ids if channel_id not in fetched_ids]
+        if still_missing:
+            logger.warning(
+                "UDI rehydrated %s StreamFlow-managed hidden channel(s); %s still missing: %s",
+                changed,
+                len(still_missing),
+                still_missing[:10],
+            )
+        else:
+            logger.info(
+                "UDI rehydrated %s StreamFlow-managed hidden channel(s) omitted by list APIs",
+                changed,
+            )
+        return merged, changed
 
     @staticmethod
     def _get_stream_m3u_account_id(stream: Dict[str, Any]) -> Optional[Any]:
@@ -1076,6 +1185,11 @@ class UDIManager:
                 )
                 return False
 
+            new_channels, rehydrated_hidden_count = self._rehydrate_managed_hidden_channels(channels_result.items)
+            if rehydrated_hidden_count:
+                entity_counts['channels']['received'] = len(new_channels)
+                entity_counts['channels']['rehydrated_hidden'] = rehydrated_hidden_count
+
             self._update_init_progress(percentage=85, message='Building indexes...', current_step='index')
 
             # ----------------------------------------------------------------
@@ -1083,7 +1197,6 @@ class UDIManager:
             # the lock is held only for the pointer swap (microseconds), not
             # for index construction or storage writes (potentially seconds).
             # ----------------------------------------------------------------
-            new_channels    = channels_result.items
             new_streams     = streams_result.items
             new_groups      = channel_groups
             new_logos       = logos_result.items
@@ -1255,6 +1368,11 @@ class UDIManager:
         deleted_stream_ids  = cached_stream_ids       - dispatcharr_stream_ids
         added_channel_ids   = dispatcharr_channel_ids - cached_channel_ids
         deleted_channel_ids = cached_channel_ids      - dispatcharr_channel_ids
+        managed_hidden_channel_ids = self._get_managed_hidden_channel_ids()
+        managed_hidden_deleted_ids = deleted_channel_ids & managed_hidden_channel_ids
+        missing_managed_hidden_ids = managed_hidden_channel_ids - cached_channel_ids
+        if managed_hidden_deleted_ids:
+            deleted_channel_ids -= managed_hidden_deleted_ids
 
         stream_change_ratio  = (len(added_stream_ids)  + len(deleted_stream_ids))  / max(len(dispatcharr_stream_ids),  1)
         channel_change_ratio = (len(added_channel_ids) + len(deleted_channel_ids)) / max(len(dispatcharr_channel_ids), 1)
@@ -1275,13 +1393,23 @@ class UDIManager:
             )
             return self.refresh_all()
 
-        if not any([added_stream_ids, deleted_stream_ids, added_channel_ids, deleted_channel_ids]):
+        if not any([
+            added_stream_ids,
+            deleted_stream_ids,
+            added_channel_ids,
+            deleted_channel_ids,
+            managed_hidden_deleted_ids,
+            missing_managed_hidden_ids,
+        ]):
             logger.info("Delta refresh: no structural changes detected")
             return True
 
         # ---- Step 4: fetch new items — both concurrently (outside the lock) ----
         new_streams:  List[Dict[str, Any]] = []
         new_channels: List[Dict[str, Any]] = []
+        hidden_channel_ids_to_rehydrate = sorted(
+            (managed_hidden_deleted_ids | missing_managed_hidden_ids) - added_channel_ids
+        )
 
         if added_stream_ids or added_channel_ids:
             with ThreadPoolExecutor(max_workers=2) as _ex:
@@ -1299,6 +1427,17 @@ class UDIManager:
                 if _ch_future is not None:
                     new_channels = _ch_future.result()
                     logger.info(f"Fetched {len(new_channels)}/{len(added_channel_ids)} new channels")
+        if hidden_channel_ids_to_rehydrate:
+            hidden_channels = self.fetcher.fetch_channels_by_ids(hidden_channel_ids_to_rehydrate)
+            new_channels, rehydrated_hidden_count = self._merge_channel_list_with_rehydrated(
+                new_channels,
+                hidden_channels,
+            )
+            logger.info(
+                "Delta refresh rehydrated %s/%s StreamFlow-managed hidden channel(s)",
+                rehydrated_hidden_count,
+                len(hidden_channel_ids_to_rehydrate),
+            )
 
         # ---- Step 5: apply delta atomically under lock ----
         with self._lock:
@@ -1352,11 +1491,14 @@ class UDIManager:
                 cid = ch.get('id')
                 if cid is None:
                     continue
-                self._channels_cache.append(ch)
-                self._channels_by_id[cid] = ch
-                gid = ch.get('channel_group_id')
-                if gid is not None:
-                    self._channels_by_group_id.setdefault(gid, []).append(ch)
+                replaced = False
+                for index, cached_channel in enumerate(self._channels_cache):
+                    if cached_channel.get('id') == cid:
+                        self._channels_cache[index] = ch
+                        replaced = True
+                        break
+                if not replaced:
+                    self._channels_cache.append(ch)
 
             # Channel deletions
             if deleted_channel_ids:
@@ -1373,11 +1515,13 @@ class UDIManager:
                     ch for ch in self._channels_cache
                     if ch.get('id') not in deleted_channel_ids
                 ]
+            self._build_indexes()
 
         logger.info(
             f"Delta refresh complete — "
             f"streams +{len(new_streams)} -{len(deleted_stream_ids)}, "
-            f"channels +{len(new_channels)} -{len(deleted_channel_ids)}"
+            f"channels +{len(new_channels)} -{len(deleted_channel_ids)} "
+            f"(protected hidden {len(managed_hidden_deleted_ids)})"
         )
         return True
 
@@ -1396,16 +1540,15 @@ class UDIManager:
         logger.info("Refreshing channels...")
         try:
             result = self.fetcher.fetch_channels()
+            channels, rehydrated_hidden_count = self._rehydrate_managed_hidden_channels(result.items)
             with self._lock:
-                self._channels_cache = result.items
-                self._channels_by_id = {
-                    ch.get('id'): ch for ch in result.items if ch.get('id') is not None
-                }
-                self._channels_by_group_id = {}
-                for ch in result.items:
-                    gid = ch.get('channel_group_id')
-                    if gid is not None:
-                        self._channels_by_group_id.setdefault(gid, []).append(ch)
+                self._channels_cache = channels
+                self._build_indexes()
+            if rehydrated_hidden_count:
+                logger.info(
+                    "Channel refresh retained %s StreamFlow-managed hidden channel(s)",
+                    rehydrated_hidden_count,
+                )
             self.cache.mark_refreshed('channels')
             return True
         except Exception as e:

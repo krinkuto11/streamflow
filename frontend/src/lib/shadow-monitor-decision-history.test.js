@@ -14,9 +14,11 @@ describe('shadow monitor decision history helpers', () => {
     expect(formatShadowEventType({ type: 'no_decodable_frames_pending' })).toBe('Decoder Stall Pending')
     expect(formatShadowEventType({ type: 'loop_pending' })).toBe('Loop Pending')
     expect(formatShadowEventType({ type: 'loop_pre_probe_required' })).toBe('Loop Pre-Probe Required')
+    expect(formatShadowEventType({ type: 'external_stream_change' })).toBe('External Stream Change')
     expect(formatShadowEventReason('offline_image')).toBe('Offline Image')
     expect(formatShadowEventReason('loop')).toBe('Loop')
     expect(getShadowEventDecisionGroup({ type: 'dry_run_switch' })).toBe('switch')
+    expect(getShadowEventDecisionGroup({ type: 'external_stream_change' })).toBe('switch')
     expect(getShadowEventDecisionGroup({ type: 'pre_probe_rejected' })).toBe('pre_probe')
     expect(getShadowEventDecisionGroup({ type: 'blank_pending' })).toBe('probe')
     expect(getShadowEventDecisionGroup({ type: 'loop_pre_probe_required' })).toBe('guard')
@@ -71,6 +73,20 @@ describe('shadow monitor decision history helpers', () => {
     expect(parts).toContain('stream-old -> stream-new')
     expect(parts).toContain('1 real viewer')
     expect(parts.join(' ')).not.toMatch(/http|provider|account/i)
+  })
+
+  it('summarizes externally observed stream changes', () => {
+    expect(getShadowEventDetailParts({
+      type: 'external_stream_change',
+      details: {
+        origin_stream_ref: 'stream-old',
+        target_stream_ref: 'stream-new',
+        switch_source: 'external',
+      },
+    })).toEqual([
+      'outside StreamFlow',
+      'stream-old -> stream-new',
+    ])
   })
 
   it('summarizes pre-probe rejection reasons', () => {

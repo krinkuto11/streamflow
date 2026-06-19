@@ -3186,8 +3186,7 @@ def test_watcher_recovery_guard_clears_pending_detection_and_switch_attempts(tmp
     assert should_continue is False
     assert switch_calls == []
     assert status["recent_events"][0]["type"] == "watcher_recovery_guard"
-    assert status["cooldowns"][0]["channel_ref"] == "channel-test"
-    assert status["cooldowns"][0]["cooldown_seconds"] == 300
+    assert status["cooldowns"] == []
     with service._lock:
         assert service._blank_counts[service._detection_count_key("uuid-1", "blank")] == 0
         assert "uuid-1" not in service._switch_attempts
@@ -4106,17 +4105,17 @@ def test_watcher_recovery_cooldown_does_not_block_reconnect_probe(tmp_path):
     now["value"] = 1010.0
     recovery_status = service.run_once(force=True)
     assert recovery_status["recent_events"][0]["type"] == "watcher_recovered"
-    assert recovery_status["cooldowns"][0]["cooldown_seconds"] == 300
+    assert recovery_status["cooldowns"] == []
 
     now["value"] = 1015.0
     cooldown_status = service.run_once(force=True)
     assert len(probe_calls) == 2
     assert cooldown_status["recent_events"][0]["type"] == "probe_ok"
     assert cooldown_status["recent_events"][1]["type"] == "watcher_reconnecting"
-    assert cooldown_status["cooldowns"][0]["cooldown_seconds"] == 295
+    assert cooldown_status["cooldowns"] == []
 
 
-def test_reconnect_probe_blocks_fault_actions_during_cooldown(tmp_path):
+def test_reconnect_probe_can_switch_after_watcher_recovery_without_channel_cooldown(tmp_path):
     now = {"value": 1000.0}
     probe_calls = []
     switch_calls = []
@@ -4174,15 +4173,136 @@ def test_reconnect_probe_blocks_fault_actions_during_cooldown(tmp_path):
     now["value"] = 1010.0
     recovery_status = service.run_once(force=True)
     assert recovery_status["recent_events"][0]["type"] == "watcher_recovered"
-    assert recovery_status["cooldowns"][0]["cooldown_seconds"] == 300
+    assert recovery_status["cooldowns"] == []
 
     now["value"] = 1015.0
-    cooldown_status = service.run_once(force=True)
+    switch_status = service.run_once(force=True)
     assert len(probe_calls) == 2
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert switch_status["recent_events"][0]["type"] == "switch_success"
+    assert switch_status["recent_events"][0]["details"]["reason"] == "blank"
+    assert switch_status["cooldowns"] == []
+
+
+def test_watcher_recovery_does_not_start_channel_cooldown(tmp_path):
+    now = {"value": 1000.0}
+    watcher_old = {
+        "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+        "client_id": "raw-old-watcher",
+        "connected_at": 990.0,
+    }
+    watcher_new = {
+        "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+        "client_id": "raw-new-watcher",
+        "connected_at": 1008.0,
+    }
+    real_viewer = {"user_agent": "VLC"}
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer, watcher_old])},
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer])},
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer, watcher_new])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        clock=lambda: now["value"],
+    )
+    service.update_config({
+        "enabled": False,
+        "watch_mode": "continuous",
+        "channel_cooldown_seconds": 300,
+    })
+
+    service.run_once(force=True)
+    now["value"] = 1005.0
+    service.run_once(force=True)
+
+    now["value"] = 1010.0
+    recovery_status = service.run_once(force=True)
+
+    assert recovery_status["recent_events"][0]["type"] == "watcher_recovered"
+    assert recovery_status["cooldowns"] == []
+
+
+def test_existing_channel_cooldown_blocks_switch_but_records_fault_reason(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, _config: {
+            "blank_detected": True,
+            "blank_ratio": 1.0,
+            "blank_duration_secs": 60,
+        },
+        switch_calls=switch_calls,
+    )
+    service.update_config({
+        "enabled": False,
+        "watch_mode": "continuous",
+        "channel_cooldown_seconds": 300,
+        "confirmation_count": 1,
+    })
+    config = service.get_config(include_secret=True)
+    service._set_cooldown("uuid-1", config)
+
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "channel_name": "Channel 1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 1,
+        "watcher_state": "watching",
+    }
+    should_continue = service._probe_target_once(udi, target, service.get_config(include_secret=True))
+    status = service.get_status()
+
+    assert should_continue is True
     assert switch_calls == []
-    assert cooldown_status["recent_events"][0]["type"] == "cooldown"
-    assert cooldown_status["recent_events"][0]["details"]["reason"] == "blank"
-    assert cooldown_status["cooldowns"][0]["cooldown_seconds"] == 295
+    assert status["recent_events"][0]["type"] == "cooldown"
+    assert status["recent_events"][0]["details"]["reason"] == "blank"
+    assert status["recent_events"][0]["details"]["cooldown_seconds"] == 300
+
+
+def test_external_stream_change_is_recorded_and_clears_cooldown(tmp_path):
+    real_viewer = {"user_agent": "VLC"}
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer])},
+            {"uuid-1": active_status(stream_id=12, clients=[real_viewer])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service.update_config({
+        "enabled": False,
+        "watch_mode": "continuous",
+        "channel_cooldown_seconds": 300,
+    })
+    service._set_cooldown("uuid-1", service.get_config(include_secret=True))
+
+    service.run_once(force=True)
+    status = service.run_once(force=True)
+
+    event = next(event for event in status["recent_events"] if event["type"] == "external_stream_change")
+    assert event["type"] == "external_stream_change"
+    assert event["details"]["origin_stream_ref"] == shadow_module._ref("stream", 10)
+    assert event["details"]["target_stream_ref"] == shadow_module._ref("stream", 12)
+    assert event["details"]["switch_source"] == "external"
+    assert status["cooldowns"] == []
 
 
 def test_continuous_mode_starts_uncovered_target_when_another_has_watcher(tmp_path):

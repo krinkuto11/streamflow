@@ -31,6 +31,14 @@ from apps.udi.fetcher import FetchResult
 from apps.udi.manager import UDIManager
 
 
+class FakeSettingsDb:
+    def __init__(self, settings=None):
+        self.settings = settings or {}
+
+    def get_system_setting(self, key, default=None):
+        return self.settings.get(key, default)
+
+
 class TestModels(unittest.TestCase):
     """Test UDI data models."""
     
@@ -676,6 +684,59 @@ class TestUDIManager(unittest.TestCase):
         self.assertEqual(self.manager._channels_cache, [])
         self.assertEqual(self.manager._streams_cache, [])
         self.assertTrue(self.manager.is_network_ready())
+
+    def test_rehydrate_managed_hidden_channels_fetches_missing_ids(self):
+        """StreamFlow-owned hidden channels remain visible to UDI if list APIs omit them."""
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.fetch_channels_by_ids.return_value = [
+            {'id': 42, 'name': 'Hidden News', 'hidden_from_output': True},
+        ]
+        fake_db = FakeSettingsDb({
+            "streamflow_channel_visibility_state": {
+                "42": {"hidden_by": "streamflow", "channel_id": 42},
+            },
+        })
+
+        with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+            channels, count = self.manager._rehydrate_managed_hidden_channels([
+                {'id': 1, 'name': 'Visible Channel'},
+            ])
+
+        self.assertEqual(count, 1)
+        self.assertEqual({channel['id'] for channel in channels}, {1, 42})
+        self.manager.fetcher.fetch_channels_by_ids.assert_called_once_with([42])
+
+    def test_delta_refresh_keeps_streamflow_hidden_channel_omitted_by_ids(self):
+        """Older Dispatcharr IDs responses must not delete StreamFlow-hidden channels from UDI."""
+        hidden_channel = {'id': 42, 'name': 'Old Hidden', 'hidden_from_output': True, 'streams': []}
+        self.manager._initialized = True
+        self.manager._network_ready = True
+        self.manager._channels_cache = [
+            {'id': 1, 'name': 'Visible Channel', 'streams': []},
+            hidden_channel,
+        ]
+        self.manager._streams_cache = []
+        self.manager._build_indexes()
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.fetch_all_ids.return_value = {'channels': {1}, 'streams': set()}
+        self.manager.fetcher.fetch_channels_by_ids.return_value = [
+            {'id': 42, 'name': 'Hidden News', 'hidden_from_output': True, 'streams': []},
+        ]
+        fake_db = FakeSettingsDb({
+            "streamflow_channel_visibility_state": {
+                "42": {"hidden_by": "streamflow", "channel_id": 42},
+            },
+        })
+
+        with patch('apps.udi.manager.get_dispatcharr_config') as mock_config, \
+                patch('apps.database.manager.get_db_manager', return_value=fake_db):
+            mock_config.return_value.is_configured.return_value = True
+            result = self.manager.refresh_delta()
+
+        self.assertTrue(result)
+        self.assertIn(42, self.manager._channels_by_id)
+        self.assertEqual(self.manager._channels_by_id[42]['name'], 'Hidden News')
+        self.manager.fetcher.fetch_channels_by_ids.assert_called_once_with([42])
 
 
 if __name__ == '__main__':

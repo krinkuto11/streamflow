@@ -110,6 +110,56 @@ def test_fetch_streams_uses_configured_fetch_pressure(monkeypatch):
     }
 
 
+def test_fetch_channels_requests_all_visibility_states(monkeypatch):
+    from apps.udi import fetcher as fetcher_module
+
+    fetcher = fetcher_module.UDIFetcher.__new__(fetcher_module.UDIFetcher)
+    fetcher.base_url = "http://dispatcharr.test"
+
+    calls = {}
+
+    def fake_fetch_paginated(url, page_size=1000, max_workers=10):
+        calls["url"] = url
+        calls["page_size"] = page_size
+        calls["max_workers"] = max_workers
+        return fetcher_module.FetchResult(items=[{"id": 1}], expected_count=1)
+
+    monkeypatch.setattr(fetcher, "_fetch_paginated", fake_fetch_paginated)
+
+    result = fetcher.fetch_channels()
+
+    assert len(result) == 1
+    assert calls == {
+        "url": "http://dispatcharr.test/api/channels/channels/?visibility_filter=all",
+        "page_size": 1000,
+        "max_workers": 10,
+    }
+
+
+def test_fetch_all_ids_requests_all_channel_visibility_states(monkeypatch):
+    from apps.udi import fetcher as fetcher_module
+
+    fetcher = fetcher_module.UDIFetcher.__new__(fetcher_module.UDIFetcher)
+    fetcher.base_url = "http://dispatcharr.test"
+
+    requested_urls = []
+
+    def fake_fetch_url(url):
+        requested_urls.append(url)
+        if "channels/channels/ids" in url:
+            return [1, 2]
+        if "channels/streams/ids" in url:
+            return [10]
+        return []
+
+    monkeypatch.setattr(fetcher, "_fetch_url", fake_fetch_url)
+
+    result = fetcher.fetch_all_ids()
+
+    assert result == {"channels": {1, 2}, "streams": {10}}
+    assert "http://dispatcharr.test/api/channels/channels/ids/?visibility_filter=all" in requested_urls
+
+
 def test_fetch_streams_forwards_progress_callback(monkeypatch):
     from apps.udi import fetcher as fetcher_module
 

@@ -189,7 +189,10 @@ class UDIFetcher:
 
         result: Dict[str, Set[int]] = {}
         with ThreadPoolExecutor(max_workers=2) as ex:
-            ch_future = ex.submit(_ids_from_url, f"{self.base_url}/api/channels/channels/ids/")
+            ch_future = ex.submit(
+                _ids_from_url,
+                f"{self.base_url}/api/channels/channels/ids/?visibility_filter=all",
+            )
             st_future = ex.submit(_ids_from_url, f"{self.base_url}/api/channels/streams/ids/")
             ch_ids = ch_future.result()
             st_ids = st_future.result()
@@ -432,7 +435,7 @@ class UDIFetcher:
         dataset completes in roughly one round-trip rather than 1 000.
 
         Args:
-            base_url:  The base URL for the endpoint (no query string).
+            base_url:  The base URL for the endpoint. May include query params.
             page_size: Number of items per page.
             max_workers: Maximum number of concurrent page requests.
 
@@ -454,7 +457,8 @@ class UDIFetcher:
         # Include page=1 explicitly so ChannelPagination does not short-circuit
         # into bare-list mode (it disables pagination when no 'page' param is
         # present, which drops the DRF count/results envelope).
-        response = self._fetch_url(f"{base_url}?page_size={page_size}&page=1")
+        query_joiner = '&' if '?' in base_url else '?'
+        response = self._fetch_url(f"{base_url}{query_joiner}page_size={page_size}&page=1")
         if not response:
             return FetchResult()
 
@@ -510,7 +514,7 @@ class UDIFetcher:
             future_to_page = {
                 executor.submit(
                     self._fetch_url,
-                    f"{base_url}?page_size={page_size}&page={p}",
+                    f"{base_url}{query_joiner}page_size={page_size}&page={p}",
                 ): p
                 for p in remaining
             }
@@ -551,7 +555,7 @@ class UDIFetcher:
             logger.error("DISPATCHARR_BASE_URL not set")
             return FetchResult()
         
-        url = f"{self.base_url}/api/channels/channels/"
+        url = f"{self.base_url}/api/channels/channels/?visibility_filter=all"
         result = self._fetch_paginated(url)
         logger.info(
             f"Fetched {len(result)} channels"

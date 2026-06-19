@@ -10,6 +10,7 @@ import { changelogAPI } from '@/services/api.js'
 import {
   getChangelogRunContextBadges,
   getChangelogStaleWarnings,
+  getChangelogVisibilityEvents,
   getChangelogVisibilityMetrics,
 } from '@/lib/changelog-run-summary.js'
 import { formatDuration } from '@/lib/time-format.js'
@@ -566,12 +567,78 @@ function AutomationChannel({ channel, cIdx }) {
   )
 }
 
+function formatVisibilityReason(reason) {
+  return String(reason || 'visibility change')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function ChannelVisibilityChanges({ events }) {
+  if (!events.length) return null
+
+  return (
+    <CardContent className="border-t bg-muted/5 pt-4">
+      <div className="space-y-3 rounded-lg border border-border/70 bg-background/60 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h4 className="text-sm font-bold">Channel Visibility Changes</h4>
+            <p className="text-xs text-muted-foreground">Channels hidden or restored by this run</p>
+          </div>
+          <Badge variant="secondary" className="text-xs font-semibold">
+            {events.length} {events.length === 1 ? 'change' : 'changes'}
+          </Badge>
+        </div>
+        <div className="grid gap-2">
+          {events.map(event => {
+            const isHidden = event.action === 'hidden'
+            const badgeClass = isHidden
+              ? 'border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+              : 'border-green-500/60 bg-green-500/10 text-green-700 dark:text-green-300'
+            return (
+              <div key={event.key} className="flex min-w-0 flex-col gap-2 rounded-md border border-border/60 p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-3">
+                  {event.logo_url ? (
+                    <img src={event.logo_url} alt={event.channel_name} className="h-8 w-8 shrink-0 rounded bg-white object-contain p-1 dark:bg-card" />
+                  ) : (
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-muted text-xs font-bold">
+                      {String(event.channel_name || 'CH').slice(0, 2).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold">{event.channel_name}</div>
+                    <div className="text-xs text-muted-foreground">
+                      ID {event.channel_id || event.channel_ref || 'unknown'}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline" className={badgeClass}>
+                    {isHidden ? 'Hidden' : 'Restored'}
+                  </Badge>
+                  <Badge variant="secondary" className="max-w-full truncate text-xs">
+                    {formatVisibilityReason(event.reason)}
+                  </Badge>
+                  <span className="text-xs text-muted-foreground">
+                    {event.good_streams_count} good / {event.dead_streams_count} dead / {event.total_streams} total
+                  </span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </CardContent>
+  )
+}
+
 function ChangelogEntry({ entry, onExport, exportingScope }) {
   const { timestamp, action, details, subentries } = entry
   const hasSubentries = subentries && subentries.length > 0
   const runContextBadges = getChangelogRunContextBadges(details)
   const staleWarnings = getChangelogStaleWarnings(details)
   const visibilityMetrics = getChangelogVisibilityMetrics(details)
+  const visibilityEvents = getChangelogVisibilityEvents(details)
 
   return (
     <Card className={`min-w-0 max-w-full overflow-hidden shadow-md transition-shadow hover:shadow-lg dark:bg-card/40 ${action === 'automation_run' ? 'border-2 border-blue-500 dark:border-green-500' : 'border-muted/60'}`}>
@@ -737,6 +804,8 @@ function ChangelogEntry({ entry, onExport, exportingScope }) {
           )}
         </div>
       </CardHeader>
+
+      <ChannelVisibilityChanges events={visibilityEvents} />
 
       {action === 'automation_run' && details.periods && (
         <CardContent className="pt-0 space-y-6 bg-muted/5">
