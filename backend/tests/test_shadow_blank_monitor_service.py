@@ -5462,6 +5462,8 @@ def test_viewer_left_grace_expires_and_stops_persistent_watcher(tmp_path, monkey
     assert expired_targets == []
     assert started[0].terminated is True
     assert service._persistent_watchers == {}
+    assert service.get_status()["recent_events"][0]["type"] == "viewer_left"
+    assert service.get_status()["recent_events"][0]["details"]["reason"] == "viewer_left_grace_expired"
 
 
 def test_watcher_recovery_cooldown_does_not_block_reconnect_probe(tmp_path):

@@ -859,6 +859,28 @@ class ShadowBlankMonitorService:
                     next_viewer_absences[channel_uuid] = absence
                     targets.append(grace_target)
                     watched[channel_uuid] = dict(grace_target)
+                elif continuous_mode and previous_target:
+                    grace_since = (
+                        float(previous_absence.get("since"))
+                        if previous_absence and previous_absence.get("since") is not None
+                        else now
+                    )
+                    event_target = dict(previous_target)
+                    if stream_id is not None:
+                        event_target["stream_id"] = stream_id
+                        event_target["stream_ref"] = _ref("stream", stream_id)
+                    event_target["real_client_count"] = 0
+                    event_target["watcher_client_count"] = watcher_clients
+                    event_target.update(watcher_details)
+                    continuity_events.append((
+                        "viewer_left",
+                        event_target,
+                        {
+                            "reason": "viewer_left_grace_expired" if previous_absence else "viewer_left",
+                            "viewer_absent_seconds": max(0, int(now - grace_since)),
+                            "viewer_left_grace_seconds": viewer_left_grace_seconds,
+                        },
+                    ))
                 continue
             numeric_id = self._resolve_channel_id(
                 udi,
