@@ -5466,6 +5466,98 @@ def test_viewer_left_grace_expires_and_stops_persistent_watcher(tmp_path, monkey
     assert service.get_status()["recent_events"][0]["details"]["reason"] == "viewer_left_grace_expired"
 
 
+def test_proxy_status_gap_keeps_persistent_watcher_during_viewer_grace(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {},
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    now["value"] = 1005.0
+    gap_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(gap_targets, config)
+
+    now["value"] = 1010.0
+    recovered_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(recovered_targets, config)
+
+    assert len(started) == 1
+    assert started[0].terminated is False
+    assert gap_targets[0]["viewer_left_grace_active"] is True
+    assert gap_targets[0]["proxy_status_gap"] is True
+    assert gap_targets[0]["watcher_state"] == "reconnecting"
+    assert recovered_targets[0]["real_client_count"] == 1
+    assert "viewer_left" not in [event["type"] for event in service.get_status()["recent_events"]]
+
+
+def test_proxy_status_gap_expires_and_stops_persistent_watcher(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {},
+            {},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    now["value"] = 1005.0
+    gap_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(gap_targets, config)
+
+    now["value"] = 1036.0
+    expired_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(expired_targets, config)
+
+    assert len(started) == 1
+    assert gap_targets[0]["viewer_left_grace_active"] is True
+    assert expired_targets == []
+    assert started[0].terminated is True
+    assert service._persistent_watchers == {}
+    assert service.get_status()["recent_events"][0]["type"] == "viewer_left"
+    assert service.get_status()["recent_events"][0]["details"]["reason"] == "proxy_status_gap_grace_expired"
+
+
 def test_probe_viewer_left_uses_grace_before_stopping_watcher(tmp_path):
     udi = FakeUdi(
         statuses=[{"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])}],

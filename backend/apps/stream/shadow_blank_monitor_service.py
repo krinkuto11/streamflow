@@ -818,6 +818,7 @@ class ShadowBlankMonitorService:
             active_probe_channels = set(self._active_probes)
         next_absences: Dict[str, Dict[str, Any]] = {}
         next_viewer_absences: Dict[str, Dict[str, Any]] = {}
+        seen_active_channel_uuids = set()
 
         for key, raw_status in proxy_status.items():
             if not self._is_status_active(raw_status):
@@ -830,6 +831,7 @@ class ShadowBlankMonitorService:
                 channel_uuid = str(channel.get("uuid") or key) if channel else channel_uuid
             if not channel and channel_uuid in by_uuid:
                 channel = by_uuid[channel_uuid]
+            seen_active_channel_uuids.add(channel_uuid)
 
             watcher_details = self._watcher_client_details(raw_status, config)
             watcher_clients = int(watcher_details.get("watcher_client_count") or 0)
@@ -1038,6 +1040,60 @@ class ShadowBlankMonitorService:
                     target["watcher_state"] = "waiting"
             targets.append(target)
             watched[channel_uuid] = dict(target)
+
+        if continuous_mode:
+            for channel_uuid, previous_target in previous_watched.items():
+                if channel_uuid in watched or channel_uuid in seen_active_channel_uuids:
+                    continue
+                if limit_to_included:
+                    previous_id = previous_target.get("channel_id")
+                    if previous_id not in included_ids and channel_uuid not in included_uuids:
+                        continue
+                previous_absence = previous_viewer_absences.get(channel_uuid)
+                grace_target = self._viewer_left_grace_target(
+                    {},
+                    previous_target,
+                    previous_absence,
+                    {},
+                    now=now,
+                    grace_seconds=viewer_left_grace_seconds,
+                    stream_id=previous_target.get("stream_id"),
+                    watcher_clients=0,
+                    viewer_output_format=previous_target.get("viewer_output_format"),
+                )
+                if grace_target:
+                    absence = {
+                        "since": grace_target["viewer_absent_since"],
+                        "last_real_client_count": previous_target.get("real_client_count"),
+                    }
+                    grace_target["proxy_status_gap"] = True
+                    grace_target["watcher_state"] = "reconnecting"
+                    grace_target["last_watcher_client_count"] = previous_target.get("watcher_client_count")
+                    next_viewer_absences[channel_uuid] = absence
+                    targets.append(grace_target)
+                    watched[channel_uuid] = dict(grace_target)
+                elif previous_target:
+                    grace_since = (
+                        float(previous_absence.get("since"))
+                        if previous_absence and previous_absence.get("since") is not None
+                        else now
+                    )
+                    event_target = dict(previous_target)
+                    event_target["real_client_count"] = 0
+                    event_target["watcher_client_count"] = 0
+                    event_target["proxy_status_gap"] = True
+                    continuity_events.append((
+                        "viewer_left",
+                        event_target,
+                        {
+                            "reason": (
+                                "proxy_status_gap_grace_expired"
+                                if previous_absence else "proxy_status_gap"
+                            ),
+                            "viewer_absent_seconds": max(0, int(now - grace_since)),
+                            "viewer_left_grace_seconds": viewer_left_grace_seconds,
+                        },
+                    ))
 
         with self._lock:
             self._watched = watched

@@ -192,28 +192,47 @@ def apply_shadow_monitor_context(
     if not isinstance(status, dict) or not isinstance(shadow_status, dict):
         return status
 
-    programs_by_ref: Dict[str, Dict[str, Any]] = {}
+    targets_by_ref: Dict[str, Dict[str, Any]] = {}
     for target in shadow_status.get("watched_channels") or []:
         if not isinstance(target, dict):
             continue
-        program = target.get("current_program")
         channel_ref = target.get("channel_ref")
-        if isinstance(program, dict) and channel_ref:
-            programs_by_ref[str(channel_ref)] = {
+        if not channel_ref:
+            continue
+        context = {
+            key: target.get(key)
+            for key in {
+                "watcher_state",
+                "watcher_client_ref",
+                "watcher_absent_seconds",
+                "watcher_recovered_after_seconds",
+                "viewer_left_grace_active",
+                "viewer_left_grace_remaining_seconds",
+                "proxy_status_gap",
+                "skip_probe_reason",
+                "persistent_watcher_state",
+            }
+            if target.get(key) is not None
+        }
+        program = target.get("current_program")
+        if isinstance(program, dict):
+            context["current_program"] = {
                 key: value
                 for key, value in program.items()
                 if key in {"title", "state", "start_time", "end_time"}
             }
+        if context:
+            targets_by_ref[str(channel_ref)] = context
 
-    if not programs_by_ref:
+    if not targets_by_ref:
         return status
 
     for channel in status.get("channels") or []:
         if not isinstance(channel, dict):
             continue
-        program = programs_by_ref.get(str(channel.get("channel_ref") or ""))
-        if program:
-            channel["current_program"] = program
+        context = targets_by_ref.get(str(channel.get("channel_ref") or ""))
+        if context:
+            channel.update(context)
     return status
 
 

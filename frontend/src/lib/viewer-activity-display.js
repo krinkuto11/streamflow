@@ -45,6 +45,12 @@ const stateLabels = {
 }
 
 export const getViewerActivityDetailLabel = (channel = {}) => {
+  if (channel.has_real_clients && channel.watcher_state === 'reconnecting') {
+    return 'Shadow watcher reconnecting'
+  }
+  if (channel.has_real_clients && channel.viewer_left_grace_active) {
+    return 'Shadow watcher holding during reconnect'
+  }
   const programLabel = getProgramDisplayLabel(channel.current_program)
   if (programLabel) return programLabel
   if (channel.has_real_clients && Number(channel.watcher_client_count || 0) <= 0) {
