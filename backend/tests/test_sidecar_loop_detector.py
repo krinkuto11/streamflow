@@ -3,7 +3,7 @@ import io
 import time
 import collections
 from PIL import Image
-from apps.stream.sidecar_loop_detector import SidecarLoopDetector
+from apps.stream.sidecar_loop_detector import SidecarHash, SidecarLoopDetector
 
 class MockPipe(io.BytesIO):
     def read(self, size):
@@ -89,6 +89,59 @@ class TestSidecarLoopDetector(unittest.TestCase):
             
         # Should NOT detect a loop (it's a static image)
         duration = detector.detect_loop()
+        self.assertIsNone(duration)
+
+    def test_compression_noisy_sequence_detected_by_stable_hash_consensus(self):
+        pipe = MockPipe()
+        detector = SidecarLoopDetector(pipe)
+        start = time.monotonic()
+
+        def make_hash(value):
+            return SidecarHash(value)
+
+        def signature(seed, noise=0):
+            base_phash = [0x1111222233334444, 0x5555666677778888, 0x9999AAAABBBBCCCC]
+            return {
+                "phash": make_hash(base_phash[seed] ^ noise),
+                "ahash": make_hash([0x3333333333333333, 0x7373733333333333, 0x3333333333333337][seed]),
+                "dhash": make_hash([0xE7E7E7E7E7E7E7E7, 0xE6E7E7E7E7E7E7E7, 0xE7E7E7E7E7E7E7EF][seed]),
+                "whash": make_hash([0x3333333333333333, 0x3333333333333331, 0x3333333333333333][seed]),
+            }
+
+        for offset, seed in enumerate([0, 1, 2]):
+            detector.buffer.append((start + offset, signature(seed)))
+        for index in range(10):
+            detector.buffer.append((start + 3 + index, signature(index % 3, noise=0x00FF00FF00FF00FF)))
+        for offset, seed in enumerate([0, 1, 2], start=15):
+            detector.buffer.append((start + offset, signature(seed, noise=0x0F0F0F0F0F0F0F0F)))
+        detector.last_frame_time = start + 17
+
+        duration = detector.detect_loop(hamming_tolerance=3)
+        self.assertIsNotNone(duration)
+        self.assertGreaterEqual(duration, 10.0)
+
+    def test_average_hash_alone_does_not_mark_noisy_sequence_as_loop(self):
+        pipe = MockPipe()
+        detector = SidecarLoopDetector(pipe)
+        start = time.monotonic()
+
+        def signature(seed, noise=0):
+            return {
+                "phash": SidecarHash([0x1111222233334444, 0x5555666677778888, 0x9999AAAABBBBCCCC][seed] ^ noise),
+                "ahash": SidecarHash(0x3333333333333333),
+                "dhash": SidecarHash([0x1111111111111111, 0x2222222222222222, 0x4444444444444444][seed] ^ noise),
+                "whash": SidecarHash([0x0101010101010101, 0x1010101010101010, 0x8080808080808080][seed] ^ noise),
+            }
+
+        for offset, seed in enumerate([0, 1, 2]):
+            detector.buffer.append((start + offset, signature(seed)))
+        for index in range(10):
+            detector.buffer.append((start + 3 + index, signature(index % 3, noise=0x0000FFFF0000FFFF)))
+        for offset, seed in enumerate([0, 1, 2], start=15):
+            detector.buffer.append((start + offset, signature(seed, noise=0xFFFF0000FFFF0000)))
+        detector.last_frame_time = start + 17
+
+        duration = detector.detect_loop(hamming_tolerance=3)
         self.assertIsNone(duration)
 
 if __name__ == '__main__':

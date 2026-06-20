@@ -85,6 +85,23 @@ describe('shadow monitor decision history helpers', () => {
       },
     })).toEqual([
       'outside StreamFlow',
+      'actor unavailable',
+      'stream-old -> stream-new',
+    ])
+  })
+
+  it('summarizes externally observed stream changes with actor when available', () => {
+    expect(getShadowEventDetailParts({
+      type: 'external_stream_change',
+      details: {
+        origin_stream_ref: 'stream-old',
+        target_stream_ref: 'stream-new',
+        switch_source: 'external',
+        switch_actor: 'dispatcharr-admin',
+      },
+    })).toEqual([
+      'outside StreamFlow',
+      'actor dispatcharr-admin',
       'stream-old -> stream-new',
     ])
   })

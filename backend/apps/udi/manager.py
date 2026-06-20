@@ -517,6 +517,62 @@ class UDIManager:
             )
         return merged, changed
 
+    def _rehydrate_missing_channel_ids(
+        self,
+        channels: List[Dict[str, Any]],
+        expected_ids: Optional[Set[int]],
+        *,
+        reason: str,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Fetch channels that are present in Dispatcharr IDs but absent from the list API.
+
+        Dispatcharr may hide ``hidden_from_output`` channels from normal list
+        responses in some deployments. The /ids/ endpoint with
+        ``visibility_filter=all`` is the broader oracle; when it reports IDs
+        that the list response omitted, fetch those channels individually so
+        StreamFlow can still rematch/check and restore them.
+        """
+        if not expected_ids:
+            return channels, 0
+
+        cached_ids = {
+            channel.get("id")
+            for channel in channels
+            if channel.get("id") is not None
+        }
+        missing_ids = sorted(expected_ids - cached_ids)
+        if not missing_ids:
+            return channels, 0
+
+        rehydrated = self.fetcher.fetch_channels_by_ids(missing_ids)
+        if not rehydrated:
+            logger.warning(
+                "UDI could not rehydrate %s channel(s) omitted by channel list (%s): %s",
+                len(missing_ids),
+                reason,
+                missing_ids[:10],
+            )
+            return channels, 0
+
+        merged, changed = self._merge_channel_list_with_rehydrated(channels, rehydrated)
+        fetched_ids = {channel.get("id") for channel in rehydrated}
+        still_missing = [channel_id for channel_id in missing_ids if channel_id not in fetched_ids]
+        if still_missing:
+            logger.warning(
+                "UDI rehydrated %s channel(s) omitted by channel list (%s); %s still missing: %s",
+                changed,
+                reason,
+                len(still_missing),
+                still_missing[:10],
+            )
+        else:
+            logger.info(
+                "UDI rehydrated %s channel(s) omitted by channel list (%s)",
+                changed,
+                reason,
+            )
+        return merged, changed
+
     @staticmethod
     def _get_stream_m3u_account_id(stream: Dict[str, Any]) -> Optional[Any]:
         """Return a stream's M3U account id across legacy and SQL payloads."""
@@ -1081,7 +1137,7 @@ class UDIManager:
             # Progress advances as each future lands via as_completed so the
             # frontend bar still moves steadily.
             _fetch_tasks = {
-                'pre_counts':   self.fetcher.fetch_entity_counts,
+                'pre_ids':      self.fetcher.fetch_all_ids,
                 'channels':     self.fetcher.fetch_channels,
                 'streams':      self.fetcher.fetch_streams,
                 'groups':       self.fetcher.fetch_channel_groups,
@@ -1106,7 +1162,11 @@ class UDIManager:
                         current_step='fetch',
                     )
 
-            pre_counts      = _fetch_results.get('pre_counts') or {}
+            pre_ids         = _fetch_results.get('pre_ids') or {}
+            pre_counts      = {
+                'channels': len(pre_ids['channels']) if 'channels' in pre_ids else None,
+                'streams': len(pre_ids['streams']) if 'streams' in pre_ids else None,
+            }
             channels_result = _fetch_results.get('channels') or FetchResult()
             streams_result  = _fetch_results.get('streams')  or FetchResult()
             channel_groups  = _fetch_results.get('groups')   or []
@@ -1121,12 +1181,28 @@ class UDIManager:
 
             # Apply /ids/ oracle when the paginated envelope omitted 'count'
             # (can happen with older Dispatcharr builds / custom pagination).
-            if channels_result.expected_count is None and pre_counts.get('channels') is not None:
+            if (
+                pre_counts.get('channels') is not None
+                and (
+                    channels_result.expected_count is None
+                    or pre_counts['channels'] > channels_result.expected_count
+                )
+            ):
                 channels_result.expected_count = pre_counts['channels']
                 logger.info(f"UDI integrity: using /ids/ oracle for channels — expected {channels_result.expected_count}")
             if streams_result.expected_count is None and pre_counts.get('streams') is not None:
                 streams_result.expected_count = pre_counts['streams']
                 logger.info(f"UDI integrity: using /ids/ oracle for streams — expected {streams_result.expected_count}")
+
+            rehydrated_missing_count = 0
+            channels_result.items, rehydrated_missing_count = self._rehydrate_missing_channel_ids(
+                channels_result.items,
+                pre_ids.get('channels') if isinstance(pre_ids, dict) else None,
+                reason="dispatcharr_ids_oracle",
+            )
+            channels_result.items, rehydrated_hidden_count = self._rehydrate_managed_hidden_channels(
+                channels_result.items,
+            )
 
             existing_channel_count = len(self._channels_cache)
             existing_stream_count = len(self._streams_cache)
@@ -1173,6 +1249,10 @@ class UDIManager:
                     'expected': None,  # non-paginated, no oracle available
                 },
             }
+            if rehydrated_missing_count:
+                entity_counts['channels']['rehydrated_missing'] = rehydrated_missing_count
+            if rehydrated_hidden_count:
+                entity_counts['channels']['rehydrated_hidden'] = rehydrated_hidden_count
 
             integrity_ok = channels_ok and streams_ok
             if not integrity_ok:
@@ -1185,10 +1265,9 @@ class UDIManager:
                 )
                 return False
 
-            new_channels, rehydrated_hidden_count = self._rehydrate_managed_hidden_channels(channels_result.items)
-            if rehydrated_hidden_count:
+            new_channels = channels_result.items
+            if rehydrated_missing_count or rehydrated_hidden_count:
                 entity_counts['channels']['received'] = len(new_channels)
-                entity_counts['channels']['rehydrated_hidden'] = rehydrated_hidden_count
 
             self._update_init_progress(percentage=85, message='Building indexes...', current_step='index')
 
@@ -1540,13 +1619,25 @@ class UDIManager:
         logger.info("Refreshing channels...")
         try:
             result = self.fetcher.fetch_channels()
-            channels, rehydrated_hidden_count = self._rehydrate_managed_hidden_channels(result.items)
+            channel_ids: Optional[Set[int]] = None
+            try:
+                current_ids = self.fetcher.fetch_all_ids()
+                channel_ids = current_ids.get('channels') if isinstance(current_ids, dict) else None
+            except Exception as exc:
+                logger.debug("Channel refresh could not fetch channel IDs oracle: %s", exc)
+            channels, rehydrated_missing_count = self._rehydrate_missing_channel_ids(
+                result.items,
+                channel_ids,
+                reason="refresh_channels_ids_oracle",
+            )
+            channels, rehydrated_hidden_count = self._rehydrate_managed_hidden_channels(channels)
             with self._lock:
                 self._channels_cache = channels
                 self._build_indexes()
-            if rehydrated_hidden_count:
+            if rehydrated_missing_count or rehydrated_hidden_count:
                 logger.info(
-                    "Channel refresh retained %s StreamFlow-managed hidden channel(s)",
+                    "Channel refresh retained %s omitted channel(s), including %s StreamFlow-managed hidden channel(s)",
+                    rehydrated_missing_count,
                     rehydrated_hidden_count,
                 )
             self.cache.mark_refreshed('channels')

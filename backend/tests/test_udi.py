@@ -606,7 +606,7 @@ class TestUDIManager(unittest.TestCase):
 
         self.manager.fetcher = Mock()
         self.manager.fetcher.refresh_config.return_value = None
-        self.manager.fetcher.fetch_entity_counts.return_value = {}
+        self.manager.fetcher.fetch_all_ids.return_value = {}
         self.manager.fetcher.fetch_channels.return_value = FetchResult()
         self.manager.fetcher.fetch_streams.return_value = FetchResult()
         self.manager.fetcher.fetch_channel_groups.return_value = []
@@ -668,7 +668,7 @@ class TestUDIManager(unittest.TestCase):
         """A real zero-count Dispatcharr response remains valid."""
         self.manager.fetcher = Mock()
         self.manager.fetcher.refresh_config.return_value = None
-        self.manager.fetcher.fetch_entity_counts.return_value = {'channels': 0, 'streams': 0}
+        self.manager.fetcher.fetch_all_ids.return_value = {'channels': set(), 'streams': set()}
         self.manager.fetcher.fetch_channels.return_value = FetchResult(items=[], expected_count=0)
         self.manager.fetcher.fetch_streams.return_value = FetchResult(items=[], expected_count=0)
         self.manager.fetcher.fetch_channel_groups.return_value = []
@@ -704,6 +704,43 @@ class TestUDIManager(unittest.TestCase):
 
         self.assertEqual(count, 1)
         self.assertEqual({channel['id'] for channel in channels}, {1, 42})
+        self.manager.fetcher.fetch_channels_by_ids.assert_called_once_with([42])
+
+    def test_refresh_all_rehydrates_hidden_channels_from_ids_oracle_without_state(self):
+        """Hidden channels remain in UDI after a reinstall when /ids/?all exposes them."""
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.refresh_config.return_value = None
+        self.manager.fetcher.fetch_all_ids.return_value = {
+            'channels': {1, 42},
+            'streams': set(),
+        }
+        self.manager.fetcher.fetch_channels.return_value = FetchResult(
+            items=[{'id': 1, 'name': 'Visible Channel', 'streams': []}],
+            expected_count=1,
+        )
+        self.manager.fetcher.fetch_channels_by_ids.return_value = [
+            {'id': 42, 'name': 'Hidden News', 'hidden_from_output': True, 'streams': []},
+        ]
+        self.manager.fetcher.fetch_streams.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_channel_groups.return_value = []
+        self.manager.fetcher.fetch_logos.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_m3u_accounts.return_value = []
+        self.manager.fetcher.fetch_channel_profiles.return_value = [
+            {'id': 7, 'name': 'News Profile', 'channels': [42]},
+        ]
+
+        with patch('apps.udi.manager.get_dispatcharr_config') as mock_config:
+            mock_config.return_value.is_configured.return_value = True
+            result = self.manager.refresh_all()
+
+        self.assertTrue(result)
+        self.assertEqual({channel['id'] for channel in self.manager.get_channels()}, {1, 42})
+        self.assertEqual(self.manager.get_channel_by_id(42)['name'], 'Hidden News')
+        self.assertEqual(self.manager.get_profile_channels(7)['channels'], [42])
+        entity_counts = self.manager.get_init_progress()['entity_counts']
+        self.assertEqual(entity_counts['channels']['received'], 2)
+        self.assertEqual(entity_counts['channels']['expected'], 2)
+        self.assertEqual(entity_counts['channels']['rehydrated_missing'], 1)
         self.manager.fetcher.fetch_channels_by_ids.assert_called_once_with([42])
 
     def test_delta_refresh_keeps_streamflow_hidden_channel_omitted_by_ids(self):
