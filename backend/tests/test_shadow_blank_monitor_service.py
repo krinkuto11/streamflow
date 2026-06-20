@@ -5364,6 +5364,106 @@ def test_viewer_left_stops_persistent_watcher(tmp_path, monkeypatch):
     assert service._persistent_watchers == {}
 
 
+def test_viewer_left_grace_keeps_persistent_watcher_for_brief_client_drop(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+    probe_urls = []
+    watcher_client = {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"}
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {"uuid-1": active_status(stream_id=10, clients=[watcher_client])},
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}, watcher_client])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10, "url": "http://provider.example/old.ts"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        clock=lambda: now["value"],
+        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    now["value"] = 1005.0
+    grace_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(grace_targets, config)
+    service._probe_targets(udi, grace_targets, config, single_pass=True)
+
+    now["value"] = 1010.0
+    recovered_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(recovered_targets, config)
+
+    assert len(started) == 1
+    assert started[0].terminated is False
+    assert grace_targets[0]["viewer_left_grace_active"] is True
+    assert grace_targets[0]["viewer_left_grace_remaining_seconds"] == 30
+    assert recovered_targets[0]["real_client_count"] == 1
+    assert probe_urls == []
+    assert "viewer_left" not in [event["type"] for event in service.get_status()["recent_events"]]
+
+
+def test_viewer_left_grace_expires_and_stops_persistent_watcher(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+    watcher_client = {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"}
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {"uuid-1": active_status(stream_id=10, clients=[watcher_client])},
+            {"uuid-1": active_status(stream_id=10, clients=[watcher_client])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    now["value"] = 1005.0
+    grace_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(grace_targets, config)
+
+    now["value"] = 1036.0
+    expired_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(expired_targets, config)
+
+    assert len(started) == 1
+    assert grace_targets[0]["viewer_left_grace_active"] is True
+    assert expired_targets == []
+    assert started[0].terminated is True
+    assert service._persistent_watchers == {}
+
+
 def test_watcher_recovery_cooldown_does_not_block_reconnect_probe(tmp_path):
     now = {"value": 1000.0}
     probe_calls = []

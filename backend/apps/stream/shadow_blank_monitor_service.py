@@ -128,6 +128,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "next_stream_pre_probe_duration_seconds": 8,
     "confirmation_count": 2,
     "channel_cooldown_seconds": 300,
+    "viewer_left_grace_seconds": 30,
     "max_switches_per_hour": 3,
     "max_concurrent_watchers": 2,
     "skip_during_quality_check": False,
@@ -224,6 +225,7 @@ INT_BOUNDS = {
     "probe_duration_seconds": (3, 120),
     "confirmation_count": (1, 5),
     "channel_cooldown_seconds": (30, 86400),
+    "viewer_left_grace_seconds": (0, 300),
     "max_switches_per_hour": (1, 20),
     "max_concurrent_watchers": (1, 10),
     "garbled_audio_error_threshold": (1, 20),
@@ -437,6 +439,7 @@ class ShadowBlankMonitorService:
         self._watched: Dict[str, Dict[str, Any]] = {}
         self._last_excluded_active_targets: List[Dict[str, Any]] = []
         self._watcher_absences: Dict[str, Dict[str, Any]] = {}
+        self._viewer_absences: Dict[str, Dict[str, Any]] = {}
         self._blank_counts: Dict[str, int] = defaultdict(int)
         self._detection_misses: Dict[str, int] = defaultdict(int)
         self._cooldowns: Dict[str, float] = {}
@@ -628,6 +631,7 @@ class ShadowBlankMonitorService:
             self._stop_event.set()
             self._watched = {}
             self._watcher_absences = {}
+            self._viewer_absences = {}
             thread = self._thread
             watcher_keys = list(self._persistent_watchers)
         if thread and thread.is_alive():
@@ -796,6 +800,7 @@ class ShadowBlankMonitorService:
         excluded_active_targets: List[Dict[str, Any]] = []
         continuity_events: List[tuple[str, Dict[str, Any], Dict[str, Any]]] = []
         continuous_mode = config.get("watch_mode") == "continuous"
+        viewer_left_grace_seconds = int(config.get("viewer_left_grace_seconds") or 0)
         now = self.clock()
         with self._lock:
             previous_watched = {
@@ -806,8 +811,13 @@ class ShadowBlankMonitorService:
                 channel_uuid: dict(absence)
                 for channel_uuid, absence in self._watcher_absences.items()
             }
+            previous_viewer_absences = {
+                channel_uuid: dict(absence)
+                for channel_uuid, absence in self._viewer_absences.items()
+            }
             active_probe_channels = set(self._active_probes)
         next_absences: Dict[str, Dict[str, Any]] = {}
+        next_viewer_absences: Dict[str, Dict[str, Any]] = {}
 
         for key, raw_status in proxy_status.items():
             if not self._is_status_active(raw_status):
@@ -821,14 +831,35 @@ class ShadowBlankMonitorService:
             if not channel and channel_uuid in by_uuid:
                 channel = by_uuid[channel_uuid]
 
-            real_clients = self._real_client_count(raw_status, config)
-            if real_clients <= 0:
-                continue
             watcher_details = self._watcher_client_details(raw_status, config)
             watcher_clients = int(watcher_details.get("watcher_client_count") or 0)
             viewer_output_format = self._real_viewer_output_format(raw_status, config)
 
             stream_id = self._extract_stream_id(raw_status)
+            real_clients = self._real_client_count(raw_status, config)
+            if real_clients <= 0:
+                previous_target = previous_watched.get(channel_uuid)
+                previous_absence = previous_viewer_absences.get(channel_uuid)
+                grace_target = self._viewer_left_grace_target(
+                    raw_status,
+                    previous_target,
+                    previous_absence,
+                    watcher_details,
+                    now=now,
+                    grace_seconds=viewer_left_grace_seconds,
+                    stream_id=stream_id,
+                    watcher_clients=watcher_clients,
+                    viewer_output_format=viewer_output_format,
+                ) if continuous_mode else None
+                if grace_target:
+                    absence = {
+                        "since": grace_target["viewer_absent_since"],
+                        "last_real_client_count": previous_target.get("real_client_count") if previous_target else None,
+                    }
+                    next_viewer_absences[channel_uuid] = absence
+                    targets.append(grace_target)
+                    watched[channel_uuid] = dict(grace_target)
+                continue
             numeric_id = self._resolve_channel_id(
                 udi,
                 self._extract_channel_id(channel, raw_status),
@@ -990,9 +1021,54 @@ class ShadowBlankMonitorService:
             self._watched = watched
             self._last_excluded_active_targets = excluded_active_targets
             self._watcher_absences = next_absences if continuous_mode else {}
+            self._viewer_absences = next_viewer_absences if continuous_mode else {}
         for event_type, event_target, details in continuity_events:
             self._record_event(event_type, event_target, details)
         return targets
+
+    def _viewer_left_grace_target(
+        self,
+        raw_status: Dict[str, Any],
+        previous_target: Optional[Dict[str, Any]],
+        previous_absence: Optional[Dict[str, Any]],
+        watcher_details: Dict[str, Any],
+        *,
+        now: float,
+        grace_seconds: int,
+        stream_id: Optional[int],
+        watcher_clients: int,
+        viewer_output_format: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if grace_seconds <= 0 or not previous_target:
+            return None
+        if previous_absence:
+            since = float(previous_absence.get("since") or now)
+        elif int(previous_target.get("real_client_count") or 0) > 0:
+            since = now
+        else:
+            return None
+        elapsed = max(0, int(now - since))
+        if elapsed > grace_seconds:
+            return None
+
+        target = dict(previous_target)
+        if stream_id is not None:
+            target["stream_id"] = stream_id
+            target["stream_ref"] = _ref("stream", stream_id)
+        target["real_client_count"] = 0
+        target["watcher_client_count"] = watcher_clients
+        target["state"] = raw_status.get("state") or target.get("state") or "active"
+        target["viewer_state"] = "left_grace"
+        target["viewer_left_grace_active"] = True
+        target["viewer_absent_since"] = since
+        target["viewer_absent_seconds"] = elapsed
+        target["viewer_left_grace_seconds"] = grace_seconds
+        target["viewer_left_grace_remaining_seconds"] = max(0, grace_seconds - elapsed)
+        target["skip_probe_reason"] = "viewer_left_grace"
+        if viewer_output_format:
+            target["viewer_output_format"] = viewer_output_format
+        target.update(watcher_details)
+        return target
 
     def _probe_targets(
         self,
@@ -1010,6 +1086,8 @@ class ShadowBlankMonitorService:
         )
         for target in targets:
             channel_uuid = target["channel_uuid"]
+            if target.get("viewer_left_grace_active") or int(target.get("real_client_count") or 0) <= 0:
+                continue
             watcher_count = int(target.get("watcher_client_count") or 0)
             blocking_watcher_count = self._blocking_watcher_count(target, watcher_count)
             if blocking_watcher_count > 0:
@@ -2495,7 +2573,11 @@ class ShadowBlankMonitorService:
         targets_by_uuid = {
             str(target.get("channel_uuid")): target
             for target in targets
-            if target.get("channel_uuid") and int(target.get("real_client_count") or 0) > 0
+            if target.get("channel_uuid")
+            and (
+                int(target.get("real_client_count") or 0) > 0
+                or bool(target.get("viewer_left_grace_active"))
+            )
         }
         should_keep_watchers = (
             config.get("watch_mode") == "continuous"
@@ -4317,6 +4399,7 @@ class ShadowBlankMonitorService:
             self._stop_persistent_watcher(channel_uuid)
             with self._lock:
                 self._last_loop_probe_started_at.pop(channel_uuid, None)
+                self._viewer_absences.pop(channel_uuid, None)
 
     @staticmethod
     def _default_stream_checker_provider() -> Any:
@@ -4463,6 +4546,13 @@ class ShadowBlankMonitorService:
             "watcher_absent_seconds",
             "watcher_recovered_after_seconds",
             "last_watcher_client_ref",
+            "viewer_state",
+            "viewer_left_grace_active",
+            "viewer_absent_since",
+            "viewer_absent_seconds",
+            "viewer_left_grace_seconds",
+            "viewer_left_grace_remaining_seconds",
+            "skip_probe_reason",
             "persistent_watcher_state",
             "persistent_watcher_started_at",
             "persistent_watcher_uptime_seconds",
