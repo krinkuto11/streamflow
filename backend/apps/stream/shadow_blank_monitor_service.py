@@ -448,6 +448,7 @@ class ShadowBlankMonitorService:
         self._last_pre_probe: Optional[Dict[str, Any]] = None
         self._active_probes: set[str] = set()
         self._persistent_watchers: Dict[str, Dict[str, Any]] = {}
+        self._last_loop_probe_started_at: Dict[str, float] = {}
         self._last_scan_at: Optional[float] = None
         self._last_error: Optional[str] = None
 
@@ -2928,10 +2929,39 @@ class ShadowBlankMonitorService:
         if not config.get("loop_detection_enabled"):
             return {}
         loop_config = dict(config)
+        channel_uuid = str(target.get("channel_uuid") or "")
         abort_state = {"viewer_left": False}
         loop_slice_seconds: Optional[float] = None
         loop_slice_deadline: Optional[float] = None
         if udi is not None and config.get("watch_mode") == "continuous":
+            pending_loop_confirmation = (
+                bool(channel_uuid)
+                and self._current_detection_count(channel_uuid, "loop") > 0
+            )
+            interval_seconds = float(
+                max(
+                    self._continuous_loop_probe_slice_seconds(config),
+                    float(config.get("loop_probe_duration_seconds") or DEFAULT_CONFIG["loop_probe_duration_seconds"]),
+                )
+            )
+            now = self.clock()
+            last_started = None
+            if not pending_loop_confirmation:
+                with self._lock:
+                    last_started = self._last_loop_probe_started_at.get(channel_uuid)
+            if last_started is not None:
+                elapsed = now - float(last_started)
+                if elapsed < interval_seconds:
+                    return {
+                        "loop_probe_ran": False,
+                        "loop_detected": False,
+                        "loop_probe_skipped": True,
+                        "loop_probe_skip_reason": "loop_probe_interval",
+                        "loop_probe_next_due_seconds": max(0, int(interval_seconds - elapsed)),
+                    }
+            if channel_uuid:
+                with self._lock:
+                    self._last_loop_probe_started_at[channel_uuid] = now
             loop_slice_seconds = self._continuous_loop_probe_slice_seconds(config)
             loop_slice_deadline = time.monotonic() + loop_slice_seconds
 
@@ -3900,7 +3930,18 @@ class ShadowBlankMonitorService:
         if not watcher_clients:
             return details
 
-        index, client = watcher_clients[0]
+        def _watcher_sort_key(item: tuple[int, Any]) -> tuple[int, float, int]:
+            index, client = item
+            connected_at: Any = None
+            if isinstance(client, dict):
+                connected_at = client.get("connected_at") or client.get("started_at")
+            try:
+                parsed = float(connected_at)
+            except (TypeError, ValueError):
+                return (1, float(index), index)
+            return (0, parsed, index)
+
+        index, client = sorted(watcher_clients, key=_watcher_sort_key)[0]
         raw_client_id: Any = None
         connected_at: Any = None
         if isinstance(client, dict):
@@ -4223,7 +4264,10 @@ class ShadowBlankMonitorService:
             f"channel_ref={event['channel_ref']} stream_ref={event['stream_ref']}"
         )
         if event_type == "viewer_left" and target.get("channel_uuid"):
-            self._stop_persistent_watcher(str(target.get("channel_uuid")))
+            channel_uuid = str(target.get("channel_uuid"))
+            self._stop_persistent_watcher(channel_uuid)
+            with self._lock:
+                self._last_loop_probe_started_at.pop(channel_uuid, None)
 
     @staticmethod
     def _default_stream_checker_provider() -> Any:

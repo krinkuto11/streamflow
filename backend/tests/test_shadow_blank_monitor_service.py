@@ -186,6 +186,83 @@ def active_status(stream_id=10, clients=None):
     }
 
 
+def test_watcher_details_prefers_oldest_visible_watcher(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({
+        "watcher_user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+    })
+
+    details = service._watcher_client_details(
+        {
+            "clients": [
+                {
+                    "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0 ffmpeg",
+                    "client_id": "new-probe",
+                    "connected_at": 990.0,
+                },
+                {"user_agent": "VLC", "client_id": "real-viewer", "connected_at": 980.0},
+                {
+                    "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0 ffmpeg",
+                    "client_id": "persistent-watcher",
+                    "connected_at": 900.0,
+                },
+            ]
+        },
+        config,
+    )
+
+    assert details["watcher_client_count"] == 2
+    assert details["watcher_client_ref"] == shadow_module._ref("client", "persistent-watcher")
+    assert details["watcher_uptime_seconds"] == 100
+
+
+def test_continuous_loop_probe_is_rate_limited_between_slices(tmp_path):
+    now = {"value": 1000.0}
+    loop_calls = []
+
+    def loop_probe(url, config):
+        loop_calls.append((url, now["value"]))
+        return {"loop_probe_ran": True, "loop_detected": False}
+
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        loop_probe=loop_probe,
+        clock=lambda: now["value"],
+    )
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "loop_detection_enabled": True,
+        "loop_probe_duration_seconds": 120,
+    })
+    target = {"channel_uuid": "uuid-1", "channel_ref": "channel-one"}
+
+    first = service._run_loop_probe_if_enabled("http://example.test/stream", target, config, udi=udi)
+    now["value"] += 30
+    second = service._run_loop_probe_if_enabled("http://example.test/stream", target, config, udi=udi)
+    now["value"] += 91
+    third = service._run_loop_probe_if_enabled("http://example.test/stream", target, config, udi=udi)
+
+    assert first["loop_probe_ran"] is True
+    assert second["loop_probe_ran"] is False
+    assert second["loop_probe_skipped"] is True
+    assert second["loop_probe_skip_reason"] == "loop_probe_interval"
+    assert third["loop_probe_ran"] is True
+    assert loop_calls == [
+        ("http://example.test/stream", 1000.0),
+        ("http://example.test/stream", 1121.0),
+    ]
+
+
 def test_watch_mode_controls_scan_delay():
     defaults = normalize_config({})
     assert defaults["enabled"] is False
