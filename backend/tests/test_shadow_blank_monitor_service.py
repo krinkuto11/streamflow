@@ -120,6 +120,29 @@ class PersistentFakeProbeProcess(FakeProbeProcess):
         return self.returncode
 
 
+class FakePersistentWatcherProcess:
+    pid = 4242
+
+    def __init__(self):
+        self.returncode = None
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
 def make_service(
     tmp_path,
     *,
@@ -5090,6 +5113,110 @@ def test_active_probe_watcher_ref_change_does_not_reset_detection(tmp_path):
     with service._lock:
         assert service._watched["uuid-1"]["active_probe_started_at"] == 1000.0
     assert "watcher_recovered" not in [event["type"] for event in status["recent_events"]]
+
+
+def test_background_continuous_mode_keeps_persistent_watcher_between_scans(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append((command, process))
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+    first_status = service.get_status()["watched_channels"][0]
+
+    now["value"] = 1015.0
+    service._sync_persistent_watchers(targets, config)
+    second_status = service.get_status()["watched_channels"][0]
+
+    assert len(started) == 1
+    assert "Authorization: ApiKey watcher-key" in " ".join(started[0][0])
+    assert first_status["persistent_watcher_state"] == "running"
+    assert second_status["persistent_watcher_pid"] == 4242
+    assert second_status["persistent_watcher_uptime_seconds"] == 15
+    assert started[0][1].poll() is None
+
+
+def test_persistent_watcher_restarts_on_stream_change(tmp_path, monkeypatch):
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append((command, process))
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {"uuid-1": active_status(stream_id=11, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+    first_process = started[0][1]
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    assert len(started) == 2
+    assert first_process.terminated is True
+    assert started[1][1].poll() is None
+
+
+def test_viewer_left_stops_persistent_watcher(tmp_path, monkeypatch):
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+    service._record_event("viewer_left", targets[0], {})
+
+    assert len(started) == 1
+    assert started[0].terminated is True
+    assert service._persistent_watchers == {}
 
 
 def test_watcher_recovery_cooldown_does_not_block_reconnect_probe(tmp_path):

@@ -447,6 +447,7 @@ class ShadowBlankMonitorService:
         self._pre_probe_metrics: Dict[str, int] = defaultdict(int)
         self._last_pre_probe: Optional[Dict[str, Any]] = None
         self._active_probes: set[str] = set()
+        self._persistent_watchers: Dict[str, Dict[str, Any]] = {}
         self._last_scan_at: Optional[float] = None
         self._last_error: Optional[str] = None
 
@@ -627,8 +628,11 @@ class ShadowBlankMonitorService:
             self._watched = {}
             self._watcher_absences = {}
             thread = self._thread
+            watcher_keys = list(self._persistent_watchers)
         if thread and thread.is_alive():
             thread.join(timeout=5)
+        for channel_uuid in watcher_keys:
+            self._stop_persistent_watcher(channel_uuid)
         return True
 
     def get_status(self) -> Dict[str, Any]:
@@ -743,6 +747,8 @@ class ShadowBlankMonitorService:
                 include_channel_ids=include_channel_ids,
                 include_channel_uuids=include_channel_uuids,
             )
+            if not force:
+                self._sync_persistent_watchers(targets, config)
             self._probe_targets(
                 udi,
                 targets[: config["max_concurrent_watchers"]],
@@ -2351,6 +2357,172 @@ class ShadowBlankMonitorService:
     ) -> None:
         self._reset_detection_state(channel_uuid)
         self._record_event("watcher_recovery_guard", target, guard_details)
+
+    @staticmethod
+    def _persistent_watcher_command(url: str, config: Dict[str, Any]) -> List[str]:
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-user_agent",
+            config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"],
+        ]
+        headers = ShadowBlankMonitorService._watcher_probe_headers(config)
+        if headers:
+            command.extend(["-headers", headers])
+        command.extend([
+            "-i",
+            url,
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-f",
+            "null",
+            "-",
+        ])
+        return command
+
+    def _persistent_watcher_snapshot(self, channel_uuid: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            session = self._persistent_watchers.get(channel_uuid)
+            if not session:
+                return None
+            process = session.get("process")
+            if process is not None and process.poll() is not None:
+                return None
+            started_at = float(session.get("started_at") or self.clock())
+            return {
+                "persistent_watcher_state": "running",
+                "persistent_watcher_started_at": started_at,
+                "persistent_watcher_uptime_seconds": max(0, int(self.clock() - started_at)),
+                "persistent_watcher_pid": getattr(process, "pid", None),
+            }
+
+    def _apply_persistent_watcher_snapshot(self, channel_uuid: str, target: Dict[str, Any]) -> None:
+        snapshot = self._persistent_watcher_snapshot(channel_uuid)
+        if not snapshot:
+            return
+        target.update(snapshot)
+        with self._lock:
+            watched = self._watched.get(channel_uuid)
+            if watched is not None:
+                watched.update(snapshot)
+
+    def _start_persistent_watcher(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        url: str,
+    ) -> None:
+        command = self._persistent_watcher_command(url, config)
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Shadow persistent watcher failed to start for %s: %s",
+                target.get("channel_ref") or _ref("channel", channel_uuid),
+                exc,
+            )
+            return
+
+        session = {
+            "process": process,
+            "url": url,
+            "stream_id": target.get("stream_id"),
+            "output_format": target.get("viewer_output_format"),
+            "started_at": self.clock(),
+        }
+        with self._lock:
+            self._persistent_watchers[channel_uuid] = session
+        self._apply_persistent_watcher_snapshot(channel_uuid, target)
+
+    def _stop_persistent_watcher(self, channel_uuid: str) -> None:
+        with self._lock:
+            session = self._persistent_watchers.pop(channel_uuid, None)
+        if not session:
+            return
+        process = session.get("process")
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=3)
+        except Exception:
+            try:
+                process.kill()
+                process.wait(timeout=3)
+            except Exception:
+                pass
+
+    def _sync_persistent_watchers(self, targets: Iterable[Dict[str, Any]], config: Dict[str, Any]) -> None:
+        targets_by_uuid = {
+            str(target.get("channel_uuid")): target
+            for target in targets
+            if target.get("channel_uuid") and int(target.get("real_client_count") or 0) > 0
+        }
+        should_keep_watchers = (
+            config.get("watch_mode") == "continuous"
+            and self._uses_default_blank_probe
+            and bool(str(config.get("watcher_api_key") or "").strip())
+        )
+        if not should_keep_watchers:
+            targets_by_uuid = {}
+
+        with self._lock:
+            existing_uuids = list(self._persistent_watchers)
+
+        for channel_uuid in existing_uuids:
+            target = targets_by_uuid.get(channel_uuid)
+            if not target:
+                self._stop_persistent_watcher(channel_uuid)
+                continue
+            try:
+                url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
+            except Exception:
+                self._stop_persistent_watcher(channel_uuid)
+                continue
+            with self._lock:
+                session = self._persistent_watchers.get(channel_uuid)
+            process = session.get("process") if session else None
+            stale = (
+                not session
+                or process is None
+                or process.poll() is not None
+                or session.get("url") != url
+                or str(session.get("stream_id")) != str(target.get("stream_id"))
+            )
+            if stale:
+                self._stop_persistent_watcher(channel_uuid)
+                self._start_persistent_watcher(channel_uuid, target, config, url)
+            else:
+                self._apply_persistent_watcher_snapshot(channel_uuid, target)
+
+        for channel_uuid, target in targets_by_uuid.items():
+            with self._lock:
+                exists = channel_uuid in self._persistent_watchers
+            if exists:
+                continue
+            try:
+                url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
+            except Exception as exc:
+                logger.warning(
+                    "Shadow persistent watcher could not build proxy URL for %s: %s",
+                    target.get("channel_ref") or _ref("channel", channel_uuid),
+                    exc,
+                )
+                continue
+            self._start_persistent_watcher(channel_uuid, target, config, url)
 
     def _channel_proxy_url(self, channel_uuid: str, output_format: Optional[str] = None) -> str:
         base_url = (self.base_url_provider() or "").rstrip("/")
@@ -3985,6 +4157,8 @@ class ShadowBlankMonitorService:
             "watcher_uptime_seconds",
             "watcher_absent_seconds",
             "watcher_recovered_after_seconds",
+            "persistent_watcher_state",
+            "persistent_watcher_uptime_seconds",
         )
         return {
             key: target.get(key)
@@ -4048,6 +4222,8 @@ class ShadowBlankMonitorService:
             f"Shadow blank monitor event={event_type} "
             f"channel_ref={event['channel_ref']} stream_ref={event['stream_ref']}"
         )
+        if event_type == "viewer_left" and target.get("channel_uuid"):
+            self._stop_persistent_watcher(str(target.get("channel_uuid")))
 
     @staticmethod
     def _default_stream_checker_provider() -> Any:
@@ -4194,6 +4370,10 @@ class ShadowBlankMonitorService:
             "watcher_absent_seconds",
             "watcher_recovered_after_seconds",
             "last_watcher_client_ref",
+            "persistent_watcher_state",
+            "persistent_watcher_started_at",
+            "persistent_watcher_uptime_seconds",
+            "persistent_watcher_pid",
             "state",
             "current_program",
             "channel_name",
