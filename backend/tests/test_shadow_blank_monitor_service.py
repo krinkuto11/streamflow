@@ -5262,6 +5262,43 @@ def test_background_continuous_mode_keeps_persistent_watcher_between_scans(tmp_p
     assert started[0][1].poll() is None
 
 
+def test_persistent_watcher_does_not_block_followup_media_probe(tmp_path):
+    probe_urls = []
+    watcher_client = {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"}
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[{"user_agent": "VLC"}, watcher_client],
+            ),
+        }],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10, "url": "http://provider.example/old.ts"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 1,
+        "watcher_state": "watching",
+        "persistent_watcher_state": "running",
+    }
+    config = normalize_config({"watch_mode": "continuous"})
+
+    service._probe_targets(udi, [target], config, single_pass=True)
+
+    assert probe_urls == ["http://provider.example/old.ts"]
+    assert "watcher_orphaned" not in [event["type"] for event in service.get_status()["recent_events"]]
+
+
 def test_persistent_watcher_restarts_on_stream_change(tmp_path, monkeypatch):
     started = []
 

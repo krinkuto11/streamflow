@@ -1011,7 +1011,8 @@ class ShadowBlankMonitorService:
         for target in targets:
             channel_uuid = target["channel_uuid"]
             watcher_count = int(target.get("watcher_client_count") or 0)
-            if watcher_count > 0:
+            blocking_watcher_count = self._blocking_watcher_count(target, watcher_count)
+            if blocking_watcher_count > 0:
                 with self._lock:
                     probe_is_running = channel_uuid in self._active_probes
                 if probe_is_running or not allow_orphaned_watcher_reprobe:
@@ -1023,6 +1024,7 @@ class ShadowBlankMonitorService:
                     {
                         "reason": "watcher_without_active_probe",
                         "watcher_client_count": watcher_count,
+                        "blocking_watcher_count": blocking_watcher_count,
                         "action": "starting_recovery_probe",
                     },
                 )
@@ -1099,7 +1101,8 @@ class ShadowBlankMonitorService:
                     if watcher_count > 0:
                         self._watcher_absences.pop(channel_uuid, None)
                     self._watched[channel_uuid] = dict(target)
-                if watcher_count > 0:
+                blocking_watcher_count = self._blocking_watcher_count(target, watcher_count)
+                if blocking_watcher_count > 0:
                     if self._watcher_status_has_current_probe_client(target, fresh_status, config):
                         time.sleep(float(config.get("watch_gap_seconds", 1)))
                         continue
@@ -1118,6 +1121,7 @@ class ShadowBlankMonitorService:
                     guard_details = {
                         "reason": "active_watcher_between_confirmations",
                         "watcher_client_count": watcher_count,
+                        "blocking_watcher_count": blocking_watcher_count,
                     }
                     if target.get("watcher_client_ref"):
                         guard_details["watcher_client_ref"] = target.get("watcher_client_ref")
@@ -2420,6 +2424,20 @@ class ShadowBlankMonitorService:
             watched = self._watched.get(channel_uuid)
             if watched is not None:
                 watched.update(snapshot)
+
+    @staticmethod
+    def _blocking_watcher_count(target: Dict[str, Any], watcher_count: int) -> int:
+        """Return watcher clients that should block starting another probe.
+
+        A persistent watcher is intentionally kept open to stabilize Dispatcharr
+        playback visibility. It is not an analysis probe and must not suppress
+        future media checks. Any additional watcher client still blocks broad
+        probing to avoid duplicate proxy probes.
+        """
+        count = max(0, int(watcher_count or 0))
+        if target.get("persistent_watcher_state") == "running" and count > 0:
+            return count - 1
+        return count
 
     def _start_persistent_watcher(
         self,
