@@ -5466,6 +5466,45 @@ def test_viewer_left_grace_expires_and_stops_persistent_watcher(tmp_path, monkey
     assert service.get_status()["recent_events"][0]["details"]["reason"] == "viewer_left_grace_expired"
 
 
+def test_probe_viewer_left_uses_grace_before_stopping_watcher(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10, "url": "http://provider.example/old.ts"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"viewer_left": True, "blank_detected": False},
+    )
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+    config["_shadow_allow_viewer_left_grace"] = True
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 1,
+        "watcher_state": "watching",
+    }
+    with service._lock:
+        service._watched["uuid-1"] = dict(target)
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert status["watched_channels"][0]["viewer_left_grace_active"] is True
+    assert status["watched_channels"][0]["real_client_count"] == 0
+    assert "viewer_left" not in [event["type"] for event in status["recent_events"]]
+
+
 def test_watcher_recovery_cooldown_does_not_block_reconnect_probe(tmp_path):
     now = {"value": 1000.0}
     probe_calls = []
@@ -5844,7 +5883,10 @@ def test_continuous_default_probe_does_not_block_new_scans(tmp_path):
                 break
         time.sleep(0.05)
 
-    assert service.get_status()["recent_events"][0]["type"] == "viewer_left"
+    final_status = service.get_status()
+    assert final_status["watched_channels"][0]["viewer_left_grace_active"] is True
+    assert final_status["watched_channels"][0]["real_client_count"] == 0
+    assert final_status["recent_events"] == []
 
 
 def test_quality_checker_guard_is_opt_in(tmp_path):
