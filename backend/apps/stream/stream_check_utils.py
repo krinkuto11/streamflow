@@ -1878,11 +1878,6 @@ def _probe_stream_for_loops(
         logger.error(f"[loop-probe:{stream_tag}] SidecarLoopDetector unavailable")
         return False, None, 0
 
-    try:
-        import imagehash as _imagehash
-    except ImportError:
-        _imagehash = None
-
     clamped = max(_LOOP_PROBE_DURATION_MIN, min(_LOOP_PROBE_DURATION_MAX, probe_duration))
 
     logger.info(
@@ -1978,13 +1973,14 @@ def _probe_stream_for_loops(
 
                 try:
                     img = Image.open(io.BytesIO(frame_data))
-                    h   = _imagehash.phash(img) if _imagehash else detector._simple_hash(img)
+                    h   = detector.frame_signature(img)
                     detector.buffer.append((ts, h))
                     frames_done[0] += 1
 
+                    display_hash = h.get("phash") if isinstance(h, dict) else h
                     logger.debug(
                         f"[loop-probe:{stream_tag}] "
-                        f"frame={frames_done[0]:4d}  hash={h}  buffer={len(detector.buffer)}"
+                        f"frame={frames_done[0]:4d}  hash={display_hash}  buffer={len(detector.buffer)}"
                     )
 
                     detected = detector.detect_loop(
@@ -1993,6 +1989,9 @@ def _probe_stream_for_loops(
                     if detected:
                         detector._is_looping   = True
                         detector._loop_duration = detected
+                        loop_detected = True
+                        if loop_duration is None or detected > loop_duration:
+                            loop_duration = detected
                         logger.debug(
                             f"[loop-probe:{stream_tag}] Loop signal at "
                             f"frame {frames_done[0]}: period={detected:.1f}s"
@@ -2014,8 +2013,9 @@ def _probe_stream_for_loops(
             except Exception:
                 pass
 
-        loop_detected = detector.is_looping()
-        loop_duration = detector.get_loop_duration() if loop_detected else None
+        if not loop_detected:
+            loop_detected = detector.is_looping()
+            loop_duration = detector.get_loop_duration() if loop_detected else None
 
     reader = threading.Thread(
         target=_reader, daemon=True,

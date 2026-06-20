@@ -6019,8 +6019,13 @@ class AutomatedStreamManager:
                         ch_revived = c_result.get('revived_streams_count', 0)
                         ch_analyzed = len(c_result.get('checked_streams', []))
                         checked_streams = c_result.get('checked_streams', [])
+                        visibility_result = (
+                            c_result.get('channel_visibility')
+                            if isinstance(c_result.get('channel_visibility'), dict)
+                            else None
+                        )
                         if isinstance(c_result.get('channel_visibility'), dict):
-                            quality_visibility_events.append(c_result.get('channel_visibility'))
+                            quality_visibility_events.append(visibility_result)
                         ch_good = max(
                             int(c_result.get('good_streams_count', 0) or 0),
                             sum(
@@ -6083,6 +6088,14 @@ class AutomatedStreamManager:
                                 'error': c_result.get('error')
                             }
                         })
+
+                        if visibility_result and visibility_result.get('changed'):
+                            visibility_action = visibility_result.get('action')
+                            steps.append({
+                                'step': 'Channel Visibility',
+                                'status': 'warning' if visibility_action == 'hidden' else 'success',
+                                'details': visibility_result,
+                            })
                         
                         # Total streams count for this channel
                         total_streams_count += len(channel.get('streams', []))
@@ -6111,6 +6124,8 @@ class AutomatedStreamManager:
                                or d.get('freeze_streams_count', 0) > 0 or d.get('revived_streams_count', 0) > 0 \
                                or active_checks > 0:
                                 has_impact = True
+                        elif step['step'] == 'Channel Visibility' and step['details'].get('changed'):
+                            has_impact = True
 
                     if steps and has_impact:
                         period_entry['channels'].append({

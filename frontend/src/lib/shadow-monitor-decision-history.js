@@ -274,6 +274,11 @@ export const getShadowEventDetailParts = (event = {}) => {
 
   if (details.switch_source === 'external') {
     parts.push('outside StreamFlow')
+    if (details.switch_actor && details.switch_actor !== 'unknown') {
+      parts.push(`actor ${details.switch_actor}`)
+    } else {
+      parts.push('actor unavailable')
+    }
   }
 
   if (details.origin_stream_ref && details.target_stream_ref) {

@@ -152,6 +152,63 @@ class TestLoopProbeSampling(unittest.TestCase):
         self.assertEqual(frames_processed, 0)
         self.assertTrue(process.terminated)
 
+    def test_loop_probe_latches_transient_loop_detection(self):
+        raw_frames = [self._ppm_frame(frame_index) for frame_index in range(40)]
+        pipe_bytes = b"".join(raw_frames)
+
+        class FakeProcess:
+            def __init__(self, payload):
+                self.stdout = io.BytesIO(payload)
+                self.stderr = io.BytesIO(b"")
+                self._size = len(payload)
+
+            def wait(self, timeout=None):
+                deadline = real_monotonic() + 5
+                while real_monotonic() < deadline:
+                    try:
+                        if self.stdout.tell() >= self._size:
+                            break
+                    except ValueError:
+                        break
+                    real_sleep(0.001)
+                return 0
+
+            def kill(self):
+                return None
+
+        monotonic_value = {"value": 100.0}
+        detect_calls = {"count": 0}
+
+        def fake_monotonic():
+            monotonic_value["value"] += 1.1
+            return monotonic_value["value"]
+
+        def fake_detect_loop(self, hamming_tolerance=None):
+            detect_calls["count"] += 1
+            return 12.0 if detect_calls["count"] == 10 else None
+
+        with patch.object(
+            stream_check_utils.subprocess,
+            "Popen",
+            return_value=FakeProcess(pipe_bytes),
+        ), patch.object(
+            stream_check_utils.time,
+            "monotonic",
+            side_effect=fake_monotonic,
+        ), patch(
+            "apps.stream.sidecar_loop_detector.SidecarLoopDetector.detect_loop",
+            fake_detect_loop,
+        ):
+            loop_detected, loop_duration, frames_processed = _probe_stream_for_loops(
+                url="http://example.invalid/loop.ts",
+                stream_tag="test-loop-latch",
+                probe_duration=60,
+            )
+
+        self.assertTrue(loop_detected)
+        self.assertEqual(loop_duration, 12.0)
+        self.assertEqual(frames_processed, len(raw_frames))
+
 
 class TestGetStreamInfo(unittest.TestCase):
     """Test extracting stream information with ffprobe."""

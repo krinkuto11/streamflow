@@ -14,7 +14,7 @@ import {
   getChangelogVisibilityMetrics,
 } from '@/lib/changelog-run-summary.js'
 import { formatDuration } from '@/lib/time-format.js'
-import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download } from 'lucide-react'
+import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download, EyeOff } from 'lucide-react'
 
 function formatTimestamp(timestamp) {
   const date = new Date(timestamp)
@@ -269,6 +269,7 @@ function getStepIcon(name) {
     case 'validation': return <AlertCircle className="h-4 w-4" />
     case 'assignment': return <CheckCircle2 className="h-4 w-4" />
     case 'quality check': return <Activity className="h-4 w-4" />
+    case 'channel visibility': return <EyeOff className="h-4 w-4" />
     default: return <Activity className="h-4 w-4" />
   }
 }
@@ -279,6 +280,11 @@ function getStepColor(status, name = '') {
   if (stepName === 'assignment') return 'text-green-500 bg-green-500/5 border-green-500/10'
   if (stepName === 'quality check') return 'text-indigo-500 bg-indigo-500/5 border-indigo-500/10'
   if (stepName === 'validation') return 'text-purple-500 bg-purple-500/5 border-purple-500/10'
+  if (stepName === 'channel visibility') {
+    return status === 'warning'
+      ? 'text-amber-500 bg-amber-500/5 border-amber-500/10'
+      : 'text-green-500 bg-green-500/5 border-green-500/10'
+  }
 
   if (status === 'success') return 'text-green-500 bg-green-500/5 border-green-500/10'
   if (status === 'failed') return 'text-destructive bg-destructive/5 border-destructive/10'
@@ -290,6 +296,7 @@ function hasStepDetails(name, details) {
   return (name === 'Validation' && details.removed_count > 0) ||
     (name === 'Assignment' && details.added_count > 0) ||
     (name === 'Playlist Refresh' && details.accounts && details.accounts.length > 0) ||
+    (name === 'Channel Visibility' && details.changed) ||
     (name === 'Quality Check' && (details.dead_streams_count > 0 || details.revived_streams_count > 0 || details.skipped_streams_count > 0 || details.checked_streams?.length > 0))
 }
 
@@ -367,6 +374,29 @@ function StepContent({ step }) {
                 </li>
               ))}
             </ul>
+          </div>
+        </div>
+      )}
+
+      {name === 'Channel Visibility' && details.changed && (
+        <div className="text-xs space-y-2 mt-1 opacity-90">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge
+              variant="outline"
+              className={details.action === 'hidden'
+                ? 'border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                : 'border-green-500/60 bg-green-500/10 text-green-700 dark:text-green-300'}
+            >
+              {details.action === 'hidden' ? 'Hidden' : 'Restored'}
+            </Badge>
+            <Badge variant="secondary" className="max-w-full truncate text-xs">
+              {formatVisibilityReason(details.reason)}
+            </Badge>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-muted-foreground">
+            <span>{details.details?.good_streams_count ?? 0} good</span>
+            <span>{details.details?.dead_streams_count ?? 0} dead</span>
+            <span>{details.details?.total_streams ?? 0} total</span>
           </div>
         </div>
       )}
