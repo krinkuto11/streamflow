@@ -408,7 +408,7 @@ def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
 
     def loop_probe(url, config):
         loop_calls.append((url, config["loop_probe_duration_seconds"]))
-        loop_detected = "/proxy/ts/stream/" in url
+        loop_detected = "/proxy/ts/stream/" in url or url.endswith("/old.ts")
         return {
             "loop_probe_ran": True,
             "loop_detected": loop_detected,
@@ -447,7 +447,7 @@ def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
     assert service._probe_target_once(udi, target, config) is False
 
     assert loop_calls == [
-        ("http://dispatcharr.local/proxy/ts/stream/uuid-1", 180),
+        ("http://provider.example/old.ts", 180),
         ("http://provider.example/new.ts", 180),
     ]
     assert switch_calls == [("uuid-1", 11, None)]
@@ -481,7 +481,9 @@ def test_shadow_loop_confirmation_survives_one_probe_ok_miss(tmp_path):
 
     def loop_probe(url, config):
         loop_calls.append(url)
-        loop_detected = next(active_loop_results) if "/proxy/ts/stream/" in url else False
+        loop_detected = next(active_loop_results) if (
+            "/proxy/ts/stream/" in url or url.endswith("/old.ts")
+        ) else False
         return {
             "loop_probe_ran": True,
             "loop_detected": loop_detected,
@@ -533,9 +535,9 @@ def test_shadow_loop_confirmation_survives_one_probe_ok_miss(tmp_path):
     assert service._probe_target_once(udi, target, config) is False
 
     assert loop_calls == [
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://provider.example/old.ts",
+        "http://provider.example/old.ts",
+        "http://provider.example/old.ts",
         "http://provider.example/new.ts",
     ]
     assert switch_calls == [("uuid-1", 11, None)]
@@ -599,7 +601,7 @@ def test_shadow_loop_probe_aborts_when_real_viewer_leaves(tmp_path):
 
     assert service._probe_target_once(udi, target, config) is False
 
-    assert loop_calls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert loop_calls == ["http://provider.example/old.ts"]
     assert switch_calls == []
     status = service.get_status()
     assert status["recent_events"][0]["type"] == "viewer_left"
@@ -996,9 +998,10 @@ def test_shadow_loop_dry_run_records_intended_switch_without_live_change(tmp_pat
 
     def loop_probe(url, config):
         loop_calls.append(url)
+        loop_detected = "/proxy/ts/stream/" in url or url.endswith("/old.ts")
         return {
             "loop_probe_ran": True,
-            "loop_detected": "/proxy/ts/stream/" in url,
+            "loop_detected": loop_detected,
             "loop_duration_secs": 12.0,
             "loop_frames_processed": 180,
         }
@@ -1026,7 +1029,7 @@ def test_shadow_loop_dry_run_records_intended_switch_without_live_change(tmp_pat
     status = service.run_once(force=True)
 
     assert loop_calls == [
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://provider.example/old.ts",
         "http://provider.example/new.ts",
     ]
     assert switch_calls == []
@@ -2302,6 +2305,34 @@ def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):
     assert status["switch_summary"]["last_switch_reason"] == "blank"
 
 
+def test_shadow_media_probe_prefers_current_stream_url_when_available(tmp_path):
+    probe_urls = []
+    probe_keys = []
+
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10, "url": "http://provider.local/live/arte.m3u8"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: (
+            probe_urls.append(url)
+            or probe_keys.append(config.get("watcher_api_key"))
+            or {"blank_detected": False}
+        ),
+    )
+    service.update_config({"enabled": False, "dry_run": False})
+
+    status = service.run_once(force=True)
+
+    assert probe_urls == ["http://provider.local/live/arte.m3u8"]
+    assert probe_keys == [""]
+    assert status["recent_events"][0]["type"] == "probe_ok"
+    assert status["recent_events"][0]["details"]["media_probe_source"] == "stream_url"
+
+
 def test_shadow_probe_mirrors_real_viewer_fmp4_output_format(tmp_path):
     probe_urls = []
 
@@ -2541,7 +2572,7 @@ def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
     pre_probe_calls = []
 
     def pre_probe(url, config):
-        pre_probe_calls.append((url, config["probe_duration_seconds"]))
+        pre_probe_calls.append((url, config["probe_duration_seconds"], config.get("watcher_api_key")))
         return {"blank_detected": "bad" in url}
 
     service._run_blank_probe = pre_probe
@@ -2556,8 +2587,8 @@ def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
     status = service.run_once(force=True)
 
     assert pre_probe_calls == [
-        ("http://candidate.local/bad", 5),
-        ("http://candidate.local/good", 5),
+        ("http://candidate.local/bad", 5, ""),
+        ("http://candidate.local/good", 5, ""),
     ]
     assert switch_calls == [("uuid-1", 12, None)]
     assert status["recent_events"][0]["type"] == "switch_success"

@@ -1134,20 +1134,25 @@ class ShadowBlankMonitorService:
             target.pop("media_recovery_guard_bypass", None)
             target["active_probe_started_at"] = self.clock()
             proxy_url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
+            media_probe_url, media_probe_source = self._media_probe_url(udi, target, proxy_url)
+            media_probe_config = dict(config)
+            if media_probe_source == "stream_url":
+                media_probe_config["watcher_api_key"] = ""
+            target["media_probe_source"] = media_probe_source
             use_continuous_blank_probe = (
                 config.get("watch_mode") == "continuous"
                 and self._uses_default_blank_probe
             )
             if use_continuous_blank_probe:
                 result = self._run_blank_probe_until_viewer_left(
-                    proxy_url,
-                    config,
+                    media_probe_url,
+                    media_probe_config,
                     udi,
                     target,
-                    continuous=not bool(config.get("loop_detection_enabled")),
+                    continuous=not bool(media_probe_config.get("loop_detection_enabled")),
                 )
             else:
-                result = self.blank_probe(proxy_url, config)
+                result = self.blank_probe(media_probe_url, media_probe_config)
             blank = bool(result.get("blank_detected"))
             freeze = bool(result.get("freeze_detected"))
             no_decodable_frames = bool(result.get("no_decodable_frames_detected"))
@@ -1199,6 +1204,7 @@ class ShadowBlankMonitorService:
                 "offline_image_detected": offline_image,
                 "offline_image_hash": result.get("offline_image_hash"),
                 "offline_image_distance": result.get("offline_image_distance"),
+                "media_probe_source": media_probe_source,
                 "loop_probe_ran": bool(result.get("loop_probe_ran")),
                 "loop_detected": loop,
                 "loop_duration_secs": result.get("loop_duration_secs"),
@@ -1225,7 +1231,7 @@ class ShadowBlankMonitorService:
                 return False
 
             if not detection_reason:
-                loop_result = self._run_loop_probe_if_enabled(proxy_url, target, config, udi=udi)
+                loop_result = self._run_loop_probe_if_enabled(media_probe_url, target, media_probe_config, udi=udi)
                 if loop_result:
                     result.update(loop_result)
                     loop = bool(loop_result.get("loop_detected"))
@@ -1979,6 +1985,7 @@ class ShadowBlankMonitorService:
         pre_probe_config["probe_duration_seconds"] = int(
             config.get("next_stream_pre_probe_duration_seconds", 8)
         )
+        pre_probe_config["watcher_api_key"] = ""
         if str(reason or "") != "loop":
             pre_probe_config["loop_detection_enabled"] = False
         result = self._run_blank_probe(url, pre_probe_config)
@@ -2534,6 +2541,30 @@ class ShadowBlankMonitorService:
         if canonical_format:
             return f"{url}?output_format={canonical_format}"
         return url
+
+    def _media_probe_url(self, udi: Any, target: Dict[str, Any], fallback_url: str) -> tuple[str, str]:
+        """Prefer the current source URL for short media probes.
+
+        The persistent watcher intentionally uses the Dispatcharr proxy so the
+        channel stays open like a real viewer. The short ffmpeg analysis probes
+        do not need to appear as additional proxy clients; when UDI can resolve
+        the active stream URL, analyze that source directly and keep the proxy
+        URL as a conservative fallback.
+        """
+        stream_id = self._coerce_int(target.get("stream_id"))
+        if stream_id is None or not hasattr(udi, "get_stream_by_id"):
+            return fallback_url, "channel_proxy"
+        try:
+            stream = udi.get_stream_by_id(stream_id)
+        except Exception as exc:
+            logger.debug("Shadow media probe stream lookup failed for %s: %s", target.get("stream_ref"), exc)
+            return fallback_url, "channel_proxy"
+        if not isinstance(stream, dict):
+            return fallback_url, "channel_proxy"
+        source_url = str(stream.get("url") or "").strip()
+        if not source_url:
+            return fallback_url, "channel_proxy"
+        return source_url, "stream_url"
 
     @staticmethod
     def _blank_probe_command(url: str, config: Dict[str, Any], *, continuous: bool = False) -> tuple[List[str], int]:
