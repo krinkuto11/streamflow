@@ -120,6 +120,29 @@ class PersistentFakeProbeProcess(FakeProbeProcess):
         return self.returncode
 
 
+class FakePersistentWatcherProcess:
+    pid = 4242
+
+    def __init__(self):
+        self.returncode = None
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
+        self.returncode = 0
+
+    def kill(self):
+        self.returncode = -9
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+
 def make_service(
     tmp_path,
     *,
@@ -161,6 +184,83 @@ def active_status(stream_id=10, clients=None):
         "stream_id": stream_id,
         "clients": clients if clients is not None else [{"user_agent": "VLC"}],
     }
+
+
+def test_watcher_details_prefers_oldest_visible_watcher(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({
+        "watcher_user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+    })
+
+    details = service._watcher_client_details(
+        {
+            "clients": [
+                {
+                    "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0 ffmpeg",
+                    "client_id": "new-probe",
+                    "connected_at": 990.0,
+                },
+                {"user_agent": "VLC", "client_id": "real-viewer", "connected_at": 980.0},
+                {
+                    "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0 ffmpeg",
+                    "client_id": "persistent-watcher",
+                    "connected_at": 900.0,
+                },
+            ]
+        },
+        config,
+    )
+
+    assert details["watcher_client_count"] == 2
+    assert details["watcher_client_ref"] == shadow_module._ref("client", "persistent-watcher")
+    assert details["watcher_uptime_seconds"] == 100
+
+
+def test_continuous_loop_probe_is_rate_limited_between_slices(tmp_path):
+    now = {"value": 1000.0}
+    loop_calls = []
+
+    def loop_probe(url, config):
+        loop_calls.append((url, now["value"]))
+        return {"loop_probe_ran": True, "loop_detected": False}
+
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        loop_probe=loop_probe,
+        clock=lambda: now["value"],
+    )
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "loop_detection_enabled": True,
+        "loop_probe_duration_seconds": 120,
+    })
+    target = {"channel_uuid": "uuid-1", "channel_ref": "channel-one"}
+
+    first = service._run_loop_probe_if_enabled("http://example.test/stream", target, config, udi=udi)
+    now["value"] += 30
+    second = service._run_loop_probe_if_enabled("http://example.test/stream", target, config, udi=udi)
+    now["value"] += 91
+    third = service._run_loop_probe_if_enabled("http://example.test/stream", target, config, udi=udi)
+
+    assert first["loop_probe_ran"] is True
+    assert second["loop_probe_ran"] is False
+    assert second["loop_probe_skipped"] is True
+    assert second["loop_probe_skip_reason"] == "loop_probe_interval"
+    assert third["loop_probe_ran"] is True
+    assert loop_calls == [
+        ("http://example.test/stream", 1000.0),
+        ("http://example.test/stream", 1121.0),
+    ]
 
 
 def test_watch_mode_controls_scan_delay():
@@ -308,7 +408,7 @@ def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
 
     def loop_probe(url, config):
         loop_calls.append((url, config["loop_probe_duration_seconds"]))
-        loop_detected = "/proxy/ts/stream/" in url
+        loop_detected = "/proxy/ts/stream/" in url or url.endswith("/old.ts")
         return {
             "loop_probe_ran": True,
             "loop_detected": loop_detected,
@@ -347,7 +447,7 @@ def test_shadow_loop_detection_switches_after_required_confirmation(tmp_path):
     assert service._probe_target_once(udi, target, config) is False
 
     assert loop_calls == [
-        ("http://dispatcharr.local/proxy/ts/stream/uuid-1", 180),
+        ("http://provider.example/old.ts", 180),
         ("http://provider.example/new.ts", 180),
     ]
     assert switch_calls == [("uuid-1", 11, None)]
@@ -381,7 +481,9 @@ def test_shadow_loop_confirmation_survives_one_probe_ok_miss(tmp_path):
 
     def loop_probe(url, config):
         loop_calls.append(url)
-        loop_detected = next(active_loop_results) if "/proxy/ts/stream/" in url else False
+        loop_detected = next(active_loop_results) if (
+            "/proxy/ts/stream/" in url or url.endswith("/old.ts")
+        ) else False
         return {
             "loop_probe_ran": True,
             "loop_detected": loop_detected,
@@ -433,9 +535,9 @@ def test_shadow_loop_confirmation_survives_one_probe_ok_miss(tmp_path):
     assert service._probe_target_once(udi, target, config) is False
 
     assert loop_calls == [
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://provider.example/old.ts",
+        "http://provider.example/old.ts",
+        "http://provider.example/old.ts",
         "http://provider.example/new.ts",
     ]
     assert switch_calls == [("uuid-1", 11, None)]
@@ -499,7 +601,7 @@ def test_shadow_loop_probe_aborts_when_real_viewer_leaves(tmp_path):
 
     assert service._probe_target_once(udi, target, config) is False
 
-    assert loop_calls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
+    assert loop_calls == ["http://provider.example/old.ts"]
     assert switch_calls == []
     status = service.get_status()
     assert status["recent_events"][0]["type"] == "viewer_left"
@@ -896,9 +998,10 @@ def test_shadow_loop_dry_run_records_intended_switch_without_live_change(tmp_pat
 
     def loop_probe(url, config):
         loop_calls.append(url)
+        loop_detected = "/proxy/ts/stream/" in url or url.endswith("/old.ts")
         return {
             "loop_probe_ran": True,
-            "loop_detected": "/proxy/ts/stream/" in url,
+            "loop_detected": loop_detected,
             "loop_duration_secs": 12.0,
             "loop_frames_processed": 180,
         }
@@ -926,7 +1029,7 @@ def test_shadow_loop_dry_run_records_intended_switch_without_live_change(tmp_pat
     status = service.run_once(force=True)
 
     assert loop_calls == [
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        "http://provider.example/old.ts",
         "http://provider.example/new.ts",
     ]
     assert switch_calls == []
@@ -2202,6 +2305,34 @@ def test_dry_run_uses_channel_proxy_and_records_intended_switch(tmp_path):
     assert status["switch_summary"]["last_switch_reason"] == "blank"
 
 
+def test_shadow_media_probe_prefers_current_stream_url_when_available(tmp_path):
+    probe_urls = []
+    probe_keys = []
+
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10, "url": "http://provider.local/live/arte.m3u8"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: (
+            probe_urls.append(url)
+            or probe_keys.append(config.get("watcher_api_key"))
+            or {"blank_detected": False}
+        ),
+    )
+    service.update_config({"enabled": False, "dry_run": False})
+
+    status = service.run_once(force=True)
+
+    assert probe_urls == ["http://provider.local/live/arte.m3u8"]
+    assert probe_keys == [""]
+    assert status["recent_events"][0]["type"] == "probe_ok"
+    assert status["recent_events"][0]["details"]["media_probe_source"] == "stream_url"
+
+
 def test_shadow_probe_mirrors_real_viewer_fmp4_output_format(tmp_path):
     probe_urls = []
 
@@ -2441,7 +2572,7 @@ def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
     pre_probe_calls = []
 
     def pre_probe(url, config):
-        pre_probe_calls.append((url, config["probe_duration_seconds"]))
+        pre_probe_calls.append((url, config["probe_duration_seconds"], config.get("watcher_api_key")))
         return {"blank_detected": "bad" in url}
 
     service._run_blank_probe = pre_probe
@@ -2456,8 +2587,8 @@ def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
     status = service.run_once(force=True)
 
     assert pre_probe_calls == [
-        ("http://candidate.local/bad", 5),
-        ("http://candidate.local/good", 5),
+        ("http://candidate.local/bad", 5, ""),
+        ("http://candidate.local/good", 5, ""),
     ]
     assert switch_calls == [("uuid-1", 12, None)]
     assert status["recent_events"][0]["type"] == "switch_success"
@@ -5092,6 +5223,380 @@ def test_active_probe_watcher_ref_change_does_not_reset_detection(tmp_path):
     assert "watcher_recovered" not in [event["type"] for event in status["recent_events"]]
 
 
+def test_background_continuous_mode_keeps_persistent_watcher_between_scans(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append((command, process))
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+    first_status = service.get_status()["watched_channels"][0]
+
+    now["value"] = 1015.0
+    service._sync_persistent_watchers(targets, config)
+    second_status = service.get_status()["watched_channels"][0]
+
+    assert len(started) == 1
+    assert "Authorization: ApiKey watcher-key" in " ".join(started[0][0])
+    assert first_status["persistent_watcher_state"] == "running"
+    assert second_status["persistent_watcher_pid"] == 4242
+    assert second_status["persistent_watcher_uptime_seconds"] == 15
+    assert started[0][1].poll() is None
+
+
+def test_persistent_watcher_does_not_block_followup_media_probe(tmp_path):
+    probe_urls = []
+    watcher_client = {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"}
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[{"user_agent": "VLC"}, watcher_client],
+            ),
+        }],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10, "url": "http://provider.example/old.ts"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 1,
+        "watcher_state": "watching",
+        "persistent_watcher_state": "running",
+    }
+    config = normalize_config({"watch_mode": "continuous"})
+
+    service._probe_targets(udi, [target], config, single_pass=True)
+
+    assert probe_urls == ["http://provider.example/old.ts"]
+    assert "watcher_orphaned" not in [event["type"] for event in service.get_status()["recent_events"]]
+
+
+def test_persistent_watcher_restarts_on_stream_change(tmp_path, monkeypatch):
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append((command, process))
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {"uuid-1": active_status(stream_id=11, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+    first_process = started[0][1]
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    assert len(started) == 2
+    assert first_process.terminated is True
+    assert started[1][1].poll() is None
+
+
+def test_viewer_left_stops_persistent_watcher(tmp_path, monkeypatch):
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+    service._record_event("viewer_left", targets[0], {})
+
+    assert len(started) == 1
+    assert started[0].terminated is True
+    assert service._persistent_watchers == {}
+
+
+def test_viewer_left_grace_keeps_persistent_watcher_for_brief_client_drop(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+    probe_urls = []
+    watcher_client = {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"}
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {"uuid-1": active_status(stream_id=10, clients=[watcher_client])},
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}, watcher_client])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10, "url": "http://provider.example/old.ts"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        clock=lambda: now["value"],
+        blank_probe=lambda url, config: probe_urls.append(url) or {"blank_detected": False},
+    )
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    now["value"] = 1005.0
+    grace_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(grace_targets, config)
+    service._probe_targets(udi, grace_targets, config, single_pass=True)
+
+    now["value"] = 1010.0
+    recovered_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(recovered_targets, config)
+
+    assert len(started) == 1
+    assert started[0].terminated is False
+    assert grace_targets[0]["viewer_left_grace_active"] is True
+    assert grace_targets[0]["viewer_left_grace_remaining_seconds"] == 30
+    assert recovered_targets[0]["real_client_count"] == 1
+    assert probe_urls == []
+    assert "viewer_left" not in [event["type"] for event in service.get_status()["recent_events"]]
+
+
+def test_viewer_left_grace_expires_and_stops_persistent_watcher(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+    watcher_client = {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"}
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {"uuid-1": active_status(stream_id=10, clients=[watcher_client])},
+            {"uuid-1": active_status(stream_id=10, clients=[watcher_client])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    now["value"] = 1005.0
+    grace_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(grace_targets, config)
+
+    now["value"] = 1036.0
+    expired_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(expired_targets, config)
+
+    assert len(started) == 1
+    assert grace_targets[0]["viewer_left_grace_active"] is True
+    assert expired_targets == []
+    assert started[0].terminated is True
+    assert service._persistent_watchers == {}
+    assert service.get_status()["recent_events"][0]["type"] == "viewer_left"
+    assert service.get_status()["recent_events"][0]["details"]["reason"] == "viewer_left_grace_expired"
+
+
+def test_proxy_status_gap_keeps_persistent_watcher_during_viewer_grace(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {},
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    now["value"] = 1005.0
+    gap_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(gap_targets, config)
+
+    now["value"] = 1010.0
+    recovered_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(recovered_targets, config)
+
+    assert len(started) == 1
+    assert started[0].terminated is False
+    assert gap_targets[0]["viewer_left_grace_active"] is True
+    assert gap_targets[0]["proxy_status_gap"] is True
+    assert gap_targets[0]["watcher_state"] == "reconnecting"
+    assert recovered_targets[0]["real_client_count"] == 1
+    assert "viewer_left" not in [event["type"] for event in service.get_status()["recent_events"]]
+
+
+def test_proxy_status_gap_expires_and_stops_persistent_watcher(tmp_path, monkeypatch):
+    now = {"value": 1000.0}
+    started = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        started.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {},
+            {},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._uses_default_blank_probe = True
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(targets, config)
+
+    now["value"] = 1005.0
+    gap_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(gap_targets, config)
+
+    now["value"] = 1036.0
+    expired_targets = service.discover_active_targets(udi, config)
+    service._sync_persistent_watchers(expired_targets, config)
+
+    assert len(started) == 1
+    assert gap_targets[0]["viewer_left_grace_active"] is True
+    assert expired_targets == []
+    assert started[0].terminated is True
+    assert service._persistent_watchers == {}
+    assert service.get_status()["recent_events"][0]["type"] == "viewer_left"
+    assert service.get_status()["recent_events"][0]["details"]["reason"] == "proxy_status_gap_grace_expired"
+
+
+def test_probe_viewer_left_uses_grace_before_stopping_watcher(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={10: {"id": 10, "url": "http://provider.example/old.ts"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"viewer_left": True, "blank_detected": False},
+    )
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "watcher_api_key": "watcher-key",
+        "viewer_left_grace_seconds": 30,
+    })
+    config["_shadow_allow_viewer_left_grace"] = True
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 1,
+        "watcher_state": "watching",
+    }
+    with service._lock:
+        service._watched["uuid-1"] = dict(target)
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert status["watched_channels"][0]["viewer_left_grace_active"] is True
+    assert status["watched_channels"][0]["real_client_count"] == 0
+    assert "viewer_left" not in [event["type"] for event in status["recent_events"]]
+
+
 def test_watcher_recovery_cooldown_does_not_block_reconnect_probe(tmp_path):
     now = {"value": 1000.0}
     probe_calls = []
@@ -5470,7 +5975,10 @@ def test_continuous_default_probe_does_not_block_new_scans(tmp_path):
                 break
         time.sleep(0.05)
 
-    assert service.get_status()["recent_events"][0]["type"] == "viewer_left"
+    final_status = service.get_status()
+    assert final_status["watched_channels"][0]["viewer_left_grace_active"] is True
+    assert final_status["watched_channels"][0]["real_client_count"] == 0
+    assert final_status["recent_events"] == []
 
 
 def test_quality_checker_guard_is_opt_in(tmp_path):

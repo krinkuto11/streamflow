@@ -117,3 +117,43 @@ def test_viewer_activity_can_attach_safe_shadow_epg_context():
         "end_time": "2026-06-05T21:00:00+00:00",
     }
     assert "should-not-leak" not in repr(enriched)
+
+
+def test_viewer_activity_can_attach_shadow_watcher_reconnect_context():
+    status = build_viewer_activity_status(
+        proxy_status={
+            "uuid-1": {
+                "state": "active",
+                "channel_id": "uuid-1",
+                "stream_id": 10,
+                "clients": [{"user_agent": "VLC"}],
+            },
+        },
+        channels=[{"id": 1, "uuid": "uuid-1", "name": "Channel One"}],
+        watcher_user_agent="StreamFlow-Shadow-Blank-Monitor/1.0",
+    )
+    channel_ref = status["channels"][0]["channel_ref"]
+
+    enriched = apply_shadow_monitor_context(
+        status,
+        {
+            "watched_channels": [
+                {
+                    "channel_ref": channel_ref,
+                    "watcher_state": "reconnecting",
+                    "watcher_absent_seconds": 4,
+                    "viewer_left_grace_active": True,
+                    "viewer_left_grace_remaining_seconds": 26,
+                    "proxy_status_gap": True,
+                    "private_provider": "should-not-leak",
+                }
+            ]
+        },
+    )
+
+    assert enriched["channels"][0]["watcher_state"] == "reconnecting"
+    assert enriched["channels"][0]["watcher_absent_seconds"] == 4
+    assert enriched["channels"][0]["viewer_left_grace_active"] is True
+    assert enriched["channels"][0]["viewer_left_grace_remaining_seconds"] == 26
+    assert enriched["channels"][0]["proxy_status_gap"] is True
+    assert "should-not-leak" not in repr(enriched)

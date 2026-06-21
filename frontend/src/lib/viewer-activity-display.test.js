@@ -43,6 +43,20 @@ describe('viewer activity display helpers', () => {
     })).toBe('Now: Live: MLB')
   })
 
+  it('shows transient shadow watcher reconnects before normal playback context', () => {
+    expect(getViewerActivityDetailLabel({
+      current_program: { title: 'Live: MLB', state: 'current' },
+      has_real_clients: true,
+      watcher_client_count: 0,
+      watcher_state: 'reconnecting',
+    })).toBe('Shadow watcher reconnecting')
+    expect(getViewerActivityDetailLabel({
+      current_program: { title: 'Live: MLB', state: 'current' },
+      has_real_clients: true,
+      viewer_left_grace_active: true,
+    })).toBe('Shadow watcher holding during reconnect')
+  })
+
   it('hides waiting_for_clients behind an operator fallback when no EPG is known', () => {
     expect(getViewerActivityDetailLabel({
       state: 'waiting_for_clients',
