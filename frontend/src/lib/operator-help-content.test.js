@@ -200,6 +200,7 @@ describe('operatorHelpSections', () => {
     expect(shadowSettings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Watch Mode',
       'Viewer Output Format',
+      'Persistent Watcher',
       'Dry Run',
       'Freeze Detection',
       'Garbled Audio',
@@ -209,10 +210,16 @@ describe('operatorHelpSections', () => {
       'Loop Detection',
       'Loop Probe Duration',
       'Probe Duration',
+      'Healthy Probe Interval',
       'Channel Switch Limit',
     ]))
     expect(shadowSettings.find(setting => setting.name === 'Watch Mode').defaultValue).toBe('Continuous')
     expect(shadowSettings.find(setting => setting.name === 'Viewer Output Format').effect).toMatch(/fMP4 or MPEGTS/i)
+    expect(shadowSettings.find(setting => setting.name === 'Persistent Watcher').defaultValue).toBe('Off')
+    expect(shadowSettings.find(setting => setting.name === 'Persistent Watcher').effect).toMatch(/Dispatcharr proxy probe/i)
+    expect(shadowSettings.find(setting => setting.name === 'Persistent Watcher').risk).toMatch(/extra viewer/i)
+    expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').defaultValue).toBe('120 seconds')
+    expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').effect).toMatch(/constant extra viewer/i)
     expect(shadowSettings.find(setting => setting.name === 'Dry Run').defaultValue).toBe('Off')
     expect(shadowSettings.find(setting => setting.name === 'Freeze Detection').defaultValue).toBe('On')
     expect(shadowSettings.find(setting => setting.name === 'Silent Audio').effect).toMatch(/no usable audio stream/i)
