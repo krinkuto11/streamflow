@@ -1,6 +1,14 @@
 export const shadowMonitorNumberFields = [
   { key: 'poll_interval_seconds', label: 'Poll Interval', suffix: 'sec', min: 5, max: 3600 },
   { key: 'watch_gap_seconds', label: 'Watch Gap', suffix: 'sec', min: 1, max: 300 },
+  {
+    key: 'continuous_probe_interval_seconds',
+    label: 'Healthy Probe Interval',
+    suffix: 'sec',
+    min: 30,
+    max: 600,
+    help: 'Wait between clean continuous probes so Shadow does not behave like a constant extra viewer.',
+  },
   { key: 'probe_duration_seconds', label: 'Probe Duration', suffix: 'sec', min: 3, max: 120 },
   { key: 'next_stream_pre_probe_duration_seconds', label: 'Next Probe Duration', suffix: 'sec', min: 3, max: 60 },
   { key: 'garbled_audio_error_threshold', label: 'Audio Error Threshold', suffix: 'hits', min: 1, max: 20 },

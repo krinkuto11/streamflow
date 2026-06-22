@@ -578,6 +578,19 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3 md:col-span-2">
+                <div className="min-w-0 flex-1">
+                  <Label className="text-sm font-medium">Persistent Watcher</Label>
+                  <p className="text-xs text-muted-foreground">
+                    Keep a continuous Shadow playback client open. Leave off for low-impact monitoring.
+                  </p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.persistent_watcher_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('persistent_watcher_enabled', value)}
+                />
+              </div>
+
               <div className="rounded-md border p-3 md:col-span-2">
                 <Label className="text-sm font-medium">Watch Mode</Label>
                 <div className="mt-3 grid gap-2 sm:grid-cols-2">
@@ -819,7 +832,7 @@ export default function ShadowBlankMonitor() {
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                           <span>{channel.stream_ref}</span>
                           {!programLabel && channel.watcher_state === 'waiting' && (
-                            <span>Waiting for shadow watcher</span>
+                            <span>Waiting for next shadow probe</span>
                           )}
                           {channel.watcher_client_ref && <span>{channel.watcher_client_ref}</span>}
                           {formatDuration(channel.watcher_uptime_seconds) && (
