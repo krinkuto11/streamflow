@@ -96,6 +96,8 @@ PROXY_OUTPUT_FORMAT_ALIASES = {
     "mpegts": "mpegts",
     "ts": "mpegts",
 }
+SHADOW_WATCHER_USER_AGENT_MARKER = "StreamFlow-Shadow-Blank-Monitor/1.0"
+DEFAULT_WATCHER_USER_AGENT = f"TiviMate/5.1.6 {SHADOW_WATCHER_USER_AGENT_MARKER}"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -134,7 +136,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "max_switches_per_hour": 3,
     "max_concurrent_watchers": 2,
     "skip_during_quality_check": False,
-    "watcher_user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+    "watcher_user_agent": DEFAULT_WATCHER_USER_AGENT,
     "watcher_api_key": "",
     "excluded_channel_ids": [],
     "excluded_channel_uuids": [],
@@ -2509,7 +2511,7 @@ class ShadowBlankMonitorService:
         except (TypeError, ValueError):
             return False
 
-        marker = str(config.get("watcher_user_agent") or "").lower()
+        marker = self._watcher_client_marker(config)
         if not marker:
             return False
         clients = status.get("clients")
@@ -4218,6 +4220,14 @@ class ShadowBlankMonitorService:
         return str(client)
 
     @staticmethod
+    def _watcher_client_marker(config: Dict[str, Any]) -> str:
+        user_agent = str(config.get("watcher_user_agent") or DEFAULT_WATCHER_USER_AGENT).lower()
+        marker = SHADOW_WATCHER_USER_AGENT_MARKER.lower()
+        if marker in user_agent:
+            return marker
+        return user_agent
+
+    @staticmethod
     def _status_clients(status: Dict[str, Any]) -> Optional[List[Any]]:
         clients = status.get("clients")
         if isinstance(clients, dict):
@@ -4243,7 +4253,7 @@ class ShadowBlankMonitorService:
         return f"{index}:{cls._client_text(client)}"
 
     def _real_client_refs(self, status: Dict[str, Any], config: Dict[str, Any]) -> List[str]:
-        marker = str(config.get("watcher_user_agent") or "").lower()
+        marker = self._watcher_client_marker(config)
         clients = self._status_clients(status)
         if not clients:
             return []
@@ -4265,7 +4275,7 @@ class ShadowBlankMonitorService:
         return PROXY_OUTPUT_FORMAT_ALIASES.get(text)
 
     def _real_viewer_output_format(self, status: Dict[str, Any], config: Dict[str, Any]) -> Optional[str]:
-        marker = str(config.get("watcher_user_agent") or "").lower()
+        marker = self._watcher_client_marker(config)
         clients = status.get("clients")
         if isinstance(clients, dict):
             clients = list(clients.values())
@@ -4292,7 +4302,7 @@ class ShadowBlankMonitorService:
         config: Dict[str, Any],
         target: Optional[Dict[str, Any]] = None,
     ) -> int:
-        marker = str(config.get("watcher_user_agent") or "").lower()
+        marker = self._watcher_client_marker(config)
         clients = self._status_clients(status)
         if isinstance(clients, list):
             non_watcher_refs: List[str] = []
@@ -4366,7 +4376,7 @@ class ShadowBlankMonitorService:
         return int(self._watcher_client_details(status, config).get("watcher_client_count") or 0)
 
     def _watcher_client_details(self, status: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-        marker = str(config.get("watcher_user_agent") or "").lower()
+        marker = self._watcher_client_marker(config)
         if not marker:
             return {"watcher_client_count": 0}
         clients = self._status_clients(status)

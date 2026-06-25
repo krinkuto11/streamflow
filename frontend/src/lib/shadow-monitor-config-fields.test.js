@@ -6,53 +6,27 @@ import {
 } from './shadow-monitor-config-fields.js'
 
 describe('shadowMonitorNumberFields', () => {
-  it('makes per-channel switch throttling explicit', () => {
+  it('keeps only viewer release timing visible in the normal UI', () => {
+    const viewerGrace = shadowMonitorNumberFields.find(field => field.key === 'viewer_left_grace_seconds')
     const cooldown = shadowMonitorNumberFields.find(field => field.key === 'channel_cooldown_seconds')
     const switchLimit = shadowMonitorNumberFields.find(field => field.key === 'max_switches_per_hour')
 
-    expect(cooldown).toMatchObject({
-      label: 'Channel Cooldown',
+    expect(viewerGrace).toMatchObject({
+      label: 'Viewer Grace',
       suffix: 'sec',
+      min: 0,
+      max: 300,
     })
-    expect(cooldown.help).toMatch(/same channel/i)
-    expect(cooldown.help).toMatch(/watcher probes/i)
-
-    expect(switchLimit).toMatchObject({
-      label: 'Channel Switch Limit',
-      suffix: '/ hour',
-      min: 1,
-      max: 20,
-    })
-    expect(switchLimit.help).toMatch(/one channel/i)
-    expect(switchLimit.help).toMatch(/rolling hour/i)
+    expect(viewerGrace.help).toMatch(/real viewer disappears/i)
+    expect(cooldown).toBeUndefined()
+    expect(switchLimit).toBeUndefined()
   })
 
-  it('keeps all numeric and threshold config keys available to the page', () => {
+  it('hides low-level probe and threshold tuning from the normal page', () => {
     expect(shadowMonitorNumberFields.map(field => field.key)).toEqual([
-      'poll_interval_seconds',
-      'watch_gap_seconds',
-      'continuous_probe_interval_seconds',
-      'probe_duration_seconds',
-      'next_stream_pre_probe_duration_seconds',
-      'garbled_audio_error_threshold',
-      'confirmation_count',
-      'channel_cooldown_seconds',
-      'max_switches_per_hour',
-      'max_concurrent_watchers',
-      'silent_audio_noise_db',
-      'offline_image_hash_threshold',
-      'offline_image_capture_offset_seconds',
+      'viewer_left_grace_seconds',
     ])
 
-    expect(shadowMonitorThresholdFields.map(field => field.key)).toEqual([
-      'blank_min_duration_seconds',
-      'blank_pixel_threshold',
-      'blank_ratio_threshold',
-      'freeze_min_duration_seconds',
-      'freeze_noise_threshold',
-      'freeze_ratio_threshold',
-      'no_decodable_frames_min_duration_seconds',
-      'silent_audio_min_duration_seconds',
-    ])
+    expect(shadowMonitorThresholdFields).toEqual([])
   })
 })

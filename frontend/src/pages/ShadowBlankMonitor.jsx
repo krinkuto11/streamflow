@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
@@ -16,6 +17,14 @@ import {
 import {
   shadowMonitorNumberFields,
 } from '@/lib/shadow-monitor-config-fields.js'
+import {
+  CUSTOM_WATCHER_USER_AGENT_TEMPLATE,
+  CUSTOM_WATCHER_USER_AGENT_VALUE,
+  SHADOW_WATCHER_USER_AGENT_MARKER,
+  getWatcherUserAgentPreset,
+  getWatcherUserAgentSelectValue,
+  watcherUserAgentPresets,
+} from '@/lib/shadow-monitor-user-agent-presets.js'
 import {
   getShadowMonitorDisplayState,
   syncShadowMonitorConfigFromStatus,
@@ -306,6 +315,10 @@ export default function ShadowBlankMonitor() {
     loopSwitchGateSatisfied,
   } = displayState
   const canLearnOfflineImage = actionLoading === '' && watchedChannels.length > 0
+  const watcherUserAgent = String(editedConfig.watcher_user_agent || '')
+  const watcherUserAgentSelectValue = getWatcherUserAgentSelectValue(watcherUserAgent)
+  const watcherUserAgentPreset = getWatcherUserAgentPreset(watcherUserAgent)
+  const watcherUserAgentIsCustom = watcherUserAgentSelectValue === CUSTOM_WATCHER_USER_AGENT_VALUE
 
   return (
     <div className="space-y-6">
@@ -654,6 +667,50 @@ export default function ShadowBlankMonitor() {
               >
                 Clear Key
               </Button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="watcher_user_agent_preset">Watcher User Agent</Label>
+                <Select
+                  value={watcherUserAgentSelectValue}
+                  onValueChange={(value) => {
+                    if (value === CUSTOM_WATCHER_USER_AGENT_VALUE) {
+                      updateConfigValue('watcher_user_agent', CUSTOM_WATCHER_USER_AGENT_TEMPLATE)
+                      return
+                    }
+                    updateConfigValue('watcher_user_agent', value)
+                  }}
+                >
+                  <SelectTrigger id="watcher_user_agent_preset">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {watcherUserAgentPresets.map(preset => (
+                      <SelectItem key={preset.value} value={preset.value}>
+                        {preset.label}
+                      </SelectItem>
+                    ))}
+                    <SelectItem value={CUSTOM_WATCHER_USER_AGENT_VALUE}>Custom</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {watcherUserAgentPreset?.description || 'Use a custom playback user agent for the watcher.'}
+                </p>
+              </div>
+              {watcherUserAgentIsCustom ? (
+                <div className="space-y-2">
+                  <Label htmlFor="watcher_user_agent">Custom User Agent</Label>
+                  <Input
+                    id="watcher_user_agent"
+                    value={watcherUserAgent}
+                    onChange={(event) => updateConfigValue('watcher_user_agent', event.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Keep <span className="font-mono">{SHADOW_WATCHER_USER_AGENT_MARKER}</span> in the value so Shadow can separate its watcher from real viewers.
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">

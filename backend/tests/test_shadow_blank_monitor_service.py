@@ -12,6 +12,8 @@ from apps.api.shadow_blank_monitor_handlers import (
 )
 from apps.stream import shadow_blank_monitor_service as shadow_module
 from apps.stream.shadow_blank_monitor_service import (
+    DEFAULT_WATCHER_USER_AGENT,
+    SHADOW_WATCHER_USER_AGENT_MARKER,
     SHADOW_MONITOR_SCAN_ERROR_MESSAGE,
     ShadowBlankMonitorService,
     normalize_config,
@@ -217,6 +219,38 @@ def test_watcher_details_prefers_oldest_visible_watcher(tmp_path):
     assert details["watcher_client_count"] == 2
     assert details["watcher_client_ref"] == shadow_module._ref("client", "persistent-watcher")
     assert details["watcher_uptime_seconds"] == 100
+
+
+def test_default_watcher_user_agent_is_tivimate_like_with_unique_marker():
+    config = normalize_config({})
+
+    assert config["watcher_user_agent"] == DEFAULT_WATCHER_USER_AGENT
+    assert config["watcher_user_agent"].startswith("TiviMate/")
+    assert SHADOW_WATCHER_USER_AGENT_MARKER in config["watcher_user_agent"]
+
+
+def test_tivimate_like_watcher_user_agent_does_not_hide_real_tivimate_viewers(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({})
+    status = active_status(
+        stream_id=10,
+        clients=[
+            {
+                "user_agent": "TiviMate/5.1.6",
+                "client_id": "real-tivimate-viewer",
+            },
+            {
+                "user_agent": config["watcher_user_agent"],
+                "client_id": "shadow-watcher",
+            },
+        ],
+    )
+
+    assert service._real_client_count(status, config) == 1
+    assert service._watcher_client_count(status, config) == 1
 
 
 def test_unmarked_probe_client_is_not_counted_as_real_after_viewer_left(tmp_path):
