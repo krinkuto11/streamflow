@@ -132,7 +132,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "next_stream_pre_probe_duration_seconds": 8,
     "confirmation_count": 2,
     "channel_cooldown_seconds": 300,
-    "viewer_left_grace_seconds": 30,
+    "viewer_left_grace_seconds": 5,
     "max_switches_per_hour": 3,
     "max_concurrent_watchers": 2,
     "skip_during_quality_check": False,

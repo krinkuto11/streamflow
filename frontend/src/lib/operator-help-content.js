@@ -623,11 +623,11 @@ export const operatorHelpDetailTopics = [
       {
         name: 'Viewer Grace',
         controlType: 'Visible UI setting',
-        defaultValue: '30 seconds',
+        defaultValue: '5 seconds',
         location: 'Shadow Monitor -> Configuration card -> Viewer Grace',
         effect: 'Keeps a channel in release grace briefly after the real viewer disappears so transient Dispatcharr status lag does not look like a new viewer.',
-        useWhen: 'Keep the default unless Dispatcharr status lags longer or releases too slowly after a viewer leaves.',
-        risk: 'Too short can drop a watcher during harmless status jitter; too long can keep a watcher around after a real viewer has gone.',
+        useWhen: 'Keep the default for normal zapping. Raise only if Dispatcharr status lag is proven longer than the default.',
+        risk: 'Too short can drop a watcher during harmless status jitter; too long can keep watcher probes around after fast channel switching and consume provider/profile capacity.',
       },
       {
         name: 'Dry Run',

@@ -400,6 +400,7 @@ def test_watch_mode_controls_scan_delay():
     assert defaults["next_stream_pre_probe_duration_seconds"] == 8
     assert defaults["confirmation_count"] == 2
     assert defaults["channel_cooldown_seconds"] == 300
+    assert defaults["viewer_left_grace_seconds"] == 5
     assert defaults["max_switches_per_hour"] == 3
     assert defaults["max_concurrent_watchers"] == 2
 
