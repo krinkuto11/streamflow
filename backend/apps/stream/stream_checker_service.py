@@ -806,6 +806,92 @@ class StreamCheckerService:
         return config
 
     @staticmethod
+    def _coerce_stream_id_list(raw_stream_ids: Any) -> List[int]:
+        """Return stream IDs as ints, accepting Dispatcharr int or object lists."""
+        if not isinstance(raw_stream_ids, (list, tuple)):
+            return []
+
+        coerced: List[int] = []
+        seen = set()
+        for raw_stream_id in raw_stream_ids:
+            if isinstance(raw_stream_id, dict):
+                raw_stream_id = raw_stream_id.get('id')
+            try:
+                stream_id = int(raw_stream_id)
+            except (TypeError, ValueError):
+                continue
+            if stream_id in seen:
+                continue
+            seen.add(stream_id)
+            coerced.append(stream_id)
+        return coerced
+
+    def _get_channel_assignment_stream_ids(
+        self,
+        channel_id: int,
+        channel_data: Optional[Dict[str, Any]],
+        udi: Any,
+        fallback_stream_ids: Optional[List[int]] = None,
+        refresh_from_dispatcharr: bool = False,
+    ) -> List[int]:
+        """Return the best available full Dispatcharr channel assignment list.
+
+        When dead-stream removal is disabled, the checker still rewrites the
+        channel for ordering. A stale UDI stream cache must not make that write
+        shrink the user's existing channel assignment list.
+        """
+        if refresh_from_dispatcharr:
+            try:
+                fetcher = getattr(udi, 'fetcher', None)
+                fetch_channel_by_id = getattr(fetcher, 'fetch_channel_by_id', None)
+                if callable(fetch_channel_by_id):
+                    fresh_channel = fetch_channel_by_id(channel_id)
+                    if isinstance(fresh_channel, dict) and 'streams' in fresh_channel:
+                        try:
+                            update_channel = getattr(udi, 'update_channel', None)
+                            if callable(update_channel):
+                                update_channel(channel_id, fresh_channel)
+                        except Exception as cache_err:
+                            logger.debug(
+                                "Could not refresh cached channel assignment for %s: %s",
+                                channel_id,
+                                cache_err,
+                            )
+                        return self._coerce_stream_id_list(fresh_channel.get('streams'))
+            except Exception as exc:
+                logger.warning(
+                    "Could not fetch fresh channel assignment for %s before write-back: %s",
+                    channel_id,
+                    exc,
+                )
+
+        assignment_ids: List[int] = []
+        if isinstance(channel_data, dict):
+            assignment_ids.extend(self._coerce_stream_id_list(channel_data.get('streams')))
+        assignment_ids.extend(self._coerce_stream_id_list(fallback_stream_ids or []))
+        return self._coerce_stream_id_list(assignment_ids)
+
+    @staticmethod
+    def _build_write_back_valid_stream_ids(
+        udi: Any,
+        assignment_stream_ids: List[int],
+        dead_stream_removal_enabled: bool,
+    ) -> Optional[set]:
+        """Return valid IDs for write-back without losing assigned cache misses."""
+        if dead_stream_removal_enabled:
+            return None
+
+        valid_stream_ids = set()
+        try:
+            get_valid_stream_ids = getattr(udi, 'get_valid_stream_ids', None)
+            if callable(get_valid_stream_ids):
+                valid_stream_ids.update(get_valid_stream_ids() or set())
+        except Exception as exc:
+            logger.warning("Could not read UDI valid stream IDs before write-back: %s", exc)
+        valid_stream_ids.update(assignment_stream_ids or [])
+        return valid_stream_ids
+
+    @staticmethod
     def _get_uncached_channel_stream_ids(
         raw_channel_stream_ids: List[int],
         cached_stream_id_set: set,
@@ -2268,6 +2354,13 @@ class StreamCheckerService:
                     logger.warning(f"Failed to parse last_check timestamp for channel {channel_id}: {e}")
             
             current_stream_ids = [s['id'] for s in streams]
+            assigned_stream_ids = self._get_channel_assignment_stream_ids(
+                channel_id,
+                channel_data,
+                udi,
+                fallback_stream_ids=current_stream_ids,
+                refresh_from_dispatcharr=not dead_stream_removal_enabled,
+            )
             protected_active_stream_ids = self._get_active_viewer_protected_stream_ids(
                 channel_id,
                 streams,
@@ -3012,7 +3105,7 @@ class StreamCheckerService:
             # Without this guard, a stale cache causes those streams to be silently dropped
             # when the checker PATCHes the channel's stream list back to Dispatcharr.
             _uncached_ids = self._get_uncached_channel_stream_ids(
-                channel_data.get('streams', []),
+                assigned_stream_ids,
                 set(reordered_ids),
                 dead_stream_removal_enabled,
                 dead_stream_ids,
@@ -3025,6 +3118,12 @@ class StreamCheckerService:
                     f"{_uncached_ids[:5]}{'...' if len(_uncached_ids) > 5 else ''}"
                 )
                 reordered_ids.extend(_uncached_ids)
+
+            write_back_valid_stream_ids = self._build_write_back_valid_stream_ids(
+                udi,
+                assigned_stream_ids,
+                dead_stream_removal_enabled,
+            )
 
             if not hasattr(update_channel_streams, "mock_calls"):
                 failed_connectivity = self._require_quality_check_connectivity(
@@ -3043,6 +3142,7 @@ class StreamCheckerService:
             update_channel_streams(
                 channel_id,
                 reordered_ids,
+                valid_stream_ids=write_back_valid_stream_ids,
                 allow_dead_streams=(not dead_stream_removal_enabled),
                 protected_stream_ids=protected_active_stream_ids,
             )
@@ -3571,6 +3671,13 @@ class StreamCheckerService:
                     logger.warning(f"Failed to parse last_check timestamp for channel {channel_id}: {e}")
             
             current_stream_ids = [s['id'] for s in streams]
+            assigned_stream_ids = self._get_channel_assignment_stream_ids(
+                channel_id,
+                channel_data,
+                udi,
+                fallback_stream_ids=current_stream_ids,
+                refresh_from_dispatcharr=not dead_stream_removal_enabled,
+            )
             protected_active_stream_ids = self._get_active_viewer_protected_stream_ids(
                 channel_id,
                 streams,
@@ -4138,7 +4245,7 @@ class StreamCheckerService:
             # Without this guard, a stale cache causes those streams to be silently dropped
             # when the checker PATCHes the channel's stream list back to Dispatcharr.
             _uncached_ids = self._get_uncached_channel_stream_ids(
-                channel_data.get('streams', []),
+                assigned_stream_ids,
                 set(reordered_ids),
                 dead_stream_removal_enabled,
                 dead_stream_ids,
@@ -4151,6 +4258,12 @@ class StreamCheckerService:
                     f"{_uncached_ids[:5]}{'...' if len(_uncached_ids) > 5 else ''}"
                 )
                 reordered_ids.extend(_uncached_ids)
+
+            write_back_valid_stream_ids = self._build_write_back_valid_stream_ids(
+                udi,
+                assigned_stream_ids,
+                dead_stream_removal_enabled,
+            )
 
             if not hasattr(update_channel_streams, "mock_calls"):
                 failed_connectivity = self._require_quality_check_connectivity(
@@ -4169,6 +4282,7 @@ class StreamCheckerService:
             update_channel_streams(
                 channel_id,
                 reordered_ids,
+                valid_stream_ids=write_back_valid_stream_ids,
                 allow_dead_streams=(not dead_stream_removal_enabled),
                 protected_stream_ids=protected_active_stream_ids,
             )
