@@ -140,7 +140,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "excluded_channel_uuids": [],
 }
 CONFIG_KEYS = set(DEFAULT_CONFIG)
-WATCH_MODES = {"periodic", "continuous"}
+WATCH_MODES = {"continuous"}
 MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
     "blank",
     "freeze",
@@ -373,9 +373,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["loop_detection_enabled"] = bool(config.get("loop_detection_enabled"))
     config["persistent_watcher_enabled"] = bool(config.get("persistent_watcher_enabled"))
     config["next_stream_pre_probe_enabled"] = bool(config.get("next_stream_pre_probe_enabled"))
-    config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
-    if config["watch_mode"] not in WATCH_MODES:
-        config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
+    config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
     # The shadow monitor protects active viewers through Dispatcharr's local
     # channel proxy. It should not pause just because quality checks are active.
     config["skip_during_quality_check"] = False
@@ -843,9 +841,14 @@ class ShadowBlankMonitorService:
             viewer_output_format = self._real_viewer_output_format(raw_status, config)
 
             stream_id = self._extract_stream_id(raw_status)
-            real_clients = self._real_client_count(raw_status, config)
+            previous_target = previous_watched.get(channel_uuid) or {}
+            count_target = (
+                previous_target
+                if continuous_mode and previous_target.get("active_probe_started_at") is not None
+                else None
+            )
+            real_clients = self._real_client_count(raw_status, config, count_target)
             if real_clients <= 0:
-                previous_target = previous_watched.get(channel_uuid)
                 previous_absence = previous_viewer_absences.get(channel_uuid)
                 grace_target = self._viewer_left_grace_target(
                     raw_status,
@@ -949,9 +952,12 @@ class ShadowBlankMonitorService:
                 target["current_program"] = current_program
             target.update(watcher_details)
             if continuous_mode:
-                previous_target = previous_watched.get(channel_uuid) or {}
                 probe_running = channel_uuid in active_probe_channels
                 previous_probe_started = previous_target.get("active_probe_started_at")
+                if previous_probe_started is not None and previous_target.get("real_client_refs"):
+                    target["real_client_refs"] = list(previous_target.get("real_client_refs") or [])
+                else:
+                    target["real_client_refs"] = self._real_client_refs(raw_status, config)
                 if previous_probe_started is not None:
                     probe_target = dict(target)
                     probe_target["active_probe_started_at"] = previous_probe_started
@@ -4212,6 +4218,44 @@ class ShadowBlankMonitorService:
         return str(client)
 
     @staticmethod
+    def _status_clients(status: Dict[str, Any]) -> Optional[List[Any]]:
+        clients = status.get("clients")
+        if isinstance(clients, dict):
+            return list(clients.values())
+        if isinstance(clients, list):
+            return clients
+        return None
+
+    @classmethod
+    def _client_ref(cls, client: Any, index: int) -> str:
+        if isinstance(client, dict):
+            for key in ("client_id", "id", "session_id"):
+                value = client.get(key)
+                if value is not None and str(value).strip():
+                    return f"{key}:{str(value).strip()}"
+            parts = [
+                str(client.get(key) or "").strip()
+                for key in ("ip", "user", "username", "connected_at", "started_at", "user_agent")
+                if str(client.get(key) or "").strip()
+            ]
+            if parts:
+                return "|".join(parts)
+        return f"{index}:{cls._client_text(client)}"
+
+    def _real_client_refs(self, status: Dict[str, Any], config: Dict[str, Any]) -> List[str]:
+        marker = str(config.get("watcher_user_agent") or "").lower()
+        clients = self._status_clients(status)
+        if not clients:
+            return []
+        refs: List[str] = []
+        for index, client in enumerate(clients):
+            text = self._client_text(client).lower()
+            if marker and marker in text:
+                continue
+            refs.append(self._client_ref(client, index))
+        return refs
+
+    @staticmethod
     def _normalize_proxy_output_format(value: Any) -> Optional[str]:
         text = str(value or "").strip().lower()
         if not text:
@@ -4249,17 +4293,39 @@ class ShadowBlankMonitorService:
         target: Optional[Dict[str, Any]] = None,
     ) -> int:
         marker = str(config.get("watcher_user_agent") or "").lower()
-        clients = status.get("clients")
-        if isinstance(clients, dict):
-            clients = list(clients.values())
+        clients = self._status_clients(status)
         if isinstance(clients, list):
-            real = 0
-            for client in clients:
+            non_watcher_refs: List[str] = []
+            visible_watcher_count = 0
+            for index, client in enumerate(clients):
                 text = self._client_text(client).lower()
                 if marker and marker in text:
+                    visible_watcher_count += 1
                     continue
-                real += 1
-            return real
+                non_watcher_refs.append(self._client_ref(client, index))
+
+            if target is not None and visible_watcher_count <= 0:
+                probe_started = target.get("active_probe_started_at")
+                try:
+                    probe_age = self.clock() - float(probe_started)
+                except (TypeError, ValueError):
+                    probe_age = 0.0
+                probe_is_established = (
+                    probe_started is not None
+                    and probe_age >= AGGREGATE_ONLY_VIEWER_GRACE_SECONDS
+                )
+                baseline_refs = {
+                    str(ref)
+                    for ref in (target.get("real_client_refs") or [])
+                    if str(ref).strip()
+                }
+                if probe_is_established and baseline_refs and non_watcher_refs:
+                    still_real = [ref for ref in non_watcher_refs if ref in baseline_refs]
+                    unseen = [ref for ref in non_watcher_refs if ref not in baseline_refs]
+                    inferred_shadow_clients = 1 if unseen else 0
+                    return len(still_real) + max(0, len(unseen) - inferred_shadow_clients)
+
+            return len(non_watcher_refs)
 
         aggregate_count: Optional[int] = None
         for key in ("real_client_count", "client_count", "current_viewers", "viewer_count"):
@@ -4303,9 +4369,7 @@ class ShadowBlankMonitorService:
         marker = str(config.get("watcher_user_agent") or "").lower()
         if not marker:
             return {"watcher_client_count": 0}
-        clients = status.get("clients")
-        if isinstance(clients, dict):
-            clients = list(clients.values())
+        clients = self._status_clients(status)
         if not isinstance(clients, list):
             return {"watcher_client_count": 0}
 

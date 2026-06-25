@@ -219,6 +219,82 @@ def test_watcher_details_prefers_oldest_visible_watcher(tmp_path):
     assert details["watcher_uptime_seconds"] == 100
 
 
+def test_unmarked_probe_client_is_not_counted_as_real_after_viewer_left(tmp_path):
+    now = {"value": 1000.0}
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        clock=lambda: now["value"],
+    )
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 30,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "active_probe_started_at": 997.0,
+        "real_client_refs": ["client_id:real-viewer"],
+    }
+    status = active_status(
+        stream_id=10,
+        clients=[
+            {
+                "client_id": "shadow-probe",
+                "user": "bachel",
+                "ip": "10.10.30.20",
+            }
+        ],
+    )
+
+    assert service._real_client_count(status, config, target) == 0
+
+
+def test_discovery_keeps_grace_when_only_unmarked_probe_client_remains(tmp_path):
+    now = {"value": 1000.0}
+    channel = {"id": 1, "uuid": "uuid-1", "name": "Das Erste HD", "streams": [10, 11]}
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {
+                            "client_id": "shadow-probe",
+                            "user": "bachel",
+                            "ip": "10.10.30.20",
+                        }
+                    ],
+                )
+            }
+        ],
+        channels=[channel],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._watched["uuid-1"] = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": shadow_module._ref("channel", 1),
+        "channel_name": "Das Erste HD",
+        "stream_id": 10,
+        "stream_ref": shadow_module._ref("stream", 10),
+        "real_client_count": 1,
+        "real_client_refs": ["client_id:real-viewer"],
+        "active_probe_started_at": 997.0,
+    }
+    service._active_probes.add("uuid-1")
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 30,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+
+    assert len(targets) == 1
+    assert targets[0]["viewer_left_grace_active"] is True
+    assert targets[0]["real_client_count"] == 0
+    assert targets[0]["viewer_left_grace_remaining_seconds"] == 30
+
+
 def test_continuous_loop_probe_is_rate_limited_between_slices(tmp_path):
     now = {"value": 1000.0}
     loop_calls = []
@@ -300,12 +376,15 @@ def test_watch_mode_controls_scan_delay():
     })
     assert ShadowBlankMonitorService._next_scan_delay(continuous) == 2
 
-    periodic = normalize_config({
+    legacy_periodic = normalize_config({
         "watch_mode": "periodic",
+        "persistent_watcher_enabled": True,
         "watch_gap_seconds": 2,
         "poll_interval_seconds": 90,
     })
-    assert ShadowBlankMonitorService._next_scan_delay(periodic) == 90
+    assert legacy_periodic["watch_mode"] == "continuous"
+    assert legacy_periodic["persistent_watcher_enabled"] is True
+    assert ShadowBlankMonitorService._next_scan_delay(legacy_periodic) == 2
 
     invalid = normalize_config({"watch_mode": "always-on", "watch_gap_seconds": 0})
     assert invalid["watch_mode"] == "continuous"
@@ -348,7 +427,7 @@ def test_status_exposes_shadow_loop_detection_context(tmp_path):
     })
 
     status = service.get_status()
-    assert status["watch_mode"] == "periodic"
+    assert status["watch_mode"] == "continuous"
     assert status["has_watcher_api_key"] is True
     assert status["loop_detection_enabled"] is True
     assert status["loop_probe_duration_seconds"] == 180
