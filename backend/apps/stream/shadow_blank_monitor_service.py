@@ -59,6 +59,13 @@ NO_DECODABLE_FRAME_ERROR_PATTERNS = (
     "no frame could be decoded",
 )
 FFMPEG_FRAME_RE = re.compile(r"\bframe=\s*(?P<frames>\d+)")
+ENTROPY_FRAME_RE = re.compile(r"frame:\s*(?P<frame>\d+)")
+ENTROPY_VALUE_RE = re.compile(
+    r"lavfi\.entropy\.normalized_entropy\.normal\.(?P<plane>[YUV])=(?P<value>\d+(?:\.\d+)?)"
+)
+SOLID_COLOR_ENTROPY_THRESHOLD = 0.02
+SOLID_COLOR_MIN_SAMPLES = 3
+SOLID_COLOR_SAMPLE_RATIO_THRESHOLD = 0.80
 OFFLINE_IMAGE_PHASH_RE = re.compile(r"^[0-9a-f]{16}$")
 SILENCE_START_RE = re.compile(r"silence_start:\s*(?P<start>\d+(?:\.\d+)?)")
 SILENCE_END_RE = re.compile(r"silence_end:\s*(?P<end>\d+(?:\.\d+)?)")
@@ -146,6 +153,7 @@ WATCH_MODES = {"continuous"}
 MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
     "blank",
     "freeze",
+    "solid_color",
     "offline_image",
     "garbled_audio",
     "silent_audio",
@@ -154,6 +162,7 @@ MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
 DETECTION_REASONS = {
     "blank",
     "freeze",
+    "solid_color",
     "no_decodable_frames",
     "garbled_audio",
     "silent_audio",
@@ -163,6 +172,7 @@ DETECTION_REASONS = {
 VIDEO_FAULT_CONFIRMATION_REASONS = {
     "blank",
     "freeze",
+    "solid_color",
 }
 VIDEO_FAULT_CONFIRMATION_KEY = "video_fault"
 PENDING_EVENT_REASONS = {
@@ -172,6 +182,11 @@ PENDING_EVENT_REASONS = {
 DETECTION_MEASUREMENT_KEYS = {
     "blank": ("blank_ratio", "blank_duration_secs"),
     "freeze": ("freeze_ratio", "freeze_duration_secs"),
+    "solid_color": (
+        "solid_color_duration_secs",
+        "solid_color_normalized_entropy_max",
+        "solid_color_sample_count",
+    ),
     "no_decodable_frames": (
         "no_decodable_frames_duration_secs",
         "no_decodable_frames_error",
@@ -188,6 +203,11 @@ DETECTION_THRESHOLD_KEYS = {
         "blank_pixel_threshold",
     ),
     "freeze": (
+        "freeze_min_duration_seconds",
+        "freeze_ratio_threshold",
+        "freeze_noise_threshold",
+    ),
+    "solid_color": (
         "freeze_min_duration_seconds",
         "freeze_ratio_threshold",
         "freeze_noise_threshold",
@@ -1519,6 +1539,7 @@ class ShadowBlankMonitorService:
                 result = self.blank_probe(media_probe_url, media_probe_config)
             blank = bool(result.get("blank_detected"))
             freeze = bool(result.get("freeze_detected"))
+            solid_color = bool(result.get("solid_color_detected"))
             no_decodable_frames = bool(result.get("no_decodable_frames_detected"))
             garbled_audio = bool(
                 config.get("garbled_audio_detection_enabled")
@@ -1537,7 +1558,7 @@ class ShadowBlankMonitorService:
                 config.get("watch_mode") == "continuous"
                 and freeze
                 and result.get("audio_stream_present") is True
-                and not any((blank, no_decodable_frames, garbled_audio, silent_audio, offline_image))
+                and not any((blank, solid_color, no_decodable_frames, garbled_audio, silent_audio, offline_image))
             ):
                 freeze = False
                 freeze_suppressed_audio_present = True
@@ -1548,6 +1569,7 @@ class ShadowBlankMonitorService:
                     for reason, detected in (
                         ("blank", blank),
                         ("offline_image", offline_image),
+                        ("solid_color", solid_color),
                         ("freeze", freeze),
                         ("no_decodable_frames", no_decodable_frames),
                         ("garbled_audio", garbled_audio),
@@ -1564,6 +1586,10 @@ class ShadowBlankMonitorService:
                 "freeze_detected": freeze,
                 "freeze_ratio": result.get("freeze_ratio"),
                 "freeze_duration_secs": result.get("freeze_duration_secs"),
+                "solid_color_detected": solid_color,
+                "solid_color_duration_secs": result.get("solid_color_duration_secs"),
+                "solid_color_normalized_entropy_max": result.get("solid_color_normalized_entropy_max"),
+                "solid_color_sample_count": result.get("solid_color_sample_count"),
                 "no_decodable_frames_detected": no_decodable_frames,
                 "no_decodable_frames_duration_secs": result.get("no_decodable_frames_duration_secs"),
                 "no_decodable_frames_error": result.get("no_decodable_frames_error"),
@@ -2352,6 +2378,7 @@ class ShadowBlankMonitorService:
         for reason in (
             "blank",
             "offline_image",
+            "solid_color",
             "freeze",
             "no_decodable_frames",
             "garbled_audio",
@@ -2380,6 +2407,7 @@ class ShadowBlankMonitorService:
         )
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "blank"), None)
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "freeze"), None)
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "solid_color"), None)
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "garbled_audio"), None)
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "silent_audio"), None)
@@ -2392,6 +2420,7 @@ class ShadowBlankMonitorService:
         )
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "blank"), None)
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "freeze"), None)
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "solid_color"), None)
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "garbled_audio"), None)
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "silent_audio"), None)
@@ -3006,6 +3035,11 @@ class ShadowBlankMonitorService:
                 f"freezedetect=n={float(config['freeze_noise_threshold'])}:"
                 f"d={float(config['freeze_min_duration_seconds'])}"
             )
+            video_filters.extend([
+                "fps=1",
+                "entropy",
+                "metadata=mode=print",
+            ])
         command.extend(["-i", url, "-vf", ",".join(video_filters)])
         if config.get("garbled_audio_detection_enabled") or config.get("silent_audio_detection_enabled"):
             audio_filters: List[str] = []
@@ -3210,6 +3244,71 @@ class ShadowBlankMonitorService:
             if longest_silence >= min_duration:
                 result["silent_audio_detected"] = True
 
+        return result
+
+    @staticmethod
+    def _parse_solid_color_detection(
+        output: str,
+        config: Dict[str, Any],
+        *,
+        observed_duration: float,
+    ) -> Dict[str, Any]:
+        result = {
+            "solid_color_detected": False,
+            "solid_color_duration_secs": None,
+            "solid_color_normalized_entropy_max": None,
+            "solid_color_sample_count": 0,
+        }
+        if not config.get("freeze_detection_enabled"):
+            return result
+
+        frame_values: Dict[int, Dict[str, float]] = {}
+        current_frame: Optional[int] = None
+        for line in (output or "").splitlines():
+            frame_match = ENTROPY_FRAME_RE.search(line)
+            if frame_match:
+                try:
+                    current_frame = int(frame_match.group("frame"))
+                    frame_values.setdefault(current_frame, {})
+                except (TypeError, ValueError):
+                    current_frame = None
+                continue
+
+            value_match = ENTROPY_VALUE_RE.search(line)
+            if not value_match or current_frame is None:
+                continue
+            try:
+                value = float(value_match.group("value"))
+            except (TypeError, ValueError):
+                continue
+            frame_values.setdefault(current_frame, {})[value_match.group("plane")] = value
+
+        complete_frames = [
+            values
+            for values in frame_values.values()
+            if all(plane in values for plane in ("Y", "U", "V"))
+        ]
+        if not complete_frames:
+            return result
+
+        frame_maxima = [max(values.values()) for values in complete_frames]
+        low_entropy_samples = [
+            value for value in frame_maxima if value <= SOLID_COLOR_ENTROPY_THRESHOLD
+        ]
+        result["solid_color_sample_count"] = len(low_entropy_samples)
+        result["solid_color_normalized_entropy_max"] = round(max(frame_maxima), 4)
+
+        min_duration = float(
+            config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
+        )
+        low_entropy_ratio = len(low_entropy_samples) / max(1, len(complete_frames))
+        if (
+            len(low_entropy_samples) >= SOLID_COLOR_MIN_SAMPLES
+            and low_entropy_ratio >= SOLID_COLOR_SAMPLE_RATIO_THRESHOLD
+            and float(observed_duration or 0.0) >= min_duration
+        ):
+            result["solid_color_detected"] = True
+            result["solid_color_duration_secs"] = round(float(observed_duration or 0.0), 3)
         return result
 
     @staticmethod
@@ -3530,6 +3629,11 @@ class ShadowBlankMonitorService:
                     duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+                parsed.update(self._parse_solid_color_detection(
+                    output,
+                    config,
+                    observed_duration=duration,
+                ))
             parsed.update(self._parse_audio_detection(
                 output,
                 config,
@@ -3556,6 +3660,11 @@ class ShadowBlankMonitorService:
                     output,
                     duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
+                ))
+                parsed.update(self._parse_solid_color_detection(
+                    output,
+                    config,
+                    observed_duration=duration,
                 ))
             parsed.update(self._parse_audio_detection(
                 output,
@@ -3986,6 +4095,11 @@ class ShadowBlankMonitorService:
                     observed_probe_duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+                parsed.update(self._parse_solid_color_detection(
+                    output,
+                    config,
+                    observed_duration=observed_probe_duration,
+                ))
             if not detected_reason and not viewer_left and not stopped:
                 flushed_blank_duration = max(
                     (
@@ -4010,6 +4124,20 @@ class ShadowBlankMonitorService:
                     if flushed_freeze_duration >= freeze_ratio_required:
                         detected_reason = "freeze"
                         detected_duration = flushed_freeze_duration
+            if (
+                parsed.get("solid_color_detected")
+                and not parsed.get("blank_detected")
+                and parsed.get("freeze_detected")
+                and detected_reason in {"", "freeze"}
+                and not viewer_left
+                and not stopped
+            ):
+                detected_reason = "solid_color"
+                detected_duration = max(
+                    detected_duration,
+                    float(parsed.get("solid_color_duration_secs") or 0.0),
+                    float(parsed.get("freeze_duration_secs") or 0.0),
+                )
             parsed.update(self._parse_audio_detection(
                 output,
                 config,
@@ -4037,6 +4165,11 @@ class ShadowBlankMonitorService:
                     min(1.0, detected_duration / float(freeze_ratio_duration or duration or 1)),
                     4,
                 )
+            elif detected_reason == "solid_color":
+                parsed.setdefault("blank_detected", False)
+                parsed.setdefault("freeze_detected", True)
+                parsed["solid_color_detected"] = True
+                parsed["solid_color_duration_secs"] = round(detected_duration, 3)
             elif detected_reason == "no_decodable_frames":
                 parsed.setdefault("blank_detected", False)
                 parsed.setdefault("freeze_detected", False)

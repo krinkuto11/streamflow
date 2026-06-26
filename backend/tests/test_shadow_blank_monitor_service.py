@@ -3168,6 +3168,68 @@ def test_audio_detection_parser_keeps_audio_stream_listing_ok():
     assert parsed["silent_audio_detected"] is False
 
 
+def test_solid_color_detection_parser_detects_sustained_low_entropy_frames():
+    config = normalize_config({
+        "freeze_detection_enabled": True,
+        "freeze_min_duration_seconds": 5,
+    })
+    output = "".join(
+        (
+            f"[Parsed_metadata_3 @ 000] frame:{frame} pts:{frame} pts_time:{frame}\n"
+            "[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.Y=0.000000\n"
+            "[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.U=0.000000\n"
+            "[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.V=0.000000\n"
+        )
+        for frame in range(6)
+    )
+
+    parsed = ShadowBlankMonitorService._parse_solid_color_detection(
+        output,
+        config,
+        observed_duration=6,
+    )
+
+    assert parsed["solid_color_detected"] is True
+    assert parsed["solid_color_duration_secs"] == 6
+    assert parsed["solid_color_sample_count"] == 6
+    assert parsed["solid_color_normalized_entropy_max"] == 0.0
+
+
+def test_solid_color_detection_parser_ignores_short_low_entropy_cuts():
+    config = normalize_config({
+        "freeze_detection_enabled": True,
+        "freeze_min_duration_seconds": 5,
+    })
+    frame_values = [
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.01, 0.01, 0.01),
+        (0.55, 0.42, 0.38),
+        (0.63, 0.51, 0.44),
+        (0.59, 0.50, 0.43),
+    ]
+    output = "".join(
+        (
+            f"[Parsed_metadata_3 @ 000] frame:{frame} pts:{frame} pts_time:{frame}\n"
+            f"[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.Y={y:.6f}\n"
+            f"[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.U={u:.6f}\n"
+            f"[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.V={v:.6f}\n"
+        )
+        for frame, (y, u, v) in enumerate(frame_values)
+    )
+
+    parsed = ShadowBlankMonitorService._parse_solid_color_detection(
+        output,
+        config,
+        observed_duration=6,
+    )
+
+    assert parsed["solid_color_detected"] is False
+    assert parsed["solid_color_duration_secs"] is None
+    assert parsed["solid_color_sample_count"] == 3
+    assert parsed["solid_color_normalized_entropy_max"] == 0.63
+
+
 def test_media_fault_results_are_ignored_unless_enabled(tmp_path):
     switch_calls = []
     udi = FakeUdi(
@@ -4135,6 +4197,71 @@ def test_continuous_freeze_with_audio_present_is_probe_ok(tmp_path):
     assert details["audio_stream_present"] is True
     with service._lock:
         assert service._blank_counts == {}
+
+
+def test_continuous_solid_color_with_audio_present_switches(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[{"user_agent": "VLC"}],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/good"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": True,
+            "freeze_duration_secs": 12.0,
+            "freeze_ratio": 0.95,
+            "solid_color_detected": True,
+            "solid_color_duration_secs": 12.0,
+            "solid_color_normalized_entropy_max": 0.0,
+            "solid_color_sample_count": 12,
+            "audio_stream_present": True,
+        },
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "freeze_detection_enabled": True,
+        "next_stream_pre_probe_enabled": False,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    event = status["recent_events"][0]
+    assert event["type"] == "switch_success"
+    assert event["trigger_reason"] == "solid_color"
+    details = event["details"]
+    assert details["reason"] == "solid_color"
+    assert details["detection"]["reason"] == "solid_color"
+    measurements = details["detection"]["measurements"]
+    assert measurements["solid_color_duration_secs"] == 12.0
+    assert measurements["solid_color_normalized_entropy_max"] == 0.0
+    assert measurements["solid_color_sample_count"] == 12
+    assert target["last_probe"]["audio_stream_present"] is True
 
 
 def test_continuous_blank_fault_recovery_guard_needs_second_confirmation(tmp_path):
