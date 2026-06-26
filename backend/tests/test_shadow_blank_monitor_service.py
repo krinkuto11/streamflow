@@ -792,6 +792,7 @@ def test_continuous_shadow_loop_probe_is_time_sliced(tmp_path, monkeypatch):
     assert result["loop_probe_ran"] is True
     assert result["loop_detected"] is False
     assert result["loop_probe_sliced"] is True
+    assert result["loop_probe_slice_seconds"] == 30.0
     assert result["loop_probe_slice_seconds"] < 360
     assert result.get("viewer_left") is not True
     assert switch_calls == []

@@ -45,6 +45,7 @@ CONFIG_FILE = CONFIG_DIR / "shadow_blank_monitor_config.json"
 MAX_EVENTS = 100
 LOOP_SWITCH_REQUIRES_PRE_PROBE = True
 LOOP_PENDING_PROBE_OK_MISS_TOLERANCE = 1
+CONTINUOUS_LOOP_PROBE_SLICE_MIN_SECONDS = 30.0
 AGGREGATE_ONLY_VIEWER_GRACE_SECONDS = 2.0
 WATCHER_API_KEY_REQUIRED_CODE = "watcher_api_key_required"
 WATCHER_API_KEY_REQUIRED_MESSAGE = "Watcher API Key is required before Shadow Monitor can start."
@@ -3456,7 +3457,13 @@ class ShadowBlankMonitorService:
             or DEFAULT_CONFIG["loop_probe_duration_seconds"]
         )
         analysis_window = ShadowBlankMonitorService._probe_analysis_window_seconds(config)
-        return max(1.0, min(configured, max(15.0, analysis_window + 3.0)))
+        return max(
+            1.0,
+            min(
+                configured,
+                max(CONTINUOUS_LOOP_PROBE_SLICE_MIN_SECONDS, analysis_window + 3.0),
+            ),
+        )
 
     def _run_loop_probe_if_enabled(
         self,
