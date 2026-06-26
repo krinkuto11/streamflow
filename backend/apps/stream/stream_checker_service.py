@@ -5446,11 +5446,15 @@ class StreamCheckerService:
             
         queue_status['eta_seconds'] = self._calculate_queue_eta_seconds(queue_status)
         
+        queued_waiting = queue_status.get('queue_size', 0) > 0
+        queue_processing = bool(
+            queue_status.get('in_progress', 0) > 0 or
+            queue_status.get('current_channel') is not None
+        )
         worker_or_queue_active = bool(
             self.checking or
-            queue_status.get('queue_size', 0) > 0 or
-            queue_status.get('in_progress', 0) > 0 or
-            queue_status.get('current_channel') is not None or
+            queue_processing or
+            (self.running and queued_waiting) or
             sync_state.get('active', False)
         )
         progress_stale = self._current_progress_stale_gate(

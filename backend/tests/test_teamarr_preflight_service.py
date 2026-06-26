@@ -52,9 +52,15 @@ class FakeChecker:
         self.calls = []
         self.queued = []
         self.gates = []
+        self.running = False
+        self.start_calls = 0
 
     def get_status(self):
         return {"stream_checking_mode": False, "queue": {"queue_size": 0, "in_progress": 0}}
+
+    def start(self):
+        self.start_calls += 1
+        self.running = True
 
     def queue_channel(self, *args, **kwargs):
         self.queued.append((args, kwargs))
@@ -90,6 +96,10 @@ class SequencedChecker(FakeChecker):
 
 
 class BusyChecker(FakeChecker):
+    def __init__(self):
+        super().__init__()
+        self.running = True
+
     def get_status(self):
         return {"stream_checking_mode": True, "queue": {"queue_size": 0, "in_progress": 1}}
 
@@ -1171,6 +1181,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(checker.queued[0][1]["metadata"]["source"], "teamarr_preflight")
         self.assertEqual(service.get_status()["recent_events"][0]["type"], "preflight_queued")
         self.assertIn(("teamarr_preflight_automation", True), checker.gates)
+        self.assertEqual(checker.start_calls, 0)
 
     def test_automation_queue_gate_clears_when_no_run_active(self):
         checker = FakeChecker()
@@ -1321,6 +1332,8 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(kwargs["metadata"]["source"], "teamarr_preflight")
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["type"], "preflight_queued")
+        self.assertEqual(checker.start_calls, 1)
+        self.assertTrue(checker.running)
 
     def test_filter_options_use_teamarr_subscription_and_cache_catalogs(self):
         def http_get(url, **kwargs):
