@@ -444,6 +444,7 @@ class ShadowBlankMonitorService:
         self._last_excluded_active_targets: List[Dict[str, Any]] = []
         self._watcher_absences: Dict[str, Dict[str, Any]] = {}
         self._viewer_absences: Dict[str, Dict[str, Any]] = {}
+        self._viewer_left_finalized: Dict[str, Dict[str, Any]] = {}
         self._blank_counts: Dict[str, int] = defaultdict(int)
         self._detection_misses: Dict[str, int] = defaultdict(int)
         self._cooldowns: Dict[str, float] = {}
@@ -892,16 +893,18 @@ class ShadowBlankMonitorService:
                     event_target["real_client_count"] = 0
                     event_target["watcher_client_count"] = watcher_clients
                     event_target.update(watcher_details)
-                    continuity_events.append((
-                        "viewer_left",
-                        event_target,
-                        {
-                            "reason": "viewer_left_grace_expired" if previous_absence else "viewer_left",
-                            "viewer_absent_seconds": max(0, int(now - grace_since)),
-                            "viewer_left_grace_seconds": viewer_left_grace_seconds,
-                        },
-                    ))
+                    if self._mark_viewer_left_finalized(channel_uuid, event_target):
+                        continuity_events.append((
+                            "viewer_left",
+                            event_target,
+                            {
+                                "reason": "viewer_left_grace_expired" if previous_absence else "viewer_left",
+                                "viewer_absent_seconds": max(0, int(now - grace_since)),
+                                "viewer_left_grace_seconds": viewer_left_grace_seconds,
+                            },
+                        ))
                 continue
+            self._clear_viewer_left_finalized(channel_uuid)
             numeric_id = self._resolve_channel_id(
                 udi,
                 self._extract_channel_id(channel, raw_status),
@@ -1118,18 +1121,19 @@ class ShadowBlankMonitorService:
                     event_target["real_client_count"] = 0
                     event_target["watcher_client_count"] = 0
                     event_target["proxy_status_gap"] = True
-                    continuity_events.append((
-                        "viewer_left",
-                        event_target,
-                        {
-                            "reason": (
-                                "proxy_status_gap_grace_expired"
-                                if previous_absence else "proxy_status_gap"
-                            ),
-                            "viewer_absent_seconds": max(0, int(now - grace_since)),
-                            "viewer_left_grace_seconds": viewer_left_grace_seconds,
-                        },
-                    ))
+                    if self._mark_viewer_left_finalized(channel_uuid, event_target):
+                        continuity_events.append((
+                            "viewer_left",
+                            event_target,
+                            {
+                                "reason": (
+                                    "proxy_status_gap_grace_expired"
+                                    if previous_absence else "proxy_status_gap"
+                                ),
+                                "viewer_absent_seconds": max(0, int(now - grace_since)),
+                                "viewer_left_grace_seconds": viewer_left_grace_seconds,
+                            },
+                        ))
 
         with self._lock:
             self._watched = watched
@@ -1263,10 +1267,41 @@ class ShadowBlankMonitorService:
         target.pop("media_recovery_guard_observed", None)
         event_target = dict(target)
         event_target["real_client_count"] = 0
-        self._record_event("viewer_left", event_target, {})
+        should_record = self._mark_viewer_left_finalized(channel_uuid, event_target)
+        if should_record:
+            self._record_event("viewer_left", event_target, {})
         with self._lock:
             self._watched.pop(channel_uuid, None)
+            self._viewer_absences.pop(channel_uuid, None)
+            self._watcher_absences.pop(channel_uuid, None)
         return False
+
+    def _viewer_left_finalized_key(self, target: Dict[str, Any]) -> str:
+        stream_ref = target.get("stream_ref")
+        if stream_ref:
+            return str(stream_ref)
+        stream_id = target.get("stream_id")
+        if stream_id is not None:
+            return _ref("stream", stream_id)
+        return ""
+
+    def _mark_viewer_left_finalized(self, channel_uuid: str, target: Dict[str, Any]) -> bool:
+        key = self._viewer_left_finalized_key(target)
+        with self._lock:
+            previous = self._viewer_left_finalized.get(channel_uuid)
+            if previous and previous.get("key") == key:
+                return False
+            self._viewer_left_finalized[channel_uuid] = {
+                "key": key,
+                "timestamp": self.clock(),
+            }
+            self._viewer_absences.pop(channel_uuid, None)
+            self._watcher_absences.pop(channel_uuid, None)
+        return True
+
+    def _clear_viewer_left_finalized(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._viewer_left_finalized.pop(channel_uuid, None)
 
     def _probe_targets(
         self,

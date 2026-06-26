@@ -5855,6 +5855,43 @@ def test_proxy_status_gap_expires_and_stops_persistent_watcher(tmp_path, monkeyp
     assert service.get_status()["recent_events"][0]["details"]["reason"] == "proxy_status_gap_grace_expired"
 
 
+def test_viewer_left_final_event_is_recorded_once_until_viewer_returns(tmp_path):
+    now = {"value": 1000.0}
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 0,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._handle_viewer_left_or_grace("uuid-1", targets[0], config, {})
+
+    with service._lock:
+        service._watched["uuid-1"] = dict(targets[0])
+        service._viewer_absences["uuid-1"] = {"since": now["value"], "last_real_client_count": 1}
+
+    now["value"] = 1001.0
+    udi.statuses = [{}]
+    udi.status_calls = 0
+    assert service.discover_active_targets(udi, config) == []
+
+    events = [event for event in service.get_status()["recent_events"] if event["type"] == "viewer_left"]
+    assert len(events) == 1
+
+    now["value"] = 1002.0
+    udi.statuses = [{"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])}]
+    udi.status_calls = 0
+    returned_targets = service.discover_active_targets(udi, config)
+    service._handle_viewer_left_or_grace("uuid-1", returned_targets[0], config, {})
+
+    events = [event for event in service.get_status()["recent_events"] if event["type"] == "viewer_left"]
+    assert len(events) == 2
+
+
 def test_probe_viewer_left_uses_grace_before_stopping_watcher(tmp_path):
     udi = FakeUdi(
         statuses=[{"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])}],
