@@ -101,12 +101,15 @@ class TestLoopProbeSampling(unittest.TestCase):
             stream_check_utils.subprocess,
             "Popen",
             return_value=FakeProcess(pipe_bytes),
-        ), patch.object(stream_check_utils.time, "monotonic", side_effect=fake_monotonic):
+        ) as popen_mock, patch.object(stream_check_utils.time, "monotonic", side_effect=fake_monotonic):
             loop_detected, loop_duration, frames_processed = _probe_stream_for_loops(
                 url="http://example.invalid/loop.ts",
                 stream_tag="test-loop",
                 probe_duration=60,
             )
+
+        command = popen_mock.call_args.args[0]
+        self.assertIn('fps=1,scale=32:32:flags=fast_bilinear,format=gray', command)
 
         self.assertTrue(loop_detected)
         self.assertIsNotNone(loop_duration)
