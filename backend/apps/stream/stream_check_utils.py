@@ -68,7 +68,7 @@ _LOOP_PROBE_HAMMING_TOLERANCE = 3
 _LOOP_PROBE_DURATION          = 360   # 6 minutes — catches loops up to 3 min period
 _LOOP_PROBE_DURATION_MIN      = 60    # enforced floor
 _LOOP_PROBE_DURATION_MAX      = 720   # 12 minutes — ceiling for future flexibility
-_LOOP_PROBE_SAMPLE_INTERVAL   = 1.0   # SidecarLoopDetector buffer is sized for ~1 FPS
+_LOOP_PROBE_SAMPLE_INTERVAL   = 1.0   # Safety throttle; FFmpeg also emits a 1 FPS frame pipe
 
 # Constants for error detection and logging
 FFMPEG_HWACCEL_MODES = {
@@ -1884,6 +1884,7 @@ def _probe_stream_for_loops(
         f"[loop-probe:{stream_tag}] Starting {clamped}s probe "
         f"(hamming_tolerance={_LOOP_PROBE_HAMMING_TOLERANCE}, "
         f"sequence_length=3, duration_threshold=10.0s, "
+        f"ffmpeg_fps=1, "
         f"sample_interval={_LOOP_PROBE_SAMPLE_INTERVAL:.1f}s)"
     )
 
@@ -1910,7 +1911,7 @@ def _probe_stream_for_loops(
         '-t', str(clamped),
         '-map', '0:v:0',
         '-an', '-sn',
-        '-vf', 'scale=32:32:flags=fast_bilinear,format=gray',
+        '-vf', 'fps=1,scale=32:32:flags=fast_bilinear,format=gray',
         '-c:v', 'ppm',
         '-f', 'image2pipe',
         'pipe:1',
@@ -1931,7 +1932,7 @@ def _probe_stream_for_loops(
             '-t', str(clamped),
             '-map', '0:v:0',
             '-an', '-sn',
-            '-vf', 'scale=32:32:flags=fast_bilinear,format=gray',
+            '-vf', 'fps=1,scale=32:32:flags=fast_bilinear,format=gray',
             '-c:v', 'ppm',
             '-f', 'image2pipe',
             'pipe:1',

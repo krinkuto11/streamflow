@@ -12,6 +12,8 @@ from apps.api.shadow_blank_monitor_handlers import (
 )
 from apps.stream import shadow_blank_monitor_service as shadow_module
 from apps.stream.shadow_blank_monitor_service import (
+    DEFAULT_WATCHER_USER_AGENT,
+    SHADOW_WATCHER_USER_AGENT_MARKER,
     SHADOW_MONITOR_SCAN_ERROR_MESSAGE,
     ShadowBlankMonitorService,
     normalize_config,
@@ -219,6 +221,193 @@ def test_watcher_details_prefers_oldest_visible_watcher(tmp_path):
     assert details["watcher_uptime_seconds"] == 100
 
 
+def test_default_watcher_user_agent_is_tivimate_like_with_unique_marker():
+    config = normalize_config({})
+
+    assert config["watcher_user_agent"] == DEFAULT_WATCHER_USER_AGENT
+    assert config["watcher_user_agent"].startswith("TiviMate/")
+    assert SHADOW_WATCHER_USER_AGENT_MARKER in config["watcher_user_agent"]
+
+
+def test_tivimate_like_watcher_user_agent_does_not_hide_real_tivimate_viewers(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({})
+    status = active_status(
+        stream_id=10,
+        clients=[
+            {
+                "user_agent": "TiviMate/5.1.6",
+                "client_id": "real-tivimate-viewer",
+            },
+            {
+                "user_agent": config["watcher_user_agent"],
+                "client_id": "shadow-watcher",
+            },
+        ],
+    )
+
+    assert service._real_client_count(status, config) == 1
+    assert service._watcher_client_count(status, config) == 1
+
+
+def test_unmarked_probe_client_is_not_counted_as_real_after_viewer_left(tmp_path):
+    now = {"value": 1000.0}
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        clock=lambda: now["value"],
+    )
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 5,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "active_probe_started_at": 997.0,
+        "real_client_refs": ["client_id:real-viewer"],
+    }
+    status = active_status(
+        stream_id=10,
+        clients=[
+            {
+                "client_id": "shadow-probe",
+                "user": "bachel",
+                "ip": "10.10.30.20",
+            }
+        ],
+    )
+
+    assert service._real_client_count(status, config, target) == 0
+
+
+def test_discovery_keeps_grace_when_only_unmarked_probe_client_remains(tmp_path):
+    now = {"value": 1000.0}
+    channel = {"id": 1, "uuid": "uuid-1", "name": "Das Erste HD", "streams": [10, 11]}
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {
+                            "client_id": "shadow-probe",
+                            "user": "bachel",
+                            "ip": "10.10.30.20",
+                        }
+                    ],
+                )
+            }
+        ],
+        channels=[channel],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service._watched["uuid-1"] = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": shadow_module._ref("channel", 1),
+        "channel_name": "Das Erste HD",
+        "stream_id": 10,
+        "stream_ref": shadow_module._ref("stream", 10),
+        "real_client_count": 1,
+        "real_client_refs": ["client_id:real-viewer"],
+        "active_probe_started_at": 997.0,
+    }
+    service._active_probes.add("uuid-1")
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 5,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+
+    assert len(targets) == 1
+    assert targets[0]["viewer_left_grace_active"] is True
+    assert targets[0]["real_client_count"] == 0
+    assert targets[0]["viewer_left_grace_remaining_seconds"] == 5
+
+
+def test_stale_dispatcharr_client_is_not_counted_as_real_after_short_viewer_grace(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 5,
+    })
+    fresh_status = active_status(
+        stream_id=10,
+        clients=[{
+            "client_id": "real-viewer",
+            "user_agent": "TiviMate/5.1.6",
+            "last_active_ago": 4.9,
+            "output_format": "fmp4",
+        }],
+    )
+    stale_status = active_status(
+        stream_id=10,
+        clients=[{
+            "client_id": "real-viewer",
+            "user_agent": "TiviMate/5.1.6",
+            "last_active_ago": 6.1,
+            "output_format": "fmp4",
+        }],
+    )
+
+    assert service._real_client_count(fresh_status, config) == 1
+    assert service._real_viewer_output_format(fresh_status, config) == "fmp4"
+    assert service._real_client_refs(fresh_status, config) == ["client_id:real-viewer"]
+    assert service._real_client_count(stale_status, config) == 0
+    assert service._real_viewer_output_format(stale_status, config) is None
+    assert service._real_client_refs(stale_status, config) == []
+
+
+def test_stale_dispatcharr_client_expires_grace_from_last_activity(tmp_path):
+    now = {"value": 1000.0}
+    channel = {"id": 1, "uuid": "uuid-1", "name": "Das Erste HD", "streams": [10, 11]}
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[{
+                    "client_id": "real-viewer",
+                    "user_agent": "TiviMate/5.1.6",
+                    "last_active_ago": 6.2,
+                }],
+            )
+        }],
+        channels=[channel],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    with service._lock:
+        service._watched["uuid-1"] = {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "channel_ref": shadow_module._ref("channel", 1),
+            "channel_name": "Das Erste HD",
+            "stream_id": 10,
+            "stream_ref": shadow_module._ref("stream", 10),
+            "real_client_count": 1,
+            "real_client_refs": ["client_id:real-viewer"],
+        }
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 5,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    status = service.get_status()
+
+    assert targets == []
+    viewer_left_events = [event for event in status["recent_events"] if event["type"] == "viewer_left"]
+    assert len(viewer_left_events) == 1
+    assert viewer_left_events[0]["details"]["reason"] == "viewer_left_grace_expired"
+    assert viewer_left_events[0]["details"]["viewer_absent_seconds"] == 6
+
+
 def test_continuous_loop_probe_is_rate_limited_between_slices(tmp_path):
     now = {"value": 1000.0}
     loop_calls = []
@@ -290,6 +479,7 @@ def test_watch_mode_controls_scan_delay():
     assert defaults["next_stream_pre_probe_duration_seconds"] == 8
     assert defaults["confirmation_count"] == 2
     assert defaults["channel_cooldown_seconds"] == 300
+    assert defaults["viewer_left_grace_seconds"] == 5
     assert defaults["max_switches_per_hour"] == 3
     assert defaults["max_concurrent_watchers"] == 2
 
@@ -300,12 +490,15 @@ def test_watch_mode_controls_scan_delay():
     })
     assert ShadowBlankMonitorService._next_scan_delay(continuous) == 2
 
-    periodic = normalize_config({
+    legacy_periodic = normalize_config({
         "watch_mode": "periodic",
+        "persistent_watcher_enabled": True,
         "watch_gap_seconds": 2,
         "poll_interval_seconds": 90,
     })
-    assert ShadowBlankMonitorService._next_scan_delay(periodic) == 90
+    assert legacy_periodic["watch_mode"] == "continuous"
+    assert legacy_periodic["persistent_watcher_enabled"] is True
+    assert ShadowBlankMonitorService._next_scan_delay(legacy_periodic) == 2
 
     invalid = normalize_config({"watch_mode": "always-on", "watch_gap_seconds": 0})
     assert invalid["watch_mode"] == "continuous"
@@ -314,6 +507,9 @@ def test_watch_mode_controls_scan_delay():
     loop_bounds = normalize_config({"loop_detection_enabled": True, "loop_probe_duration_seconds": 999})
     assert loop_bounds["loop_detection_enabled"] is True
     assert loop_bounds["loop_probe_duration_seconds"] == 720
+
+    viewer_grace_bounds = normalize_config({"viewer_left_grace_seconds": 30})
+    assert viewer_grace_bounds["viewer_left_grace_seconds"] == 10
 
 
 def test_offline_image_status_warns_about_missing_or_invalid_hashes(tmp_path):
@@ -348,7 +544,7 @@ def test_status_exposes_shadow_loop_detection_context(tmp_path):
     })
 
     status = service.get_status()
-    assert status["watch_mode"] == "periodic"
+    assert status["watch_mode"] == "continuous"
     assert status["has_watcher_api_key"] is True
     assert status["loop_detection_enabled"] is True
     assert status["loop_probe_duration_seconds"] == 180
@@ -678,6 +874,7 @@ def test_continuous_shadow_loop_probe_is_time_sliced(tmp_path, monkeypatch):
     assert result["loop_probe_ran"] is True
     assert result["loop_detected"] is False
     assert result["loop_probe_sliced"] is True
+    assert result["loop_probe_slice_seconds"] == 30.0
     assert result["loop_probe_slice_seconds"] < 360
     assert result.get("viewer_left") is not True
     assert switch_calls == []
@@ -1758,7 +1955,7 @@ def test_shadow_probe_treats_flushed_min_duration_black_segment_as_detection(tmp
     assert result["blank_ratio"] < 0.8
 
 
-def test_continuous_probe_detects_open_freeze_after_min_duration(tmp_path, monkeypatch):
+def test_continuous_probe_waits_for_open_freeze_ratio_threshold(tmp_path, monkeypatch):
     processes = []
 
     class FakeProcess:
@@ -1821,8 +2018,8 @@ def test_continuous_probe_detects_open_freeze_after_min_duration(tmp_path, monke
 
     assert processes
     assert result["freeze_detected"] is True
-    assert result["freeze_duration_secs"] < 10
-    assert result["freeze_ratio"] < 0.8
+    assert result["freeze_duration_secs"] >= 9.0
+    assert result["freeze_ratio"] >= 0.8
     assert result.get("blank_detected") is False
 
 
@@ -1896,6 +2093,113 @@ def test_continuous_probe_detects_no_decodable_frames_after_min_duration(tmp_pat
         "output file does not contain any stream",
     }
     assert result.get("blank_detected") is False
+
+
+def test_continuous_probe_detects_audio_only_no_decoded_video_frames(tmp_path, monkeypatch):
+    processes = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO(
+                "  Stream #0:0: Audio: aac, 48000 Hz, stereo, fltp, 128 kb/s\n"
+                "Stream mapping:\n"
+                "  Stream #0:0 -> #0:0 (aac (native) -> pcm_s16le (native))\n"
+                "frame=   42 fps=2.0 q=-0.0 size=N/A time=00:00:10.00 bitrate=N/A speed=1x\n"
+            )
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    def fake_popen(command, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    current_time = {"value": 200.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.1
+        return current_time["value"]
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "probe_duration_seconds": 60,
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+
+    result = service._run_blank_probe_until_viewer_left(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+        udi,
+        {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "stream_id": 10,
+        },
+    )
+
+    assert processes
+    assert result["no_decodable_frames_detected"] is True
+    assert result["no_decodable_frames_duration_secs"] >= 10
+    assert result["no_decodable_frames_error"] == "no decoded video frames"
+    assert result.get("blank_detected") is False
+
+
+def test_no_decodable_parser_treats_invalid_data_as_terminal_decoder_stall():
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+
+    result = ShadowBlankMonitorService._parse_no_decodable_frames_detection(
+        "http://provider.example/bad.ts: Invalid data found when processing input\n",
+        config,
+        observed_duration=0.4,
+        returncode=1,
+    )
+
+    assert result["no_decodable_frames_detected"] is True
+    assert result["no_decodable_frames_duration_secs"] == 10
+    assert result["no_decodable_frames_error"] == "invalid data found"
+
+
+def test_no_decodable_parser_ignores_invalid_data_after_decoded_frames():
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+
+    result = ShadowBlankMonitorService._parse_no_decodable_frames_detection(
+        "frame=   12 fps=2.0 q=-0.0 size=N/A time=00:00:06.00 bitrate=N/A speed=1x\n"
+        "Invalid data found when processing input\n",
+        config,
+        observed_duration=10.5,
+        returncode=1,
+    )
+
+    assert result["no_decodable_frames_detected"] is False
+    assert result["no_decodable_frames_error"] is None
 
 
 def test_continuous_probe_holds_ffmpeg_until_viewer_leaves(tmp_path, monkeypatch):
@@ -3054,6 +3358,68 @@ def test_audio_detection_parser_keeps_audio_stream_listing_ok():
     assert parsed["silent_audio_detected"] is False
 
 
+def test_solid_color_detection_parser_detects_sustained_low_entropy_frames():
+    config = normalize_config({
+        "freeze_detection_enabled": True,
+        "freeze_min_duration_seconds": 5,
+    })
+    output = "".join(
+        (
+            f"[Parsed_metadata_3 @ 000] frame:{frame} pts:{frame} pts_time:{frame}\n"
+            "[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.Y=0.000000\n"
+            "[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.U=0.000000\n"
+            "[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.V=0.000000\n"
+        )
+        for frame in range(6)
+    )
+
+    parsed = ShadowBlankMonitorService._parse_solid_color_detection(
+        output,
+        config,
+        observed_duration=6,
+    )
+
+    assert parsed["solid_color_detected"] is True
+    assert parsed["solid_color_duration_secs"] == 6
+    assert parsed["solid_color_sample_count"] == 6
+    assert parsed["solid_color_normalized_entropy_max"] == 0.0
+
+
+def test_solid_color_detection_parser_ignores_short_low_entropy_cuts():
+    config = normalize_config({
+        "freeze_detection_enabled": True,
+        "freeze_min_duration_seconds": 5,
+    })
+    frame_values = [
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.01, 0.01, 0.01),
+        (0.55, 0.42, 0.38),
+        (0.63, 0.51, 0.44),
+        (0.59, 0.50, 0.43),
+    ]
+    output = "".join(
+        (
+            f"[Parsed_metadata_3 @ 000] frame:{frame} pts:{frame} pts_time:{frame}\n"
+            f"[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.Y={y:.6f}\n"
+            f"[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.U={u:.6f}\n"
+            f"[Parsed_metadata_3 @ 000] lavfi.entropy.normalized_entropy.normal.V={v:.6f}\n"
+        )
+        for frame, (y, u, v) in enumerate(frame_values)
+    )
+
+    parsed = ShadowBlankMonitorService._parse_solid_color_detection(
+        output,
+        config,
+        observed_duration=6,
+    )
+
+    assert parsed["solid_color_detected"] is False
+    assert parsed["solid_color_duration_secs"] is None
+    assert parsed["solid_color_sample_count"] == 3
+    assert parsed["solid_color_normalized_entropy_max"] == 0.63
+
+
 def test_media_fault_results_are_ignored_unless_enabled(tmp_path):
     switch_calls = []
     udi = FakeUdi(
@@ -3520,6 +3886,7 @@ def test_continuous_default_probe_open_freeze_start_switches_as_freeze(monkeypat
         "confirmation_count": 1,
         "freeze_detection_enabled": True,
         "freeze_min_duration_seconds": 2,
+        "freeze_ratio_threshold": 0.4,
         "probe_duration_seconds": 5,
     })
     target = {
@@ -3607,6 +3974,7 @@ def test_continuous_default_probe_full_screen_color_faults_switch(monkeypatch, t
             "blank_min_duration_seconds": 2,
             "freeze_detection_enabled": True,
             "freeze_min_duration_seconds": 2,
+            "freeze_ratio_threshold": 0.4,
             "probe_duration_seconds": 5,
         })
         target = {
@@ -3962,6 +4330,128 @@ def test_continuous_freeze_fault_recovery_guard_needs_second_confirmation(tmp_pa
     assert recovery_guard["confirmations"] == 2
     assert recovery_guard["required"] == 2
     assert status["recent_events"][1]["type"] == "freeze_pending"
+
+
+def test_continuous_freeze_with_audio_present_is_probe_ok(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[{"user_agent": "VLC"}],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/good"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": True,
+            "freeze_duration_secs": 12.0,
+            "freeze_ratio": 0.95,
+            "audio_stream_present": True,
+        },
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "freeze_detection_enabled": True,
+        "next_stream_pre_probe_enabled": False,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is True
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "probe_ok"
+    details = status["recent_events"][0]["details"]
+    assert details["freeze_detected"] is False
+    assert details["freeze_suppressed_audio_present"] is True
+    assert details["audio_stream_present"] is True
+    with service._lock:
+        assert service._blank_counts == {}
+
+
+def test_continuous_solid_color_with_audio_present_switches(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[{"user_agent": "VLC"}],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/good"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": True,
+            "freeze_duration_secs": 12.0,
+            "freeze_ratio": 0.95,
+            "solid_color_detected": True,
+            "solid_color_duration_secs": 12.0,
+            "solid_color_normalized_entropy_max": 0.0,
+            "solid_color_sample_count": 12,
+            "audio_stream_present": True,
+        },
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "freeze_detection_enabled": True,
+        "next_stream_pre_probe_enabled": False,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    event = status["recent_events"][0]
+    assert event["type"] == "switch_success"
+    assert event["trigger_reason"] == "solid_color"
+    details = event["details"]
+    assert details["reason"] == "solid_color"
+    assert details["detection"]["reason"] == "solid_color"
+    measurements = details["detection"]["measurements"]
+    assert measurements["solid_color_duration_secs"] == 12.0
+    assert measurements["solid_color_normalized_entropy_max"] == 0.0
+    assert measurements["solid_color_sample_count"] == 12
+    assert target["last_probe"]["audio_stream_present"] is True
 
 
 def test_continuous_blank_fault_recovery_guard_needs_second_confirmation(tmp_path):
@@ -5575,7 +6065,7 @@ def test_viewer_left_grace_keeps_persistent_watcher_for_brief_client_drop(tmp_pa
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
         "persistent_watcher_enabled": True,
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
 
     targets = service.discover_active_targets(udi, config)
@@ -5586,14 +6076,14 @@ def test_viewer_left_grace_keeps_persistent_watcher_for_brief_client_drop(tmp_pa
     service._sync_persistent_watchers(grace_targets, config)
     service._probe_targets(udi, grace_targets, config, single_pass=True)
 
-    now["value"] = 1010.0
+    now["value"] = 1008.0
     recovered_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(recovered_targets, config)
 
     assert len(started) == 1
     assert started[0].terminated is False
     assert grace_targets[0]["viewer_left_grace_active"] is True
-    assert grace_targets[0]["viewer_left_grace_remaining_seconds"] == 30
+    assert grace_targets[0]["viewer_left_grace_remaining_seconds"] == 5
     assert recovered_targets[0]["real_client_count"] == 1
     assert probe_urls == []
     assert "viewer_left" not in [event["type"] for event in service.get_status()["recent_events"]]
@@ -5624,7 +6114,7 @@ def test_viewer_left_grace_expires_and_stops_persistent_watcher(tmp_path, monkey
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
         "persistent_watcher_enabled": True,
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
 
     targets = service.discover_active_targets(udi, config)
@@ -5634,7 +6124,7 @@ def test_viewer_left_grace_expires_and_stops_persistent_watcher(tmp_path, monkey
     grace_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(grace_targets, config)
 
-    now["value"] = 1036.0
+    now["value"] = 1011.0
     expired_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(expired_targets, config)
 
@@ -5671,7 +6161,7 @@ def test_proxy_status_gap_keeps_persistent_watcher_during_viewer_grace(tmp_path,
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
         "persistent_watcher_enabled": True,
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
 
     targets = service.discover_active_targets(udi, config)
@@ -5681,7 +6171,7 @@ def test_proxy_status_gap_keeps_persistent_watcher_during_viewer_grace(tmp_path,
     gap_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(gap_targets, config)
 
-    now["value"] = 1010.0
+    now["value"] = 1008.0
     recovered_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(recovered_targets, config)
 
@@ -5718,7 +6208,7 @@ def test_proxy_status_gap_expires_and_stops_persistent_watcher(tmp_path, monkeyp
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
         "persistent_watcher_enabled": True,
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
 
     targets = service.discover_active_targets(udi, config)
@@ -5728,7 +6218,7 @@ def test_proxy_status_gap_expires_and_stops_persistent_watcher(tmp_path, monkeyp
     gap_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(gap_targets, config)
 
-    now["value"] = 1036.0
+    now["value"] = 1011.0
     expired_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(expired_targets, config)
 
@@ -5739,6 +6229,43 @@ def test_proxy_status_gap_expires_and_stops_persistent_watcher(tmp_path, monkeyp
     assert service._persistent_watchers == {}
     assert service.get_status()["recent_events"][0]["type"] == "viewer_left"
     assert service.get_status()["recent_events"][0]["details"]["reason"] == "proxy_status_gap_grace_expired"
+
+
+def test_viewer_left_final_event_is_recorded_once_until_viewer_returns(tmp_path):
+    now = {"value": 1000.0}
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 0,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    service._handle_viewer_left_or_grace("uuid-1", targets[0], config, {})
+
+    with service._lock:
+        service._watched["uuid-1"] = dict(targets[0])
+        service._viewer_absences["uuid-1"] = {"since": now["value"], "last_real_client_count": 1}
+
+    now["value"] = 1001.0
+    udi.statuses = [{}]
+    udi.status_calls = 0
+    assert service.discover_active_targets(udi, config) == []
+
+    events = [event for event in service.get_status()["recent_events"] if event["type"] == "viewer_left"]
+    assert len(events) == 1
+
+    now["value"] = 1002.0
+    udi.statuses = [{"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])}]
+    udi.status_calls = 0
+    returned_targets = service.discover_active_targets(udi, config)
+    service._handle_viewer_left_or_grace("uuid-1", returned_targets[0], config, {})
+
+    events = [event for event in service.get_status()["recent_events"] if event["type"] == "viewer_left"]
+    assert len(events) == 2
 
 
 def test_probe_viewer_left_uses_grace_before_stopping_watcher(tmp_path):
@@ -5755,7 +6282,7 @@ def test_probe_viewer_left_uses_grace_before_stopping_watcher(tmp_path):
     config = normalize_config({
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
     config["_shadow_allow_viewer_left_grace"] = True
     target = {

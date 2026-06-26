@@ -45,6 +45,7 @@ CONFIG_FILE = CONFIG_DIR / "shadow_blank_monitor_config.json"
 MAX_EVENTS = 100
 LOOP_SWITCH_REQUIRES_PRE_PROBE = True
 LOOP_PENDING_PROBE_OK_MISS_TOLERANCE = 1
+CONTINUOUS_LOOP_PROBE_SLICE_MIN_SECONDS = 30.0
 AGGREGATE_ONLY_VIEWER_GRACE_SECONDS = 2.0
 WATCHER_API_KEY_REQUIRED_CODE = "watcher_api_key_required"
 WATCHER_API_KEY_REQUIRED_MESSAGE = "Watcher API Key is required before Shadow Monitor can start."
@@ -55,10 +56,19 @@ NO_DECODABLE_FRAME_ERROR_PATTERNS = (
     "unspecified size",
     "output file does not contain any stream",
     "cannot determine format of input stream",
+    "invalid data found",
     "no decodable frames",
     "no frame could be decoded",
+    "no decoded video frames",
 )
 FFMPEG_FRAME_RE = re.compile(r"\bframe=\s*(?P<frames>\d+)")
+ENTROPY_FRAME_RE = re.compile(r"frame:\s*(?P<frame>\d+)")
+ENTROPY_VALUE_RE = re.compile(
+    r"lavfi\.entropy\.normalized_entropy\.normal\.(?P<plane>[YUV])=(?P<value>\d+(?:\.\d+)?)"
+)
+SOLID_COLOR_ENTROPY_THRESHOLD = 0.02
+SOLID_COLOR_MIN_SAMPLES = 3
+SOLID_COLOR_SAMPLE_RATIO_THRESHOLD = 0.80
 OFFLINE_IMAGE_PHASH_RE = re.compile(r"^[0-9a-f]{16}$")
 SILENCE_START_RE = re.compile(r"silence_start:\s*(?P<start>\d+(?:\.\d+)?)")
 SILENCE_END_RE = re.compile(r"silence_end:\s*(?P<end>\d+(?:\.\d+)?)")
@@ -96,6 +106,8 @@ PROXY_OUTPUT_FORMAT_ALIASES = {
     "mpegts": "mpegts",
     "ts": "mpegts",
 }
+SHADOW_WATCHER_USER_AGENT_MARKER = "StreamFlow-Shadow-Blank-Monitor/1.0"
+DEFAULT_WATCHER_USER_AGENT = f"TiviMate/5.1.6 {SHADOW_WATCHER_USER_AGENT_MARKER}"
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -130,20 +142,21 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "next_stream_pre_probe_duration_seconds": 8,
     "confirmation_count": 2,
     "channel_cooldown_seconds": 300,
-    "viewer_left_grace_seconds": 30,
+    "viewer_left_grace_seconds": 5,
     "max_switches_per_hour": 3,
     "max_concurrent_watchers": 2,
     "skip_during_quality_check": False,
-    "watcher_user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+    "watcher_user_agent": DEFAULT_WATCHER_USER_AGENT,
     "watcher_api_key": "",
     "excluded_channel_ids": [],
     "excluded_channel_uuids": [],
 }
 CONFIG_KEYS = set(DEFAULT_CONFIG)
-WATCH_MODES = {"periodic", "continuous"}
+WATCH_MODES = {"continuous"}
 MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
     "blank",
     "freeze",
+    "solid_color",
     "offline_image",
     "garbled_audio",
     "silent_audio",
@@ -152,6 +165,7 @@ MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
 DETECTION_REASONS = {
     "blank",
     "freeze",
+    "solid_color",
     "no_decodable_frames",
     "garbled_audio",
     "silent_audio",
@@ -161,6 +175,7 @@ DETECTION_REASONS = {
 VIDEO_FAULT_CONFIRMATION_REASONS = {
     "blank",
     "freeze",
+    "solid_color",
 }
 VIDEO_FAULT_CONFIRMATION_KEY = "video_fault"
 PENDING_EVENT_REASONS = {
@@ -170,6 +185,11 @@ PENDING_EVENT_REASONS = {
 DETECTION_MEASUREMENT_KEYS = {
     "blank": ("blank_ratio", "blank_duration_secs"),
     "freeze": ("freeze_ratio", "freeze_duration_secs"),
+    "solid_color": (
+        "solid_color_duration_secs",
+        "solid_color_normalized_entropy_max",
+        "solid_color_sample_count",
+    ),
     "no_decodable_frames": (
         "no_decodable_frames_duration_secs",
         "no_decodable_frames_error",
@@ -186,6 +206,11 @@ DETECTION_THRESHOLD_KEYS = {
         "blank_pixel_threshold",
     ),
     "freeze": (
+        "freeze_min_duration_seconds",
+        "freeze_ratio_threshold",
+        "freeze_noise_threshold",
+    ),
+    "solid_color": (
         "freeze_min_duration_seconds",
         "freeze_ratio_threshold",
         "freeze_noise_threshold",
@@ -227,7 +252,7 @@ INT_BOUNDS = {
     "probe_duration_seconds": (3, 120),
     "confirmation_count": (1, 5),
     "channel_cooldown_seconds": (30, 86400),
-    "viewer_left_grace_seconds": (0, 300),
+    "viewer_left_grace_seconds": (0, 10),
     "max_switches_per_hour": (1, 20),
     "max_concurrent_watchers": (1, 10),
     "garbled_audio_error_threshold": (1, 20),
@@ -373,9 +398,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["loop_detection_enabled"] = bool(config.get("loop_detection_enabled"))
     config["persistent_watcher_enabled"] = bool(config.get("persistent_watcher_enabled"))
     config["next_stream_pre_probe_enabled"] = bool(config.get("next_stream_pre_probe_enabled"))
-    config["watch_mode"] = str(config.get("watch_mode") or DEFAULT_CONFIG["watch_mode"]).strip().lower()
-    if config["watch_mode"] not in WATCH_MODES:
-        config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
+    config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
     # The shadow monitor protects active viewers through Dispatcharr's local
     # channel proxy. It should not pause just because quality checks are active.
     config["skip_during_quality_check"] = False
@@ -444,6 +467,7 @@ class ShadowBlankMonitorService:
         self._last_excluded_active_targets: List[Dict[str, Any]] = []
         self._watcher_absences: Dict[str, Dict[str, Any]] = {}
         self._viewer_absences: Dict[str, Dict[str, Any]] = {}
+        self._viewer_left_finalized: Dict[str, Dict[str, Any]] = {}
         self._blank_counts: Dict[str, int] = defaultdict(int)
         self._detection_misses: Dict[str, int] = defaultdict(int)
         self._cooldowns: Dict[str, float] = {}
@@ -843,10 +867,17 @@ class ShadowBlankMonitorService:
             viewer_output_format = self._real_viewer_output_format(raw_status, config)
 
             stream_id = self._extract_stream_id(raw_status)
-            real_clients = self._real_client_count(raw_status, config)
+            previous_target = previous_watched.get(channel_uuid) or {}
+            count_target = (
+                previous_target
+                if continuous_mode and previous_target.get("active_probe_started_at") is not None
+                else None
+            )
+            real_clients = self._real_client_count(raw_status, config, count_target)
             if real_clients <= 0:
-                previous_target = previous_watched.get(channel_uuid)
                 previous_absence = previous_viewer_absences.get(channel_uuid)
+                if previous_absence is None:
+                    previous_absence = self._stale_real_client_absence(raw_status, config, now)
                 grace_target = self._viewer_left_grace_target(
                     raw_status,
                     previous_target,
@@ -887,16 +918,18 @@ class ShadowBlankMonitorService:
                     event_target["real_client_count"] = 0
                     event_target["watcher_client_count"] = watcher_clients
                     event_target.update(watcher_details)
-                    continuity_events.append((
-                        "viewer_left",
-                        event_target,
-                        {
-                            "reason": "viewer_left_grace_expired" if previous_absence else "viewer_left",
-                            "viewer_absent_seconds": max(0, int(now - grace_since)),
-                            "viewer_left_grace_seconds": viewer_left_grace_seconds,
-                        },
-                    ))
+                    if self._mark_viewer_left_finalized(channel_uuid, event_target):
+                        continuity_events.append((
+                            "viewer_left",
+                            event_target,
+                            {
+                                "reason": "viewer_left_grace_expired" if previous_absence else "viewer_left",
+                                "viewer_absent_seconds": max(0, int(now - grace_since)),
+                                "viewer_left_grace_seconds": viewer_left_grace_seconds,
+                            },
+                        ))
                 continue
+            self._clear_viewer_left_finalized(channel_uuid)
             numeric_id = self._resolve_channel_id(
                 udi,
                 self._extract_channel_id(channel, raw_status),
@@ -949,9 +982,12 @@ class ShadowBlankMonitorService:
                 target["current_program"] = current_program
             target.update(watcher_details)
             if continuous_mode:
-                previous_target = previous_watched.get(channel_uuid) or {}
                 probe_running = channel_uuid in active_probe_channels
                 previous_probe_started = previous_target.get("active_probe_started_at")
+                if previous_probe_started is not None and previous_target.get("real_client_refs"):
+                    target["real_client_refs"] = list(previous_target.get("real_client_refs") or [])
+                else:
+                    target["real_client_refs"] = self._real_client_refs(raw_status, config)
                 if previous_probe_started is not None:
                     probe_target = dict(target)
                     probe_target["active_probe_started_at"] = previous_probe_started
@@ -1110,18 +1146,19 @@ class ShadowBlankMonitorService:
                     event_target["real_client_count"] = 0
                     event_target["watcher_client_count"] = 0
                     event_target["proxy_status_gap"] = True
-                    continuity_events.append((
-                        "viewer_left",
-                        event_target,
-                        {
-                            "reason": (
-                                "proxy_status_gap_grace_expired"
-                                if previous_absence else "proxy_status_gap"
-                            ),
-                            "viewer_absent_seconds": max(0, int(now - grace_since)),
-                            "viewer_left_grace_seconds": viewer_left_grace_seconds,
-                        },
-                    ))
+                    if self._mark_viewer_left_finalized(channel_uuid, event_target):
+                        continuity_events.append((
+                            "viewer_left",
+                            event_target,
+                            {
+                                "reason": (
+                                    "proxy_status_gap_grace_expired"
+                                    if previous_absence else "proxy_status_gap"
+                                ),
+                                "viewer_absent_seconds": max(0, int(now - grace_since)),
+                                "viewer_left_grace_seconds": viewer_left_grace_seconds,
+                            },
+                        ))
 
         with self._lock:
             self._watched = watched
@@ -1255,10 +1292,41 @@ class ShadowBlankMonitorService:
         target.pop("media_recovery_guard_observed", None)
         event_target = dict(target)
         event_target["real_client_count"] = 0
-        self._record_event("viewer_left", event_target, {})
+        should_record = self._mark_viewer_left_finalized(channel_uuid, event_target)
+        if should_record:
+            self._record_event("viewer_left", event_target, {})
         with self._lock:
             self._watched.pop(channel_uuid, None)
+            self._viewer_absences.pop(channel_uuid, None)
+            self._watcher_absences.pop(channel_uuid, None)
         return False
+
+    def _viewer_left_finalized_key(self, target: Dict[str, Any]) -> str:
+        stream_ref = target.get("stream_ref")
+        if stream_ref:
+            return str(stream_ref)
+        stream_id = target.get("stream_id")
+        if stream_id is not None:
+            return _ref("stream", stream_id)
+        return ""
+
+    def _mark_viewer_left_finalized(self, channel_uuid: str, target: Dict[str, Any]) -> bool:
+        key = self._viewer_left_finalized_key(target)
+        with self._lock:
+            previous = self._viewer_left_finalized.get(channel_uuid)
+            if previous and previous.get("key") == key:
+                return False
+            self._viewer_left_finalized[channel_uuid] = {
+                "key": key,
+                "timestamp": self.clock(),
+            }
+            self._viewer_absences.pop(channel_uuid, None)
+            self._watcher_absences.pop(channel_uuid, None)
+        return True
+
+    def _clear_viewer_left_finalized(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._viewer_left_finalized.pop(channel_uuid, None)
 
     def _probe_targets(
         self,
@@ -1476,6 +1544,7 @@ class ShadowBlankMonitorService:
                 result = self.blank_probe(media_probe_url, media_probe_config)
             blank = bool(result.get("blank_detected"))
             freeze = bool(result.get("freeze_detected"))
+            solid_color = bool(result.get("solid_color_detected"))
             no_decodable_frames = bool(result.get("no_decodable_frames_detected"))
             garbled_audio = bool(
                 config.get("garbled_audio_detection_enabled")
@@ -1489,6 +1558,15 @@ class ShadowBlankMonitorService:
                 config.get("offline_image_detection_enabled")
                 and result.get("offline_image_detected")
             )
+            freeze_suppressed_audio_present = False
+            if (
+                config.get("watch_mode") == "continuous"
+                and freeze
+                and result.get("audio_stream_present") is True
+                and not any((blank, solid_color, no_decodable_frames, garbled_audio, silent_audio, offline_image))
+            ):
+                freeze = False
+                freeze_suppressed_audio_present = True
             loop = False
             detection_reason = next(
                 (
@@ -1496,6 +1574,7 @@ class ShadowBlankMonitorService:
                     for reason, detected in (
                         ("blank", blank),
                         ("offline_image", offline_image),
+                        ("solid_color", solid_color),
                         ("freeze", freeze),
                         ("no_decodable_frames", no_decodable_frames),
                         ("garbled_audio", garbled_audio),
@@ -1512,6 +1591,10 @@ class ShadowBlankMonitorService:
                 "freeze_detected": freeze,
                 "freeze_ratio": result.get("freeze_ratio"),
                 "freeze_duration_secs": result.get("freeze_duration_secs"),
+                "solid_color_detected": solid_color,
+                "solid_color_duration_secs": result.get("solid_color_duration_secs"),
+                "solid_color_normalized_entropy_max": result.get("solid_color_normalized_entropy_max"),
+                "solid_color_sample_count": result.get("solid_color_sample_count"),
                 "no_decodable_frames_detected": no_decodable_frames,
                 "no_decodable_frames_duration_secs": result.get("no_decodable_frames_duration_secs"),
                 "no_decodable_frames_error": result.get("no_decodable_frames_error"),
@@ -1532,6 +1615,7 @@ class ShadowBlankMonitorService:
                 "loop_frames_processed": result.get("loop_frames_processed"),
                 "loop_probe_error": result.get("loop_probe_error"),
                 "loop_probe_sliced": bool(result.get("loop_probe_sliced")),
+                "freeze_suppressed_audio_present": freeze_suppressed_audio_present,
             }
             target["last_probe_thresholds"] = self._detection_thresholds(config)
 
@@ -2299,6 +2383,7 @@ class ShadowBlankMonitorService:
         for reason in (
             "blank",
             "offline_image",
+            "solid_color",
             "freeze",
             "no_decodable_frames",
             "garbled_audio",
@@ -2327,6 +2412,7 @@ class ShadowBlankMonitorService:
         )
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "blank"), None)
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "freeze"), None)
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "solid_color"), None)
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "garbled_audio"), None)
         self._blank_counts.pop(self._detection_count_key(channel_uuid, "silent_audio"), None)
@@ -2339,6 +2425,7 @@ class ShadowBlankMonitorService:
         )
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "blank"), None)
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "freeze"), None)
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "solid_color"), None)
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "garbled_audio"), None)
         self._detection_misses.pop(self._detection_count_key(channel_uuid, "silent_audio"), None)
@@ -2503,7 +2590,7 @@ class ShadowBlankMonitorService:
         except (TypeError, ValueError):
             return False
 
-        marker = str(config.get("watcher_user_agent") or "").lower()
+        marker = self._watcher_client_marker(config)
         if not marker:
             return False
         clients = status.get("clients")
@@ -2953,6 +3040,11 @@ class ShadowBlankMonitorService:
                 f"freezedetect=n={float(config['freeze_noise_threshold'])}:"
                 f"d={float(config['freeze_min_duration_seconds'])}"
             )
+            video_filters.extend([
+                "fps=1",
+                "entropy",
+                "metadata=mode=print",
+            ])
         command.extend(["-i", url, "-vf", ",".join(video_filters)])
         if config.get("garbled_audio_detection_enabled") or config.get("silent_audio_detection_enabled"):
             audio_filters: List[str] = []
@@ -3160,6 +3252,71 @@ class ShadowBlankMonitorService:
         return result
 
     @staticmethod
+    def _parse_solid_color_detection(
+        output: str,
+        config: Dict[str, Any],
+        *,
+        observed_duration: float,
+    ) -> Dict[str, Any]:
+        result = {
+            "solid_color_detected": False,
+            "solid_color_duration_secs": None,
+            "solid_color_normalized_entropy_max": None,
+            "solid_color_sample_count": 0,
+        }
+        if not config.get("freeze_detection_enabled"):
+            return result
+
+        frame_values: Dict[int, Dict[str, float]] = {}
+        current_frame: Optional[int] = None
+        for line in (output or "").splitlines():
+            frame_match = ENTROPY_FRAME_RE.search(line)
+            if frame_match:
+                try:
+                    current_frame = int(frame_match.group("frame"))
+                    frame_values.setdefault(current_frame, {})
+                except (TypeError, ValueError):
+                    current_frame = None
+                continue
+
+            value_match = ENTROPY_VALUE_RE.search(line)
+            if not value_match or current_frame is None:
+                continue
+            try:
+                value = float(value_match.group("value"))
+            except (TypeError, ValueError):
+                continue
+            frame_values.setdefault(current_frame, {})[value_match.group("plane")] = value
+
+        complete_frames = [
+            values
+            for values in frame_values.values()
+            if all(plane in values for plane in ("Y", "U", "V"))
+        ]
+        if not complete_frames:
+            return result
+
+        frame_maxima = [max(values.values()) for values in complete_frames]
+        low_entropy_samples = [
+            value for value in frame_maxima if value <= SOLID_COLOR_ENTROPY_THRESHOLD
+        ]
+        result["solid_color_sample_count"] = len(low_entropy_samples)
+        result["solid_color_normalized_entropy_max"] = round(max(frame_maxima), 4)
+
+        min_duration = float(
+            config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
+        )
+        low_entropy_ratio = len(low_entropy_samples) / max(1, len(complete_frames))
+        if (
+            len(low_entropy_samples) >= SOLID_COLOR_MIN_SAMPLES
+            and low_entropy_ratio >= SOLID_COLOR_SAMPLE_RATIO_THRESHOLD
+            and float(observed_duration or 0.0) >= min_duration
+        ):
+            result["solid_color_detected"] = True
+            result["solid_color_duration_secs"] = round(float(observed_duration or 0.0), 3)
+        return result
+
+    @staticmethod
     def _offline_image_probe_command(url: str, config: Dict[str, Any]) -> List[str]:
         headers = ""
         api_key = config.get("watcher_api_key")
@@ -3304,7 +3461,13 @@ class ShadowBlankMonitorService:
             or DEFAULT_CONFIG["loop_probe_duration_seconds"]
         )
         analysis_window = ShadowBlankMonitorService._probe_analysis_window_seconds(config)
-        return max(1.0, min(configured, max(15.0, analysis_window + 3.0)))
+        return max(
+            1.0,
+            min(
+                configured,
+                max(CONTINUOUS_LOOP_PROBE_SLICE_MIN_SECONDS, analysis_window + 3.0),
+            ),
+        )
 
     def _run_loop_probe_if_enabled(
         self,
@@ -3436,6 +3599,7 @@ class ShadowBlankMonitorService:
             returncode not in (None, 0)
             and (
                 "output file does not contain any stream" in lowered
+                or "invalid data found" in lowered
                 or (
                     "could not find codec parameters" in lowered
                     and "unspecified size" in lowered
@@ -3477,6 +3641,11 @@ class ShadowBlankMonitorService:
                     duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+                parsed.update(self._parse_solid_color_detection(
+                    output,
+                    config,
+                    observed_duration=duration,
+                ))
             parsed.update(self._parse_audio_detection(
                 output,
                 config,
@@ -3503,6 +3672,11 @@ class ShadowBlankMonitorService:
                     output,
                     duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
+                ))
+                parsed.update(self._parse_solid_color_detection(
+                    output,
+                    config,
+                    observed_duration=duration,
                 ))
             parsed.update(self._parse_audio_detection(
                 output,
@@ -3582,16 +3756,20 @@ class ShadowBlankMonitorService:
 
         try:
             # Continuous probes are protecting a real viewer that is already on
-            # the channel. Waiting for probe_duration * ratio turns a 60s
-            # watcher into a 48s blank wait before even the first confirmation.
-            # For open segments, use the configured minimum duration as the
-            # real-time trigger and let confirmation_count provide the safety
-            # against one-off black frames.
+            # the channel. Freeze can appear briefly during low-motion content,
+            # so gate it by the actual analysis window ratio instead of the raw
+            # minimum segment duration. Blank/no-decodable/silent keep their own
+            # faster fault-specific gates.
             blank_required = float(
                 config.get("blank_min_duration_seconds", DEFAULT_CONFIG["blank_min_duration_seconds"])
             )
             freeze_required = float(
                 config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
+            )
+            freeze_ratio_required = max(
+                freeze_required,
+                float(analysis_window_seconds or duration or 1)
+                * float(config.get("freeze_ratio_threshold", DEFAULT_CONFIG["freeze_ratio_threshold"])),
             )
             no_decodable_required = float(
                 config.get(
@@ -3717,7 +3895,7 @@ class ShadowBlankMonitorService:
 
                     if (
                         config.get("no_decodable_frames_detection_enabled", True)
-                        and decoded_frames <= 0
+                        and not (decoded_frames > 0 and saw_video_stream)
                     ):
                         lowered_line = line.lower()
                         matched_no_decodable = next(
@@ -3786,7 +3964,7 @@ class ShadowBlankMonitorService:
                                 segment_duration = 0.0
                         active_freeze_start = None
                         active_freeze_wall = None
-                        if segment_duration is not None and segment_duration >= freeze_required:
+                        if segment_duration is not None and segment_duration >= freeze_ratio_required:
                             if mark_detection("freeze", segment_duration):
                                 break
 
@@ -3803,9 +3981,21 @@ class ShadowBlankMonitorService:
 
                 if (
                     no_decodable_error
-                    and decoded_frames <= 0
+                    and not (decoded_frames > 0 and saw_video_stream)
                     and no_decodable_observed_duration() >= no_decodable_required
                 ):
+                    mark_detection("no_decodable_frames", no_decodable_observed_duration())
+                    break
+
+                if (
+                    config.get("no_decodable_frames_detection_enabled", True)
+                    and not no_decodable_error
+                    and not (decoded_frames > 0 and saw_video_stream)
+                    and (saw_audio_stream or saw_video_stream or saw_stream_mapping)
+                    and no_decodable_observed_duration() >= no_decodable_required
+                ):
+                    no_decodable_error = "no decoded video frames"
+                    no_decodable_first_seen_wall = probe_started_wall
                     mark_detection("no_decodable_frames", no_decodable_observed_duration())
                     break
 
@@ -3818,7 +4008,7 @@ class ShadowBlankMonitorService:
 
                 if (
                     active_freeze_start is not None
-                    and observed_duration(active_freeze_start, active_freeze_wall) >= freeze_required
+                    and observed_duration(active_freeze_start, active_freeze_wall) >= freeze_ratio_required
                 ):
                     mark_detection("freeze", observed_duration(active_freeze_start, active_freeze_wall))
                     break
@@ -3883,7 +4073,7 @@ class ShadowBlankMonitorService:
             elif (
                 not detected_reason
                 and no_decodable_error
-                and decoded_frames <= 0
+                and not (decoded_frames > 0 and saw_video_stream)
                 and not viewer_left
                 and not stopped
             ):
@@ -3929,6 +4119,11 @@ class ShadowBlankMonitorService:
                     observed_probe_duration,
                     freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
                 ))
+                parsed.update(self._parse_solid_color_detection(
+                    output,
+                    config,
+                    observed_duration=observed_probe_duration,
+                ))
             if not detected_reason and not viewer_left and not stopped:
                 flushed_blank_duration = max(
                     (
@@ -3950,14 +4145,30 @@ class ShadowBlankMonitorService:
                         ),
                         default=0.0,
                     )
-                    if flushed_freeze_duration >= freeze_required:
+                    if flushed_freeze_duration >= freeze_ratio_required:
                         detected_reason = "freeze"
                         detected_duration = flushed_freeze_duration
+            if (
+                parsed.get("solid_color_detected")
+                and not parsed.get("blank_detected")
+                and parsed.get("freeze_detected")
+                and detected_reason in {"", "freeze"}
+                and not viewer_left
+                and not stopped
+            ):
+                detected_reason = "solid_color"
+                detected_duration = max(
+                    detected_duration,
+                    float(parsed.get("solid_color_duration_secs") or 0.0),
+                    float(parsed.get("freeze_duration_secs") or 0.0),
+                )
             parsed.update(self._parse_audio_detection(
                 output,
                 config,
                 observed_duration=max(detected_duration, time.monotonic() - probe_started_wall),
             ))
+            if saw_audio_stream and parsed.get("audio_stream_present") is None:
+                parsed["audio_stream_present"] = True
             parsed.update(no_decodable_parsed)
             parsed.update(offline_image_probe)
             parsed["returncode"] = process.returncode
@@ -3969,7 +4180,20 @@ class ShadowBlankMonitorService:
                 parsed.setdefault("blank_detected", False)
                 parsed["freeze_detected"] = True
                 parsed["freeze_duration_secs"] = round(detected_duration, 3)
-                parsed["freeze_ratio"] = round(min(1.0, detected_duration / float(duration or 1)), 4)
+                freeze_ratio_duration = (
+                    analysis_window_duration
+                    if analysis_window_duration is not None
+                    else analysis_window_seconds
+                )
+                parsed["freeze_ratio"] = round(
+                    min(1.0, detected_duration / float(freeze_ratio_duration or duration or 1)),
+                    4,
+                )
+            elif detected_reason == "solid_color":
+                parsed.setdefault("blank_detected", False)
+                parsed.setdefault("freeze_detected", True)
+                parsed["solid_color_detected"] = True
+                parsed["solid_color_duration_secs"] = round(detected_duration, 3)
             elif detected_reason == "no_decodable_frames":
                 parsed.setdefault("blank_detected", False)
                 parsed.setdefault("freeze_detected", False)
@@ -4212,6 +4436,118 @@ class ShadowBlankMonitorService:
         return str(client)
 
     @staticmethod
+    def _watcher_client_marker(config: Dict[str, Any]) -> str:
+        user_agent = str(config.get("watcher_user_agent") or DEFAULT_WATCHER_USER_AGENT).lower()
+        marker = SHADOW_WATCHER_USER_AGENT_MARKER.lower()
+        if marker in user_agent:
+            return marker
+        return user_agent
+
+    @staticmethod
+    def _status_clients(status: Dict[str, Any]) -> Optional[List[Any]]:
+        clients = status.get("clients")
+        if isinstance(clients, dict):
+            return list(clients.values())
+        if isinstance(clients, list):
+            return clients
+        return None
+
+    @classmethod
+    def _client_ref(cls, client: Any, index: int) -> str:
+        if isinstance(client, dict):
+            for key in ("client_id", "id", "session_id"):
+                value = client.get(key)
+                if value is not None and str(value).strip():
+                    return f"{key}:{str(value).strip()}"
+            parts = [
+                str(client.get(key) or "").strip()
+                for key in ("ip", "user", "username", "connected_at", "started_at", "user_agent")
+                if str(client.get(key) or "").strip()
+            ]
+            if parts:
+                return "|".join(parts)
+        return f"{index}:{cls._client_text(client)}"
+
+    def _real_client_refs(self, status: Dict[str, Any], config: Dict[str, Any]) -> List[str]:
+        marker = self._watcher_client_marker(config)
+        clients = self._status_clients(status)
+        if not clients:
+            return []
+        refs: List[str] = []
+        for index, client in enumerate(clients):
+            text = self._client_text(client).lower()
+            if marker and marker in text:
+                continue
+            if self._is_stale_real_client(client, config):
+                continue
+            refs.append(self._client_ref(client, index))
+        return refs
+
+    def _client_last_active_age_seconds(self, client: Any) -> Optional[float]:
+        if not isinstance(client, dict):
+            return None
+        for key in ("last_active_ago", "last_activity_ago", "idle_seconds"):
+            try:
+                age = float(client.get(key))
+            except (TypeError, ValueError):
+                continue
+            if age >= 0:
+                return age
+        for key in ("last_active", "last_activity_at"):
+            try:
+                timestamp = float(client.get(key))
+            except (TypeError, ValueError):
+                continue
+            if timestamp > 0:
+                return max(0.0, float(self.clock()) - timestamp)
+        return None
+
+    @staticmethod
+    def _stale_real_client_threshold_seconds(config: Dict[str, Any]) -> float:
+        try:
+            grace = float(config.get("viewer_left_grace_seconds"))
+        except (TypeError, ValueError):
+            grace = float(DEFAULT_CONFIG["viewer_left_grace_seconds"])
+        return max(1.0, grace)
+
+    def _is_stale_real_client(self, client: Any, config: Dict[str, Any]) -> bool:
+        age = self._client_last_active_age_seconds(client)
+        if age is None:
+            return False
+        return age > self._stale_real_client_threshold_seconds(config)
+
+    def _stale_real_client_absence(
+        self,
+        status: Dict[str, Any],
+        config: Dict[str, Any],
+        now: float,
+    ) -> Optional[Dict[str, Any]]:
+        marker = self._watcher_client_marker(config)
+        clients = self._status_clients(status)
+        if not clients:
+            return None
+
+        stale_ages: List[float] = []
+        for client in clients:
+            text = self._client_text(client).lower()
+            if marker and marker in text:
+                continue
+            age = self._client_last_active_age_seconds(client)
+            if age is None:
+                return None
+            if age <= self._stale_real_client_threshold_seconds(config):
+                return None
+            stale_ages.append(age)
+
+        if not stale_ages:
+            return None
+        return {
+            "since": max(0.0, float(now) - max(stale_ages)),
+            "last_real_client_count": len(stale_ages),
+            "reason": "stale_dispatcharr_client",
+        }
+
+    @staticmethod
     def _normalize_proxy_output_format(value: Any) -> Optional[str]:
         text = str(value or "").strip().lower()
         if not text:
@@ -4221,7 +4557,7 @@ class ShadowBlankMonitorService:
         return PROXY_OUTPUT_FORMAT_ALIASES.get(text)
 
     def _real_viewer_output_format(self, status: Dict[str, Any], config: Dict[str, Any]) -> Optional[str]:
-        marker = str(config.get("watcher_user_agent") or "").lower()
+        marker = self._watcher_client_marker(config)
         clients = status.get("clients")
         if isinstance(clients, dict):
             clients = list(clients.values())
@@ -4230,6 +4566,8 @@ class ShadowBlankMonitorService:
                 if marker and marker in self._client_text(client).lower():
                     continue
                 if not isinstance(client, dict):
+                    continue
+                if self._is_stale_real_client(client, config):
                     continue
                 for key in ("output_format", "resolved_output_format", "container", "format"):
                     normalized = self._normalize_proxy_output_format(client.get(key))
@@ -4248,18 +4586,42 @@ class ShadowBlankMonitorService:
         config: Dict[str, Any],
         target: Optional[Dict[str, Any]] = None,
     ) -> int:
-        marker = str(config.get("watcher_user_agent") or "").lower()
-        clients = status.get("clients")
-        if isinstance(clients, dict):
-            clients = list(clients.values())
+        marker = self._watcher_client_marker(config)
+        clients = self._status_clients(status)
         if isinstance(clients, list):
-            real = 0
-            for client in clients:
+            non_watcher_refs: List[str] = []
+            visible_watcher_count = 0
+            for index, client in enumerate(clients):
                 text = self._client_text(client).lower()
                 if marker and marker in text:
+                    visible_watcher_count += 1
                     continue
-                real += 1
-            return real
+                if self._is_stale_real_client(client, config):
+                    continue
+                non_watcher_refs.append(self._client_ref(client, index))
+
+            if target is not None and visible_watcher_count <= 0:
+                probe_started = target.get("active_probe_started_at")
+                try:
+                    probe_age = self.clock() - float(probe_started)
+                except (TypeError, ValueError):
+                    probe_age = 0.0
+                probe_is_established = (
+                    probe_started is not None
+                    and probe_age >= AGGREGATE_ONLY_VIEWER_GRACE_SECONDS
+                )
+                baseline_refs = {
+                    str(ref)
+                    for ref in (target.get("real_client_refs") or [])
+                    if str(ref).strip()
+                }
+                if probe_is_established and baseline_refs and non_watcher_refs:
+                    still_real = [ref for ref in non_watcher_refs if ref in baseline_refs]
+                    unseen = [ref for ref in non_watcher_refs if ref not in baseline_refs]
+                    inferred_shadow_clients = 1 if unseen else 0
+                    return len(still_real) + max(0, len(unseen) - inferred_shadow_clients)
+
+            return len(non_watcher_refs)
 
         aggregate_count: Optional[int] = None
         for key in ("real_client_count", "client_count", "current_viewers", "viewer_count"):
@@ -4300,12 +4662,10 @@ class ShadowBlankMonitorService:
         return int(self._watcher_client_details(status, config).get("watcher_client_count") or 0)
 
     def _watcher_client_details(self, status: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
-        marker = str(config.get("watcher_user_agent") or "").lower()
+        marker = self._watcher_client_marker(config)
         if not marker:
             return {"watcher_client_count": 0}
-        clients = status.get("clients")
-        if isinstance(clients, dict):
-            clients = list(clients.values())
+        clients = self._status_clients(status)
         if not isinstance(clients, list):
             return {"watcher_client_count": 0}
 

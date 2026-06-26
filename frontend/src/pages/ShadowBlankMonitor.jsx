@@ -4,6 +4,7 @@ import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Input } from '@/components/ui/input.jsx'
 import { Label } from '@/components/ui/label.jsx'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { useToast } from '@/hooks/use-toast.js'
@@ -15,8 +16,15 @@ import {
 } from '@/lib/viewer-activity-display.js'
 import {
   shadowMonitorNumberFields,
-  shadowMonitorThresholdFields,
 } from '@/lib/shadow-monitor-config-fields.js'
+import {
+  CUSTOM_WATCHER_USER_AGENT_TEMPLATE,
+  CUSTOM_WATCHER_USER_AGENT_VALUE,
+  SHADOW_WATCHER_USER_AGENT_MARKER,
+  getWatcherUserAgentPreset,
+  getWatcherUserAgentSelectValue,
+  watcherUserAgentPresets,
+} from '@/lib/shadow-monitor-user-agent-presets.js'
 import {
   getShadowMonitorDisplayState,
   syncShadowMonitorConfigFromStatus,
@@ -306,8 +314,11 @@ export default function ShadowBlankMonitor() {
     loopDetectionEnabled,
     loopSwitchGateSatisfied,
   } = displayState
-  const formWatchMode = editedConfig?.watch_mode || 'continuous'
   const canLearnOfflineImage = actionLoading === '' && watchedChannels.length > 0
+  const watcherUserAgent = String(editedConfig.watcher_user_agent || '')
+  const watcherUserAgentSelectValue = getWatcherUserAgentSelectValue(watcherUserAgent)
+  const watcherUserAgentPreset = getWatcherUserAgentPreset(watcherUserAgent)
+  const watcherUserAgentIsCustom = watcherUserAgentSelectValue === CUSTOM_WATCHER_USER_AGENT_VALUE
 
   return (
     <div className="space-y-6">
@@ -543,27 +554,6 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
-              <div className="space-y-2 md:col-span-2">
-                <Label htmlFor="loop_probe_duration_seconds">Loop Probe Duration</Label>
-                <div className="flex items-center gap-2">
-                  <Input
-                    id="loop_probe_duration_seconds"
-                    type="number"
-                    min={60}
-                    max={720}
-                    value={editedConfig.loop_probe_duration_seconds ?? 360}
-                    onChange={(event) => updateConfigValue(
-                      'loop_probe_duration_seconds',
-                      Math.min(720, Math.max(60, Number(event.target.value) || 360)),
-                    )}
-                  />
-                  <span className="w-16 shrink-0 text-xs text-muted-foreground">sec</span>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  Uses sampled frames over the probe window; keep the default for slow provider loops. Gated by active real viewers, confirmations, cooldowns, switch budget, stale-stream checks, watcher recovery, and required next-stream pre-probe.
-                </p>
-              </div>
-
               <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3 md:col-span-2">
                 <div className="min-w-0 flex-1">
                   <Label className="text-sm font-medium">Next Stream Pre-Probe</Label>
@@ -578,40 +568,11 @@ export default function ShadowBlankMonitor() {
                 />
               </div>
 
-              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3 md:col-span-2">
-                <div className="min-w-0 flex-1">
-                  <Label className="text-sm font-medium">Persistent Watcher</Label>
-                  <p className="text-xs text-muted-foreground">
-                    Keep a continuous Shadow playback client open. Leave off for low-impact monitoring.
-                  </p>
-                </div>
-                <Switch
-                  checked={Boolean(editedConfig.persistent_watcher_enabled)}
-                  onCheckedChange={(value) => updateConfigValue('persistent_watcher_enabled', value)}
-                />
-              </div>
-
               <div className="rounded-md border p-3 md:col-span-2">
-                <Label className="text-sm font-medium">Watch Mode</Label>
-                <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                  <Button
-                    type="button"
-                    variant={formWatchMode === 'periodic' ? 'default' : 'outline'}
-                    onClick={() => updateConfigValue('watch_mode', 'periodic')}
-                  >
-                    Periodic
-                  </Button>
-                  <Button
-                    type="button"
-                    variant={formWatchMode === 'continuous' ? 'default' : 'outline'}
-                    onClick={() => updateConfigValue('watch_mode', 'continuous')}
-                  >
-                    Continuous
-                  </Button>
-                </div>
-                <div className="mt-3 rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
-                  Continuous mode keeps watching active viewer sessions as they appear. Use excludes for channels the watcher should ignore; `Scan Now` is hidden while continuous watching is already active.
-                </div>
+                <Label className="text-sm font-medium">Continuous Monitoring</Label>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Watches active viewer sessions as they appear. Use excludes for channels the watcher should ignore; Scan Now is hidden while continuous watching is already active.
+                </p>
               </div>
             </div>
 
@@ -633,25 +594,6 @@ export default function ShadowBlankMonitor() {
                   {field.help ? (
                     <p className="text-xs text-muted-foreground">{field.help}</p>
                   ) : null}
-                </div>
-              ))}
-            </div>
-
-            <Separator />
-
-            <div className="grid gap-4 md:grid-cols-3">
-              {shadowMonitorThresholdFields.map(field => (
-                <div key={field.key} className="space-y-2">
-                  <Label htmlFor={field.key}>{field.label}</Label>
-                  <Input
-                    id={field.key}
-                    type="number"
-                    step={field.step}
-                    min={field.min}
-                    max={field.max}
-                    value={editedConfig[field.key] ?? ''}
-                    onChange={(event) => updateConfigValue(field.key, Number(event.target.value))}
-                  />
                 </div>
               ))}
             </div>
@@ -699,17 +641,6 @@ export default function ShadowBlankMonitor() {
               )}
             </div>
 
-            <Separator />
-
-            <div className="space-y-2">
-              <Label htmlFor="watcher_user_agent">Watcher User Agent</Label>
-              <Input
-                id="watcher_user_agent"
-                value={editedConfig.watcher_user_agent || ''}
-                onChange={(event) => updateConfigValue('watcher_user_agent', event.target.value)}
-              />
-            </div>
-
             <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
               <div className="space-y-2">
                 <Label htmlFor="watcher_api_key">Watcher API Key</Label>
@@ -736,6 +667,50 @@ export default function ShadowBlankMonitor() {
               >
                 Clear Key
               </Button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="watcher_user_agent_preset">Watcher User Agent</Label>
+                <Select
+                  value={watcherUserAgentSelectValue}
+                  onValueChange={(value) => {
+                    if (value === CUSTOM_WATCHER_USER_AGENT_VALUE) {
+                      updateConfigValue('watcher_user_agent', CUSTOM_WATCHER_USER_AGENT_TEMPLATE)
+                      return
+                    }
+                    updateConfigValue('watcher_user_agent', value)
+                  }}
+                >
+                  <SelectTrigger id="watcher_user_agent_preset">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {watcherUserAgentPresets.map(preset => (
+                      <SelectItem key={preset.value} value={preset.value}>
+                        {preset.label}
+                      </SelectItem>
+                    ))}
+                    <SelectItem value={CUSTOM_WATCHER_USER_AGENT_VALUE}>Custom</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {watcherUserAgentPreset?.description || 'Use a custom playback user agent for the watcher.'}
+                </p>
+              </div>
+              {watcherUserAgentIsCustom ? (
+                <div className="space-y-2">
+                  <Label htmlFor="watcher_user_agent">Custom User Agent</Label>
+                  <Input
+                    id="watcher_user_agent"
+                    value={watcherUserAgent}
+                    onChange={(event) => updateConfigValue('watcher_user_agent', event.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Keep <span className="font-mono">{SHADOW_WATCHER_USER_AGENT_MARKER}</span> in the value so Shadow can separate its watcher from real viewers.
+                  </p>
+                </div>
+              ) : null}
             </div>
 
             <div className="grid gap-4 md:grid-cols-2">

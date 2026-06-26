@@ -77,8 +77,8 @@ describe('operatorHelpSections', () => {
     expect(teamarr.links.map(link => link.to)).toContain('/help/teamarr-preflight')
 
     const shadowMonitor = operatorHelpSections.find(section => section.id === 'shadow-monitor')
-    expect(shadowMonitor.items.join(' ')).toMatch(/Channel Switch Limit/)
-    expect(shadowMonitor.items.join(' ')).toMatch(/per-channel rolling-hour guard/)
+    expect(shadowMonitor.items.join(' ')).toMatch(/Timing, cooldown, and switch-budget values/)
+    expect(shadowMonitor.items.join(' ')).toMatch(/internal Continuous safeguards/)
     expect(shadowMonitor.items.join(' ')).toMatch(/Silent Audio/)
     expect(shadowMonitor.items.join(' ')).toMatch(/fMP4/)
     expect(shadowMonitor.items.join(' ')).toMatch(/MPEGTS/)
@@ -198,9 +198,10 @@ describe('operatorHelpSections', () => {
     expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Concurrent Checking tab -> Global Concurrent Limit')
     const shadowSettings = getOperatorHelpDetailTopic('shadow-monitor').settings
     expect(shadowSettings.map(setting => setting.name)).toEqual(expect.arrayContaining([
-      'Watch Mode',
+      'Continuous mode',
       'Viewer Output Format',
-      'Persistent Watcher',
+      'Watcher User Agent',
+      'Viewer Grace',
       'Dry Run',
       'Freeze Detection',
       'Garbled Audio',
@@ -213,11 +214,14 @@ describe('operatorHelpSections', () => {
       'Healthy Probe Interval',
       'Channel Switch Limit',
     ]))
-    expect(shadowSettings.find(setting => setting.name === 'Watch Mode').defaultValue).toBe('Continuous')
+    expect(shadowSettings.find(setting => setting.name === 'Continuous mode').defaultValue).toBe('Continuous')
+    expect(shadowSettings.find(setting => setting.name === 'Continuous mode').effect).toMatch(/Legacy periodic config is normalized/i)
     expect(shadowSettings.find(setting => setting.name === 'Viewer Output Format').effect).toMatch(/fMP4 or MPEGTS/i)
-    expect(shadowSettings.find(setting => setting.name === 'Persistent Watcher').defaultValue).toBe('Off')
-    expect(shadowSettings.find(setting => setting.name === 'Persistent Watcher').effect).toMatch(/Dispatcharr proxy probe/i)
-    expect(shadowSettings.find(setting => setting.name === 'Persistent Watcher').risk).toMatch(/extra viewer/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher User Agent').defaultValue).toMatch(/TiviMate/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher User Agent').effect).toMatch(/unique marker/i)
+    expect(shadowSettings.find(setting => setting.name === 'Viewer Grace').defaultValue).toBe('5 seconds')
+    expect(shadowSettings.find(setting => setting.name === 'Viewer Grace').effect).toMatch(/real viewer disappears/i)
+    expect(shadowSettings.find(setting => setting.name === 'Viewer Grace').risk).toMatch(/provider\/profile capacity/i)
     expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').defaultValue).toBe('120 seconds')
     expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').effect).toMatch(/constant extra viewer/i)
     expect(shadowSettings.find(setting => setting.name === 'Dry Run').defaultValue).toBe('Off')
