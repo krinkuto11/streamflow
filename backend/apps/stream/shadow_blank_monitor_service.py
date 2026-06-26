@@ -1532,6 +1532,15 @@ class ShadowBlankMonitorService:
                 config.get("offline_image_detection_enabled")
                 and result.get("offline_image_detected")
             )
+            freeze_suppressed_audio_present = False
+            if (
+                config.get("watch_mode") == "continuous"
+                and freeze
+                and result.get("audio_stream_present") is True
+                and not any((blank, no_decodable_frames, garbled_audio, silent_audio, offline_image))
+            ):
+                freeze = False
+                freeze_suppressed_audio_present = True
             loop = False
             detection_reason = next(
                 (
@@ -1575,6 +1584,7 @@ class ShadowBlankMonitorService:
                 "loop_frames_processed": result.get("loop_frames_processed"),
                 "loop_probe_error": result.get("loop_probe_error"),
                 "loop_probe_sliced": bool(result.get("loop_probe_sliced")),
+                "freeze_suppressed_audio_present": freeze_suppressed_audio_present,
             }
             target["last_probe_thresholds"] = self._detection_thresholds(config)
 
@@ -4005,6 +4015,8 @@ class ShadowBlankMonitorService:
                 config,
                 observed_duration=max(detected_duration, time.monotonic() - probe_started_wall),
             ))
+            if saw_audio_stream and parsed.get("audio_stream_present") is None:
+                parsed["audio_stream_present"] = True
             parsed.update(no_decodable_parsed)
             parsed.update(offline_image_probe)
             parsed["returncode"] = process.returncode

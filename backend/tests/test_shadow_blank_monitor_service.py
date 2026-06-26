@@ -4080,6 +4080,63 @@ def test_continuous_freeze_fault_recovery_guard_needs_second_confirmation(tmp_pa
     assert status["recent_events"][1]["type"] == "freeze_pending"
 
 
+def test_continuous_freeze_with_audio_present_is_probe_ok(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[{"user_agent": "VLC"}],
+                )
+            }
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={11: {"id": 11, "url": "http://candidate.local/good"}},
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {
+            "blank_detected": False,
+            "freeze_detected": True,
+            "freeze_duration_secs": 12.0,
+            "freeze_ratio": 0.95,
+            "audio_stream_present": True,
+        },
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "freeze_detection_enabled": True,
+        "next_stream_pre_probe_enabled": False,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is True
+    assert switch_calls == []
+    assert status["recent_events"][0]["type"] == "probe_ok"
+    details = status["recent_events"][0]["details"]
+    assert details["freeze_detected"] is False
+    assert details["freeze_suppressed_audio_present"] is True
+    assert details["audio_stream_present"] is True
+    with service._lock:
+        assert service._blank_counts == {}
+
+
 def test_continuous_blank_fault_recovery_guard_needs_second_confirmation(tmp_path):
     switch_calls = []
     udi = FakeUdi(
