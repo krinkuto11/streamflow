@@ -69,3 +69,35 @@ def test_quality_reason_fields_are_prepared_for_stream_stats_payload():
         "actual": 742.4,
         "threshold": 1500,
     }
+
+
+def test_missing_bitrate_incomplete_fields_are_prepared_for_stream_stats_payload():
+    service = object.__new__(StreamCheckerService)
+    stream_data = {
+        "stream_id": 42,
+        "resolution": "3840x2160",
+        "fps": 50,
+        "video_codec": "hevc",
+        "audio_codec": "aac",
+        "bitrate_kbps": None,
+        "bitrate_source": "ffprobe_media_fallback_no_bitrate",
+        "quality_reason": "none",
+        "quality_reason_detail": "none",
+        "quality_reason_context": {},
+        "measurement_incomplete": True,
+        "measurement_incomplete_reason": "missing_bitrate",
+        "measurement_incomplete_context": {
+            "bitrate_source": "ffprobe_media_fallback_no_bitrate",
+        },
+        "bitrate_recheck_required": True,
+    }
+
+    payload = service._prepare_stream_stats_for_batch(stream_data)
+
+    assert payload["stream_stats"]["ffmpeg_output_bitrate"] is None
+    assert payload["stream_stats"]["measurement_incomplete"] is True
+    assert payload["stream_stats"]["measurement_incomplete_reason"] == "missing_bitrate"
+    assert payload["stream_stats"]["measurement_incomplete_context"] == {
+        "bitrate_source": "ffprobe_media_fallback_no_bitrate",
+    }
+    assert payload["stream_stats"]["bitrate_recheck_required"] is True

@@ -184,6 +184,38 @@ def test_last_quality_stats_rejects_zero_resolution():
     assert payload["last_status"] == "0x0"
 
 
+def test_last_quality_stats_missing_bitrate_requires_recheck_without_dead_reason():
+    session = connection.get_session()
+    try:
+        _add_stream(session)
+        run = _add_run(session, timestamp=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc))
+        session.add(
+            StreamTelemetry(
+                run_id=run.id,
+                channel_id=1914,
+                provider_id=21,
+                stream_id=683989,
+                bitrate_kbps=None,
+                resolution_width=3840,
+                resolution_height=2160,
+                fps=50.0,
+                codec="hevc",
+                is_dead=False,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    payload = get_last_quality_stats(683989, session_factory=connection.get_session)
+
+    assert payload["measured"] is False
+    assert payload["recheck_required"] is True
+    assert payload["reason"] == "missing_bitrate"
+    assert payload["last_status"] == "incomplete_bitrate"
+    assert payload["quality_reason"] == "none"
+
+
 def test_last_quality_stats_marks_current_stream_stale():
     session = connection.get_session()
     try:
@@ -195,6 +227,7 @@ def test_last_quality_stats_marks_current_stream_stale():
                 channel_id=1914,
                 provider_id=21,
                 stream_id=683989,
+                bitrate_kbps=12000,
                 resolution_width=3840,
                 resolution_height=2160,
                 fps=50.0,
@@ -224,6 +257,7 @@ def test_last_quality_stats_route_does_not_touch_stream_checker(monkeypatch):
                 channel_id=1914,
                 provider_id=21,
                 stream_id=683989,
+                bitrate_kbps=5000,
                 resolution_width=1920,
                 resolution_height=1080,
                 fps=25.0,
