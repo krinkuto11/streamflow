@@ -262,7 +262,7 @@ def test_unmarked_probe_client_is_not_counted_as_real_after_viewer_left(tmp_path
     )
     config = normalize_config({
         "watch_mode": "continuous",
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
     target = {
         "channel_uuid": "uuid-1",
@@ -318,7 +318,7 @@ def test_discovery_keeps_grace_when_only_unmarked_probe_client_remains(tmp_path)
     service._active_probes.add("uuid-1")
     config = normalize_config({
         "watch_mode": "continuous",
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
 
     targets = service.discover_active_targets(udi, config)
@@ -326,7 +326,86 @@ def test_discovery_keeps_grace_when_only_unmarked_probe_client_remains(tmp_path)
     assert len(targets) == 1
     assert targets[0]["viewer_left_grace_active"] is True
     assert targets[0]["real_client_count"] == 0
-    assert targets[0]["viewer_left_grace_remaining_seconds"] == 30
+    assert targets[0]["viewer_left_grace_remaining_seconds"] == 5
+
+
+def test_stale_dispatcharr_client_is_not_counted_as_real_after_short_viewer_grace(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 5,
+    })
+    fresh_status = active_status(
+        stream_id=10,
+        clients=[{
+            "client_id": "real-viewer",
+            "user_agent": "TiviMate/5.1.6",
+            "last_active_ago": 4.9,
+            "output_format": "fmp4",
+        }],
+    )
+    stale_status = active_status(
+        stream_id=10,
+        clients=[{
+            "client_id": "real-viewer",
+            "user_agent": "TiviMate/5.1.6",
+            "last_active_ago": 6.1,
+            "output_format": "fmp4",
+        }],
+    )
+
+    assert service._real_client_count(fresh_status, config) == 1
+    assert service._real_viewer_output_format(fresh_status, config) == "fmp4"
+    assert service._real_client_refs(fresh_status, config) == ["client_id:real-viewer"]
+    assert service._real_client_count(stale_status, config) == 0
+    assert service._real_viewer_output_format(stale_status, config) is None
+    assert service._real_client_refs(stale_status, config) == []
+
+
+def test_stale_dispatcharr_client_expires_grace_from_last_activity(tmp_path):
+    now = {"value": 1000.0}
+    channel = {"id": 1, "uuid": "uuid-1", "name": "Das Erste HD", "streams": [10, 11]}
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[{
+                    "client_id": "real-viewer",
+                    "user_agent": "TiviMate/5.1.6",
+                    "last_active_ago": 6.2,
+                }],
+            )
+        }],
+        channels=[channel],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    with service._lock:
+        service._watched["uuid-1"] = {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "channel_ref": shadow_module._ref("channel", 1),
+            "channel_name": "Das Erste HD",
+            "stream_id": 10,
+            "stream_ref": shadow_module._ref("stream", 10),
+            "real_client_count": 1,
+            "real_client_refs": ["client_id:real-viewer"],
+        }
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 5,
+    })
+
+    targets = service.discover_active_targets(udi, config)
+    status = service.get_status()
+
+    assert targets == []
+    viewer_left_events = [event for event in status["recent_events"] if event["type"] == "viewer_left"]
+    assert len(viewer_left_events) == 1
+    assert viewer_left_events[0]["details"]["reason"] == "viewer_left_grace_expired"
+    assert viewer_left_events[0]["details"]["viewer_absent_seconds"] == 6
 
 
 def test_continuous_loop_probe_is_rate_limited_between_slices(tmp_path):
@@ -428,6 +507,9 @@ def test_watch_mode_controls_scan_delay():
     loop_bounds = normalize_config({"loop_detection_enabled": True, "loop_probe_duration_seconds": 999})
     assert loop_bounds["loop_detection_enabled"] is True
     assert loop_bounds["loop_probe_duration_seconds"] == 720
+
+    viewer_grace_bounds = normalize_config({"viewer_left_grace_seconds": 30})
+    assert viewer_grace_bounds["viewer_left_grace_seconds"] == 10
 
 
 def test_offline_image_status_warns_about_missing_or_invalid_hashes(tmp_path):
@@ -2011,6 +2093,42 @@ def test_continuous_probe_detects_no_decodable_frames_after_min_duration(tmp_pat
         "output file does not contain any stream",
     }
     assert result.get("blank_detected") is False
+
+
+def test_no_decodable_parser_treats_invalid_data_as_terminal_decoder_stall():
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+
+    result = ShadowBlankMonitorService._parse_no_decodable_frames_detection(
+        "http://provider.example/bad.ts: Invalid data found when processing input\n",
+        config,
+        observed_duration=0.4,
+        returncode=1,
+    )
+
+    assert result["no_decodable_frames_detected"] is True
+    assert result["no_decodable_frames_duration_secs"] == 10
+    assert result["no_decodable_frames_error"] == "invalid data found"
+
+
+def test_no_decodable_parser_ignores_invalid_data_after_decoded_frames():
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+
+    result = ShadowBlankMonitorService._parse_no_decodable_frames_detection(
+        "frame=   12 fps=2.0 q=-0.0 size=N/A time=00:00:06.00 bitrate=N/A speed=1x\n"
+        "Invalid data found when processing input\n",
+        config,
+        observed_duration=10.5,
+        returncode=1,
+    )
+
+    assert result["no_decodable_frames_detected"] is False
+    assert result["no_decodable_frames_error"] is None
 
 
 def test_continuous_probe_holds_ffmpeg_until_viewer_leaves(tmp_path, monkeypatch):
@@ -5876,7 +5994,7 @@ def test_viewer_left_grace_keeps_persistent_watcher_for_brief_client_drop(tmp_pa
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
         "persistent_watcher_enabled": True,
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
 
     targets = service.discover_active_targets(udi, config)
@@ -5887,14 +6005,14 @@ def test_viewer_left_grace_keeps_persistent_watcher_for_brief_client_drop(tmp_pa
     service._sync_persistent_watchers(grace_targets, config)
     service._probe_targets(udi, grace_targets, config, single_pass=True)
 
-    now["value"] = 1010.0
+    now["value"] = 1008.0
     recovered_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(recovered_targets, config)
 
     assert len(started) == 1
     assert started[0].terminated is False
     assert grace_targets[0]["viewer_left_grace_active"] is True
-    assert grace_targets[0]["viewer_left_grace_remaining_seconds"] == 30
+    assert grace_targets[0]["viewer_left_grace_remaining_seconds"] == 5
     assert recovered_targets[0]["real_client_count"] == 1
     assert probe_urls == []
     assert "viewer_left" not in [event["type"] for event in service.get_status()["recent_events"]]
@@ -5925,7 +6043,7 @@ def test_viewer_left_grace_expires_and_stops_persistent_watcher(tmp_path, monkey
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
         "persistent_watcher_enabled": True,
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
 
     targets = service.discover_active_targets(udi, config)
@@ -5935,7 +6053,7 @@ def test_viewer_left_grace_expires_and_stops_persistent_watcher(tmp_path, monkey
     grace_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(grace_targets, config)
 
-    now["value"] = 1036.0
+    now["value"] = 1011.0
     expired_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(expired_targets, config)
 
@@ -5972,7 +6090,7 @@ def test_proxy_status_gap_keeps_persistent_watcher_during_viewer_grace(tmp_path,
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
         "persistent_watcher_enabled": True,
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
 
     targets = service.discover_active_targets(udi, config)
@@ -5982,7 +6100,7 @@ def test_proxy_status_gap_keeps_persistent_watcher_during_viewer_grace(tmp_path,
     gap_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(gap_targets, config)
 
-    now["value"] = 1010.0
+    now["value"] = 1008.0
     recovered_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(recovered_targets, config)
 
@@ -6019,7 +6137,7 @@ def test_proxy_status_gap_expires_and_stops_persistent_watcher(tmp_path, monkeyp
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
         "persistent_watcher_enabled": True,
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
 
     targets = service.discover_active_targets(udi, config)
@@ -6029,7 +6147,7 @@ def test_proxy_status_gap_expires_and_stops_persistent_watcher(tmp_path, monkeyp
     gap_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(gap_targets, config)
 
-    now["value"] = 1036.0
+    now["value"] = 1011.0
     expired_targets = service.discover_active_targets(udi, config)
     service._sync_persistent_watchers(expired_targets, config)
 
@@ -6093,7 +6211,7 @@ def test_probe_viewer_left_uses_grace_before_stopping_watcher(tmp_path):
     config = normalize_config({
         "watch_mode": "continuous",
         "watcher_api_key": "watcher-key",
-        "viewer_left_grace_seconds": 30,
+        "viewer_left_grace_seconds": 5,
     })
     config["_shadow_allow_viewer_left_grace"] = True
     target = {

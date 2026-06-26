@@ -15,10 +15,11 @@ describe('shadowMonitorNumberFields', () => {
       label: 'Viewer Grace',
       suffix: 'sec',
       min: 0,
-      max: 30,
+      max: 10,
     })
     expect(viewerGrace.help).toMatch(/real viewer disappears/i)
     expect(viewerGrace.help).toMatch(/frequent channel switching/i)
+    expect(viewerGrace.help).toMatch(/provider\/profile limits/i)
     expect(cooldown).toBeUndefined()
     expect(switchLimit).toBeUndefined()
   })

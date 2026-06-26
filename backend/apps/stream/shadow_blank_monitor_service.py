@@ -56,6 +56,7 @@ NO_DECODABLE_FRAME_ERROR_PATTERNS = (
     "unspecified size",
     "output file does not contain any stream",
     "cannot determine format of input stream",
+    "invalid data found",
     "no decodable frames",
     "no frame could be decoded",
 )
@@ -250,7 +251,7 @@ INT_BOUNDS = {
     "probe_duration_seconds": (3, 120),
     "confirmation_count": (1, 5),
     "channel_cooldown_seconds": (30, 86400),
-    "viewer_left_grace_seconds": (0, 300),
+    "viewer_left_grace_seconds": (0, 10),
     "max_switches_per_hour": (1, 20),
     "max_concurrent_watchers": (1, 10),
     "garbled_audio_error_threshold": (1, 20),
@@ -874,6 +875,8 @@ class ShadowBlankMonitorService:
             real_clients = self._real_client_count(raw_status, config, count_target)
             if real_clients <= 0:
                 previous_absence = previous_viewer_absences.get(channel_uuid)
+                if previous_absence is None:
+                    previous_absence = self._stale_real_client_absence(raw_status, config, now)
                 grace_target = self._viewer_left_grace_target(
                     raw_status,
                     previous_target,
@@ -3595,6 +3598,7 @@ class ShadowBlankMonitorService:
             returncode not in (None, 0)
             and (
                 "output file does not contain any stream" in lowered
+                or "invalid data found" in lowered
                 or (
                     "could not find codec parameters" in lowered
                     and "unspecified size" in lowered
@@ -4461,8 +4465,74 @@ class ShadowBlankMonitorService:
             text = self._client_text(client).lower()
             if marker and marker in text:
                 continue
+            if self._is_stale_real_client(client, config):
+                continue
             refs.append(self._client_ref(client, index))
         return refs
+
+    def _client_last_active_age_seconds(self, client: Any) -> Optional[float]:
+        if not isinstance(client, dict):
+            return None
+        for key in ("last_active_ago", "last_activity_ago", "idle_seconds"):
+            try:
+                age = float(client.get(key))
+            except (TypeError, ValueError):
+                continue
+            if age >= 0:
+                return age
+        for key in ("last_active", "last_activity_at"):
+            try:
+                timestamp = float(client.get(key))
+            except (TypeError, ValueError):
+                continue
+            if timestamp > 0:
+                return max(0.0, float(self.clock()) - timestamp)
+        return None
+
+    @staticmethod
+    def _stale_real_client_threshold_seconds(config: Dict[str, Any]) -> float:
+        try:
+            grace = float(config.get("viewer_left_grace_seconds"))
+        except (TypeError, ValueError):
+            grace = float(DEFAULT_CONFIG["viewer_left_grace_seconds"])
+        return max(1.0, grace)
+
+    def _is_stale_real_client(self, client: Any, config: Dict[str, Any]) -> bool:
+        age = self._client_last_active_age_seconds(client)
+        if age is None:
+            return False
+        return age > self._stale_real_client_threshold_seconds(config)
+
+    def _stale_real_client_absence(
+        self,
+        status: Dict[str, Any],
+        config: Dict[str, Any],
+        now: float,
+    ) -> Optional[Dict[str, Any]]:
+        marker = self._watcher_client_marker(config)
+        clients = self._status_clients(status)
+        if not clients:
+            return None
+
+        stale_ages: List[float] = []
+        for client in clients:
+            text = self._client_text(client).lower()
+            if marker and marker in text:
+                continue
+            age = self._client_last_active_age_seconds(client)
+            if age is None:
+                return None
+            if age <= self._stale_real_client_threshold_seconds(config):
+                return None
+            stale_ages.append(age)
+
+        if not stale_ages:
+            return None
+        return {
+            "since": max(0.0, float(now) - max(stale_ages)),
+            "last_real_client_count": len(stale_ages),
+            "reason": "stale_dispatcharr_client",
+        }
 
     @staticmethod
     def _normalize_proxy_output_format(value: Any) -> Optional[str]:
@@ -4483,6 +4553,8 @@ class ShadowBlankMonitorService:
                 if marker and marker in self._client_text(client).lower():
                     continue
                 if not isinstance(client, dict):
+                    continue
+                if self._is_stale_real_client(client, config):
                     continue
                 for key in ("output_format", "resolved_output_format", "container", "format"):
                     normalized = self._normalize_proxy_output_format(client.get(key))
@@ -4510,6 +4582,8 @@ class ShadowBlankMonitorService:
                 text = self._client_text(client).lower()
                 if marker and marker in text:
                     visible_watcher_count += 1
+                    continue
+                if self._is_stale_real_client(client, config):
                     continue
                 non_watcher_refs.append(self._client_ref(client, index))
 
