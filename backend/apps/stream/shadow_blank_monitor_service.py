@@ -3625,16 +3625,20 @@ class ShadowBlankMonitorService:
 
         try:
             # Continuous probes are protecting a real viewer that is already on
-            # the channel. Waiting for probe_duration * ratio turns a 60s
-            # watcher into a 48s blank wait before even the first confirmation.
-            # For open segments, use the configured minimum duration as the
-            # real-time trigger and let confirmation_count provide the safety
-            # against one-off black frames.
+            # the channel. Freeze can appear briefly during low-motion content,
+            # so gate it by the actual analysis window ratio instead of the raw
+            # minimum segment duration. Blank/no-decodable/silent keep their own
+            # faster fault-specific gates.
             blank_required = float(
                 config.get("blank_min_duration_seconds", DEFAULT_CONFIG["blank_min_duration_seconds"])
             )
             freeze_required = float(
                 config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
+            )
+            freeze_ratio_required = max(
+                freeze_required,
+                float(analysis_window_seconds or duration or 1)
+                * float(config.get("freeze_ratio_threshold", DEFAULT_CONFIG["freeze_ratio_threshold"])),
             )
             no_decodable_required = float(
                 config.get(
@@ -3829,7 +3833,7 @@ class ShadowBlankMonitorService:
                                 segment_duration = 0.0
                         active_freeze_start = None
                         active_freeze_wall = None
-                        if segment_duration is not None and segment_duration >= freeze_required:
+                        if segment_duration is not None and segment_duration >= freeze_ratio_required:
                             if mark_detection("freeze", segment_duration):
                                 break
 
@@ -3861,7 +3865,7 @@ class ShadowBlankMonitorService:
 
                 if (
                     active_freeze_start is not None
-                    and observed_duration(active_freeze_start, active_freeze_wall) >= freeze_required
+                    and observed_duration(active_freeze_start, active_freeze_wall) >= freeze_ratio_required
                 ):
                     mark_detection("freeze", observed_duration(active_freeze_start, active_freeze_wall))
                     break
@@ -3993,7 +3997,7 @@ class ShadowBlankMonitorService:
                         ),
                         default=0.0,
                     )
-                    if flushed_freeze_duration >= freeze_required:
+                    if flushed_freeze_duration >= freeze_ratio_required:
                         detected_reason = "freeze"
                         detected_duration = flushed_freeze_duration
             parsed.update(self._parse_audio_detection(
@@ -4012,7 +4016,15 @@ class ShadowBlankMonitorService:
                 parsed.setdefault("blank_detected", False)
                 parsed["freeze_detected"] = True
                 parsed["freeze_duration_secs"] = round(detected_duration, 3)
-                parsed["freeze_ratio"] = round(min(1.0, detected_duration / float(duration or 1)), 4)
+                freeze_ratio_duration = (
+                    analysis_window_duration
+                    if analysis_window_duration is not None
+                    else analysis_window_seconds
+                )
+                parsed["freeze_ratio"] = round(
+                    min(1.0, detected_duration / float(freeze_ratio_duration or duration or 1)),
+                    4,
+                )
             elif detected_reason == "no_decodable_frames":
                 parsed.setdefault("blank_detected", False)
                 parsed.setdefault("freeze_detected", False)

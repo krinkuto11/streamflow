@@ -1872,7 +1872,7 @@ def test_shadow_probe_treats_flushed_min_duration_black_segment_as_detection(tmp
     assert result["blank_ratio"] < 0.8
 
 
-def test_continuous_probe_detects_open_freeze_after_min_duration(tmp_path, monkeypatch):
+def test_continuous_probe_waits_for_open_freeze_ratio_threshold(tmp_path, monkeypatch):
     processes = []
 
     class FakeProcess:
@@ -1935,8 +1935,8 @@ def test_continuous_probe_detects_open_freeze_after_min_duration(tmp_path, monke
 
     assert processes
     assert result["freeze_detected"] is True
-    assert result["freeze_duration_secs"] < 10
-    assert result["freeze_ratio"] < 0.8
+    assert result["freeze_duration_secs"] >= 9.0
+    assert result["freeze_ratio"] >= 0.8
     assert result.get("blank_detected") is False
 
 
@@ -3634,6 +3634,7 @@ def test_continuous_default_probe_open_freeze_start_switches_as_freeze(monkeypat
         "confirmation_count": 1,
         "freeze_detection_enabled": True,
         "freeze_min_duration_seconds": 2,
+        "freeze_ratio_threshold": 0.4,
         "probe_duration_seconds": 5,
     })
     target = {
@@ -3721,6 +3722,7 @@ def test_continuous_default_probe_full_screen_color_faults_switch(monkeypatch, t
             "blank_min_duration_seconds": 2,
             "freeze_detection_enabled": True,
             "freeze_min_duration_seconds": 2,
+            "freeze_ratio_threshold": 0.4,
             "probe_duration_seconds": 5,
         })
         target = {
