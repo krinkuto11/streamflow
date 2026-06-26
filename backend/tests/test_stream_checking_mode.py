@@ -121,17 +121,18 @@ class TestStreamCheckingMode(unittest.TestCase):
         self.assertTrue(status['progress']['is_single_channel_check'])
     
     def test_stream_checking_mode_with_queue(self):
-        """Test that stream_checking_mode is True when queue has channels."""
+        """Test that stream_checking_mode is True when a running worker has queued channels."""
         service = self.make_service()
 
         # Initially stream_checking_mode should be False
         status = service.get_status()
         self.assertFalse(status['stream_checking_mode'])
 
-        # Add a channel to the queue
+        # Add a channel to the queue while the worker is running.
+        service.running = True
         service.check_queue.add_channel(1, priority=10)
 
-        # Now stream_checking_mode should be True (queue_size > 0)
+        # Now stream_checking_mode should be True (queue_size > 0 and worker running)
         status = service.get_status()
         self.assertTrue(status['stream_checking_mode'])
 
