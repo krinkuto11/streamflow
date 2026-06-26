@@ -59,6 +59,7 @@ NO_DECODABLE_FRAME_ERROR_PATTERNS = (
     "invalid data found",
     "no decodable frames",
     "no frame could be decoded",
+    "no decoded video frames",
 )
 FFMPEG_FRAME_RE = re.compile(r"\bframe=\s*(?P<frames>\d+)")
 ENTROPY_FRAME_RE = re.compile(r"frame:\s*(?P<frame>\d+)")
@@ -3894,7 +3895,7 @@ class ShadowBlankMonitorService:
 
                     if (
                         config.get("no_decodable_frames_detection_enabled", True)
-                        and decoded_frames <= 0
+                        and not (decoded_frames > 0 and saw_video_stream)
                     ):
                         lowered_line = line.lower()
                         matched_no_decodable = next(
@@ -3980,9 +3981,21 @@ class ShadowBlankMonitorService:
 
                 if (
                     no_decodable_error
-                    and decoded_frames <= 0
+                    and not (decoded_frames > 0 and saw_video_stream)
                     and no_decodable_observed_duration() >= no_decodable_required
                 ):
+                    mark_detection("no_decodable_frames", no_decodable_observed_duration())
+                    break
+
+                if (
+                    config.get("no_decodable_frames_detection_enabled", True)
+                    and not no_decodable_error
+                    and not (decoded_frames > 0 and saw_video_stream)
+                    and (saw_audio_stream or saw_video_stream or saw_stream_mapping)
+                    and no_decodable_observed_duration() >= no_decodable_required
+                ):
+                    no_decodable_error = "no decoded video frames"
+                    no_decodable_first_seen_wall = probe_started_wall
                     mark_detection("no_decodable_frames", no_decodable_observed_duration())
                     break
 
@@ -4060,7 +4073,7 @@ class ShadowBlankMonitorService:
             elif (
                 not detected_reason
                 and no_decodable_error
-                and decoded_frames <= 0
+                and not (decoded_frames > 0 and saw_video_stream)
                 and not viewer_left
                 and not stopped
             ):

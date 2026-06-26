@@ -2095,6 +2095,77 @@ def test_continuous_probe_detects_no_decodable_frames_after_min_duration(tmp_pat
     assert result.get("blank_detected") is False
 
 
+def test_continuous_probe_detects_audio_only_no_decoded_video_frames(tmp_path, monkeypatch):
+    processes = []
+
+    class FakeProcess:
+        def __init__(self):
+            self.stderr = io.StringIO(
+                "  Stream #0:0: Audio: aac, 48000 Hz, stereo, fltp, 128 kb/s\n"
+                "Stream mapping:\n"
+                "  Stream #0:0 -> #0:0 (aac (native) -> pcm_s16le (native))\n"
+                "frame=   42 fps=2.0 q=-0.0 size=N/A time=00:00:10.00 bitrate=N/A speed=1x\n"
+            )
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                self.returncode = 0
+            return self.returncode
+
+    def fake_popen(command, **kwargs):
+        process = FakeProcess()
+        processes.append(process)
+        return process
+
+    current_time = {"value": 200.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.1
+        return current_time["value"]
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "probe_duration_seconds": 60,
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+
+    result = service._run_blank_probe_until_viewer_left(
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+        config,
+        udi,
+        {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "stream_id": 10,
+        },
+    )
+
+    assert processes
+    assert result["no_decodable_frames_detected"] is True
+    assert result["no_decodable_frames_duration_secs"] >= 10
+    assert result["no_decodable_frames_error"] == "no decoded video frames"
+    assert result.get("blank_detected") is False
+
+
 def test_no_decodable_parser_treats_invalid_data_as_terminal_decoder_stall():
     config = normalize_config({
         "watch_mode": "continuous",
