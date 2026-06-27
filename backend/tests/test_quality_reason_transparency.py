@@ -94,10 +94,43 @@ def test_missing_bitrate_incomplete_fields_are_prepared_for_stream_stats_payload
 
     payload = service._prepare_stream_stats_for_batch(stream_data)
 
-    assert payload["stream_stats"]["ffmpeg_output_bitrate"] is None
+    assert "ffmpeg_output_bitrate" not in payload["stream_stats"]
     assert payload["stream_stats"]["measurement_incomplete"] is True
     assert payload["stream_stats"]["measurement_incomplete_reason"] == "missing_bitrate"
     assert payload["stream_stats"]["measurement_incomplete_context"] == {
         "bitrate_source": "ffprobe_media_fallback_no_bitrate",
     }
+    assert payload["stream_stats"]["bitrate_recheck_required"] is True
+
+
+def test_incomplete_bitrate_can_reuse_previous_value_for_scoring_without_persisting_null():
+    service = object.__new__(StreamCheckerService)
+    service.config = {"dead_stream_handling": {}}
+    stream_data = {
+        "stream_id": 42,
+        "resolution": "3840x2160",
+        "fps": 60,
+        "video_codec": "hevc",
+        "audio_codec": "aac",
+        "bitrate_kbps": None,
+        "measurement_incomplete": True,
+        "measurement_incomplete_reason": "missing_bitrate",
+        "measurement_incomplete_context": {},
+        "bitrate_recheck_required": True,
+    }
+    existing_stream = {
+        "stream_stats": {
+            "ffmpeg_output_bitrate": 12000,
+        }
+    }
+
+    service._apply_previous_bitrate_fallback(stream_data, existing_stream)
+    score = service._calculate_stream_score(stream_data)
+    payload = service._prepare_stream_stats_for_batch(stream_data)
+
+    assert stream_data["scoring_bitrate_kbps"] == 12000
+    assert stream_data["bitrate_preserved_from_previous_measurement"] is True
+    assert score == 1.0
+    assert "ffmpeg_output_bitrate" not in payload["stream_stats"]
+    assert payload["stream_stats"]["measurement_incomplete"] is True
     assert payload["stream_stats"]["bitrate_recheck_required"] is True

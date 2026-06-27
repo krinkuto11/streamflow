@@ -44,6 +44,7 @@ as alive but incomplete so callers can recheck it without marking it dead.
 import io
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -102,6 +103,28 @@ MAX_DEBUG_LINES_TO_LOG = 10  # Maximum number of debug lines to log from ffmpeg 
 # has flowed.  Values at or below this threshold are startup artifacts and
 # are ignored so they cannot be mistaken for a real (very low) bitrate.
 MIN_VALID_PROGRESS_BITRATE = 10.0  # kbps
+
+# Blank/freeze decoding can be expensive on UHD/HEVC streams. Keep the regular
+# bitrate probe cheap and cap concurrent visual probes so provider/profile slots
+# are not exhausted by filter work.
+try:
+    VISUAL_PROBE_MAX_CONCURRENCY = max(
+        1,
+        int(os.getenv('STREAMFLOW_VISUAL_PROBE_MAX_CONCURRENCY', '2') or '2'),
+    )
+except (TypeError, ValueError):
+    VISUAL_PROBE_MAX_CONCURRENCY = 2
+VISUAL_PROBE_DEFAULT_BLANK_SECONDS = 8
+VISUAL_PROBE_DEFAULT_FREEZE_SECONDS = 10
+_VISUAL_PROBE_SEMAPHORE = threading.BoundedSemaphore(VISUAL_PROBE_MAX_CONCURRENCY)
+
+try:
+    STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS = max(
+        0,
+        int(os.getenv('STREAMFLOW_STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS', '20') or '20'),
+    )
+except (TypeError, ValueError):
+    STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS = 20
 
 BLACK_START_RE = re.compile(r'black_start:(?P<start>-?[0-9]+(?:\.[0-9]+)?)')
 BLACK_END_RE = re.compile(r'black_end:(?P<end>-?[0-9]+(?:\.[0-9]+)?)')
@@ -495,7 +518,16 @@ def _run_ffmpeg_with_optional_fallback(
             if process.poll() is None:
                 process.kill()
 
-    result = _run(command)
+    try:
+        result = _run(command)
+    except subprocess.TimeoutExpired:
+        if fallback_command:
+            logger.warning(
+                "FFmpeg hardware acceleration timed out during %s; retrying on CPU",
+                context,
+            )
+            return _run(fallback_command)
+        raise
     if (
         fallback_command
         and result.returncode != 0
@@ -507,6 +539,23 @@ def _run_ffmpeg_with_optional_fallback(
         )
         return _run(fallback_command)
     return result
+
+
+def _stream_analysis_timeout(
+    timeout: int,
+    duration: int,
+    stream_startup_buffer: int,
+) -> int:
+    """
+    Timeout for real-time ffmpeg remux probes.
+
+    The probe intentionally uses ``-re`` so the stats bitrate reflects playback
+    pace. Some high-bitrate UHD streams need a little extra time after the
+    requested window for segment startup/teardown before ffmpeg exits cleanly.
+    Without this completion headroom, good streams can fall back to ffprobe and
+    lose bitrate even though the stream is playable.
+    """
+    return timeout + duration + stream_startup_buffer + STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS
 
 
 def _log_ffmpeg_errors(output: str, logger: logging.Logger, error_patterns: list) -> None:
@@ -587,6 +636,34 @@ def _estimate_bitrate_from_ffmpeg_bytes_read(
     if bitrate_kbps <= MIN_VALID_PROGRESS_BITRATE:
         return None
     return bitrate_kbps
+
+
+def _visual_probe_duration(
+    *,
+    duration: int,
+    blank_check_enabled: bool,
+    blank_check_min_duration: float,
+    freeze_check_enabled: bool,
+    freeze_check_min_duration: float,
+) -> int:
+    """Pick a short visual probe window while respecting the user analysis window."""
+    requested = max(1.0, float(duration or 0))
+    target = 0.0
+    if blank_check_enabled:
+        target = max(
+            target,
+            float(blank_check_min_duration or 0) + 1.0,
+            float(VISUAL_PROBE_DEFAULT_BLANK_SECONDS),
+        )
+    if freeze_check_enabled:
+        target = max(
+            target,
+            float(freeze_check_min_duration or 0) + 1.0,
+            float(VISUAL_PROBE_DEFAULT_FREEZE_SECONDS),
+        )
+    if target <= 0:
+        return max(1, int(math.ceil(requested)))
+    return max(1, int(math.ceil(min(requested, target))))
 
 
 def _parse_blank_detection(
@@ -1182,6 +1259,211 @@ def _ffprobe_media_fallback(
     }
 
 
+def _visual_probe_default_result(
+    *,
+    visual_duration: int,
+    blank_check_enabled: bool,
+    freeze_check_enabled: bool,
+) -> Dict[str, Any]:
+    return {
+        'visual_probe_ran': bool(blank_check_enabled or freeze_check_enabled),
+        'visual_probe_completed': False,
+        'visual_probe_incomplete': False,
+        'visual_probe_incomplete_reason': 'none',
+        'visual_probe_duration_seconds': visual_duration,
+        'visual_probe_elapsed_time': None,
+        'blank_probe_ran': bool(blank_check_enabled),
+        'blank_detected': False,
+        'blank_duration_secs': None,
+        'blank_ratio': None,
+        'blank_segments': [],
+        'freeze_probe_ran': bool(freeze_check_enabled),
+        'freeze_detected': False,
+        'freeze_duration_secs': None,
+        'freeze_ratio': None,
+        'freeze_segments': [],
+    }
+
+
+def _mark_visual_probe_incomplete(
+    result: Dict[str, Any],
+    *,
+    reason: str,
+    elapsed: Optional[float] = None,
+) -> Dict[str, Any]:
+    result['visual_probe_incomplete'] = True
+    result['visual_probe_incomplete_reason'] = reason
+    result['blank_detected'] = False
+    result['freeze_detected'] = False
+    if elapsed is not None:
+        result['visual_probe_elapsed_time'] = elapsed
+    result['measurement_incomplete'] = True
+    result['measurement_incomplete_reason'] = f'visual_probe_{reason}'
+    result['measurement_incomplete_context'] = {
+        'reason': reason,
+        'visual_probe_duration_seconds': result.get('visual_probe_duration_seconds'),
+        'visual_probe_elapsed_time': result.get('visual_probe_elapsed_time'),
+        'blank_probe_ran': result.get('blank_probe_ran'),
+        'freeze_probe_ran': result.get('freeze_probe_ran'),
+    }
+    return result
+
+
+def _run_visual_detection_probe(
+    url: str,
+    *,
+    duration: int,
+    timeout: int,
+    user_agent: str,
+    stream_startup_buffer: int,
+    blank_check_enabled: bool,
+    blank_check_min_duration: float,
+    blank_check_pixel_threshold: float,
+    blank_check_ratio_threshold: float,
+    freeze_check_enabled: bool,
+    freeze_check_min_duration: float,
+    freeze_check_noise_threshold: float,
+    freeze_check_ratio_threshold: float,
+    hardware_acceleration: Optional[Dict[str, Any]],
+    preempt_check: Optional[Callable[[], bool]],
+) -> Dict[str, Any]:
+    """Run expensive visual filters separately from the cheap bitrate probe."""
+    visual_duration = _visual_probe_duration(
+        duration=duration,
+        blank_check_enabled=blank_check_enabled,
+        blank_check_min_duration=blank_check_min_duration,
+        freeze_check_enabled=freeze_check_enabled,
+        freeze_check_min_duration=freeze_check_min_duration,
+    )
+    result_data = _visual_probe_default_result(
+        visual_duration=visual_duration,
+        blank_check_enabled=blank_check_enabled,
+        freeze_check_enabled=freeze_check_enabled,
+    )
+
+    video_filters = []
+    if blank_check_enabled:
+        video_filters.append(
+            f'blackdetect=d={float(blank_check_min_duration):g}:'
+            f'pix_th={float(blank_check_pixel_threshold):g}'
+        )
+    if freeze_check_enabled:
+        video_filters.append(
+            f'freezedetect=n={float(freeze_check_noise_threshold):g}:'
+            f'd={float(freeze_check_min_duration):g}'
+        )
+    if not video_filters:
+        return result_data
+
+    extra_args = _get_ffmpeg_extra_args()
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
+    hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
+    command = [
+        'ffmpeg', '-re', '-v', 'info', '-stats',
+        '-user_agent', user_agent,
+    ] + hwaccel_args + extra_args + [
+        '-i', url, '-t', str(visual_duration),
+        '-map', '0:v:0?', '-an', '-sn',
+        '-vf', ','.join(video_filters),
+        '-f', 'null', os.devnull,
+    ]
+    fallback_command = None
+    if hwaccel_args and hwaccel_config.get('allow_fallback', True):
+        fallback_command = [
+            'ffmpeg', '-re', '-v', 'info', '-stats',
+            '-user_agent', user_agent,
+        ] + extra_args + [
+            '-i', url, '-t', str(visual_duration),
+            '-map', '0:v:0?', '-an', '-sn',
+            '-vf', ','.join(video_filters),
+            '-f', 'null', os.devnull,
+        ]
+
+    _log_ffmpeg_hwaccel_request(
+        "visual stream analysis",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=True,
+    )
+
+    visual_timeout = timeout + visual_duration + stream_startup_buffer
+    try:
+        start = time.time()
+        with _VISUAL_PROBE_SEMAPHORE:
+            visual_result = _run_ffmpeg_with_optional_fallback(
+                command,
+                fallback_command=fallback_command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=visual_timeout,
+                text=True,
+                context="visual stream analysis",
+                preempt_check=preempt_check,
+            )
+        elapsed = time.time() - start
+        result_data['visual_probe_elapsed_time'] = elapsed
+        result_data['visual_probe_completed'] = visual_result.returncode == 0
+
+        output = visual_result.stderr or ''
+        if blank_check_enabled:
+            result_data.update(_parse_blank_detection(
+                output,
+                duration=visual_duration,
+                blank_ratio_threshold=float(blank_check_ratio_threshold),
+            ))
+            if result_data.get('blank_detected'):
+                logger.warning(
+                    "  [blank-detect] Blank screen detected "
+                    f"({result_data['blank_duration_secs']:.1f}s/"
+                    f"{visual_duration}s, ratio={result_data['blank_ratio']:.2f})"
+                )
+        if freeze_check_enabled:
+            result_data.update(_parse_freeze_detection(
+                output,
+                duration=visual_duration,
+                freeze_ratio_threshold=float(freeze_check_ratio_threshold),
+            ))
+            if result_data.get('freeze_detected'):
+                logger.warning(
+                    "  [freeze-detect] Frozen picture detected "
+                    f"({result_data['freeze_duration_secs']:.1f}s/"
+                    f"{visual_duration}s, ratio={result_data['freeze_ratio']:.2f})"
+                )
+
+        if visual_result.returncode != 0:
+            return _mark_visual_probe_incomplete(
+                result_data,
+                reason=f'exit_{visual_result.returncode}',
+                elapsed=elapsed,
+            )
+        return result_data
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "Visual blank/freeze probe timed out after %ss; keeping bitrate "
+            "measurement and marking visual detection incomplete",
+            visual_timeout,
+        )
+        return _mark_visual_probe_incomplete(
+            result_data,
+            reason='timeout',
+            elapsed=float(visual_timeout),
+        )
+    except StreamProbePreempted:
+        logger.info("Visual blank/freeze probe preempted because viewer capacity is needed")
+        result_data['preempted'] = True
+        result_data['preempt_reason'] = 'viewer_preempted'
+        return _mark_visual_probe_incomplete(
+            result_data,
+            reason='preempted',
+        )
+    except Exception as exc:
+        logger.warning(f"Visual blank/freeze probe failed: {scrub_urls(exc)}")
+        return _mark_visual_probe_incomplete(
+            result_data,
+            reason=type(exc).__name__,
+        )
+
+
 def get_stream_info_and_bitrate(
     url: str,
     duration: int = 30,
@@ -1200,7 +1482,7 @@ def get_stream_info_and_bitrate(
     preempt_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """
-    Get complete stream information using ffmpeg in a single call.
+    Get complete stream information using ffmpeg.
 
     Uses ffmpeg flags:
         -v info   : preserves Input#/Stream# lines for codec+resolution parsing
@@ -1216,11 +1498,11 @@ def get_stream_info_and_bitrate(
         timeout: Base timeout in seconds (actual timeout includes duration + overhead)
         user_agent: User agent string to use for HTTP requests
         stream_startup_buffer: Buffer in seconds for stream startup (default: 10s)
-        blank_check_enabled: Run ffmpeg blackdetect on the same input connection
+        blank_check_enabled: Run a separate ffmpeg blackdetect visual probe
         blank_check_min_duration: Minimum continuous black duration in seconds
         blank_check_pixel_threshold: blackdetect pixel threshold
         blank_check_ratio_threshold: Probe-window ratio required to flag blank
-        freeze_check_enabled: Run ffmpeg freezedetect on the same input connection
+        freeze_check_enabled: Run a separate ffmpeg freezedetect visual probe
         freeze_check_min_duration: Minimum continuous frozen duration in seconds
         freeze_check_noise_threshold: freezedetect noise threshold
         freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
@@ -1316,41 +1598,15 @@ def get_stream_info_and_bitrate(
             '-c', 'copy', '-f', 'mpegts', 'pipe:1'
         ]
 
-    video_filters = []
-    if blank_check_enabled:
-        video_filters.append(
-            f'blackdetect=d={float(blank_check_min_duration):g}:'
-            f'pix_th={float(blank_check_pixel_threshold):g}'
-        )
-    if freeze_check_enabled:
-        video_filters.append(
-            f'freezedetect=n={float(freeze_check_noise_threshold):g}:'
-            f'd={float(freeze_check_min_duration):g}'
-        )
-    if video_filters:
-        command += [
-            '-map', '0:v:0?', '-t', str(duration),
-            '-an', '-sn',
-            '-vf', ','.join(video_filters),
-            '-f', 'null', os.devnull,
-        ]
-        if fallback_command:
-            fallback_command += [
-                '-map', '0:v:0?', '-t', str(duration),
-                '-an', '-sn',
-                '-vf', ','.join(video_filters),
-                '-f', 'null', os.devnull,
-            ]
-
     _log_ffmpeg_hwaccel_request(
         "stream analysis",
         hwaccel_config,
         hwaccel_args,
-        decode_filters=bool(video_filters),
+        decode_filters=False,
     )
 
-    # Total subprocess timeout: analysis window + startup headroom.
-    actual_timeout = timeout + duration + stream_startup_buffer
+    # Total subprocess timeout: analysis window + startup and completion headroom.
+    actual_timeout = _stream_analysis_timeout(timeout, duration, stream_startup_buffer)
 
     result_data = {
         'video_codec': 'N/A', 'audio_codec': 'N/A', 'resolution': '0x0',
@@ -1362,12 +1618,22 @@ def get_stream_info_and_bitrate(
         'operation_timeout_seconds': timeout,
         'ffmpeg_duration_seconds': duration,
         'startup_buffer_seconds': stream_startup_buffer,
+        'completion_headroom_seconds': STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS,
         'blank_probe_ran': False, 'blank_detected': False,
         'blank_duration_secs': None, 'blank_ratio': None,
         'blank_segments': [],
         'freeze_probe_ran': False, 'freeze_detected': False,
         'freeze_duration_secs': None, 'freeze_ratio': None,
         'freeze_segments': [],
+        'visual_probe_ran': False,
+        'visual_probe_completed': False,
+        'visual_probe_incomplete': False,
+        'visual_probe_incomplete_reason': 'none',
+        'visual_probe_duration_seconds': None,
+        'visual_probe_elapsed_time': None,
+        'measurement_incomplete': False,
+        'measurement_incomplete_reason': 'none',
+        'measurement_incomplete_context': {},
         'preempted': False, 'preempt_reason': None,
         'bitrate_source': None,
         'ffprobe_fallback_ran': False,
@@ -1391,30 +1657,6 @@ def get_stream_info_and_bitrate(
         result_data['elapsed_time'] = elapsed
 
         output = result.stderr
-        if blank_check_enabled:
-            result_data.update(_parse_blank_detection(
-                output,
-                duration=duration,
-                blank_ratio_threshold=float(blank_check_ratio_threshold),
-            ))
-            if result_data.get('blank_detected'):
-                logger.warning(
-                    "  [blank-detect] Blank screen detected "
-                    f"({result_data['blank_duration_secs']:.1f}s/"
-                    f"{duration}s, ratio={result_data['blank_ratio']:.2f})"
-                )
-        if freeze_check_enabled:
-            result_data.update(_parse_freeze_detection(
-                output,
-                duration=duration,
-                freeze_ratio_threshold=float(freeze_check_ratio_threshold),
-            ))
-            if result_data.get('freeze_detected'):
-                logger.warning(
-                    "  [freeze-detect] Frozen picture detected "
-                    f"({result_data['freeze_duration_secs']:.1f}s/"
-                    f"{duration}s, ratio={result_data['freeze_ratio']:.2f})"
-                )
         progress_bitrate = None
         last_stats_line = None  # keeps updating; final line is the most stable average
         last_media_time = 0.0
@@ -1638,6 +1880,26 @@ def get_stream_info_and_bitrate(
                 ]
                 _log_ffmpeg_errors(output, logger, error_patterns)
 
+        if blank_check_enabled or freeze_check_enabled:
+            visual_result = _run_visual_detection_probe(
+                url,
+                duration=duration,
+                timeout=timeout,
+                user_agent=user_agent,
+                stream_startup_buffer=stream_startup_buffer,
+                blank_check_enabled=blank_check_enabled,
+                blank_check_min_duration=blank_check_min_duration,
+                blank_check_pixel_threshold=blank_check_pixel_threshold,
+                blank_check_ratio_threshold=blank_check_ratio_threshold,
+                freeze_check_enabled=freeze_check_enabled,
+                freeze_check_min_duration=freeze_check_min_duration,
+                freeze_check_noise_threshold=freeze_check_noise_threshold,
+                freeze_check_ratio_threshold=freeze_check_ratio_threshold,
+                hardware_acceleration=hardware_acceleration,
+                preempt_check=preempt_check,
+            )
+            result_data.update(visual_result)
+
         logger.debug(f"  Analysis completed in {elapsed:.2f}s")
 
     except subprocess.TimeoutExpired:
@@ -1728,7 +1990,7 @@ def get_stream_bitrate(
 
     bitrate = None
     status = "OK"
-    actual_timeout = timeout + duration + stream_startup_buffer
+    actual_timeout = _stream_analysis_timeout(timeout, duration, stream_startup_buffer)
 
     try:
         start = time.time()
@@ -2272,6 +2534,12 @@ def analyze_stream(
         'freeze_duration_secs': None,
         'freeze_ratio': None,
         'freeze_segments': [],
+        'visual_probe_ran': False,
+        'visual_probe_completed': False,
+        'visual_probe_incomplete': False,
+        'visual_probe_incomplete_reason': 'none',
+        'visual_probe_duration_seconds': None,
+        'visual_probe_elapsed_time': None,
         'preempted': False,
         'preempt_reason': None,
         'ffprobe_fallback_ran': False,
@@ -2301,7 +2569,7 @@ def analyze_stream(
 
             try:
                 if logger.isEnabledFor(logging.DEBUG):
-                    logger.info("  Analyzing stream (single ffmpeg call)...")
+                    logger.info("  Analyzing stream (basis probe plus optional visual probe)...")
 
                 result_data = get_stream_info_and_bitrate(
                     url=stream_url,
@@ -2363,6 +2631,12 @@ def analyze_stream(
                     'freeze_duration_secs': result_data.get('freeze_duration_secs'),
                     'freeze_ratio': result_data.get('freeze_ratio'),
                     'freeze_segments': result_data.get('freeze_segments', []),
+                    'visual_probe_ran': bool(result_data.get('visual_probe_ran')),
+                    'visual_probe_completed': bool(result_data.get('visual_probe_completed')),
+                    'visual_probe_incomplete': bool(result_data.get('visual_probe_incomplete')),
+                    'visual_probe_incomplete_reason': result_data.get('visual_probe_incomplete_reason') or 'none',
+                    'visual_probe_duration_seconds': result_data.get('visual_probe_duration_seconds'),
+                    'visual_probe_elapsed_time': result_data.get('visual_probe_elapsed_time'),
                     'preempted': bool(result_data.get('preempted')),
                     'preempt_reason': result_data.get('preempt_reason'),
                     'ffprobe_fallback_ran': bool(result_data.get('ffprobe_fallback_ran')),

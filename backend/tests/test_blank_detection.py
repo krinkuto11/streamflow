@@ -2,6 +2,7 @@
 """Tests for quality-check blank-screen detection."""
 
 import os
+import subprocess
 import sys
 import unittest
 from unittest.mock import Mock, patch
@@ -104,13 +105,16 @@ class TestFreezeDetectionParsing(unittest.TestCase):
 
 class TestBlankDetectionFfmpegCommand(unittest.TestCase):
     @patch.object(stream_check_utils.subprocess, "run")
-    def test_blank_detection_uses_one_input_connection(self, mock_run):
-        mock_run.return_value = Mock(
-            stderr=_ffmpeg_output(
-                "[blackdetect @ 000] black_start:0 black_end:30 black_duration:30"
+    def test_blank_detection_runs_separate_visual_probe(self, mock_run):
+        mock_run.side_effect = [
+            Mock(stderr=_ffmpeg_output(), returncode=0),
+            Mock(
+                stderr=_ffmpeg_output(
+                    "[blackdetect @ 000] black_start:0 black_end:8 black_duration:8"
+                ),
+                returncode=0,
             ),
-            returncode=0,
-        )
+        ]
 
         result = get_stream_info_and_bitrate(
             "http://example.com/test.m3u8",
@@ -119,25 +123,35 @@ class TestBlankDetectionFfmpegCommand(unittest.TestCase):
             blank_check_enabled=True,
         )
 
-        command = mock_run.call_args.args[0]
-        self.assertEqual(command[0], "ffmpeg")
-        self.assertEqual(command.count("-i"), 1)
-        self.assertNotIn("ffprobe", command)
-        self.assertIn("-vf", command)
-        self.assertTrue(any("blackdetect=d=2:pix_th=0.1" in arg for arg in command))
+        self.assertEqual(mock_run.call_count, 2)
+        basis_command = mock_run.call_args_list[0].args[0]
+        visual_command = mock_run.call_args_list[1].args[0]
+        self.assertEqual(basis_command[0], "ffmpeg")
+        self.assertEqual(basis_command.count("-i"), 1)
+        self.assertNotIn("ffprobe", basis_command)
+        self.assertNotIn("-vf", basis_command)
+        self.assertEqual(visual_command.count("-i"), 1)
+        self.assertIn("-vf", visual_command)
+        self.assertTrue(any("blackdetect=d=2:pix_th=0.1" in arg for arg in visual_command))
+        self.assertEqual(result["bitrate_kbps"], 3333.3)
+        self.assertTrue(result["visual_probe_ran"])
+        self.assertTrue(result["visual_probe_completed"])
         self.assertTrue(result["blank_probe_ran"])
         self.assertTrue(result["blank_detected"])
 
     @patch.object(stream_check_utils.subprocess, "run")
-    def test_freeze_detection_uses_same_input_connection(self, mock_run):
-        mock_run.return_value = Mock(
-            stderr=_ffmpeg_output(
-                "[freezedetect @ 000] lavfi.freezedetect.freeze_start: 0\n"
-                "[freezedetect @ 000] lavfi.freezedetect.freeze_duration: 30\n"
-                "[freezedetect @ 000] lavfi.freezedetect.freeze_end: 30"
+    def test_freeze_detection_runs_separate_visual_probe(self, mock_run):
+        mock_run.side_effect = [
+            Mock(stderr=_ffmpeg_output(), returncode=0),
+            Mock(
+                stderr=_ffmpeg_output(
+                    "[freezedetect @ 000] lavfi.freezedetect.freeze_start: 0\n"
+                    "[freezedetect @ 000] lavfi.freezedetect.freeze_duration: 10\n"
+                    "[freezedetect @ 000] lavfi.freezedetect.freeze_end: 10"
+                ),
+                returncode=0,
             ),
-            returncode=0,
-        )
+        ]
 
         result = get_stream_info_and_bitrate(
             "http://example.com/test.m3u8",
@@ -146,11 +160,18 @@ class TestBlankDetectionFfmpegCommand(unittest.TestCase):
             freeze_check_enabled=True,
         )
 
-        command = mock_run.call_args.args[0]
-        self.assertEqual(command[0], "ffmpeg")
-        self.assertEqual(command.count("-i"), 1)
-        self.assertIn("-vf", command)
-        self.assertTrue(any("freezedetect=n=0.001:d=5" in arg for arg in command))
+        self.assertEqual(mock_run.call_count, 2)
+        basis_command = mock_run.call_args_list[0].args[0]
+        visual_command = mock_run.call_args_list[1].args[0]
+        self.assertEqual(basis_command[0], "ffmpeg")
+        self.assertEqual(basis_command.count("-i"), 1)
+        self.assertNotIn("-vf", basis_command)
+        self.assertEqual(visual_command.count("-i"), 1)
+        self.assertIn("-vf", visual_command)
+        self.assertTrue(any("freezedetect=n=0.001:d=5" in arg for arg in visual_command))
+        self.assertEqual(result["bitrate_kbps"], 3333.3)
+        self.assertTrue(result["visual_probe_ran"])
+        self.assertTrue(result["visual_probe_completed"])
         self.assertTrue(result["freeze_probe_ran"])
         self.assertTrue(result["freeze_detected"])
 
@@ -169,6 +190,35 @@ class TestBlankDetectionFfmpegCommand(unittest.TestCase):
         self.assertFalse(any("blackdetect" in arg for arg in command))
         self.assertFalse(result["blank_probe_ran"])
         self.assertFalse(result["blank_detected"])
+
+    @patch.object(stream_check_utils.subprocess, "run")
+    def test_visual_probe_timeout_preserves_basis_bitrate(self, mock_run):
+        def run_side_effect(command, **kwargs):
+            if "-vf" in command:
+                raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 30))
+            return Mock(stderr=_ffmpeg_output(), returncode=0)
+
+        mock_run.side_effect = run_side_effect
+
+        result = get_stream_info_and_bitrate(
+            "http://example.com/test.m3u8",
+            duration=30,
+            timeout=30,
+            blank_check_enabled=True,
+            freeze_check_enabled=True,
+        )
+
+        self.assertEqual(result["bitrate_kbps"], 3333.3)
+        self.assertEqual(result["bitrate_source"], "ffmpeg_progress")
+        self.assertTrue(result["blank_probe_ran"])
+        self.assertFalse(result["blank_detected"])
+        self.assertTrue(result["freeze_probe_ran"])
+        self.assertFalse(result["freeze_detected"])
+        self.assertTrue(result["visual_probe_ran"])
+        self.assertFalse(result["visual_probe_completed"])
+        self.assertTrue(result["visual_probe_incomplete"])
+        self.assertEqual(result["visual_probe_incomplete_reason"], "timeout")
+        self.assertTrue(result["measurement_incomplete"])
 
 
 class TestBlankDetectionAnalysis(unittest.TestCase):
