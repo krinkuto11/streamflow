@@ -1694,9 +1694,9 @@ class TeamarrPreflightService:
         quality_profile_details = self._quality_profile_details(forced_profile_id)
         if config.get("queue_during_active_checks", True) and self._automation_active():
             self._set_stream_checker_event_gate(True, gate_name="teamarr_preflight_automation")
-            return self._queue_check(event, config)
+            return self._queue_check(event, config, autostart_worker=False)
         if self._stream_checker_active():
-            return self._queue_check(event, config)
+            return self._queue_check(event, config, autostart_worker=False)
 
         queue_due_to_capacity = False
         with self._lock:
@@ -1726,7 +1726,7 @@ class TeamarrPreflightService:
                 self._set_stream_checker_event_gate(True)
 
         if queue_due_to_capacity:
-            if self._queue_check(event, config):
+            if self._queue_check(event, config, autostart_worker=True):
                 logger.info(
                     "Teamarr preflight direct capacity full; queued channel_id=%s identity=%s",
                     channel_id,
@@ -1754,7 +1754,13 @@ class TeamarrPreflightService:
         thread.start()
         return True
 
-    def _queue_check(self, event: Dict[str, Any], config: Dict[str, Any]) -> bool:
+    def _queue_check(
+        self,
+        event: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        autostart_worker: bool = False,
+    ) -> bool:
         channel_id = event.get("dispatcharr_channel_id")
         if not channel_id:
             return False
@@ -1814,7 +1820,29 @@ class TeamarrPreflightService:
                     **quality_profile_details,
                 },
             )
+            if autostart_worker:
+                self._ensure_stream_checker_worker_running(checker, event)
         return queued
+
+    @staticmethod
+    def _ensure_stream_checker_worker_running(checker: Any, event: Dict[str, Any]) -> None:
+        if bool(getattr(checker, "running", False)):
+            return
+        start = getattr(checker, "start", None)
+        if not callable(start):
+            return
+        try:
+            start()
+            logger.info(
+                "Teamarr preflight queued channel_id=%s and started the stream checker worker",
+                event.get("dispatcharr_channel_id"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Teamarr preflight queued channel_id=%s but could not start the stream checker worker: %s",
+                event.get("dispatcharr_channel_id"),
+                exc,
+            )
 
     def record_queued_check_result(self, metadata: Dict[str, Any], result: Any) -> None:
         """Record the eventual result of a Teamarr preflight check run through the queue."""

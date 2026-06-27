@@ -37,8 +37,8 @@ ffmpeg flags used
 
 With a sufficiently long analysis window (>=30 s, recommended 120 s) the
 running bitrate average stabilises into a reliable reading.  If no valid
-stats line is produced the stream is considered unanalyzable — a missing
-bitrate is a meaningful signal that the stream is dead or unresponsive.
+bitrate is produced but video/audio metadata is present, the stream is treated
+as alive but incomplete so callers can recheck it without marking it dead.
 """
 
 import io
@@ -1621,7 +1621,7 @@ def get_stream_info_and_bitrate(
             logger.warning(
                 f"  [!] No bitrate detected — ffmpeg produced no valid stats lines "
                 f"(elapsed={elapsed:.2f}s, expected ~{duration}s). "
-                f"Stream is likely dead or unresponsive."
+                f"Measurement is incomplete and should be rechecked before scoring."
             )
             if exited_early or result.returncode != 0:
                 if result.returncode != 0:
@@ -1801,7 +1801,7 @@ def get_stream_bitrate(
             logger.warning(
                 f"  [!] No bitrate detected — ffmpeg produced no valid stats lines "
                 f"(elapsed={elapsed:.2f}s, expected ~{duration}s). "
-                f"Stream is likely dead or unresponsive."
+                f"Bitrate is unavailable and should not be reused for scoring."
             )
             logger.debug(f"  Searched {len(output.splitlines())} lines of output")
             if exited_early or result.returncode != 0:
@@ -2152,6 +2152,24 @@ def _stamp_analysis_failure_reason(result: Dict[str, Any]) -> None:
         result['quality_reason_context'] = _analysis_failure_context(result)
 
 
+def _missing_bitrate_context(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value for key, value in {
+            'bitrate_source': result.get('bitrate_source'),
+            'ffprobe_fallback_ran': result.get('ffprobe_fallback_ran'),
+            'ffprobe_fallback_reason': result.get('ffprobe_fallback_reason'),
+            'ffprobe_fallback_elapsed_time': result.get('ffprobe_fallback_elapsed_time'),
+            'elapsed_seconds': result.get('elapsed_time'),
+            'ffmpeg_duration_seconds': result.get('ffmpeg_duration_seconds', result.get('ffmpeg_duration')),
+            'attempt': result.get('attempt'),
+            'attempts': result.get('attempts'),
+            'max_attempts': result.get('max_attempts'),
+            'stage': result.get('stage') or 'stream analysis',
+        }.items()
+        if value not in (None, '', [], {})
+    }
+
+
 def analyze_stream(
     stream_url: str,
     stream_id: int,
@@ -2262,6 +2280,10 @@ def analyze_stream(
         'quality_reason': 'offline',
         'quality_reason_detail': 'error',
         'quality_reason_context': {},
+        'measurement_incomplete': False,
+        'measurement_incomplete_reason': 'none',
+        'measurement_incomplete_context': {},
+        'bitrate_recheck_required': False,
     }
 
     try:
@@ -2346,11 +2368,20 @@ def analyze_stream(
                     'ffprobe_fallback_ran': bool(result_data.get('ffprobe_fallback_ran')),
                     'ffprobe_fallback_reason': result_data.get('ffprobe_fallback_reason'),
                     'ffprobe_fallback_elapsed_time': result_data.get('ffprobe_fallback_elapsed_time'),
+                    'measurement_incomplete': bool(result_data.get('measurement_incomplete')),
+                    'measurement_incomplete_reason': result_data.get('measurement_incomplete_reason') or 'none',
+                    'measurement_incomplete_context': result_data.get('measurement_incomplete_context') or {},
+                    'bitrate_recheck_required': bool(result_data.get('bitrate_recheck_required')),
                 }
                 if result['status'] == 'OK':
                     result['quality_reason'] = 'none'
                     result['quality_reason_detail'] = 'none'
                     result['quality_reason_context'] = {}
+                    if result.get('bitrate_kbps') is None:
+                        result['measurement_incomplete'] = True
+                        result['measurement_incomplete_reason'] = 'missing_bitrate'
+                        result['measurement_incomplete_context'] = _missing_bitrate_context(result)
+                        result['bitrate_recheck_required'] = True
                 else:
                     _stamp_analysis_failure_reason(result)
 
@@ -2419,7 +2450,14 @@ def analyze_stream(
                     # Give it another attempt rather than accepting the result.
                     elapsed  = result_data.get('elapsed_time', ffmpeg_duration)
                     completed = elapsed >= ffmpeg_duration * EARLY_EXIT_THRESHOLD
-                    if completed:
+                    missing_bitrate = result.get('bitrate_kbps') is None
+                    if completed and missing_bitrate and attempt < total_attempts - 1:
+                        logger.warning(
+                            f"  {stream_audit_ref}: completed probe without bitrate "
+                            f"({elapsed:.1f}s/{ffmpeg_duration}s) - retrying "
+                            f"(attempt {attempt + 2}/{total_attempts})"
+                        )
+                    elif completed:
                         break
                     elif attempt < total_attempts - 1:
                         if logger.isEnabledFor(logging.DEBUG):

@@ -118,6 +118,7 @@ def _extract_resolution(payload: Dict[str, Any]) -> Tuple[Optional[int], Optiona
 
 def _row_or_payload_stats(row: StreamTelemetry, payload: Dict[str, Any]) -> Dict[str, Any]:
     extracted = extract_stream_stats(payload) if payload else {}
+    stream_stats = payload.get("stream_stats") if isinstance(payload.get("stream_stats"), dict) else {}
     width = row.resolution_width
     height = row.resolution_height
     if width is None or height is None:
@@ -152,6 +153,20 @@ def _row_or_payload_stats(row: StreamTelemetry, payload: Dict[str, Any]) -> Dict
         "audio_codec": audio_codec.lower() if audio_codec else None,
         "bitrate_kbps": bitrate_int,
         "hdr": bool(row.is_hdr or payload.get("is_hdr") or payload.get("hdr_format")),
+        "measurement_incomplete": bool(
+            payload.get("measurement_incomplete")
+            or stream_stats.get("measurement_incomplete")
+            or payload.get("bitrate_recheck_required")
+            or stream_stats.get("bitrate_recheck_required")
+        ),
+        "measurement_incomplete_reason": (
+            _clean_string(payload.get("measurement_incomplete_reason"))
+            or _clean_string(stream_stats.get("measurement_incomplete_reason"))
+        ),
+        "bitrate_recheck_required": bool(
+            payload.get("bitrate_recheck_required")
+            or stream_stats.get("bitrate_recheck_required")
+        ),
     }
 
 
@@ -290,6 +305,16 @@ def get_last_quality_stats(
                 stream_id=stream_id,
                 reason="last_result_not_reusable",
                 status="incomplete_stats",
+                quality_reason=quality_reason,
+                row=row,
+                run=run,
+            )
+
+        if stats["bitrate_kbps"] is None:
+            return _not_reusable(
+                stream_id=stream_id,
+                reason=stats["measurement_incomplete_reason"] or "missing_bitrate",
+                status="incomplete_bitrate",
                 quality_reason=quality_reason,
                 row=row,
                 run=run,

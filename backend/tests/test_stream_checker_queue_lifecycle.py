@@ -884,6 +884,24 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['progress']['stale_reason'], 'idle_batch_progress')
         service.progress.clear.assert_not_called()
 
+    def test_get_status_does_not_report_stopped_waiting_queue_as_active_check(self):
+        service = self._service_for_idle_progress_status(None)
+        service.running = False
+        service.check_queue.add_channel(
+            9234,
+            priority=100,
+            stream_count=3,
+            metadata={'source': 'teamarr_preflight'},
+        )
+
+        status = service.get_status()
+
+        self.assertEqual(status['queue']['state'], 'queued')
+        self.assertEqual(status['queue']['queue_size'], 1)
+        self.assertFalse(status['running'])
+        self.assertFalse(status['checking'])
+        self.assertFalse(status['stream_checking_mode'])
+
     def test_get_status_keeps_recent_single_channel_progress_active_when_mode_lags(self):
         service = self._service_for_idle_progress_status({
             'status': 'preparing',

@@ -1274,6 +1274,10 @@ class StreamCheckerService:
             "quality_reason": stream_data.get("quality_reason"),
             "quality_reason_detail": stream_data.get("quality_reason_detail"),
             "quality_reason_context": stream_data.get("quality_reason_context"),
+            "measurement_incomplete": bool(stream_data.get("measurement_incomplete")),
+            "measurement_incomplete_reason": stream_data.get("measurement_incomplete_reason") or "none",
+            "measurement_incomplete_context": stream_data.get("measurement_incomplete_context") or {},
+            "bitrate_recheck_required": bool(stream_data.get("bitrate_recheck_required")),
             # PRESERVE_FALSE: emit False (not None) so the None-filter below keeps these
             # fields in the payload even when the probe ran but found no loop.
             # Without this, Dispatcharr's PATCH merge leaves a stale loop_probe_ran: true
@@ -1302,10 +1306,15 @@ class StreamCheckerService:
             "blank_detected",
             "freeze_probe_ran",
             "freeze_detected",
+            "measurement_incomplete",
+            "bitrate_recheck_required",
+        }
+        PRESERVE_NULL = {
+            "ffmpeg_output_bitrate",
         }
         stream_stats_payload = {
             k: v for k, v in stream_stats_payload.items()
-            if v not in [None, "N/A"]
+            if v not in [None, "N/A"] or (v is None and k in PRESERVE_NULL)
         }
         for k in PRESERVE_FALSE:
             if k in stream_stats_payload or stream_data.get(k) is False:
@@ -1392,6 +1401,10 @@ class StreamCheckerService:
             "quality_reason": stream_data.get("quality_reason"),
             "quality_reason_detail": stream_data.get("quality_reason_detail"),
             "quality_reason_context": stream_data.get("quality_reason_context"),
+            "measurement_incomplete": bool(stream_data.get("measurement_incomplete")),
+            "measurement_incomplete_reason": stream_data.get("measurement_incomplete_reason") or "none",
+            "measurement_incomplete_context": stream_data.get("measurement_incomplete_context") or {},
+            "bitrate_recheck_required": bool(stream_data.get("bitrate_recheck_required")),
             # PRESERVE_FALSE: emit False (not None) so the None-filter below keeps these
             # fields in the payload even when the probe ran but found no loop.
             # Without this, Dispatcharr's PATCH merge leaves a stale loop_probe_ran: true
@@ -1420,6 +1433,8 @@ class StreamCheckerService:
             "blank_detected",
             "freeze_probe_ran",
             "freeze_detected",
+            "measurement_incomplete",
+            "bitrate_recheck_required",
         }
         QUALITY_FIELDS = {
             "quality_reason",
@@ -5431,11 +5446,15 @@ class StreamCheckerService:
             
         queue_status['eta_seconds'] = self._calculate_queue_eta_seconds(queue_status)
         
+        queued_waiting = queue_status.get('queue_size', 0) > 0
+        queue_processing = bool(
+            queue_status.get('in_progress', 0) > 0 or
+            queue_status.get('current_channel') is not None
+        )
         worker_or_queue_active = bool(
             self.checking or
-            queue_status.get('queue_size', 0) > 0 or
-            queue_status.get('in_progress', 0) > 0 or
-            queue_status.get('current_channel') is not None or
+            queue_processing or
+            (self.running and queued_waiting) or
             sync_state.get('active', False)
         )
         progress_stale = self._current_progress_stale_gate(

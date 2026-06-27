@@ -501,6 +501,102 @@ class TestAnalyzeStream(unittest.TestCase):
         self.assertEqual(result['bitrate_kbps'], 5000.0)
 
     @patch('stream_check_utils.get_stream_info_and_bitrate')
+    @patch('time.sleep')
+    def test_retry_on_completed_probe_missing_bitrate(self, mock_sleep, mock_get_info_and_bitrate):
+        """A full-length OK probe without bitrate should be retried before reuse."""
+        mock_get_info_and_bitrate.side_effect = [
+            {
+                'video_codec': 'hevc',
+                'audio_codec': 'aac',
+                'resolution': '3840x2160',
+                'fps': 50.0,
+                'bitrate_kbps': None,
+                'bitrate_source': 'ffprobe_media_fallback_no_bitrate',
+                'hdr_format': 'HLG',
+                'pixel_format': None,
+                'audio_sample_rate': None,
+                'audio_channels': None,
+                'channel_layout': None,
+                'audio_bitrate': None,
+                'status': 'OK',
+                'elapsed_time': 30.5,
+                'ffprobe_fallback_ran': True,
+                'ffprobe_fallback_reason': 'ffmpeg_timeout',
+            },
+            {
+                'video_codec': 'hevc',
+                'audio_codec': 'aac',
+                'resolution': '3840x2160',
+                'fps': 50.0,
+                'bitrate_kbps': 17870.0,
+                'bitrate_source': 'ffmpeg_progress',
+                'hdr_format': 'HLG',
+                'pixel_format': None,
+                'audio_sample_rate': None,
+                'audio_channels': None,
+                'channel_layout': None,
+                'audio_bitrate': None,
+                'status': 'OK',
+                'elapsed_time': 30.5,
+            },
+        ]
+
+        result = analyze_stream(
+            stream_url='http://test.stream',
+            stream_id=123,
+            stream_name='Test Stream',
+            ffmpeg_duration=30,
+            retries=1,
+            retry_delay=5,
+        )
+
+        self.assertEqual(mock_get_info_and_bitrate.call_count, 2)
+        self.assertEqual(mock_sleep.call_count, 1)
+        self.assertEqual(result['status'], 'OK')
+        self.assertEqual(result['bitrate_kbps'], 17870.0)
+        self.assertFalse(result['measurement_incomplete'])
+        self.assertEqual(result['measurement_incomplete_reason'], 'none')
+        self.assertFalse(result['bitrate_recheck_required'])
+
+    @patch('stream_check_utils.get_stream_info_and_bitrate')
+    def test_missing_bitrate_stays_alive_but_incomplete_after_last_attempt(self, mock_get_info_and_bitrate):
+        """Missing bitrate must not mark a stream dead, but it is not reusable."""
+        mock_get_info_and_bitrate.return_value = {
+            'video_codec': 'hevc',
+            'audio_codec': 'aac',
+            'resolution': '3840x2160',
+            'fps': 50.0,
+            'bitrate_kbps': None,
+            'bitrate_source': 'ffprobe_media_fallback_no_bitrate',
+            'hdr_format': 'HLG',
+            'pixel_format': None,
+            'audio_sample_rate': None,
+            'audio_channels': None,
+            'channel_layout': None,
+            'audio_bitrate': None,
+            'status': 'OK',
+            'elapsed_time': 30.5,
+            'ffprobe_fallback_ran': True,
+            'ffprobe_fallback_reason': 'ffmpeg_timeout',
+        }
+
+        result = analyze_stream(
+            stream_url='http://test.stream',
+            stream_id=123,
+            stream_name='Test Stream',
+            ffmpeg_duration=30,
+            retries=0,
+        )
+
+        self.assertEqual(result['status'], 'OK')
+        self.assertEqual(result['quality_reason'], 'none')
+        self.assertEqual(result['quality_reason_detail'], 'none')
+        self.assertTrue(result['measurement_incomplete'])
+        self.assertEqual(result['measurement_incomplete_reason'], 'missing_bitrate')
+        self.assertTrue(result['bitrate_recheck_required'])
+        self.assertEqual(result['measurement_incomplete_context']['bitrate_source'], 'ffprobe_media_fallback_no_bitrate')
+
+    @patch('stream_check_utils.get_stream_info_and_bitrate')
     def test_timeout_analysis_carries_quality_reason_context(self, mock_get_info_and_bitrate):
         """Timeouts should expose structured context for UI and persisted stats."""
         mock_get_info_and_bitrate.return_value = {
