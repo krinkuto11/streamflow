@@ -353,6 +353,40 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertGreater(manager.period_last_run["period-1"], original_last_run)
         manager._save_state.assert_called_once()
 
+    def test_child_stage_abort_still_invokes_manual_stop_handler(self):
+        manager = self._manager()
+        active_periods = {("period-1", "Full Check"): {"channels": [1, 2, 3]}}
+        manager._abort_run_if_manual_stop_requested = Mock(return_value=True)
+
+        message, handled = manager._handle_child_stage_abort(
+            {"aborted": True, "error": "child stopped"},
+            active_periods,
+            "fallback",
+        )
+
+        self.assertIsNone(message)
+        self.assertTrue(handled)
+        manager._abort_run_if_manual_stop_requested.assert_called_once_with(
+            active_periods=active_periods
+        )
+
+    def test_child_stage_abort_without_manual_stop_returns_abort_message(self):
+        manager = self._manager()
+        active_periods = {("period-1", "Full Check"): {"channels": [1, 2, 3]}}
+        manager._abort_run_if_manual_stop_requested = Mock(return_value=False)
+
+        message, handled = manager._handle_child_stage_abort(
+            {"aborted": True},
+            active_periods,
+            "fallback",
+        )
+
+        self.assertEqual(message, "fallback")
+        self.assertFalse(handled)
+        manager._abort_run_if_manual_stop_requested.assert_called_once_with(
+            active_periods=active_periods
+        )
+
     def test_manual_stop_abort_marks_active_periods_to_prevent_immediate_retry(self):
         manager = self._manager()
         original_last_run = datetime.now() - timedelta(minutes=90)

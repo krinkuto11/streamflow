@@ -2957,6 +2957,20 @@ class AutomatedStreamManager:
             cycle_abort_message = self._manual_stop_message()
         return cycle_abort_message, manual_stop_abort
 
+    def _handle_child_stage_abort(
+        self,
+        result: Optional[Dict[str, Any]],
+        active_periods: Dict[Any, Dict[str, Any]],
+        fallback_message: str,
+    ) -> Tuple[Optional[str], bool]:
+        if not isinstance(result, dict) or not result.get("aborted"):
+            return None, False
+
+        if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+            return None, True
+
+        return result.get("error") or fallback_message, False
+
     def _advance_period_run_timestamps(
         self,
         active_periods: Dict[Any, Dict[str, Any]],
@@ -5933,7 +5947,17 @@ class AutomatedStreamManager:
                 try:
                     val_res = self.validate_and_remove_non_matching_streams(force=forced, forced_period_id=forced_period_id, skip_changelog=True)
                     validation_details = val_res.get("details", [])
-                    if val_res.get("aborted") or self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                    child_abort_message, child_abort_handled = self._handle_child_stage_abort(
+                        val_res,
+                        active_periods,
+                        "Stream validation aborted",
+                    )
+                    if child_abort_handled:
+                        return
+                    if child_abort_message:
+                        cycle_abort_message = child_abort_message
+                        refresh_success = False
+                    elif self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                         return
                 except Exception as e:
                     logger.error(f"✗ Failed to validate streams: {e}")
@@ -5946,7 +5970,17 @@ class AutomatedStreamManager:
                     assignment_details = assign_res.get("assignment_details", [])
                     assigned_stream_ids = assign_res.get("assigned_stream_ids", {})
                     channel_visibility_events.extend(assign_res.get("channel_visibility_events", []) or [])
-                    if assign_res.get("aborted") or self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                    child_abort_message, child_abort_handled = self._handle_child_stage_abort(
+                        assign_res,
+                        active_periods,
+                        "Stream discovery aborted",
+                    )
+                    if child_abort_handled:
+                        return
+                    if child_abort_message:
+                        cycle_abort_message = child_abort_message
+                        refresh_success = False
+                    elif self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                         return
                 except Exception as e:
                     logger.error(f"✗ Failed to assign streams: {e}")
