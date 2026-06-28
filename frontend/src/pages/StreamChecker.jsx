@@ -895,8 +895,8 @@ export default function StreamChecker() {
               // normal analysis phase floats completed streams to top by score.
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
-                ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, low_quality: 6, blank: 7, freeze: 8, dead: 9 }
-                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, viewer_preempted: 4, provider_limit_wait_timeout: 5, error: 6, low_quality: 7, blank: 8, freeze: 9, dead: 10 }
+                ? { probing: 0, loop_detected: 1, completed: 2, incomplete_bitrate: 3, checking: 4, pending: 5, error: 6, low_quality: 7, blank: 8, freeze: 9, dead: 10 }
+                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, incomplete_bitrate: 4, viewer_preempted: 5, provider_limit_wait_timeout: 6, error: 7, low_quality: 8, blank: 9, freeze: 10, dead: 11 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -949,7 +949,7 @@ export default function StreamChecker() {
                             }
                           }
                           const qualityReason = getQualityReasonDisplay(stream)
-                          const showMeasuredSpecs = ['completed', 'loop_detected', 'low_quality', 'dead', 'blank', 'freeze'].includes(stream.status)
+                          const showMeasuredSpecs = ['completed', 'incomplete_bitrate', 'loop_detected', 'low_quality', 'dead', 'blank', 'freeze'].includes(stream.status)
                           const reservedProfileTitle = [
                             stream.reserved_profile_name ? `Profile: ${stream.reserved_profile_name}` : null,
                             stream.reserved_profile_id != null ? `ID: ${stream.reserved_profile_id}` : null,
@@ -988,6 +988,18 @@ export default function StreamChecker() {
                                 {stream.status === 'viewer_preempted' && <Badge variant="outline" className="text-[10px] border-cyan-500/40 bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300">Preempted</Badge>}
                                 {stream.status === 'provider_limit_wait_timeout' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Skipped</Badge>}
                                 {stream.status === 'completed' && <Badge variant="outline" className="text-[10px] bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Completed</Badge>}
+                                {stream.status === 'incomplete_bitrate' && (
+                                  <div className="mx-auto flex max-w-[180px] flex-col items-center gap-1" title={qualityReason?.title}>
+                                    <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+                                      Needs Recheck
+                                    </Badge>
+                                    {qualityReason && (
+                                      <span className="max-w-full truncate text-[10px] leading-tight text-amber-700 dark:text-amber-300">
+                                        {qualityReason.text}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
                                 {stream.status === 'error' && <Badge variant="destructive" className="text-[10px]">Error</Badge>}
                                 {stream.status === 'dead' && <Badge variant="destructive" className="text-[10px]">Dead</Badge>}
                                 {stream.status === 'blank' && <Badge variant="destructive" className="text-[10px]">Blank</Badge>}
@@ -1026,7 +1038,7 @@ export default function StreamChecker() {
                                 ) : '-'}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right text-xs font-mono">
-                                {(stream.status === 'completed' || stream.status === 'loop_detected') && stream.score !== undefined ? stream.score.toFixed(2) : '-'}
+                                {(['completed', 'incomplete_bitrate', 'loop_detected'].includes(stream.status)) && stream.score !== undefined ? stream.score.toFixed(2) : '-'}
                               </td>
                             </tr>
                           )

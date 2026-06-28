@@ -6030,11 +6030,14 @@ class AutomatedStreamManager:
                             int(c_result.get('good_streams_count', 0) or 0),
                             sum(
                                 1 for stream in checked_streams
-                                if stream.get('status') == 'completed'
+                                if stream.get('status') in {'completed', 'incomplete_bitrate'}
                                 and stream.get('blank_detected') is not True
                                 and stream.get('freeze_detected') is not True
                                 and stream.get('dead_reason') not in {'blank', 'freeze', 'low_quality', 'offline', 'unstable'}
-                                and stream.get('quality_reason_detail') in {None, '', 'none'}
+                                and (
+                                    stream.get('status') == 'incomplete_bitrate'
+                                    or stream.get('quality_reason_detail') in {None, '', 'none'}
+                                )
                             ),
                         )
                         ch_blank = max(

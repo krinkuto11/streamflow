@@ -1556,6 +1556,39 @@ class StreamCheckerService:
         context.setdefault("preserved_bitrate_kbps", previous_bitrate)
         context.setdefault("preserved_bitrate_source", "previous_stream_stats")
         analyzed["measurement_incomplete_context"] = context
+
+    @classmethod
+    def _has_incomplete_bitrate_measurement(cls, stream_data: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(stream_data, dict):
+            return False
+        if cls._bitrate_payload_value(stream_data.get("bitrate_kbps")) is not None:
+            return False
+        return bool(
+            stream_data.get("measurement_incomplete_reason") == "missing_bitrate"
+            or stream_data.get("bitrate_recheck_required")
+        )
+
+    @classmethod
+    def _apply_incomplete_bitrate_status(
+        cls,
+        target: Dict[str, Any],
+        source: Optional[Dict[str, Any]],
+    ) -> None:
+        if not cls._has_incomplete_bitrate_measurement(source):
+            return
+        context = {}
+        if isinstance(source, dict) and isinstance(source.get("measurement_incomplete_context"), dict):
+            context = source.get("measurement_incomplete_context") or {}
+        target["status"] = "incomplete_bitrate"
+        target["reason"] = "missing_bitrate"
+        target["reason_detail"] = "missing_bitrate"
+        target["quality_reason"] = "missing_bitrate"
+        target["quality_reason_detail"] = "missing_bitrate"
+        target["quality_reason_context"] = context
+        target["measurement_incomplete"] = True
+        target["measurement_incomplete_reason"] = "missing_bitrate"
+        target["measurement_incomplete_context"] = context
+        target["bitrate_recheck_required"] = True
     
     def _start_batch_changelog(self):
         """Start a new batch for changelog entries."""
@@ -2784,10 +2817,13 @@ class StreamCheckerService:
                             stream_statuses[stream_id]['bitrate'] = result.get('bitrate_kbps')
                             stream_statuses[stream_id]['hdr_format'] = result.get('hdr_format')
                         else:
-                            stream_statuses[stream_id]['status'] = 'completed'
-                            stream_statuses[stream_id]['quality_reason'] = 'none'
-                            stream_statuses[stream_id]['quality_reason_detail'] = 'none'
-                            stream_statuses[stream_id]['quality_reason_context'] = {}
+                            if self._has_incomplete_bitrate_measurement(result):
+                                self._apply_incomplete_bitrate_status(stream_statuses[stream_id], result)
+                            else:
+                                stream_statuses[stream_id]['status'] = 'completed'
+                                stream_statuses[stream_id]['quality_reason'] = 'none'
+                                stream_statuses[stream_id]['quality_reason_detail'] = 'none'
+                                stream_statuses[stream_id]['quality_reason_context'] = {}
                             # Optional: record score or resolution
                             stream_statuses[stream_id]['score'] = temp_score
                             stream_statuses[stream_id]['resolution'] = result.get('resolution', '0x0')
@@ -3346,6 +3382,22 @@ class StreamCheckerService:
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                     elif analyzed.get('reason_detail') == 'viewer_preempted':
                         stream_stat['status'] = 'viewer_preempted'
+                    elif self._has_incomplete_bitrate_measurement(analyzed):
+                        stream_stat['status'] = 'incomplete_bitrate'
+                        stream_stat['reason'] = 'missing_bitrate'
+                        stream_stat['reason_detail'] = 'missing_bitrate'
+                        stream_stat['quality_reason'] = 'missing_bitrate'
+                        stream_stat['quality_reason_detail'] = 'missing_bitrate'
+                        stream_stat['quality_reason_context'] = (
+                            analyzed.get('measurement_incomplete_context') or {}
+                        )
+                        stream_stat['measurement_incomplete'] = True
+                        stream_stat['measurement_incomplete_reason'] = 'missing_bitrate'
+                        stream_stat['measurement_incomplete_context'] = (
+                            analyzed.get('measurement_incomplete_context') or {}
+                        )
+                        stream_stat['bitrate_recheck_required'] = True
+                        stream_stat['score'] = round(analyzed.get('score', 0), 2)
                     else:
                         stream_stat['status'] = 'completed'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
@@ -4108,11 +4160,14 @@ class StreamCheckerService:
                         stream_statuses[stream['id']]['bitrate'] = analyzed.get('bitrate_kbps')
                         stream_statuses[stream['id']]['hdr_format'] = analyzed.get('hdr_format')
                     else:
-                        stream_statuses[stream['id']]['status'] = 'completed'
                         stream_statuses[stream['id']]['score'] = score
-                        stream_statuses[stream['id']]['quality_reason'] = 'none'
-                        stream_statuses[stream['id']]['quality_reason_detail'] = 'none'
-                        stream_statuses[stream['id']]['quality_reason_context'] = {}
+                        if self._has_incomplete_bitrate_measurement(analyzed):
+                            self._apply_incomplete_bitrate_status(stream_statuses[stream['id']], analyzed)
+                        else:
+                            stream_statuses[stream['id']]['status'] = 'completed'
+                            stream_statuses[stream['id']]['quality_reason'] = 'none'
+                            stream_statuses[stream['id']]['quality_reason_detail'] = 'none'
+                            stream_statuses[stream['id']]['quality_reason_context'] = {}
                         stream_statuses[stream['id']]['resolution'] = analyzed.get('resolution', '0x0')
                         stream_statuses[stream['id']]['video_codec'] = analyzed.get('video_codec', 'N/A')
                         stream_statuses[stream['id']]['fps'] = analyzed.get('fps', 0)
@@ -4483,6 +4538,22 @@ class StreamCheckerService:
                         stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') in ('blank', 'freeze', 'low_quality') else 'dead'
                     elif is_revived:
                         stream_stat['status'] = 'revived'
+                        stream_stat['score'] = round(analyzed.get('score', 0), 2)
+                    elif self._has_incomplete_bitrate_measurement(analyzed):
+                        stream_stat['status'] = 'incomplete_bitrate'
+                        stream_stat['reason'] = 'missing_bitrate'
+                        stream_stat['reason_detail'] = 'missing_bitrate'
+                        stream_stat['quality_reason'] = 'missing_bitrate'
+                        stream_stat['quality_reason_detail'] = 'missing_bitrate'
+                        stream_stat['quality_reason_context'] = (
+                            analyzed.get('measurement_incomplete_context') or {}
+                        )
+                        stream_stat['measurement_incomplete'] = True
+                        stream_stat['measurement_incomplete_reason'] = 'missing_bitrate'
+                        stream_stat['measurement_incomplete_context'] = (
+                            analyzed.get('measurement_incomplete_context') or {}
+                        )
+                        stream_stat['bitrate_recheck_required'] = True
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                     else:
                         stream_stat['status'] = 'completed'
@@ -6019,7 +6090,7 @@ class StreamCheckerService:
         if not isinstance(checked_streams, list):
             return 0
         bad_reasons = {'blank', 'freeze', 'low_quality', 'offline', 'unstable'}
-        good_statuses = {None, '', 'completed', 'revived'}
+        good_statuses = {None, '', 'completed', 'revived', 'incomplete_bitrate'}
         return sum(
             1
             for stream in checked_streams
@@ -6028,7 +6099,10 @@ class StreamCheckerService:
             and stream.get('blank_detected') is not True
             and stream.get('freeze_detected') is not True
             and stream.get('dead_reason') not in bad_reasons
-            and stream.get('quality_reason_detail') in {None, '', 'none'}
+            and (
+                stream.get('status') == 'incomplete_bitrate'
+                or stream.get('quality_reason_detail') in {None, '', 'none'}
+            )
         )
 
     @classmethod
@@ -7120,6 +7194,21 @@ class StreamCheckerService:
                     stream_detail['reason_detail'] = 'freeze'
                     stream_detail['quality_reason'] = 'freeze'
                     stream_detail['quality_reason_detail'] = 'freeze'
+                elif self._has_incomplete_bitrate_measurement(analyzed):
+                    stream_detail['status'] = 'incomplete_bitrate'
+                    stream_detail['reason'] = 'missing_bitrate'
+                    stream_detail['reason_detail'] = 'missing_bitrate'
+                    stream_detail['quality_reason'] = 'missing_bitrate'
+                    stream_detail['quality_reason_detail'] = 'missing_bitrate'
+                    stream_detail['quality_reason_context'] = (
+                        analyzed.get('measurement_incomplete_context') or {}
+                    )
+                    stream_detail['measurement_incomplete'] = True
+                    stream_detail['measurement_incomplete_reason'] = 'missing_bitrate'
+                    stream_detail['measurement_incomplete_context'] = (
+                        analyzed.get('measurement_incomplete_context') or {}
+                    )
+                    stream_detail['bitrate_recheck_required'] = True
                 else:
                     stream_detail['status'] = 'completed'
                     if quality_reason:

@@ -85,6 +85,28 @@ describe('dashboard run counts', () => {
     expect(counts.freeze).toBe(2)
   })
 
+  it('counts incomplete bitrate streams as playable during active quality checks', () => {
+    const counts = getDashboardRunCounts({
+      streamQueueActive: true,
+      batchTotal: 1,
+      completed: 0,
+      streamCheckerStatus: {
+        progress: {
+          streams_detail: [
+            { status: 'completed', quality_reason_detail: 'none' },
+            { status: 'incomplete_bitrate', quality_reason_detail: 'missing_bitrate' },
+            { status: 'completed', quality_reason_detail: 'bitrate_below_threshold' },
+          ],
+        },
+      },
+    })
+
+    expect(counts.good).toBe(2)
+    expect(counts.dead).toBe(0)
+    expect(counts.blank).toBe(0)
+    expect(counts.freeze).toBe(0)
+  })
+
   it('uses cumulative stream-checker queue problem counts while a batch is active', () => {
     const counts = getDashboardRunCounts({
       streamQueueActive: true,

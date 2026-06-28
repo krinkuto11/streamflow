@@ -103,6 +103,54 @@ def test_missing_bitrate_incomplete_fields_are_prepared_for_stream_stats_payload
     assert payload["stream_stats"]["bitrate_recheck_required"] is True
 
 
+def test_incomplete_bitrate_status_overrides_clean_completed_reason():
+    target = {
+        "status": "completed",
+        "quality_reason": "none",
+        "quality_reason_detail": "none",
+        "quality_reason_context": {},
+    }
+    source = {
+        "bitrate_kbps": None,
+        "measurement_incomplete": True,
+        "measurement_incomplete_reason": "missing_bitrate",
+        "measurement_incomplete_context": {
+            "bitrate_source": "ffprobe_media_fallback_no_bitrate",
+        },
+        "bitrate_recheck_required": True,
+    }
+
+    StreamCheckerService._apply_incomplete_bitrate_status(target, source)
+
+    assert target["status"] == "incomplete_bitrate"
+    assert target["reason_detail"] == "missing_bitrate"
+    assert target["quality_reason"] == "missing_bitrate"
+    assert target["quality_reason_detail"] == "missing_bitrate"
+    assert target["quality_reason_context"] == {
+        "bitrate_source": "ffprobe_media_fallback_no_bitrate",
+    }
+    assert target["measurement_incomplete"] is True
+    assert target["bitrate_recheck_required"] is True
+
+
+def test_incomplete_bitrate_counts_as_playable_but_not_clean_completed():
+    result = {
+        "checked_streams": [
+            {"status": "completed", "quality_reason_detail": "none"},
+            {
+                "status": "incomplete_bitrate",
+                "quality_reason_detail": "missing_bitrate",
+                "measurement_incomplete_reason": "missing_bitrate",
+            },
+            {"status": "completed", "quality_reason_detail": "bitrate_below_threshold"},
+            {"status": "completed", "blank_detected": True},
+            {"status": "dead"},
+        ],
+    }
+
+    assert StreamCheckerService._count_good_checked_streams(result) == 2
+
+
 def test_incomplete_bitrate_can_reuse_previous_value_for_scoring_without_persisting_null():
     service = object.__new__(StreamCheckerService)
     service.config = {"dead_stream_handling": {}}

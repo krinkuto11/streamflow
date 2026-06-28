@@ -5,6 +5,7 @@ const REASON_LABELS = {
   zero_resolution: 'No video resolution',
   zero_resolution_dimension: 'Invalid video resolution',
   zero_bitrate: 'No bitrate detected',
+  missing_bitrate: 'Needs bitrate recheck',
   resolution_width_below_threshold: 'Resolution width below threshold',
   resolution_height_below_threshold: 'Resolution height below threshold',
   bitrate_below_threshold: 'Bitrate below threshold',
@@ -39,6 +40,7 @@ const STATUS_REASON_FALLBACKS = {
   viewer_preempted: 'viewer_preempted',
   provider_limit_wait_timeout: 'provider_wait_timeout',
   waiting_provider_limit: 'provider_capacity_unavailable',
+  incomplete_bitrate: 'missing_bitrate',
   error: 'error',
 }
 
