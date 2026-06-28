@@ -369,6 +369,29 @@ def stop_automation_service_api_response(*, get_automation_manager: Callable[[],
         return jsonify({"error": "Internal Server Error"}), 500
 
 
+def abort_automation_run_api_response(*, get_automation_manager: Callable[[], Any]):
+    """Handle stop request for the active automation run without stopping the scheduler."""
+    try:
+        manager = get_automation_manager()
+        requested = bool(manager.request_active_run_stop())
+        return (
+            jsonify(
+                {
+                    "message": (
+                        "Active automation run stop requested"
+                        if requested
+                        else "No active automation run to stop"
+                    ),
+                    "stop_requested": requested,
+                }
+            ),
+            200,
+        )
+    except Exception as exc:
+        logger.error(f"Error aborting active automation run: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
 def trigger_automation_cycle_response(*, payload: Optional[Dict[str, Any]], get_automation_manager: Callable[[], Any]):
     """Handle manual trigger of an automation cycle, optionally for a single period."""
     try:

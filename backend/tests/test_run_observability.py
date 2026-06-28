@@ -295,6 +295,57 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["message"], "Automation run was stopped by the user")
         self.assertEqual(status["last_error"], "Automation run was stopped by the user")
 
+    def test_aborted_cycle_does_not_advance_period_schedule_clock(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+
+        advanced = manager._advance_period_run_timestamps(
+            {("period-1", "Full Check"): {"channels": [1, 2, 3]}},
+            "aborted",
+        )
+
+        self.assertFalse(advanced)
+        self.assertEqual(manager.period_last_run["period-1"], original_last_run)
+        self.assertEqual(manager.last_playlist_update, original_last_run)
+        manager._save_state.assert_not_called()
+
+    def test_completed_cycle_advances_period_schedule_clock(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+
+        advanced = manager._advance_period_run_timestamps(
+            {("period-1", "Full Check"): {"channels": [1, 2, 3]}},
+            "completed",
+        )
+
+        self.assertTrue(advanced)
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        self.assertGreater(manager.last_playlist_update, original_last_run)
+        manager._save_state.assert_called_once()
+
+    def test_request_active_run_stop_keeps_scheduler_service_running(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=False, forced_period_id=None)
+        manager.automation_running = True
+        manager.running = True
+
+        requested = manager.request_active_run_stop()
+
+        status = manager.get_run_status()
+        self.assertTrue(requested)
+        self.assertTrue(manager._manual_stop_requested.is_set())
+        self.assertTrue(manager.automation_running)
+        self.assertTrue(manager.running)
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(status["message"], "Stop requested; active automation run is shutting down")
+
     def test_stop_automation_requests_abort_for_active_run(self):
         manager = self._manager()
 

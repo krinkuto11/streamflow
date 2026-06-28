@@ -2835,6 +2835,29 @@ class AutomatedStreamManager:
         )
         return "failed"
 
+    def _advance_period_run_timestamps(self, active_periods: Dict[Any, Dict[str, Any]], run_job_outcome: str) -> bool:
+        """Advance scheduler timers only for runs that successfully completed work."""
+        if not active_periods:
+            return False
+
+        if run_job_outcome not in {"completed", "completed_degraded"}:
+            logger.info(
+                "Not advancing automation period timers after %s run; next scheduler pass may retry",
+                run_job_outcome,
+            )
+            return False
+
+        now = datetime.now()
+        for p_id_tuple in active_periods.keys():
+            # active_periods keys are (p_id, p_name)
+            pid = p_id_tuple[0]
+            self.period_last_run[pid] = now
+
+        # Keep legacy last_playlist_update synced for legacy backward compatibility if any
+        self.last_playlist_update = now
+        self._save_state()
+        return True
+
     @staticmethod
     def _summarize_quality_check_results(check_results, expected_count: int) -> Dict[str, Any]:
         checked_count = len(check_results or {})
@@ -6204,16 +6227,7 @@ class AutomatedStreamManager:
             if has_work and self.config.get("enabled_features", {}).get("changelog_tracking", True):
                 self.changelog.add_automation_run_entry(run_results)
             
-            # Update last run times ONLY for periods that actually had work / were due
-            for p_id_tuple in active_periods.keys():
-                # active_periods keys are (p_id, p_name)
-                pid = p_id_tuple[0]
-                self.period_last_run[pid] = datetime.now()
-                
-            # Keep legacy last_playlist_update synced for legacy backward compatibility if any
-            if active_periods:
-                self.last_playlist_update = datetime.now()
-                self._save_state()
+            self._advance_period_run_timestamps(active_periods, run_job_outcome)
 
             self._update_run_status(
                 counts={
@@ -6320,6 +6334,23 @@ class AutomatedStreamManager:
             # If not running, we could potentially run it synchronously or just log warning.
             # But the requirement is likely to trigger the *service*.
             logger.warning("Automation service not running, manual trigger queueing for next run or ignored")
+
+    def request_active_run_stop(self) -> bool:
+        """Request that the current automation run abort without stopping the scheduler."""
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            active_run = bool(
+                self._run_status.get("active") or self._run_status.get("state") == "running"
+            )
+        if not active_run:
+            return False
+
+        self._manual_stop_requested.set()
+        self._update_run_status(
+            message="Stop requested; active automation run is shutting down",
+        )
+        self.automation_wake_event.set()
+        return True
             
     def start_automation(self):
         """Start the automation background thread."""
