@@ -582,9 +582,11 @@ class AutomationRunStatusTests(unittest.TestCase):
         udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
         udi.get_streams.return_value = [{"id": 10}, {"id": 11}]
 
-        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
-            "apps.automation.automated_stream_manager.time.sleep"
-        ) as sleep_mock:
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch.object(
+            manager._manual_stop_requested,
+            "wait",
+            return_value=False,
+        ) as wait_mock:
             result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
 
         self.assertTrue(result["ok"])
@@ -592,7 +594,7 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(events[-1]["state"], "settled")
         self.assertEqual(events[-1]["wait_streams_seen"], 2)
         udi.refresh_streams.assert_not_called()
-        sleep_mock.assert_called_once_with(1)
+        wait_mock.assert_called_once_with(timeout=1)
 
     def test_m3u_refresh_wait_treats_parsing_account_as_busy(self):
         manager = self._manager()
@@ -614,9 +616,11 @@ class AutomationRunStatusTests(unittest.TestCase):
         udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
         udi.get_streams.return_value = [{"id": 10}, {"id": 11}]
 
-        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
-            "apps.automation.automated_stream_manager.time.sleep"
-        ) as sleep_mock:
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch.object(
+            manager._manual_stop_requested,
+            "wait",
+            return_value=False,
+        ) as wait_mock:
             result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
 
         self.assertTrue(result["ok"])
@@ -627,7 +631,42 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertIn("playlist parsing", events[0]["message"])
         self.assertEqual(events[-1]["state"], "settled")
         udi.refresh_streams.assert_not_called()
-        sleep_mock.assert_called_once_with(1)
+        wait_mock.assert_called_once_with(timeout=1)
+
+    def test_m3u_refresh_wait_aborts_when_manual_stop_requested(self):
+        manager = self._manager()
+        manager.config = {
+            "m3u_refresh_wait": {
+                "timeout_seconds": 30,
+                "poll_interval_seconds": 60,
+                "stable_polls_required": 1,
+                "min_wait_seconds": 0,
+            },
+        }
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.return_value = [{"id": 1, "name": "One", "status": "parsing"}]
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
+        udi.get_streams.return_value = [{"id": 10}]
+
+        def record_and_stop(payload):
+            events.append(payload)
+            if payload.get("state") == "waiting":
+                manager._manual_stop_requested.set()
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi):
+            result = manager._wait_for_m3u_refresh_completion(
+                [{"id": 1, "name": "One"}],
+                record_and_stop,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "aborted")
+        self.assertEqual(result["message"], "Automation run was stopped by the user")
+        self.assertEqual(events[-1]["state"], "aborted")
+        self.assertTrue(manager._manual_stop_requested.is_set())
+        udi.refresh_streams.assert_not_called()
 
     def test_m3u_refresh_wait_reports_failed_account_status(self):
         manager = self._manager()
@@ -710,8 +749,10 @@ class AutomationRunStatusTests(unittest.TestCase):
         with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
             "apps.automation.automated_stream_manager.refresh_m3u_playlists",
             return_value=response,
-        ) as refresh_mock, patch(
-            "apps.automation.automated_stream_manager.time.sleep"
+        ) as refresh_mock, patch.object(
+            manager._manual_stop_requested,
+            "wait",
+            return_value=False,
         ):
             result = manager._wait_for_m3u_refresh_completion(
                 [{"id": 1, "name": "One"}, {"id": 2, "name": "Two"}],

@@ -1,4 +1,8 @@
-from apps.core.stream_stats_utils import is_stream_dead
+from apps.core.stream_stats_utils import (
+    extract_stream_stats,
+    format_stream_stats_for_display,
+    is_stream_dead,
+)
 from apps.stream.stream_checker_service import StreamCheckerService
 
 
@@ -182,3 +186,36 @@ def test_incomplete_bitrate_can_reuse_previous_value_for_scoring_without_persist
     assert "ffmpeg_output_bitrate" not in payload["stream_stats"]
     assert payload["stream_stats"]["measurement_incomplete"] is True
     assert payload["stream_stats"]["bitrate_recheck_required"] is True
+
+
+def test_single_channel_details_do_not_mix_cached_bitrate_with_current_missing_bitrate():
+    cached_stream = {
+        "id": 42,
+        "stream_stats": {
+            "resolution": "3840x2160",
+            "source_fps": 59.9,
+            "ffmpeg_output_bitrate": 19300,
+            "video_codec": "hevc",
+        },
+    }
+    analyzed = {
+        "stream_id": 42,
+        "resolution": "3840x2160",
+        "fps": 59.9,
+        "bitrate_kbps": None,
+        "video_codec": "hevc",
+        "measurement_incomplete": True,
+        "measurement_incomplete_reason": "missing_bitrate",
+        "bitrate_recheck_required": True,
+    }
+
+    cached_display = format_stream_stats_for_display(extract_stream_stats(cached_stream))
+    current_display = format_stream_stats_for_display(
+        extract_stream_stats(
+            StreamCheckerService._current_probe_stats_source(cached_stream, analyzed)
+        )
+    )
+
+    assert cached_display["bitrate"] == "19.3 Mbps"
+    assert current_display["bitrate"] == "N/A"
+    assert StreamCheckerService._has_incomplete_bitrate_measurement(analyzed) is True

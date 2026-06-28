@@ -2545,6 +2545,31 @@ class AutomatedStreamManager:
         retry_accepted_count = 0
 
         while True:
+            if self._is_manual_stop_requested():
+                message = self._manual_stop_message()
+                elapsed = int(time.time() - started)
+                if progress_callback:
+                    progress_callback({
+                        "state": "aborted",
+                        "current": 0,
+                        "total": 1,
+                        "message": message,
+                        "wait_elapsed_seconds": elapsed,
+                        "wait_stable_polls": stable_polls,
+                        "wait_busy_accounts": last_snapshot.get("busy_count"),
+                        "wait_streams_seen": last_snapshot.get("stream_count"),
+                        "wait_failed_accounts": last_snapshot.get("failed_count"),
+                        "wait_retry_count": retry_accepted_count,
+                    })
+                return {
+                    "ok": False,
+                    "state": "aborted",
+                    "message": message,
+                    "snapshot": last_snapshot,
+                    "elapsed_seconds": elapsed,
+                    "retry_accepted_count": retry_accepted_count,
+                }
+
             snapshot = self._build_m3u_refresh_monitor_snapshot(udi_manager, target_account_ids)
             last_snapshot = snapshot
             elapsed = int(time.time() - started)
@@ -2616,7 +2641,7 @@ class AutomatedStreamManager:
                 last_signature = None
                 sleep_for = min(poll_interval, max(0.0, deadline - time.time()))
                 if sleep_for > 0:
-                    time.sleep(sleep_for)
+                    self._manual_stop_requested.wait(timeout=sleep_for)
                 continue
 
             if all_monitored_accounts_failed:
@@ -2684,7 +2709,7 @@ class AutomatedStreamManager:
 
             sleep_for = min(poll_interval, max(0.0, deadline - time.time()))
             if sleep_for > 0:
-                time.sleep(sleep_for)
+                self._manual_stop_requested.wait(timeout=sleep_for)
 
     def _finish_run_status(
         self,
