@@ -120,7 +120,7 @@ frame=  750 fps= 25 q=-1.0 size=   15000kB time=00:00:30.00 bitrate=4000.0kbits/
     def test_bitrate_timeout_handling(self, mock_run):
         """Test that timeout is handled gracefully."""
         test_timeout = 10
-        expected_timeout = test_timeout + 30 + 10  # timeout + duration + buffer
+        expected_timeout = test_timeout + 30 + 10 + 20  # timeout + duration + startup + completion headroom
         mock_run.side_effect = subprocess.TimeoutExpired(cmd='ffmpeg', timeout=expected_timeout)
         
         bitrate, status, elapsed = get_stream_bitrate(

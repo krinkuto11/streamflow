@@ -32,6 +32,8 @@ const SINGLE_CHANNEL_STATUS_STAGE = {
   cache_sync: 'cache_sync',
   stream_matching: 'stream_matching',
   matching: 'stream_matching',
+  analyzing: 'quality_checking',
+  analysis: 'quality_checking',
   quality_checking: 'quality_checking',
   checking: 'quality_checking',
   finalizing: 'finalizing',
@@ -55,17 +57,27 @@ const getSingleChannelStageId = (progress = {}) => {
   }
 
   const text = `${progress?.step || ''} ${progress?.step_detail || ''}`.toLowerCase()
+  const currentStream = Number(progress?.current_stream)
+  const totalStreams = Number(progress?.total_streams)
   if (text.includes('cache') || text.includes('udi')) {
     return 'cache_sync'
-  }
-  if (text.includes('m3u') || text.includes('playlist') || text.includes('provider')) {
-    return 'm3u_refresh'
   }
   if (text.includes('match') || text.includes('validating')) {
     return 'stream_matching'
   }
-  if (text.includes('quality') || text.includes('checking streams')) {
+  if (
+    text.includes('quality') ||
+    text.includes('analyz') ||
+    text.includes('checking streams') ||
+    text.includes('account limits') ||
+    Number.isFinite(currentStream) ||
+    Number.isFinite(totalStreams) ||
+    (Array.isArray(progress?.streams_detail) && progress.streams_detail.length > 0)
+  ) {
     return 'quality_checking'
+  }
+  if (text.includes('m3u') || text.includes('playlist') || text.includes('provider')) {
+    return 'm3u_refresh'
   }
   if (text.includes('final')) {
     return 'finalizing'

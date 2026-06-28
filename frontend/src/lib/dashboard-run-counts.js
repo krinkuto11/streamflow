@@ -8,11 +8,14 @@ const countProgressStatus = (streams = [], status) => (
 
 const countGoodProgressStreams = (streams = []) => (
   streams.filter(stream => (
-    stream?.status === 'completed' &&
+    ['completed', 'incomplete_bitrate'].includes(stream?.status) &&
     stream?.blank_detected !== true &&
     stream?.freeze_detected !== true &&
     !['blank', 'freeze', 'low_quality', 'offline', 'unstable'].includes(stream?.dead_reason) &&
-    [undefined, null, '', 'none'].includes(stream?.quality_reason_detail)
+    (
+      stream?.status === 'incomplete_bitrate' ||
+      [undefined, null, '', 'none'].includes(stream?.quality_reason_detail)
+    )
   )).length
 )
 

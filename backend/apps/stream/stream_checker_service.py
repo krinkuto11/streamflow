@@ -46,7 +46,7 @@ from apps.udi import get_udi_manager
 
 # Import dead streams tracker
 from apps.stream.dead_streams_tracker import DeadStreamsTracker
-from apps.stream.stream_check_utils import analyze_stream
+from apps.stream.stream_check_utils import analyze_stream, _stream_analysis_timeout
 from apps.stream.queue_start import order_channels_for_queue_start
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
 from apps.stream.stream_session_manager import get_session_manager
@@ -1256,6 +1256,9 @@ class StreamCheckerService:
             logger.warning("No stream_id in stream data. Skipping stats update.")
             return False
         
+        bitrate_value = self._bitrate_payload_value(stream_data.get("bitrate_kbps"))
+        preserve_existing_bitrate = self._should_preserve_existing_bitrate(stream_data)
+
         # Construct the stream stats payload from the analyzed stream data
         stream_stats_payload = {
             "resolution": stream_data.get("resolution"),
@@ -1268,7 +1271,7 @@ class StreamCheckerService:
             "audio_channels": stream_data.get("audio_channels"),
             "channel_layout": stream_data.get("channel_layout"),
             "audio_bitrate": stream_data.get("audio_bitrate"),
-            "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
+            "ffmpeg_output_bitrate": bitrate_value,
             "bitrate_source": stream_data.get("bitrate_source"),
             "quality_score": stream_data.get("score"),
             "quality_reason": stream_data.get("quality_reason"),
@@ -1278,6 +1281,16 @@ class StreamCheckerService:
             "measurement_incomplete_reason": stream_data.get("measurement_incomplete_reason") or "none",
             "measurement_incomplete_context": stream_data.get("measurement_incomplete_context") or {},
             "bitrate_recheck_required": bool(stream_data.get("bitrate_recheck_required")),
+            "visual_probe_ran": True if stream_data.get("visual_probe_ran") else (False if "visual_probe_ran" in stream_data else None),
+            "visual_probe_completed": stream_data.get("visual_probe_completed") if "visual_probe_completed" in stream_data else None,
+            "visual_probe_incomplete": stream_data.get("visual_probe_incomplete") if "visual_probe_incomplete" in stream_data else None,
+            "visual_probe_incomplete_reason": (
+                stream_data.get("visual_probe_incomplete_reason") or "none"
+                if "visual_probe_ran" in stream_data or "visual_probe_incomplete_reason" in stream_data
+                else None
+            ),
+            "visual_probe_duration_seconds": stream_data.get("visual_probe_duration_seconds"),
+            "visual_probe_elapsed_time": stream_data.get("visual_probe_elapsed_time"),
             # PRESERVE_FALSE: emit False (not None) so the None-filter below keeps these
             # fields in the payload even when the probe ran but found no loop.
             # Without this, Dispatcharr's PATCH merge leaves a stale loop_probe_ran: true
@@ -1306,12 +1319,15 @@ class StreamCheckerService:
             "blank_detected",
             "freeze_probe_ran",
             "freeze_detected",
+            "visual_probe_ran",
+            "visual_probe_completed",
+            "visual_probe_incomplete",
             "measurement_incomplete",
             "bitrate_recheck_required",
         }
-        PRESERVE_NULL = {
-            "ffmpeg_output_bitrate",
-        }
+        PRESERVE_NULL = set()
+        if not preserve_existing_bitrate:
+            PRESERVE_NULL.add("ffmpeg_output_bitrate")
         stream_stats_payload = {
             k: v for k, v in stream_stats_payload.items()
             if v not in [None, "N/A"] or (v is None and k in PRESERVE_NULL)
@@ -1383,6 +1399,9 @@ class StreamCheckerService:
             logger.warning("No stream_id in stream data. Skipping stats preparation.")
             return None
         
+        bitrate_value = self._bitrate_payload_value(stream_data.get("bitrate_kbps"))
+        preserve_existing_bitrate = self._should_preserve_existing_bitrate(stream_data)
+
         # Construct the stream stats payload from the analyzed stream data
         stream_stats_payload = {
             "resolution": stream_data.get("resolution"),
@@ -1395,7 +1414,7 @@ class StreamCheckerService:
             "audio_channels": stream_data.get("audio_channels"),
             "channel_layout": stream_data.get("channel_layout"),
             "audio_bitrate": stream_data.get("audio_bitrate"),
-            "ffmpeg_output_bitrate": int(stream_data.get("bitrate_kbps")) if stream_data.get("bitrate_kbps") not in ["N/A", None] else None,
+            "ffmpeg_output_bitrate": bitrate_value,
             "bitrate_source": stream_data.get("bitrate_source"),
             "quality_score": stream_data.get("score"),
             "quality_reason": stream_data.get("quality_reason"),
@@ -1405,6 +1424,16 @@ class StreamCheckerService:
             "measurement_incomplete_reason": stream_data.get("measurement_incomplete_reason") or "none",
             "measurement_incomplete_context": stream_data.get("measurement_incomplete_context") or {},
             "bitrate_recheck_required": bool(stream_data.get("bitrate_recheck_required")),
+            "visual_probe_ran": True if stream_data.get("visual_probe_ran") else False,
+            "visual_probe_completed": stream_data.get("visual_probe_completed") if "visual_probe_completed" in stream_data else False,
+            "visual_probe_incomplete": stream_data.get("visual_probe_incomplete") if "visual_probe_incomplete" in stream_data else False,
+            "visual_probe_incomplete_reason": (
+                stream_data.get("visual_probe_incomplete_reason") or "none"
+                if "visual_probe_ran" in stream_data or "visual_probe_incomplete_reason" in stream_data
+                else None
+            ),
+            "visual_probe_duration_seconds": stream_data.get("visual_probe_duration_seconds"),
+            "visual_probe_elapsed_time": stream_data.get("visual_probe_elapsed_time"),
             # PRESERVE_FALSE: emit False (not None) so the None-filter below keeps these
             # fields in the payload even when the probe ran but found no loop.
             # Without this, Dispatcharr's PATCH merge leaves a stale loop_probe_ran: true
@@ -1433,6 +1462,9 @@ class StreamCheckerService:
             "blank_detected",
             "freeze_probe_ran",
             "freeze_detected",
+            "visual_probe_ran",
+            "visual_probe_completed",
+            "visual_probe_incomplete",
             "measurement_incomplete",
             "bitrate_recheck_required",
         }
@@ -1445,7 +1477,12 @@ class StreamCheckerService:
             k: v for k, v in stream_stats_payload.items()
             if (
                 v not in [None, "N/A"]
-                or (v is None and k not in PRESERVE_FALSE and k not in QUALITY_FIELDS)
+                or (
+                    v is None
+                    and k not in PRESERVE_FALSE
+                    and k not in QUALITY_FIELDS
+                    and not (k == "ffmpeg_output_bitrate" and preserve_existing_bitrate)
+                )
             )
         }
         for k in PRESERVE_FALSE:
@@ -1460,6 +1497,98 @@ class StreamCheckerService:
             'stream_id': stream_id,
             'stream_stats': stream_stats_payload
         }
+
+    @staticmethod
+    def _bitrate_payload_value(value: Any) -> Optional[int]:
+        parsed = parse_bitrate_value(value)
+        if parsed is None or parsed <= 0:
+            return None
+        return int(parsed)
+
+    @staticmethod
+    def _load_stream_stats_blob(stream_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not isinstance(stream_data, dict):
+            return {}
+        stream_stats = stream_data.get("stream_stats") or {}
+        if isinstance(stream_stats, str):
+            try:
+                stream_stats = json.loads(stream_stats) or {}
+            except json.JSONDecodeError:
+                stream_stats = {}
+        return stream_stats if isinstance(stream_stats, dict) else {}
+
+    @classmethod
+    def _previous_stream_bitrate(cls, stream_data: Optional[Dict[str, Any]]) -> Optional[int]:
+        stream_stats = cls._load_stream_stats_blob(stream_data)
+        return cls._bitrate_payload_value(
+            stream_stats.get("ffmpeg_output_bitrate")
+            or stream_stats.get("bitrate_kbps")
+            or stream_stats.get("bitrate")
+        )
+
+    @classmethod
+    def _should_preserve_existing_bitrate(cls, stream_data: Dict[str, Any]) -> bool:
+        if cls._bitrate_payload_value(stream_data.get("bitrate_kbps")) is not None:
+            return False
+        return bool(
+            stream_data.get("measurement_incomplete")
+            or stream_data.get("bitrate_recheck_required")
+        )
+
+    @classmethod
+    def _apply_previous_bitrate_fallback(
+        cls,
+        analyzed: Dict[str, Any],
+        existing_stream: Optional[Dict[str, Any]],
+    ) -> None:
+        if not cls._should_preserve_existing_bitrate(analyzed):
+            return
+        previous_bitrate = cls._previous_stream_bitrate(existing_stream)
+        if previous_bitrate is None:
+            return
+        analyzed["scoring_bitrate_kbps"] = previous_bitrate
+        analyzed["bitrate_preserved_from_previous_measurement"] = True
+        analyzed["preserved_bitrate_kbps"] = previous_bitrate
+        analyzed["preserved_bitrate_source"] = "previous_stream_stats"
+        context = analyzed.get("measurement_incomplete_context")
+        if not isinstance(context, dict):
+            context = {}
+        context.setdefault("preserved_bitrate_kbps", previous_bitrate)
+        context.setdefault("preserved_bitrate_source", "previous_stream_stats")
+        analyzed["measurement_incomplete_context"] = context
+
+    @classmethod
+    def _has_incomplete_bitrate_measurement(cls, stream_data: Optional[Dict[str, Any]]) -> bool:
+        if not isinstance(stream_data, dict):
+            return False
+        if cls._bitrate_payload_value(stream_data.get("bitrate_kbps")) is not None:
+            return False
+        return bool(
+            stream_data.get("measurement_incomplete_reason") == "missing_bitrate"
+            or stream_data.get("bitrate_recheck_required")
+        )
+
+    @classmethod
+    def _apply_incomplete_bitrate_status(
+        cls,
+        target: Dict[str, Any],
+        source: Optional[Dict[str, Any]],
+    ) -> None:
+        if not cls._has_incomplete_bitrate_measurement(source):
+            return
+        context = {}
+        if isinstance(source, dict) and isinstance(source.get("measurement_incomplete_context"), dict):
+            context = source.get("measurement_incomplete_context") or {}
+        target["status"] = "incomplete_bitrate"
+        target["reason"] = "missing_bitrate"
+        target["reason_detail"] = "missing_bitrate"
+        target["quality_reason"] = "missing_bitrate"
+        target["quality_reason_detail"] = "missing_bitrate"
+        target["quality_reason_context"] = context
+        target["measurement_incomplete"] = True
+        target["measurement_incomplete_reason"] = "missing_bitrate"
+        target["measurement_incomplete_context"] = context
+        target["bitrate_recheck_required"] = True
     
     def _start_batch_changelog(self):
         """Start a new batch for changelog entries."""
@@ -2555,6 +2684,11 @@ class StreamCheckerService:
                 }
                 for s in streams_to_check
             }
+            streams_by_id = {
+                s.get('id'): s
+                for s in streams_to_check
+                if s.get('id') is not None
+            }
 
             profile_slot_account_ids = sorted({
                 account_id
@@ -2656,6 +2790,10 @@ class StreamCheckerService:
                             'message': result.get('error_message') or 'Stream analysis worker returned no result',
                         }
                     else:
+                        self._apply_previous_bitrate_fallback(
+                            result,
+                            streams_by_id.get(stream_id),
+                        )
                         # Calculate temp score for UI display
                         temp_score = self._calculate_stream_score(result, priority_m3u_ids, priority_mode, scoring_weights)
 
@@ -2679,10 +2817,13 @@ class StreamCheckerService:
                             stream_statuses[stream_id]['bitrate'] = result.get('bitrate_kbps')
                             stream_statuses[stream_id]['hdr_format'] = result.get('hdr_format')
                         else:
-                            stream_statuses[stream_id]['status'] = 'completed'
-                            stream_statuses[stream_id]['quality_reason'] = 'none'
-                            stream_statuses[stream_id]['quality_reason_detail'] = 'none'
-                            stream_statuses[stream_id]['quality_reason_context'] = {}
+                            if self._has_incomplete_bitrate_measurement(result):
+                                self._apply_incomplete_bitrate_status(stream_statuses[stream_id], result)
+                            else:
+                                stream_statuses[stream_id]['status'] = 'completed'
+                                stream_statuses[stream_id]['quality_reason'] = 'none'
+                                stream_statuses[stream_id]['quality_reason_detail'] = 'none'
+                                stream_statuses[stream_id]['quality_reason_context'] = {}
                             # Optional: record score or resolution
                             stream_statuses[stream_id]['score'] = temp_score
                             stream_statuses[stream_id]['resolution'] = result.get('resolution', '0x0')
@@ -2835,6 +2976,10 @@ class StreamCheckerService:
 
                     # Check if stream is dead using pre-resolved threshold config
                     # so forced_profile_id selections are honoured.
+                    self._apply_previous_bitrate_fallback(
+                        analyzed,
+                        streams_by_id.get(analyzed.get('stream_id')),
+                    )
                     dead_result = self._is_stream_dead(analyzed, channel_id, threshold_config=_threshold_config)
                     self._apply_quality_classification(analyzed, dead_result)
                     is_dead, dead_reason = dead_result
@@ -3237,6 +3382,22 @@ class StreamCheckerService:
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                     elif analyzed.get('reason_detail') == 'viewer_preempted':
                         stream_stat['status'] = 'viewer_preempted'
+                    elif self._has_incomplete_bitrate_measurement(analyzed):
+                        stream_stat['status'] = 'incomplete_bitrate'
+                        stream_stat['reason'] = 'missing_bitrate'
+                        stream_stat['reason_detail'] = 'missing_bitrate'
+                        stream_stat['quality_reason'] = 'missing_bitrate'
+                        stream_stat['quality_reason_detail'] = 'missing_bitrate'
+                        stream_stat['quality_reason_context'] = (
+                            analyzed.get('measurement_incomplete_context') or {}
+                        )
+                        stream_stat['measurement_incomplete'] = True
+                        stream_stat['measurement_incomplete_reason'] = 'missing_bitrate'
+                        stream_stat['measurement_incomplete_context'] = (
+                            analyzed.get('measurement_incomplete_context') or {}
+                        )
+                        stream_stat['bitrate_recheck_required'] = True
+                        stream_stat['score'] = round(analyzed.get('score', 0), 2)
                     else:
                         stream_stat['status'] = 'completed'
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
@@ -3999,11 +4160,14 @@ class StreamCheckerService:
                         stream_statuses[stream['id']]['bitrate'] = analyzed.get('bitrate_kbps')
                         stream_statuses[stream['id']]['hdr_format'] = analyzed.get('hdr_format')
                     else:
-                        stream_statuses[stream['id']]['status'] = 'completed'
                         stream_statuses[stream['id']]['score'] = score
-                        stream_statuses[stream['id']]['quality_reason'] = 'none'
-                        stream_statuses[stream['id']]['quality_reason_detail'] = 'none'
-                        stream_statuses[stream['id']]['quality_reason_context'] = {}
+                        if self._has_incomplete_bitrate_measurement(analyzed):
+                            self._apply_incomplete_bitrate_status(stream_statuses[stream['id']], analyzed)
+                        else:
+                            stream_statuses[stream['id']]['status'] = 'completed'
+                            stream_statuses[stream['id']]['quality_reason'] = 'none'
+                            stream_statuses[stream['id']]['quality_reason_detail'] = 'none'
+                            stream_statuses[stream['id']]['quality_reason_context'] = {}
                         stream_statuses[stream['id']]['resolution'] = analyzed.get('resolution', '0x0')
                         stream_statuses[stream['id']]['video_codec'] = analyzed.get('video_codec', 'N/A')
                         stream_statuses[stream['id']]['fps'] = analyzed.get('fps', 0)
@@ -4374,6 +4538,22 @@ class StreamCheckerService:
                         stream_stat['status'] = analyzed.get('dead_reason') if analyzed.get('dead_reason') in ('blank', 'freeze', 'low_quality') else 'dead'
                     elif is_revived:
                         stream_stat['status'] = 'revived'
+                        stream_stat['score'] = round(analyzed.get('score', 0), 2)
+                    elif self._has_incomplete_bitrate_measurement(analyzed):
+                        stream_stat['status'] = 'incomplete_bitrate'
+                        stream_stat['reason'] = 'missing_bitrate'
+                        stream_stat['reason_detail'] = 'missing_bitrate'
+                        stream_stat['quality_reason'] = 'missing_bitrate'
+                        stream_stat['quality_reason_detail'] = 'missing_bitrate'
+                        stream_stat['quality_reason_context'] = (
+                            analyzed.get('measurement_incomplete_context') or {}
+                        )
+                        stream_stat['measurement_incomplete'] = True
+                        stream_stat['measurement_incomplete_reason'] = 'missing_bitrate'
+                        stream_stat['measurement_incomplete_context'] = (
+                            analyzed.get('measurement_incomplete_context') or {}
+                        )
+                        stream_stat['bitrate_recheck_required'] = True
                         stream_stat['score'] = round(analyzed.get('score', 0), 2)
                     else:
                         stream_stat['status'] = 'completed'
@@ -4839,6 +5019,8 @@ class StreamCheckerService:
         
         # Bitrate score (0-1, normalized to typical range 1000-8000 kbps)
         bitrate = stream_data.get('bitrate_kbps', 0)
+        if self._bitrate_payload_value(bitrate) is None:
+            bitrate = stream_data.get('scoring_bitrate_kbps', 0)
         if isinstance(bitrate, (int, float)) and bitrate > 0:
             bitrate_score = min(bitrate / 8000, 1.0)
             score += bitrate_score * weights.get('bitrate', 0.40)
@@ -5081,7 +5263,11 @@ class StreamCheckerService:
         provider_wait = self._queue_number(self.config.get('concurrent_streams.provider_wait_timeout', 180)) or 180.0
 
         attempts = max(1.0, retries + 1.0)
-        probe_budget = attempts * (analysis_duration + analysis_timeout + startup_buffer)
+        probe_budget = attempts * _stream_analysis_timeout(
+            analysis_timeout,
+            analysis_duration,
+            startup_buffer,
+        )
         retry_budget = max(0.0, retries) * retry_delay
         loop_budget = loop_duration * 3.0
         stale_after = probe_budget + retry_budget + loop_budget + provider_wait + 60.0
@@ -5284,10 +5470,10 @@ class StreamCheckerService:
             configured_timeout = self._queue_number(analysis_config.get('timeout'))
             startup_buffer = self._queue_number(analysis_config.get('stream_startup_buffer'))
             if configured_timeout > 0 or startup_buffer > 0:
-                configured_timeout_floor_seconds = (
-                    configured_stream_seconds
-                    + configured_timeout
-                    + startup_buffer
+                configured_timeout_floor_seconds = _stream_analysis_timeout(
+                    configured_timeout,
+                    configured_stream_seconds,
+                    startup_buffer,
                 )
         effective_stream_seconds = max(
             avg_seconds,
@@ -5904,7 +6090,7 @@ class StreamCheckerService:
         if not isinstance(checked_streams, list):
             return 0
         bad_reasons = {'blank', 'freeze', 'low_quality', 'offline', 'unstable'}
-        good_statuses = {None, '', 'completed', 'revived'}
+        good_statuses = {None, '', 'completed', 'revived', 'incomplete_bitrate'}
         return sum(
             1
             for stream in checked_streams
@@ -5913,7 +6099,10 @@ class StreamCheckerService:
             and stream.get('blank_detected') is not True
             and stream.get('freeze_detected') is not True
             and stream.get('dead_reason') not in bad_reasons
-            and stream.get('quality_reason_detail') in {None, '', 'none'}
+            and (
+                stream.get('status') == 'incomplete_bitrate'
+                or stream.get('quality_reason_detail') in {None, '', 'none'}
+            )
         )
 
     @classmethod
@@ -7005,6 +7194,21 @@ class StreamCheckerService:
                     stream_detail['reason_detail'] = 'freeze'
                     stream_detail['quality_reason'] = 'freeze'
                     stream_detail['quality_reason_detail'] = 'freeze'
+                elif self._has_incomplete_bitrate_measurement(analyzed):
+                    stream_detail['status'] = 'incomplete_bitrate'
+                    stream_detail['reason'] = 'missing_bitrate'
+                    stream_detail['reason_detail'] = 'missing_bitrate'
+                    stream_detail['quality_reason'] = 'missing_bitrate'
+                    stream_detail['quality_reason_detail'] = 'missing_bitrate'
+                    stream_detail['quality_reason_context'] = (
+                        analyzed.get('measurement_incomplete_context') or {}
+                    )
+                    stream_detail['measurement_incomplete'] = True
+                    stream_detail['measurement_incomplete_reason'] = 'missing_bitrate'
+                    stream_detail['measurement_incomplete_context'] = (
+                        analyzed.get('measurement_incomplete_context') or {}
+                    )
+                    stream_detail['bitrate_recheck_required'] = True
                 else:
                     stream_detail['status'] = 'completed'
                     if quality_reason:

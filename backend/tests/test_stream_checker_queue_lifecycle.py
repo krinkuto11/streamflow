@@ -391,8 +391,8 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         eta_seconds = service._calculate_queue_eta_seconds(queue_status)
 
         self.assertGreaterEqual(eta_seconds, 7 * 3600)
-        self.assertEqual(queue_status['eta_stream_timeout_floor_seconds'], 70)
-        self.assertEqual(queue_status['eta_channel_floor_seconds'], 26460)
+        self.assertEqual(queue_status['eta_stream_timeout_floor_seconds'], 90)
+        self.assertEqual(queue_status['eta_channel_floor_seconds'], 34020)
         self.assertEqual(queue_status['eta_basis'], 'channel')
         self.assertEqual(queue_status['eta_basis_detail'], 'channel_floor')
 

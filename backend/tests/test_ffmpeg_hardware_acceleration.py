@@ -366,6 +366,34 @@ class TestHardwareAccelerationFfmpegCommand(unittest.TestCase):
         self.assertIn("-hwaccel", first_command)
         self.assertNotIn("-hwaccel", second_command)
 
+    @patch.object(stream_check_utils.subprocess, "run")
+    def test_hwaccel_timeout_retries_without_hwaccel(self, mock_run):
+        mock_run.side_effect = [
+            subprocess.TimeoutExpired(cmd="ffmpeg", timeout=90),
+            Mock(stderr=_ffmpeg_output(), stdout="", returncode=0),
+        ]
+
+        result = get_stream_info_and_bitrate(
+            "http://example.com/test.m3u8",
+            duration=30,
+            timeout=30,
+            stream_startup_buffer=10,
+            hardware_acceleration={
+                "enabled": True,
+                "mode": "auto",
+                "allow_fallback": True,
+            },
+        )
+
+        self.assertEqual(result["status"], "OK")
+        self.assertEqual(result["bitrate_kbps"], 3333.3)
+        self.assertFalse(result["ffprobe_fallback_ran"])
+        self.assertEqual(mock_run.call_count, 2)
+        first_command = mock_run.call_args_list[0].args[0]
+        second_command = mock_run.call_args_list[1].args[0]
+        self.assertIn("-hwaccel", first_command)
+        self.assertNotIn("-hwaccel", second_command)
+
 
 class TestHardwareAccelerationAnalysis(unittest.TestCase):
     def test_analyze_stream_passes_hardware_config(self):

@@ -352,7 +352,7 @@ class TestGetStreamInfoAndBitrate(unittest.TestCase):
             ],
         }
         mock_run.side_effect = [
-            subprocess.TimeoutExpired(cmd='ffmpeg', timeout=70),
+            subprocess.TimeoutExpired(cmd='ffmpeg', timeout=90),
             MagicMock(returncode=0, stdout=json.dumps(ffprobe_payload), stderr=''),
         ]
 

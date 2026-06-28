@@ -1,12 +1,13 @@
 import json
+from datetime import datetime, timedelta
 
 from flask import Flask
 from werkzeug.datastructures import MultiDict
 
 from apps.api.telemetry_handlers import export_changelog_run_response, get_changelog_response
-from apps.database.models import Run
+from apps.database.models import ChannelHealth, Run, StreamTelemetry
 from apps.telemetry.run_classification import classify_run_metadata
-from apps.telemetry.telemetry_db import get_session, save_generic_telemetry
+from apps.telemetry.telemetry_db import _cleanup_old_telemetry, get_session, save_generic_telemetry
 
 
 def test_classify_single_channel_metadata():
@@ -74,6 +75,39 @@ def test_save_generic_telemetry_persists_v6_job_fields():
         assert run.job_outcome == "completed"
         assert run.job_subject_ref == "channel:456"
         assert run.job_correlation_id == "single-456"
+    finally:
+        session.close()
+
+
+def test_telemetry_cleanup_prunes_runs_older_than_retention_with_children():
+    session = get_session()
+    try:
+        old_run = Run(
+            timestamp=datetime.utcnow() - timedelta(days=8),
+            run_type="automation_run",
+        )
+        recent_run = Run(
+            timestamp=datetime.utcnow() - timedelta(days=1),
+            run_type="automation_run",
+        )
+        session.add_all([old_run, recent_run])
+        session.flush()
+        old_run_id = old_run.id
+        recent_run_id = recent_run.id
+        session.add(ChannelHealth(run_id=old_run_id, channel_id=10, channel_name="Old"))
+        session.add(StreamTelemetry(run_id=old_run_id, channel_id=10, stream_id=99, is_dead=False))
+        session.commit()
+    finally:
+        session.close()
+
+    assert _cleanup_old_telemetry(days=7) == 1
+
+    session = get_session()
+    try:
+        assert session.query(Run).filter(Run.id == old_run_id).first() is None
+        assert session.query(Run).filter(Run.id == recent_run_id).first() is not None
+        assert session.query(ChannelHealth).filter(ChannelHealth.run_id == old_run_id).count() == 0
+        assert session.query(StreamTelemetry).filter(StreamTelemetry.run_id == old_run_id).count() == 0
     finally:
         session.close()
 

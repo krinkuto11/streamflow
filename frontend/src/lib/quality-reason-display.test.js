@@ -18,6 +18,27 @@ describe('getQualityReasonDisplay', () => {
     expect(getQualityReasonDisplay({ quality_reason_detail: 'none' })).toBeNull()
   })
 
+  it('explains incomplete bitrate rows from status fallback', () => {
+    expect(getQualityReasonDisplay({
+      status: 'incomplete_bitrate',
+    })).toEqual({
+      code: 'missing_bitrate',
+      text: 'Needs bitrate recheck',
+      title: 'missing_bitrate',
+    })
+  })
+
+  it('explains incomplete bitrate rows even when the backend sends the reason detail explicitly', () => {
+    expect(getQualityReasonDisplay({
+      status: 'incomplete_bitrate',
+      quality_reason_detail: 'missing_bitrate',
+    })).toEqual({
+      code: 'missing_bitrate',
+      text: 'Needs bitrate recheck',
+      title: 'missing_bitrate',
+    })
+  })
+
   it('uses provider-capacity wording without leaking raw detail as primary text', () => {
     expect(getQualityReasonDisplay({
       reason_detail: 'provider_capacity_unavailable',
