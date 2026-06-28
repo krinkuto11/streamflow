@@ -6585,7 +6585,6 @@ class AutomatedStreamManager:
         self._update_run_status(
             message="Stop requested; active automation run is shutting down",
         )
-        self.automation_wake_event.set()
         return True
             
     def start_automation(self):

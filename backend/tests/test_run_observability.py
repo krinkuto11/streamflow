@@ -381,6 +381,7 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertTrue(manager._manual_stop_requested.is_set())
         self.assertTrue(manager.automation_running)
         self.assertTrue(manager.running)
+        self.assertFalse(manager.automation_wake_event.is_set())
         self.assertEqual(status["state"], "running")
         self.assertEqual(status["message"], "Stop requested; active automation run is shutting down")
 
