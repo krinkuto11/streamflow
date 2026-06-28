@@ -4145,6 +4145,24 @@ class AutomatedStreamManager:
                 total=total_streams,
                 message=f"Matching 0/{total_streams} streams",
             )
+            if self._is_manual_stop_requested():
+                message = self._manual_stop_message()
+                logger.info("Stream matching skipped because the automation run stop was requested")
+                self._update_run_progress(
+                    stage_key="stream_matching",
+                    current=0,
+                    total=total_streams,
+                    message=message,
+                )
+                return {
+                    "assignment_count": {},
+                    "assignment_details": [],
+                    "assigned_stream_ids": {},
+                    "channel_visibility_events": channel_visibility_events,
+                    "aborted": True,
+                    "success": False,
+                    "error": message,
+                }
             
             # Resolve dead stream removal setting.
             # When the caller provides allow_dead_streams explicitly (e.g. check_single_channel
@@ -4161,8 +4179,10 @@ class AutomatedStreamManager:
             completed_count = 0
             last_log_pct = -1
             
-            # Process batches in parallel
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            aborted = False
+            future_to_batch = {}
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 future_to_batch = {
                     executor.submit(self._match_streams_batch, batch, channel_streams, 
                                    dead_stream_removal_enabled,
@@ -4171,8 +4191,14 @@ class AutomatedStreamManager:
                 }
                 
                 for future in concurrent.futures.as_completed(future_to_batch):
+                    if self._is_manual_stop_requested():
+                        aborted = True
+                        break
                     try:
                         batch_assignments, batch_details = future.result()
+                        if self._is_manual_stop_requested():
+                            aborted = True
+                            break
                         
                         # Merge results
                         for channel_id, stream_ids in batch_assignments.items():
@@ -4198,6 +4224,34 @@ class AutomatedStreamManager:
                              
                     except Exception as e:
                         logger.error(f"Error in stream matching batch: {e}")
+            finally:
+                if aborted:
+                    for pending in future_to_batch:
+                        pending.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True)
+
+            if aborted:
+                message = self._manual_stop_message()
+                logger.info(
+                    f"Stream matching aborted after {completed_count}/{total_streams} streams"
+                )
+                self._update_run_progress(
+                    stage_key="stream_matching",
+                    current=completed_count,
+                    total=total_streams,
+                    message=message,
+                )
+                return {
+                    "assignment_count": {},
+                    "assignment_details": [],
+                    "assigned_stream_ids": {},
+                    "channel_visibility_events": channel_visibility_events,
+                    "aborted": True,
+                    "success": False,
+                    "error": message,
+                }
             
             logger.info(f"✓ Completed processing {total_streams} streams. Found {sum(len(s) for s in assignments.values())} new stream assignments across {len(assignments)} channels")
             
@@ -4608,7 +4662,10 @@ class AutomatedStreamManager:
             
             completed_count = 0
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            aborted = False
+            future_to_batch = {}
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 future_to_batch = {
                     executor.submit(self._validate_channels_batch, batch, stream_lookup,
                                     matching_enabled_channel_ids, channel_validation_settings,
@@ -4617,13 +4674,22 @@ class AutomatedStreamManager:
                 }
                 
                 for future in concurrent.futures.as_completed(future_to_batch):
+                    if self._is_manual_stop_requested():
+                        aborted = True
+                        break
                     try:
                         batch_results = future.result()
+                        if self._is_manual_stop_requested():
+                            aborted = True
+                            break
                         
                         validation_results["channels_checked"] += batch_results["channels_checked"]
                         
                         # Process results and update UDI if needed
                         for detail in batch_results.get("details", []):
+                            if self._is_manual_stop_requested():
+                                aborted = True
+                                break
                             channel_id = detail["channel_id"]
                             channel_name = detail["channel_name"]
                             kept_ids = detail["kept_ids"]
@@ -4664,6 +4730,25 @@ class AutomatedStreamManager:
 
                     except Exception as e:
                         logger.error(f"Error in channel validation batch: {e}")
+                    if aborted:
+                        break
+            finally:
+                if aborted:
+                    for pending in future_to_batch:
+                        pending.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True)
+
+            if aborted:
+                validation_results["aborted"] = True
+                validation_results["success"] = False
+                validation_results["error"] = self._manual_stop_message()
+                logger.info(
+                    "Stream validation aborted after checking "
+                    f"{validation_results['channels_checked']} channel(s)"
+                )
+                return validation_results
             
             logger.info(f"Stream validation completed: Checked {validation_results['channels_checked']} channels, " +
                        f"removed {validation_results['streams_removed']} streams from {validation_results['channels_modified']} channels")
@@ -5721,7 +5806,9 @@ class AutomatedStreamManager:
                     logger.info(
                         f"Waiting {post_refresh_delay:.2f}s after playlist refresh before stream matching"
                     )
-                    time.sleep(post_refresh_delay)
+                    if self._manual_stop_requested.wait(timeout=post_refresh_delay):
+                        if self._abort_run_if_manual_stop_requested():
+                            return
                 
                 # 4. Stream Matching (Validation & Assignment)
                 # Group results by channel for easier joining later
@@ -5736,18 +5823,27 @@ class AutomatedStreamManager:
                 try:
                     val_res = self.validate_and_remove_non_matching_streams(force=forced, forced_period_id=forced_period_id, skip_changelog=True)
                     validation_details = val_res.get("details", [])
+                    if val_res.get("aborted") or self._abort_run_if_manual_stop_requested():
+                        return
                 except Exception as e:
                     logger.error(f"✗ Failed to validate streams: {e}")
-                
+                if self._abort_run_if_manual_stop_requested():
+                    return
+
                 # Discover and assign new streams
                 try:
                     assign_res = self.discover_and_assign_streams(force=forced, skip_check_trigger=True, forced_period_id=forced_period_id, skip_changelog=True)
                     assignment_details = assign_res.get("assignment_details", [])
                     assigned_stream_ids = assign_res.get("assigned_stream_ids", {})
                     channel_visibility_events.extend(assign_res.get("channel_visibility_events", []) or [])
+                    if assign_res.get("aborted") or self._abort_run_if_manual_stop_requested():
+                        return
                 except Exception as e:
                     logger.error(f"✗ Failed to assign streams: {e}")
                     assigned_stream_ids = {}
+
+                if self._abort_run_if_manual_stop_requested():
+                    return
 
                 visibility_summary = self._summarize_channel_visibility_events(channel_visibility_events)
                 self._update_run_status(
@@ -5762,6 +5858,8 @@ class AutomatedStreamManager:
 
                 # 4.5. Trigger Quality Checks for all channels in the period(s)
                 if channels_to_quality_check:
+                    if self._abort_run_if_manual_stop_requested():
+                        return
                     quality_stage_started = time.time()
                     self._update_run_status(
                         stage="quality_queueing",
@@ -5787,6 +5885,8 @@ class AutomatedStreamManager:
                         _target_stream_ids = {}
 
                         for ch_id in channels_to_quality_check:
+                            if self._abort_run_if_manual_stop_requested():
+                                return
                             # Normalise ch_id to int for all lookups. channels_to_quality_check
                             # may contain mixed int/str entries if populated from multiple sources.
                             _ch_id_int = int(ch_id)
@@ -5858,6 +5958,11 @@ class AutomatedStreamManager:
                         # Run checks synchronously and collect results
                         if channels_to_check_sync:
                             def _quality_progress_callback(completed_count, total_count, channel_result):
+                                if self._is_manual_stop_requested():
+                                    try:
+                                        stream_checker.abort_current_check.set()
+                                    except Exception:
+                                        pass
                                 channel_name = ""
                                 if isinstance(channel_result, dict):
                                     channel_name = channel_result.get("channel_name") or ""
@@ -5882,6 +5987,8 @@ class AutomatedStreamManager:
                                 },
                             )
                             target_stream_ids = _target_stream_ids if _target_stream_ids else None
+                            if self._is_manual_stop_requested():
+                                stream_checker.abort_current_check.set()
                             check_results = stream_checker.check_channels_synchronously(
                                 channel_ids=channels_to_check_sync,
                                 force_check=forced,
@@ -5889,6 +5996,8 @@ class AutomatedStreamManager:
                                 progress_callback=_quality_progress_callback,
                                 run_mode="automation_quality_check",
                             )
+                            if self._abort_run_if_manual_stop_requested():
+                                return
                             self._update_run_progress(
                                 stage_key="quality_checking",
                                 current=len(check_results),

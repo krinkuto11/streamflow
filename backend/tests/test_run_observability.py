@@ -668,6 +668,95 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertTrue(manager._manual_stop_requested.is_set())
         udi.refresh_streams.assert_not_called()
 
+    def test_stream_matching_parallel_loop_aborts_when_manual_stop_requested(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {"auto_stream_discovery": True},
+            "enabled_m3u_accounts": [],
+        }
+        manager._lock = threading.Lock()
+        manager._m3u_accounts_cache = [{"id": 1, "name": "Provider", "is_active": True}]
+        manager.regex_matcher = Mock()
+        manager.regex_matcher.reload_patterns.return_value = None
+        manager.regex_matcher.has_regex_patterns.return_value = True
+        manager.regex_matcher.get_match_by_tvg_id.return_value = False
+        manager._filter_channels_by_profile = Mock(side_effect=lambda channels, _reason: channels)
+        manager._record_channel_visibility_events = Mock()
+        manager._is_dead_stream_removal_enabled = Mock(return_value=False)
+        manager._update_run_progress = Mock()
+        manager._get_channel_visibility_config = Mock(return_value={})
+
+        streams = [{"id": i, "name": f"Stream {i}", "m3u_account": 1} for i in range(2000)]
+        channels = [{"id": 10, "name": "Channel 10"}]
+        automation_config = Mock()
+        automation_config.get_effective_configuration.return_value = {
+            "profile": {
+                "stream_matching": {"enabled": True, "match_priority_order": ["regex"]},
+                "stream_checking": {"enabled": False},
+            }
+        }
+        udi = Mock()
+        udi.get_channel_streams.return_value = []
+        session_manager = Mock()
+        session_manager.get_channels_in_active_sessions.return_value = []
+
+        def stop_during_batch(*_args, **_kwargs):
+            manager._manual_stop_requested.set()
+            return {}, {}
+
+        manager._match_streams_batch = Mock(side_effect=stop_during_batch)
+
+        with patch("apps.automation.automated_stream_manager.get_streams", return_value=streams), \
+             patch("apps.automation.automated_stream_manager.get_channels", return_value=channels), \
+             patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), \
+             patch("apps.automation.automated_stream_manager.get_automation_config_manager", return_value=automation_config), \
+             patch("apps.stream.stream_session_manager.get_session_manager", return_value=session_manager):
+            result = manager._discover_and_assign_streams_impl(force=True, skip_check_trigger=True)
+
+        self.assertTrue(result["aborted"])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "Automation run was stopped by the user")
+        self.assertEqual(result["assignment_count"], {})
+        self.assertTrue(manager._manual_stop_requested.is_set())
+
+    def test_stream_validation_parallel_loop_aborts_when_manual_stop_requested(self):
+        manager = self._manager()
+        manager.config = {}
+        manager._lock = threading.Lock()
+        manager._filter_channels_by_profile = Mock(side_effect=lambda channels, _reason: channels)
+        manager.changelog = Mock()
+
+        channels = [{"id": i, "name": f"Channel {i}"} for i in range(60)]
+        streams = [{"id": i, "name": f"Stream {i}"} for i in range(10)]
+        udi = Mock()
+        udi.get_channels.return_value = channels
+        udi.get_streams.return_value = streams
+        automation_config = Mock()
+        automation_config.get_effective_configuration.return_value = {
+            "profile": {
+                "stream_matching": {
+                    "enabled": True,
+                    "validate_existing_streams": True,
+                }
+            }
+        }
+
+        def stop_during_batch(*_args, **_kwargs):
+            manager._manual_stop_requested.set()
+            return {"channels_checked": 0, "details": []}
+
+        manager._validate_channels_batch = Mock(side_effect=stop_during_batch)
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), \
+             patch("apps.automation.automation_config_manager.get_automation_config_manager", return_value=automation_config):
+            result = manager._validate_and_remove_non_matching_streams_impl(force=True)
+
+        self.assertTrue(result["aborted"])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "Automation run was stopped by the user")
+        self.assertTrue(manager._manual_stop_requested.is_set())
+        manager.changelog.add_entry.assert_not_called()
+
     def test_m3u_refresh_wait_reports_failed_account_status(self):
         manager = self._manager()
         manager.config = {"m3u_refresh_wait": {"stable_polls_required": 2, "min_wait_seconds": 0}}
