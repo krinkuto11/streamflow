@@ -219,3 +219,34 @@ def test_single_channel_details_do_not_mix_cached_bitrate_with_current_missing_b
     assert cached_display["bitrate"] == "19.3 Mbps"
     assert current_display["bitrate"] == "N/A"
     assert StreamCheckerService._has_incomplete_bitrate_measurement(analyzed) is True
+
+
+def test_single_channel_details_use_current_probe_bitrate_when_present():
+    cached_stream = {
+        "id": 42,
+        "stream_stats": {
+            "resolution": "3840x2160",
+            "source_fps": 59.9,
+            "ffmpeg_output_bitrate": 3000,
+            "video_codec": "hevc",
+        },
+    }
+    analyzed = {
+        "stream_id": 42,
+        "resolution": "3840x2160",
+        "fps": 59.9,
+        "bitrate_kbps": 19300,
+        "video_codec": "hevc",
+        "measurement_incomplete": False,
+        "measurement_incomplete_reason": "none",
+        "bitrate_recheck_required": False,
+    }
+
+    current_display = format_stream_stats_for_display(
+        extract_stream_stats(
+            StreamCheckerService._current_probe_stats_source(cached_stream, analyzed)
+        )
+    )
+
+    assert current_display["bitrate"] == "19.3 Mbps"
+    assert StreamCheckerService._has_incomplete_bitrate_measurement(analyzed) is False
