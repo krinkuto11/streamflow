@@ -254,6 +254,48 @@ describe('dashboard stream checker run display', () => {
     })
   })
 
+  it('maps single-channel provider-limit analysis as quality checking, not M3U refresh', () => {
+    const display = getStreamCheckerRunDisplay({
+      runState: 'queued',
+      runStage: 'm3u_refresh',
+      batchTotal: 0,
+      completed: 0,
+      now: Date.parse('2026-06-28T11:50:00Z'),
+      streamCheckerStatus: {
+        checking: true,
+        stream_checking_mode: true,
+        queue: {
+          state: 'idle',
+          queue_size: 0,
+          in_progress: 0,
+          completed: 0,
+        },
+        progress: {
+          is_single_channel_check: true,
+          status: 'analyzing',
+          step: 'Analyzing streams with provider account limits',
+          channel_name: 'FUSSBALL.TV 2',
+          current_stream: 26,
+          total_streams: 35,
+          timestamp: '2026-06-28T11:47:00Z',
+        },
+      },
+    })
+
+    expect(display.isProcessing).toBe(true)
+    expect(display.streamCheckerOnlyActive).toBe(true)
+    expect(display.streamQueueActive).toBe(false)
+    expect(display.displayMessage).toBe('Running single channel check')
+    expect(display.displayStageId).toBe('quality_checking')
+    expect(display.displayStageLabel).toBe('Quality Check')
+    expect(display.stageCards[0]).toMatchObject({
+      key: 'quality_checking',
+      label: 'Quality Check',
+      current: 26,
+      total: 35,
+    })
+  })
+
   it('ignores completed queue history when the stream checker is idle', () => {
     const display = getStreamCheckerRunDisplay({
       runState: 'skipped',
