@@ -1360,6 +1360,7 @@ class AutomatedStreamManager:
     RUN_SNAPSHOT_SETTINGS_KEY = "streamflow_run_snapshot_settings"
     RUN_SNAPSHOT_DEFAULT_MAX_BYTES = 50 * 1024
     RUN_SNAPSHOT_DEFAULT_RETENTION = 50
+    MANUAL_STOP_REQUEST_KEY = "automation_manual_stop_request"
     
     def __init__(self, config_file=None):
         self._explicit_config_file = config_file is not None
@@ -1986,6 +1987,7 @@ class AutomatedStreamManager:
     def _start_run_status(self, *, forced: bool = False, forced_period_id: Optional[str] = None) -> None:
         self._ensure_run_status_fields()
         self._manual_stop_requested.clear()
+        self._clear_persisted_manual_stop_request()
         with self._run_status_lock:
             self._run_sequence += 1
             run_id = f"automation-{int(time.time())}-{self._run_sequence}"
@@ -2793,9 +2795,67 @@ class AutomatedStreamManager:
     def _manual_stop_message(self) -> str:
         return "Automation run was stopped by the user"
 
+    def _current_run_id(self) -> Optional[str]:
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            run_id = self._run_status.get("run_id")
+        return str(run_id) if run_id else None
+
+    def _persist_manual_stop_request(self) -> None:
+        try:
+            from apps.database.manager import get_db_manager
+
+            get_db_manager().set_system_setting(
+                self.MANUAL_STOP_REQUEST_KEY,
+                {
+                    "run_id": self._current_run_id(),
+                    "all_active": True,
+                    "requested_at": datetime.now().isoformat(),
+                },
+            )
+        except Exception as exc:
+            logger.debug(f"Could not persist automation stop request: {exc}")
+
+    def _clear_persisted_manual_stop_request(self) -> None:
+        try:
+            from apps.database.manager import get_db_manager
+
+            get_db_manager().set_system_setting(self.MANUAL_STOP_REQUEST_KEY, None)
+        except Exception as exc:
+            logger.debug(f"Could not clear automation stop request: {exc}")
+
+    def _persisted_manual_stop_matches_current_run(self) -> bool:
+        try:
+            from apps.database.manager import get_db_manager
+
+            request = get_db_manager().get_system_setting(self.MANUAL_STOP_REQUEST_KEY, None)
+        except Exception as exc:
+            logger.debug(f"Could not read automation stop request: {exc}")
+            return False
+
+        if not isinstance(request, dict):
+            return False
+
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            current_run_id = self._run_status.get("run_id")
+            active_run = bool(
+                self._run_status.get("active") or self._run_status.get("state") == "running"
+            )
+
+        requested_run_id = request.get("run_id")
+        if requested_run_id and current_run_id and str(requested_run_id) == str(current_run_id):
+            return True
+        return bool(request.get("all_active") and active_run)
+
     def _is_manual_stop_requested(self) -> bool:
         self._ensure_run_status_fields()
-        return self._manual_stop_requested.is_set()
+        if self._manual_stop_requested.is_set():
+            return True
+        if self._persisted_manual_stop_matches_current_run():
+            self._manual_stop_requested.set()
+            return True
+        return False
 
     def _abort_run_if_manual_stop_requested(self) -> bool:
         if not self._is_manual_stop_requested():
@@ -2810,6 +2870,7 @@ class AutomatedStreamManager:
             error=message,
         )
         self._manual_stop_requested.clear()
+        self._clear_persisted_manual_stop_request()
         return True
 
     def _finish_cycle_outcome(
@@ -6479,6 +6540,7 @@ class AutomatedStreamManager:
         if not active_run:
             return False
 
+        self._persist_manual_stop_request()
         self._manual_stop_requested.set()
         self._update_run_status(
             message="Stop requested; active automation run is shutting down",
@@ -6513,6 +6575,7 @@ class AutomatedStreamManager:
             )
         if active_run:
             self._manual_stop_requested.set()
+            self._persist_manual_stop_request()
             self._update_run_status(
                 message="Stop requested; automation is shutting down",
             )

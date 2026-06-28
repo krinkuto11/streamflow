@@ -757,6 +757,50 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertTrue(manager._manual_stop_requested.is_set())
         manager.changelog.add_entry.assert_not_called()
 
+    def test_manual_stop_request_is_persisted_for_other_manager_instances(self):
+        manager = self._manager()
+        fake_db = FakeSettingsDB()
+        manager._start_run_status(forced=True)
+
+        with patch("apps.database.manager.get_db_manager", return_value=fake_db):
+            requested = manager.request_active_run_stop()
+
+        self.assertTrue(requested)
+        token = fake_db.get_system_setting(AutomatedStreamManager.MANUAL_STOP_REQUEST_KEY)
+        self.assertIsInstance(token, dict)
+        self.assertEqual(token["run_id"], manager.get_run_status()["run_id"])
+        self.assertTrue(token["all_active"])
+
+    def test_manual_stop_request_can_be_seen_from_persisted_token(self):
+        manager = self._manager()
+        fake_db = FakeSettingsDB()
+        manager._start_run_status(forced=True)
+        run_id = manager.get_run_status()["run_id"]
+        fake_db.set_system_setting(
+            AutomatedStreamManager.MANUAL_STOP_REQUEST_KEY,
+            {"run_id": run_id, "all_active": True},
+        )
+
+        with patch("apps.database.manager.get_db_manager", return_value=fake_db):
+            self.assertTrue(manager._is_manual_stop_requested())
+
+        self.assertTrue(manager._manual_stop_requested.is_set())
+
+    def test_manual_stop_abort_clears_persisted_token(self):
+        manager = self._manager()
+        fake_db = FakeSettingsDB()
+        manager._start_run_status(forced=True)
+        fake_db.set_system_setting(
+            AutomatedStreamManager.MANUAL_STOP_REQUEST_KEY,
+            {"all_active": True},
+        )
+
+        with patch("apps.database.manager.get_db_manager", return_value=fake_db):
+            self.assertTrue(manager._abort_run_if_manual_stop_requested())
+
+        self.assertEqual(manager.get_run_status()["state"], "aborted")
+        self.assertIsNone(fake_db.get_system_setting(AutomatedStreamManager.MANUAL_STOP_REQUEST_KEY))
+
     def test_m3u_refresh_wait_reports_failed_account_status(self):
         manager = self._manager()
         manager.config = {"m3u_refresh_wait": {"stable_polls_required": 2, "min_wait_seconds": 0}}
