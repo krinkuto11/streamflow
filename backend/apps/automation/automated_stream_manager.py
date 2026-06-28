@@ -2948,6 +2948,15 @@ class AutomatedStreamManager:
         )
         return "failed"
 
+    def _normalize_manual_cycle_abort(
+        self,
+        cycle_abort_message: Optional[str],
+    ) -> Tuple[Optional[str], bool]:
+        manual_stop_abort = self._is_manual_stop_requested()
+        if manual_stop_abort and not cycle_abort_message:
+            cycle_abort_message = self._manual_stop_message()
+        return cycle_abort_message, manual_stop_abort
+
     def _advance_period_run_timestamps(
         self,
         active_periods: Dict[Any, Dict[str, Any]],
@@ -6441,6 +6450,9 @@ class AutomatedStreamManager:
                 if playlists_refreshed
                 else "skipped"
             )
+            cycle_abort_message, manual_stop_abort = self._normalize_manual_cycle_abort(
+                cycle_abort_message
+            )
             run_job_outcome = (
                 "aborted"
                 if cycle_abort_message
@@ -6462,7 +6474,11 @@ class AutomatedStreamManager:
             if has_work and self.config.get("enabled_features", {}).get("changelog_tracking", True):
                 self.changelog.add_automation_run_entry(run_results)
             
-            self._advance_period_run_timestamps(active_periods, run_job_outcome)
+            self._advance_period_run_timestamps(
+                active_periods,
+                run_job_outcome,
+                manual_stop=manual_stop_abort,
+            )
 
             self._update_run_status(
                 counts={
@@ -6490,7 +6506,10 @@ class AutomatedStreamManager:
                 cycle_failed_message=cycle_failed_message,
                 refresh_degraded=refresh_degraded,
             )
-            
+            if manual_stop_abort:
+                self._manual_stop_requested.clear()
+                self._clear_persisted_manual_stop_request()
+
             if cycle_outcome == "completed":
                 logger.info("Automation cycle completed")
             elif cycle_outcome == "completed_degraded":

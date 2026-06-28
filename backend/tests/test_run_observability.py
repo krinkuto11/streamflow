@@ -330,6 +330,29 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertGreater(manager.last_playlist_update, original_last_run)
         manager._save_state.assert_called_once()
 
+    def test_late_manual_stop_finalizer_advances_period_schedule_clock(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        active_periods = {("period-1", "Full Check"): {"channels": [1, 2, 3]}}
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+        manager._manual_stop_requested.set()
+
+        cycle_abort_message, manual_stop_abort = manager._normalize_manual_cycle_abort(None)
+        run_job_outcome = "aborted" if cycle_abort_message else "completed"
+        advanced = manager._advance_period_run_timestamps(
+            active_periods,
+            run_job_outcome,
+            manual_stop=manual_stop_abort,
+        )
+
+        self.assertEqual(cycle_abort_message, "Automation run was stopped by the user")
+        self.assertTrue(manual_stop_abort)
+        self.assertTrue(advanced)
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        manager._save_state.assert_called_once()
+
     def test_manual_stop_abort_marks_active_periods_to_prevent_immediate_retry(self):
         manager = self._manager()
         original_last_run = datetime.now() - timedelta(minutes=90)
