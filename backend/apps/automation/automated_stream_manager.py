@@ -6651,6 +6651,7 @@ class AutomatedStreamManager:
                 # Reset forced flags before running
                 self.force_next_run = False
                 self.forced_period_id = None
+                self.automation_wake_event.clear()
                 
                 self.run_automation_cycle(forced=forced, forced_period_id=period_id)
                 

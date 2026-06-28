@@ -385,6 +385,28 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "running")
         self.assertEqual(status["message"], "Stop requested; active automation run is shutting down")
 
+    def test_automation_loop_consumes_trigger_wake_event_before_running_cycle(self):
+        manager = self._manager()
+        manager.automation_running = True
+        manager.running = True
+        manager.force_next_run = True
+        manager.forced_period_id = None
+        manager.automation_wake_event.set()
+
+        udi = Mock()
+        udi.is_network_ready.return_value = True
+
+        def run_once(*_args, **_kwargs):
+            self.assertFalse(manager.automation_wake_event.is_set())
+            manager.automation_running = False
+
+        manager.run_automation_cycle = Mock(side_effect=run_once)
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi):
+            manager._automation_loop()
+
+        manager.run_automation_cycle.assert_called_once_with(forced=True, forced_period_id=None)
+
     def test_stop_automation_requests_abort_for_active_run(self):
         manager = self._manager()
 
