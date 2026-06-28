@@ -194,6 +194,74 @@ def test_fetch_streams_forwards_progress_callback(monkeypatch):
     callback.assert_called_once_with({"completed_pages": 1, "total_pages": 2})
 
 
+def test_fetch_streams_forwards_cancel_check(monkeypatch):
+    from apps.udi import fetcher as fetcher_module
+
+    fetcher = fetcher_module.UDIFetcher.__new__(fetcher_module.UDIFetcher)
+    fetcher.base_url = "http://dispatcharr.test"
+
+    config = Mock()
+    config.get_stream_fetch_page_size.return_value = 5000
+    config.get_stream_fetch_max_workers.return_value = 2
+    monkeypatch.setattr(fetcher_module, "get_dispatcharr_config", lambda: config)
+
+    cancel_check = Mock(return_value=False)
+    calls = {}
+
+    def fake_fetch_paginated(
+        url,
+        page_size=1000,
+        max_workers=10,
+        progress_callback=None,
+        cancel_check=None,
+    ):
+        calls["cancel_check"] = cancel_check
+        return fetcher_module.FetchResult(items=[{"id": 1}], expected_count=1)
+
+    monkeypatch.setattr(fetcher, "_fetch_paginated", fake_fetch_paginated)
+
+    result = fetcher.fetch_streams(cancel_check=cancel_check)
+
+    assert len(result) == 1
+    assert calls["cancel_check"] is cancel_check
+
+
+def test_fetch_paginated_cancel_check_stops_after_progress(monkeypatch):
+    from apps.udi import fetcher as fetcher_module
+
+    fetcher = fetcher_module.UDIFetcher.__new__(fetcher_module.UDIFetcher)
+    fetcher.base_url = "http://dispatcharr.test"
+
+    def fake_fetch_url(url):
+        assert "page=1" in url
+        return {"count": 2000, "results": [{"id": 1}]}
+
+    monkeypatch.setattr(fetcher, "_fetch_url", fake_fetch_url)
+    progress_calls = []
+
+    def progress_callback(payload):
+        progress_calls.append(payload)
+
+    cancel_check = Mock(side_effect=[False, False, True])
+
+    with pytest.raises(fetcher_module.FetchCancelled):
+        fetcher._fetch_paginated(
+            "http://dispatcharr.test/api/channels/streams/",
+            page_size=1000,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+        )
+
+    assert progress_calls == [
+        {
+            "completed_pages": 1,
+            "total_pages": 2,
+            "items_fetched": 1,
+            "expected_count": 2000,
+        }
+    ]
+
+
 def test_fetch_url_retries_transient_timeout(monkeypatch):
     from apps.udi import fetcher as fetcher_module
 

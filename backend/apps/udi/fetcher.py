@@ -73,6 +73,10 @@ class FetchResult:
         return self.items[index]
 
 
+class FetchCancelled(Exception):
+    """Raised when a long Dispatcharr fetch is cancelled by the caller."""
+
+
 class UDIFetcher:
     """Fetches data from the Dispatcharr API for the UDI system."""
     
@@ -427,6 +431,7 @@ class UDIFetcher:
         page_size: int = 1000,
         max_workers: int = 10,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> FetchResult:
         """Fetch paginated data from an API endpoint.
 
@@ -454,11 +459,17 @@ class UDIFetcher:
         page_size = max(1, page_size)
         max_workers = max(1, max_workers)
 
+        def raise_if_cancelled() -> None:
+            if cancel_check and cancel_check():
+                raise FetchCancelled("Paginated fetch cancelled")
+
         # Include page=1 explicitly so ChannelPagination does not short-circuit
         # into bare-list mode (it disables pagination when no 'page' param is
         # present, which drops the DRF count/results envelope).
         query_joiner = '&' if '?' in base_url else '?'
+        raise_if_cancelled()
         response = self._fetch_url(f"{base_url}{query_joiner}page_size={page_size}&page=1")
+        raise_if_cancelled()
         if not response:
             return FetchResult()
 
@@ -491,6 +502,7 @@ class UDIFetcher:
                     "items_fetched": items_fetched,
                     "expected_count": expected_count,
                 })
+            raise_if_cancelled()
             return FetchResult(items=all_items, expected_count=expected_count)
 
         total_pages = math.ceil(expected_count / page_size)
@@ -501,6 +513,7 @@ class UDIFetcher:
                 "items_fetched": items_fetched,
                 "expected_count": expected_count,
             })
+        raise_if_cancelled()
         remaining = range(2, total_pages + 1)
         logger.debug(
             f"Fetching {total_pages - 1} remaining pages of {base_url} concurrently "
@@ -510,18 +523,22 @@ class UDIFetcher:
         # Fetch remaining pages concurrently. Auth retries inside _fetch_url are
         # serialised by _token_refresh_lock so 401 bursts are safe.
         page_results: Dict[int, List] = {}
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(remaining))) as executor:
-            future_to_page = {
-                executor.submit(
+        executor = ThreadPoolExecutor(max_workers=min(max_workers, len(remaining)))
+        future_to_page = {}
+        try:
+            for p in remaining:
+                raise_if_cancelled()
+                future = executor.submit(
                     self._fetch_url,
                     f"{base_url}{query_joiner}page_size={page_size}&page={p}",
-                ): p
-                for p in remaining
-            }
+                )
+                future_to_page[future] = p
             for future in as_completed(future_to_page):
+                raise_if_cancelled()
                 page_num = future_to_page[future]
                 try:
                     result = future.result()
+                    raise_if_cancelled()
                     if result and isinstance(result, dict) and 'results' in result:
                         page_results[page_num] = result['results']
                         items_fetched += len(result['results'])
@@ -538,6 +555,17 @@ class UDIFetcher:
                         "items_fetched": items_fetched,
                         "expected_count": expected_count,
                     })
+                raise_if_cancelled()
+        except FetchCancelled:
+            for future in future_to_page:
+                future.cancel()
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
         # Merge pages in page-number order so item ordering is deterministic.
         for page_num in sorted(page_results):
@@ -597,6 +625,7 @@ class UDIFetcher:
     def fetch_streams(
         self,
         progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ) -> FetchResult:
         """Fetch all streams from Dispatcharr.
         
@@ -614,6 +643,8 @@ class UDIFetcher:
         fetch_kwargs = {"page_size": page_size, "max_workers": max_workers}
         if progress_callback is not None:
             fetch_kwargs["progress_callback"] = progress_callback
+        if cancel_check is not None:
+            fetch_kwargs["cancel_check"] = cancel_check
         result = self._fetch_paginated(url, **fetch_kwargs)
         logger.info(
             f"Fetched {len(result)} streams"

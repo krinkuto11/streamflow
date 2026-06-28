@@ -89,6 +89,7 @@ from apps.core.api_utils import (
 
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
+from apps.udi.fetcher import FetchCancelled
 from apps.stream.stale_status_snapshot import build_dispatcharr_stale_snapshot, build_stale_warnings
 from apps.automation.automation_config_manager import get_automation_config_manager
 from apps.automation.channel_visibility_automation import (
@@ -2220,6 +2221,9 @@ class AutomatedStreamManager:
                 message=f"Syncing stream cache{page_detail}",
             )
 
+        def cache_sync_cancelled() -> bool:
+            return self._is_manual_stop_requested()
+
         self._update_run_progress(
             stage_key="cache_sync",
             current=1,
@@ -2227,7 +2231,20 @@ class AutomatedStreamManager:
             message="Syncing stream cache",
         )
         try:
-            streams_success = bool(udi_manager.refresh_streams(progress_callback=update_stream_fetch_progress))
+            streams_success = bool(
+                udi_manager.refresh_streams(
+                    progress_callback=update_stream_fetch_progress,
+                    cancel_check=cache_sync_cancelled,
+                )
+            )
+        except FetchCancelled:
+            self._update_run_progress(
+                stage_key="cache_sync",
+                current=1,
+                total=progress_total,
+                message="Cache sync stopped by user",
+            )
+            raise
         except Exception as exc:
             logger.warning("UDI streams cache sync failed: %s", exc)
             streams_success = False
@@ -2857,10 +2874,20 @@ class AutomatedStreamManager:
             return True
         return False
 
-    def _abort_run_if_manual_stop_requested(self) -> bool:
+    def _abort_run_if_manual_stop_requested(
+        self,
+        *,
+        active_periods: Optional[Dict[Any, Dict[str, Any]]] = None,
+    ) -> bool:
         if not self._is_manual_stop_requested():
             return False
 
+        if active_periods:
+            self._advance_period_run_timestamps(
+                active_periods,
+                "aborted",
+                manual_stop=True,
+            )
         message = self._manual_stop_message()
         self._finish_run_status(
             state="aborted",
@@ -2921,12 +2948,21 @@ class AutomatedStreamManager:
         )
         return "failed"
 
-    def _advance_period_run_timestamps(self, active_periods: Dict[Any, Dict[str, Any]], run_job_outcome: str) -> bool:
-        """Advance scheduler timers only for runs that successfully completed work."""
+    def _advance_period_run_timestamps(
+        self,
+        active_periods: Dict[Any, Dict[str, Any]],
+        run_job_outcome: str,
+        *,
+        manual_stop: bool = False,
+    ) -> bool:
+        """Advance scheduler timers for completed runs and deliberate manual stops."""
         if not active_periods:
             return False
 
-        if run_job_outcome not in {"completed", "completed_degraded"}:
+        should_advance = run_job_outcome in {"completed", "completed_degraded"} or (
+            manual_stop and run_job_outcome == "aborted"
+        )
+        if not should_advance:
             logger.info(
                 "Not advancing automation period timers after %s run; next scheduler pass may retry",
                 run_job_outcome,
@@ -5408,7 +5444,7 @@ class AutomatedStreamManager:
             )
             logger.info(f"Processing {channels_with_periods} channel assignments across {len(active_periods)} active period(s)")
             logger.info(f"UDI cache {udi.get_cache_age_description()}")
-            if self._abort_run_if_manual_stop_requested():
+            if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                 return
             
             # Determine playlists to update
@@ -5649,7 +5685,7 @@ class AutomatedStreamManager:
                     else "Current cache selected for stream matching"
                 ),
             )
-            if self._abort_run_if_manual_stop_requested():
+            if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                 return
 
             validation_details = []
@@ -5670,7 +5706,7 @@ class AutomatedStreamManager:
                     durations={"m3u_refresh_seconds": time.time() - m3u_refresh_started},
                     message=wait_result.get("message", "Playlist refresh wait completed"),
                 )
-                if self._abort_run_if_manual_stop_requested():
+                if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                     return
                 if not wait_result.get("ok"):
                     cycle_abort_message = wait_result.get("message") or "Playlist refresh did not settle"
@@ -5727,6 +5763,10 @@ class AutomatedStreamManager:
                             "UDI cache sync after provider refresh reported warnings - "
                             "proceeding with available cache"
                         )
+                except FetchCancelled:
+                    if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                        return
+                    raise
                 except Exception as _sync_err:
                     logger.warning(
                         f"UDI sync after provider refresh failed: {_sync_err} — "
@@ -5831,9 +5871,9 @@ class AutomatedStreamManager:
                     stage="cache_sync" if refresh_success else "aborted",
                     stage_label="Syncing Cache" if refresh_success else "Aborted",
                 )
-                if self._abort_run_if_manual_stop_requested():
+                if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                     return
-            
+
             if refresh_success:
                 if channels_to_quality_check:
                     try:
@@ -5868,9 +5908,9 @@ class AutomatedStreamManager:
                         f"Waiting {post_refresh_delay:.2f}s after playlist refresh before stream matching"
                     )
                     if self._manual_stop_requested.wait(timeout=post_refresh_delay):
-                        if self._abort_run_if_manual_stop_requested():
+                        if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                             return
-                
+
                 # 4. Stream Matching (Validation & Assignment)
                 # Group results by channel for easier joining later
                 matching_started = time.time()
@@ -5884,11 +5924,11 @@ class AutomatedStreamManager:
                 try:
                     val_res = self.validate_and_remove_non_matching_streams(force=forced, forced_period_id=forced_period_id, skip_changelog=True)
                     validation_details = val_res.get("details", [])
-                    if val_res.get("aborted") or self._abort_run_if_manual_stop_requested():
+                    if val_res.get("aborted") or self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                         return
                 except Exception as e:
                     logger.error(f"✗ Failed to validate streams: {e}")
-                if self._abort_run_if_manual_stop_requested():
+                if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                     return
 
                 # Discover and assign new streams
@@ -5897,13 +5937,13 @@ class AutomatedStreamManager:
                     assignment_details = assign_res.get("assignment_details", [])
                     assigned_stream_ids = assign_res.get("assigned_stream_ids", {})
                     channel_visibility_events.extend(assign_res.get("channel_visibility_events", []) or [])
-                    if assign_res.get("aborted") or self._abort_run_if_manual_stop_requested():
+                    if assign_res.get("aborted") or self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                         return
                 except Exception as e:
                     logger.error(f"✗ Failed to assign streams: {e}")
                     assigned_stream_ids = {}
 
-                if self._abort_run_if_manual_stop_requested():
+                if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                     return
 
                 visibility_summary = self._summarize_channel_visibility_events(channel_visibility_events)
@@ -5919,7 +5959,7 @@ class AutomatedStreamManager:
 
                 # 4.5. Trigger Quality Checks for all channels in the period(s)
                 if channels_to_quality_check:
-                    if self._abort_run_if_manual_stop_requested():
+                    if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                         return
                     quality_stage_started = time.time()
                     self._update_run_status(
@@ -5946,7 +5986,7 @@ class AutomatedStreamManager:
                         _target_stream_ids = {}
 
                         for ch_id in channels_to_quality_check:
-                            if self._abort_run_if_manual_stop_requested():
+                            if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                                 return
                             # Normalise ch_id to int for all lookups. channels_to_quality_check
                             # may contain mixed int/str entries if populated from multiple sources.
@@ -6057,7 +6097,7 @@ class AutomatedStreamManager:
                                 progress_callback=_quality_progress_callback,
                                 run_mode="automation_quality_check",
                             )
-                            if self._abort_run_if_manual_stop_requested():
+                            if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                                 return
                             self._update_run_progress(
                                 stage_key="quality_checking",

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from apps.automation.automated_stream_manager import AutomatedStreamManager, ChangelogManager
-from apps.udi.fetcher import UDIFetcher
+from apps.udi.fetcher import UDIFetcher, FetchCancelled
 
 
 class FakeSettingsDB:
@@ -311,6 +311,44 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(manager.period_last_run["period-1"], original_last_run)
         self.assertEqual(manager.last_playlist_update, original_last_run)
         manager._save_state.assert_not_called()
+
+    def test_manual_stop_aborted_cycle_advances_period_schedule_clock(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+
+        advanced = manager._advance_period_run_timestamps(
+            {("period-1", "Full Check"): {"channels": [1, 2, 3]}},
+            "aborted",
+            manual_stop=True,
+        )
+
+        self.assertTrue(advanced)
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        self.assertGreater(manager.last_playlist_update, original_last_run)
+        manager._save_state.assert_called_once()
+
+    def test_manual_stop_abort_marks_active_periods_to_prevent_immediate_retry(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+        manager._clear_persisted_manual_stop_request = Mock()
+        manager._manual_stop_requested.set()
+
+        aborted = manager._abort_run_if_manual_stop_requested(
+            active_periods={("period-1", "Full Check"): {"channels": [1, 2, 3]}},
+        )
+
+        status = manager.get_run_status()
+        self.assertTrue(aborted)
+        self.assertEqual(status["state"], "aborted")
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        manager._save_state.assert_called_once()
+        manager._clear_persisted_manual_stop_request.assert_called_once()
 
     def test_completed_cycle_advances_period_schedule_clock(self):
         manager = self._manager()
@@ -909,7 +947,7 @@ class AutomationRunStatusTests(unittest.TestCase):
 
         udi = Mock()
 
-        def refresh_streams(progress_callback=None):
+        def refresh_streams(progress_callback=None, cancel_check=None):
             status = manager.get_run_status()
             self.assertEqual(status["current"], 1)
             self.assertEqual(status["total"], 100)
@@ -917,6 +955,8 @@ class AutomationRunStatusTests(unittest.TestCase):
             stages = {stage["key"]: stage for stage in status["stages"]}
             self.assertEqual(stages["cache_sync"]["percent"], 1)
             self.assertIsNotNone(progress_callback)
+            self.assertIsNotNone(cancel_check)
+            self.assertFalse(cancel_check())
             progress_callback({
                 "completed_pages": 2,
                 "total_pages": 4,
@@ -946,6 +986,34 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["percent"], 100)
         self.assertEqual(status["counts"]["cache_sync_successful_steps"], 2)
         self.assertEqual(status["counts"]["cache_sync_total_steps"], 2)
+
+    def test_cache_sync_propagates_manual_stop_cancellation(self):
+        manager = self._manager()
+        manager._start_run_status(forced=True)
+        manager._update_run_status(
+            stage="cache_sync",
+            stage_label="Syncing Cache",
+            message="Refreshing cache after playlist update",
+        )
+        manager._manual_stop_requested.set()
+
+        udi = Mock()
+
+        def refresh_streams(progress_callback=None, cancel_check=None):
+            self.assertIsNotNone(cancel_check)
+            self.assertTrue(cancel_check())
+            raise FetchCancelled("stopped")
+
+        udi.refresh_streams.side_effect = refresh_streams
+
+        with self.assertRaises(FetchCancelled):
+            manager._sync_udi_cache_after_playlist_refresh(udi)
+
+        status = manager.get_run_status()
+        self.assertEqual(status["current"], 1)
+        self.assertEqual(status["percent"], 1)
+        self.assertEqual(status["message"], "Cache sync stopped by user")
+        udi.refresh_channels.assert_not_called()
 
 
 class FetcherTimingSummaryTests(unittest.TestCase):
