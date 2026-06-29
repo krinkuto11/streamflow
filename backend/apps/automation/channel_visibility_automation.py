@@ -100,6 +100,7 @@ class ChannelVisibilityAutomation:
         *,
         good_streams_count: int,
         dead_streams_count: int,
+        failed_streams_count: Optional[int] = None,
         revived_streams_count: int = 0,
         config: Optional[Dict[str, Any]] = None,
         details: Optional[Dict[str, Any]] = None,
@@ -118,7 +119,21 @@ class ChannelVisibilityAutomation:
         if total_streams == 0 and merged.get("hide_on_no_streams"):
             return self.hide_channel(channel, reason="no_streams", details=details)
 
-        if good_streams_count <= 0 and dead_streams_count > 0 and merged.get("hide_on_all_failed"):
+        try:
+            effective_failed_streams_count = int(failed_streams_count)
+        except (TypeError, ValueError):
+            effective_failed_streams_count = int(dead_streams_count or 0)
+        effective_failed_streams_count = max(
+            int(dead_streams_count or 0),
+            effective_failed_streams_count,
+        )
+        details.setdefault("failed_streams_count", effective_failed_streams_count)
+
+        if (
+            good_streams_count <= 0
+            and effective_failed_streams_count > 0
+            and merged.get("hide_on_all_failed")
+        ):
             return self.hide_channel(channel, reason="all_failed", details=details)
 
         if total_streams and total_streams > 0 and merged.get("unhide_on_recovered"):

@@ -3447,10 +3447,15 @@ class StreamCheckerService:
                 self._count_good_checked_streams({'checked_streams': stream_stats})
                 + len(protected_active_stream_ids)
             )
+            visibility_failed_streams_count = max(
+                len(dead_stream_ids),
+                self._count_failed_checked_streams({'checked_streams': stream_stats}),
+            )
             visibility_result = self._apply_channel_visibility_after_check(
                 channel_data,
                 good_streams_count=visibility_good_streams_count,
                 dead_streams_count=len(dead_stream_ids),
+                failed_streams_count=visibility_failed_streams_count,
                 revived_streams_count=len(revived_stream_ids),
                 total_streams=len(streams),
                 profile=profile,
@@ -4602,10 +4607,15 @@ class StreamCheckerService:
                 self._count_good_checked_streams({'checked_streams': stream_stats})
                 + len(protected_active_stream_ids)
             )
+            visibility_failed_streams_count = max(
+                len(dead_stream_ids),
+                self._count_failed_checked_streams({'checked_streams': stream_stats}),
+            )
             visibility_result = self._apply_channel_visibility_after_check(
                 channel_data,
                 good_streams_count=visibility_good_streams_count,
                 dead_streams_count=len(dead_stream_ids),
+                failed_streams_count=visibility_failed_streams_count,
                 revived_streams_count=len(revived_stream_ids),
                 total_streams=len(streams),
                 profile=profile,
@@ -5979,6 +5989,7 @@ class StreamCheckerService:
         *,
         good_streams_count: int,
         dead_streams_count: int,
+        failed_streams_count: Optional[int] = None,
         revived_streams_count: int,
         total_streams: int,
         profile: Optional[Dict[str, Any]] = None,
@@ -5995,12 +6006,14 @@ class StreamCheckerService:
                 channel_data,
                 good_streams_count=good_streams_count,
                 dead_streams_count=dead_streams_count,
+                failed_streams_count=failed_streams_count,
                 revived_streams_count=revived_streams_count,
                 config=config,
                 details={
                     'total_streams': total_streams,
                     'good_streams_count': good_streams_count,
                     'dead_streams_count': dead_streams_count,
+                    'failed_streams_count': failed_streams_count,
                     'revived_streams_count': revived_streams_count,
                 },
             )
@@ -6112,6 +6125,29 @@ class StreamCheckerService:
             and (
                 stream.get('status') == 'incomplete_bitrate'
                 or stream.get('quality_reason_detail') in {None, '', 'none'}
+            )
+        )
+
+    @staticmethod
+    def _count_failed_checked_streams(result: Dict) -> int:
+        checked_streams = result.get('checked_streams', []) if isinstance(result, dict) else []
+        if not isinstance(checked_streams, list):
+            return 0
+        bad_statuses = {'blank', 'freeze', 'low_quality', 'dead', 'offline', 'error', 'failed', 'timeout', 'unstable'}
+        bad_reasons = bad_statuses
+        return sum(
+            1
+            for stream in checked_streams
+            if isinstance(stream, dict)
+            and (
+                stream.get('status') in bad_statuses
+                or stream.get('blank_detected') is True
+                or stream.get('freeze_detected') is True
+                or stream.get('dead_reason') in bad_reasons
+                or stream.get('reason') in bad_reasons
+                or stream.get('reason_detail') in bad_reasons
+                or stream.get('quality_reason') in bad_reasons
+                or stream.get('quality_reason_detail') in bad_reasons
             )
         )
 

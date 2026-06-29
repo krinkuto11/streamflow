@@ -170,6 +170,27 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
         self.assertNotIn('Provider A', snapshot_json)
         self.assertNotIn('Processing completed', snapshot_json)
 
+    def test_failed_stream_count_includes_visual_failures_but_not_missing_bitrate(self):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        count = StreamCheckerService._count_failed_checked_streams(
+            {
+                'checked_streams': [
+                    {'stream_id': 1, 'status': 'blank', 'blank_detected': True},
+                    {'stream_id': 2, 'status': 'freeze', 'freeze_detected': True},
+                    {
+                        'stream_id': 3,
+                        'status': 'incomplete_bitrate',
+                        'quality_reason': 'missing_bitrate',
+                        'quality_reason_detail': 'missing_bitrate',
+                    },
+                    {'stream_id': 4, 'status': 'completed'},
+                ],
+            }
+        )
+
+        self.assertEqual(count, 2)
+
     @patch('stream_checker_service.get_udi_manager')
     @patch('stream_checker_service.StreamCheckConfig')
     @patch('stream_checker_service.get_automation_config_manager')
