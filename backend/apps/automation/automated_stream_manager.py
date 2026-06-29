@@ -89,6 +89,7 @@ from apps.core.api_utils import (
 
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
+from apps.udi.fetcher import FetchCancelled
 from apps.stream.stale_status_snapshot import build_dispatcharr_stale_snapshot, build_stale_warnings
 from apps.automation.automation_config_manager import get_automation_config_manager
 from apps.automation.channel_visibility_automation import (
@@ -1360,6 +1361,7 @@ class AutomatedStreamManager:
     RUN_SNAPSHOT_SETTINGS_KEY = "streamflow_run_snapshot_settings"
     RUN_SNAPSHOT_DEFAULT_MAX_BYTES = 50 * 1024
     RUN_SNAPSHOT_DEFAULT_RETENTION = 50
+    MANUAL_STOP_REQUEST_KEY = "automation_manual_stop_request"
     
     def __init__(self, config_file=None):
         self._explicit_config_file = config_file is not None
@@ -1986,6 +1988,7 @@ class AutomatedStreamManager:
     def _start_run_status(self, *, forced: bool = False, forced_period_id: Optional[str] = None) -> None:
         self._ensure_run_status_fields()
         self._manual_stop_requested.clear()
+        self._clear_persisted_manual_stop_request()
         with self._run_status_lock:
             self._run_sequence += 1
             run_id = f"automation-{int(time.time())}-{self._run_sequence}"
@@ -2218,6 +2221,9 @@ class AutomatedStreamManager:
                 message=f"Syncing stream cache{page_detail}",
             )
 
+        def cache_sync_cancelled() -> bool:
+            return self._is_manual_stop_requested()
+
         self._update_run_progress(
             stage_key="cache_sync",
             current=1,
@@ -2225,7 +2231,20 @@ class AutomatedStreamManager:
             message="Syncing stream cache",
         )
         try:
-            streams_success = bool(udi_manager.refresh_streams(progress_callback=update_stream_fetch_progress))
+            streams_success = bool(
+                udi_manager.refresh_streams(
+                    progress_callback=update_stream_fetch_progress,
+                    cancel_check=cache_sync_cancelled,
+                )
+            )
+        except FetchCancelled:
+            self._update_run_progress(
+                stage_key="cache_sync",
+                current=1,
+                total=progress_total,
+                message="Cache sync stopped by user",
+            )
+            raise
         except Exception as exc:
             logger.warning("UDI streams cache sync failed: %s", exc)
             streams_success = False
@@ -2545,6 +2564,31 @@ class AutomatedStreamManager:
         retry_accepted_count = 0
 
         while True:
+            if self._is_manual_stop_requested():
+                message = self._manual_stop_message()
+                elapsed = int(time.time() - started)
+                if progress_callback:
+                    progress_callback({
+                        "state": "aborted",
+                        "current": 0,
+                        "total": 1,
+                        "message": message,
+                        "wait_elapsed_seconds": elapsed,
+                        "wait_stable_polls": stable_polls,
+                        "wait_busy_accounts": last_snapshot.get("busy_count"),
+                        "wait_streams_seen": last_snapshot.get("stream_count"),
+                        "wait_failed_accounts": last_snapshot.get("failed_count"),
+                        "wait_retry_count": retry_accepted_count,
+                    })
+                return {
+                    "ok": False,
+                    "state": "aborted",
+                    "message": message,
+                    "snapshot": last_snapshot,
+                    "elapsed_seconds": elapsed,
+                    "retry_accepted_count": retry_accepted_count,
+                }
+
             snapshot = self._build_m3u_refresh_monitor_snapshot(udi_manager, target_account_ids)
             last_snapshot = snapshot
             elapsed = int(time.time() - started)
@@ -2616,7 +2660,7 @@ class AutomatedStreamManager:
                 last_signature = None
                 sleep_for = min(poll_interval, max(0.0, deadline - time.time()))
                 if sleep_for > 0:
-                    time.sleep(sleep_for)
+                    self._manual_stop_requested.wait(timeout=sleep_for)
                 continue
 
             if all_monitored_accounts_failed:
@@ -2684,7 +2728,7 @@ class AutomatedStreamManager:
 
             sleep_for = min(poll_interval, max(0.0, deadline - time.time()))
             if sleep_for > 0:
-                time.sleep(sleep_for)
+                self._manual_stop_requested.wait(timeout=sleep_for)
 
     def _finish_run_status(
         self,
@@ -2768,14 +2812,82 @@ class AutomatedStreamManager:
     def _manual_stop_message(self) -> str:
         return "Automation run was stopped by the user"
 
+    def _current_run_id(self) -> Optional[str]:
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            run_id = self._run_status.get("run_id")
+        return str(run_id) if run_id else None
+
+    def _persist_manual_stop_request(self) -> None:
+        try:
+            from apps.database.manager import get_db_manager
+
+            get_db_manager().set_system_setting(
+                self.MANUAL_STOP_REQUEST_KEY,
+                {
+                    "run_id": self._current_run_id(),
+                    "all_active": True,
+                    "requested_at": datetime.now().isoformat(),
+                },
+            )
+        except Exception as exc:
+            logger.debug(f"Could not persist automation stop request: {exc}")
+
+    def _clear_persisted_manual_stop_request(self) -> None:
+        try:
+            from apps.database.manager import get_db_manager
+
+            get_db_manager().set_system_setting(self.MANUAL_STOP_REQUEST_KEY, None)
+        except Exception as exc:
+            logger.debug(f"Could not clear automation stop request: {exc}")
+
+    def _persisted_manual_stop_matches_current_run(self) -> bool:
+        try:
+            from apps.database.manager import get_db_manager
+
+            request = get_db_manager().get_system_setting(self.MANUAL_STOP_REQUEST_KEY, None)
+        except Exception as exc:
+            logger.debug(f"Could not read automation stop request: {exc}")
+            return False
+
+        if not isinstance(request, dict):
+            return False
+
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            current_run_id = self._run_status.get("run_id")
+            active_run = bool(
+                self._run_status.get("active") or self._run_status.get("state") == "running"
+            )
+
+        requested_run_id = request.get("run_id")
+        if requested_run_id and current_run_id and str(requested_run_id) == str(current_run_id):
+            return True
+        return bool(request.get("all_active") and active_run)
+
     def _is_manual_stop_requested(self) -> bool:
         self._ensure_run_status_fields()
-        return self._manual_stop_requested.is_set()
+        if self._manual_stop_requested.is_set():
+            return True
+        if self._persisted_manual_stop_matches_current_run():
+            self._manual_stop_requested.set()
+            return True
+        return False
 
-    def _abort_run_if_manual_stop_requested(self) -> bool:
+    def _abort_run_if_manual_stop_requested(
+        self,
+        *,
+        active_periods: Optional[Dict[Any, Dict[str, Any]]] = None,
+    ) -> bool:
         if not self._is_manual_stop_requested():
             return False
 
+        if active_periods:
+            self._advance_period_run_timestamps(
+                active_periods,
+                "aborted",
+                manual_stop=True,
+            )
         message = self._manual_stop_message()
         self._finish_run_status(
             state="aborted",
@@ -2785,6 +2897,7 @@ class AutomatedStreamManager:
             error=message,
         )
         self._manual_stop_requested.clear()
+        self._clear_persisted_manual_stop_request()
         return True
 
     def _finish_cycle_outcome(
@@ -2834,6 +2947,61 @@ class AutomatedStreamManager:
             error=failed_message,
         )
         return "failed"
+
+    def _normalize_manual_cycle_abort(
+        self,
+        cycle_abort_message: Optional[str],
+    ) -> Tuple[Optional[str], bool]:
+        manual_stop_abort = self._is_manual_stop_requested()
+        if manual_stop_abort and not cycle_abort_message:
+            cycle_abort_message = self._manual_stop_message()
+        return cycle_abort_message, manual_stop_abort
+
+    def _handle_child_stage_abort(
+        self,
+        result: Optional[Dict[str, Any]],
+        active_periods: Dict[Any, Dict[str, Any]],
+        fallback_message: str,
+    ) -> Tuple[Optional[str], bool]:
+        if not isinstance(result, dict) or not result.get("aborted"):
+            return None, False
+
+        if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+            return None, True
+
+        return result.get("error") or fallback_message, False
+
+    def _advance_period_run_timestamps(
+        self,
+        active_periods: Dict[Any, Dict[str, Any]],
+        run_job_outcome: str,
+        *,
+        manual_stop: bool = False,
+    ) -> bool:
+        """Advance scheduler timers for completed runs and deliberate manual stops."""
+        if not active_periods:
+            return False
+
+        should_advance = run_job_outcome in {"completed", "completed_degraded"} or (
+            manual_stop and run_job_outcome == "aborted"
+        )
+        if not should_advance:
+            logger.info(
+                "Not advancing automation period timers after %s run; next scheduler pass may retry",
+                run_job_outcome,
+            )
+            return False
+
+        now = datetime.now()
+        for p_id_tuple in active_periods.keys():
+            # active_periods keys are (p_id, p_name)
+            pid = p_id_tuple[0]
+            self.period_last_run[pid] = now
+
+        # Keep legacy last_playlist_update synced for legacy backward compatibility if any
+        self.last_playlist_update = now
+        self._save_state()
+        return True
 
     @staticmethod
     def _summarize_quality_check_results(check_results, expected_count: int) -> Dict[str, Any]:
@@ -4097,6 +4265,24 @@ class AutomatedStreamManager:
                 total=total_streams,
                 message=f"Matching 0/{total_streams} streams",
             )
+            if self._is_manual_stop_requested():
+                message = self._manual_stop_message()
+                logger.info("Stream matching skipped because the automation run stop was requested")
+                self._update_run_progress(
+                    stage_key="stream_matching",
+                    current=0,
+                    total=total_streams,
+                    message=message,
+                )
+                return {
+                    "assignment_count": {},
+                    "assignment_details": [],
+                    "assigned_stream_ids": {},
+                    "channel_visibility_events": channel_visibility_events,
+                    "aborted": True,
+                    "success": False,
+                    "error": message,
+                }
             
             # Resolve dead stream removal setting.
             # When the caller provides allow_dead_streams explicitly (e.g. check_single_channel
@@ -4113,8 +4299,10 @@ class AutomatedStreamManager:
             completed_count = 0
             last_log_pct = -1
             
-            # Process batches in parallel
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            aborted = False
+            future_to_batch = {}
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 future_to_batch = {
                     executor.submit(self._match_streams_batch, batch, channel_streams, 
                                    dead_stream_removal_enabled,
@@ -4123,8 +4311,14 @@ class AutomatedStreamManager:
                 }
                 
                 for future in concurrent.futures.as_completed(future_to_batch):
+                    if self._is_manual_stop_requested():
+                        aborted = True
+                        break
                     try:
                         batch_assignments, batch_details = future.result()
+                        if self._is_manual_stop_requested():
+                            aborted = True
+                            break
                         
                         # Merge results
                         for channel_id, stream_ids in batch_assignments.items():
@@ -4150,6 +4344,34 @@ class AutomatedStreamManager:
                              
                     except Exception as e:
                         logger.error(f"Error in stream matching batch: {e}")
+            finally:
+                if aborted:
+                    for pending in future_to_batch:
+                        pending.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True)
+
+            if aborted:
+                message = self._manual_stop_message()
+                logger.info(
+                    f"Stream matching aborted after {completed_count}/{total_streams} streams"
+                )
+                self._update_run_progress(
+                    stage_key="stream_matching",
+                    current=completed_count,
+                    total=total_streams,
+                    message=message,
+                )
+                return {
+                    "assignment_count": {},
+                    "assignment_details": [],
+                    "assigned_stream_ids": {},
+                    "channel_visibility_events": channel_visibility_events,
+                    "aborted": True,
+                    "success": False,
+                    "error": message,
+                }
             
             logger.info(f"✓ Completed processing {total_streams} streams. Found {sum(len(s) for s in assignments.values())} new stream assignments across {len(assignments)} channels")
             
@@ -4560,7 +4782,10 @@ class AutomatedStreamManager:
             
             completed_count = 0
             
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            aborted = False
+            future_to_batch = {}
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 future_to_batch = {
                     executor.submit(self._validate_channels_batch, batch, stream_lookup,
                                     matching_enabled_channel_ids, channel_validation_settings,
@@ -4569,13 +4794,22 @@ class AutomatedStreamManager:
                 }
                 
                 for future in concurrent.futures.as_completed(future_to_batch):
+                    if self._is_manual_stop_requested():
+                        aborted = True
+                        break
                     try:
                         batch_results = future.result()
+                        if self._is_manual_stop_requested():
+                            aborted = True
+                            break
                         
                         validation_results["channels_checked"] += batch_results["channels_checked"]
                         
                         # Process results and update UDI if needed
                         for detail in batch_results.get("details", []):
+                            if self._is_manual_stop_requested():
+                                aborted = True
+                                break
                             channel_id = detail["channel_id"]
                             channel_name = detail["channel_name"]
                             kept_ids = detail["kept_ids"]
@@ -4616,6 +4850,25 @@ class AutomatedStreamManager:
 
                     except Exception as e:
                         logger.error(f"Error in channel validation batch: {e}")
+                    if aborted:
+                        break
+            finally:
+                if aborted:
+                    for pending in future_to_batch:
+                        pending.cancel()
+                    executor.shutdown(wait=False, cancel_futures=True)
+                else:
+                    executor.shutdown(wait=True)
+
+            if aborted:
+                validation_results["aborted"] = True
+                validation_results["success"] = False
+                validation_results["error"] = self._manual_stop_message()
+                logger.info(
+                    "Stream validation aborted after checking "
+                    f"{validation_results['channels_checked']} channel(s)"
+                )
+                return validation_results
             
             logger.info(f"Stream validation completed: Checked {validation_results['channels_checked']} channels, " +
                        f"removed {validation_results['streams_removed']} streams from {validation_results['channels_modified']} channels")
@@ -5214,7 +5467,7 @@ class AutomatedStreamManager:
             )
             logger.info(f"Processing {channels_with_periods} channel assignments across {len(active_periods)} active period(s)")
             logger.info(f"UDI cache {udi.get_cache_age_description()}")
-            if self._abort_run_if_manual_stop_requested():
+            if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                 return
             
             # Determine playlists to update
@@ -5455,7 +5708,7 @@ class AutomatedStreamManager:
                     else "Current cache selected for stream matching"
                 ),
             )
-            if self._abort_run_if_manual_stop_requested():
+            if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                 return
 
             validation_details = []
@@ -5476,7 +5729,7 @@ class AutomatedStreamManager:
                     durations={"m3u_refresh_seconds": time.time() - m3u_refresh_started},
                     message=wait_result.get("message", "Playlist refresh wait completed"),
                 )
-                if self._abort_run_if_manual_stop_requested():
+                if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                     return
                 if not wait_result.get("ok"):
                     cycle_abort_message = wait_result.get("message") or "Playlist refresh did not settle"
@@ -5533,6 +5786,10 @@ class AutomatedStreamManager:
                             "UDI cache sync after provider refresh reported warnings - "
                             "proceeding with available cache"
                         )
+                except FetchCancelled:
+                    if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                        return
+                    raise
                 except Exception as _sync_err:
                     logger.warning(
                         f"UDI sync after provider refresh failed: {_sync_err} — "
@@ -5637,9 +5894,9 @@ class AutomatedStreamManager:
                     stage="cache_sync" if refresh_success else "aborted",
                     stage_label="Syncing Cache" if refresh_success else "Aborted",
                 )
-                if self._abort_run_if_manual_stop_requested():
+                if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
                     return
-            
+
             if refresh_success:
                 if channels_to_quality_check:
                     try:
@@ -5673,8 +5930,10 @@ class AutomatedStreamManager:
                     logger.info(
                         f"Waiting {post_refresh_delay:.2f}s after playlist refresh before stream matching"
                     )
-                    time.sleep(post_refresh_delay)
-                
+                    if self._manual_stop_requested.wait(timeout=post_refresh_delay):
+                        if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                            return
+
                 # 4. Stream Matching (Validation & Assignment)
                 # Group results by channel for easier joining later
                 matching_started = time.time()
@@ -5688,18 +5947,47 @@ class AutomatedStreamManager:
                 try:
                     val_res = self.validate_and_remove_non_matching_streams(force=forced, forced_period_id=forced_period_id, skip_changelog=True)
                     validation_details = val_res.get("details", [])
+                    child_abort_message, child_abort_handled = self._handle_child_stage_abort(
+                        val_res,
+                        active_periods,
+                        "Stream validation aborted",
+                    )
+                    if child_abort_handled:
+                        return
+                    if child_abort_message:
+                        cycle_abort_message = child_abort_message
+                        refresh_success = False
+                    elif self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                        return
                 except Exception as e:
                     logger.error(f"✗ Failed to validate streams: {e}")
-                
+                if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                    return
+
                 # Discover and assign new streams
                 try:
                     assign_res = self.discover_and_assign_streams(force=forced, skip_check_trigger=True, forced_period_id=forced_period_id, skip_changelog=True)
                     assignment_details = assign_res.get("assignment_details", [])
                     assigned_stream_ids = assign_res.get("assigned_stream_ids", {})
                     channel_visibility_events.extend(assign_res.get("channel_visibility_events", []) or [])
+                    child_abort_message, child_abort_handled = self._handle_child_stage_abort(
+                        assign_res,
+                        active_periods,
+                        "Stream discovery aborted",
+                    )
+                    if child_abort_handled:
+                        return
+                    if child_abort_message:
+                        cycle_abort_message = child_abort_message
+                        refresh_success = False
+                    elif self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                        return
                 except Exception as e:
                     logger.error(f"✗ Failed to assign streams: {e}")
                     assigned_stream_ids = {}
+
+                if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                    return
 
                 visibility_summary = self._summarize_channel_visibility_events(channel_visibility_events)
                 self._update_run_status(
@@ -5714,6 +6002,8 @@ class AutomatedStreamManager:
 
                 # 4.5. Trigger Quality Checks for all channels in the period(s)
                 if channels_to_quality_check:
+                    if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                        return
                     quality_stage_started = time.time()
                     self._update_run_status(
                         stage="quality_queueing",
@@ -5739,6 +6029,8 @@ class AutomatedStreamManager:
                         _target_stream_ids = {}
 
                         for ch_id in channels_to_quality_check:
+                            if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                                return
                             # Normalise ch_id to int for all lookups. channels_to_quality_check
                             # may contain mixed int/str entries if populated from multiple sources.
                             _ch_id_int = int(ch_id)
@@ -5810,6 +6102,11 @@ class AutomatedStreamManager:
                         # Run checks synchronously and collect results
                         if channels_to_check_sync:
                             def _quality_progress_callback(completed_count, total_count, channel_result):
+                                if self._is_manual_stop_requested():
+                                    try:
+                                        stream_checker.abort_current_check.set()
+                                    except Exception:
+                                        pass
                                 channel_name = ""
                                 if isinstance(channel_result, dict):
                                     channel_name = channel_result.get("channel_name") or ""
@@ -5834,6 +6131,8 @@ class AutomatedStreamManager:
                                 },
                             )
                             target_stream_ids = _target_stream_ids if _target_stream_ids else None
+                            if self._is_manual_stop_requested():
+                                stream_checker.abort_current_check.set()
                             check_results = stream_checker.check_channels_synchronously(
                                 channel_ids=channels_to_check_sync,
                                 force_check=forced,
@@ -5841,6 +6140,8 @@ class AutomatedStreamManager:
                                 progress_callback=_quality_progress_callback,
                                 run_mode="automation_quality_check",
                             )
+                            if self._abort_run_if_manual_stop_requested(active_periods=active_periods):
+                                return
                             self._update_run_progress(
                                 stage_key="quality_checking",
                                 current=len(check_results),
@@ -6183,6 +6484,9 @@ class AutomatedStreamManager:
                 if playlists_refreshed
                 else "skipped"
             )
+            cycle_abort_message, manual_stop_abort = self._normalize_manual_cycle_abort(
+                cycle_abort_message
+            )
             run_job_outcome = (
                 "aborted"
                 if cycle_abort_message
@@ -6204,16 +6508,11 @@ class AutomatedStreamManager:
             if has_work and self.config.get("enabled_features", {}).get("changelog_tracking", True):
                 self.changelog.add_automation_run_entry(run_results)
             
-            # Update last run times ONLY for periods that actually had work / were due
-            for p_id_tuple in active_periods.keys():
-                # active_periods keys are (p_id, p_name)
-                pid = p_id_tuple[0]
-                self.period_last_run[pid] = datetime.now()
-                
-            # Keep legacy last_playlist_update synced for legacy backward compatibility if any
-            if active_periods:
-                self.last_playlist_update = datetime.now()
-                self._save_state()
+            self._advance_period_run_timestamps(
+                active_periods,
+                run_job_outcome,
+                manual_stop=manual_stop_abort,
+            )
 
             self._update_run_status(
                 counts={
@@ -6241,7 +6540,10 @@ class AutomatedStreamManager:
                 cycle_failed_message=cycle_failed_message,
                 refresh_degraded=refresh_degraded,
             )
-            
+            if manual_stop_abort:
+                self._manual_stop_requested.clear()
+                self._clear_persisted_manual_stop_request()
+
             if cycle_outcome == "completed":
                 logger.info("Automation cycle completed")
             elif cycle_outcome == "completed_degraded":
@@ -6320,6 +6622,23 @@ class AutomatedStreamManager:
             # If not running, we could potentially run it synchronously or just log warning.
             # But the requirement is likely to trigger the *service*.
             logger.warning("Automation service not running, manual trigger queueing for next run or ignored")
+
+    def request_active_run_stop(self) -> bool:
+        """Request that the current automation run abort without stopping the scheduler."""
+        self._ensure_run_status_fields()
+        with self._run_status_lock:
+            active_run = bool(
+                self._run_status.get("active") or self._run_status.get("state") == "running"
+            )
+        if not active_run:
+            return False
+
+        self._persist_manual_stop_request()
+        self._manual_stop_requested.set()
+        self._update_run_status(
+            message="Stop requested; active automation run is shutting down",
+        )
+        return True
             
     def start_automation(self):
         """Start the automation background thread."""
@@ -6348,6 +6667,7 @@ class AutomatedStreamManager:
             )
         if active_run:
             self._manual_stop_requested.set()
+            self._persist_manual_stop_request()
             self._update_run_status(
                 message="Stop requested; automation is shutting down",
             )
@@ -6384,6 +6704,7 @@ class AutomatedStreamManager:
                 # Reset forced flags before running
                 self.force_next_run = False
                 self.forced_period_id = None
+                self.automation_wake_event.clear()
                 
                 self.run_automation_cycle(forced=forced, forced_period_id=period_id)
                 

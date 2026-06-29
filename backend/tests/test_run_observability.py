@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from apps.automation.automated_stream_manager import AutomatedStreamManager, ChangelogManager
-from apps.udi.fetcher import UDIFetcher
+from apps.udi.fetcher import UDIFetcher, FetchCancelled
 
 
 class FakeSettingsDB:
@@ -295,6 +295,175 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["message"], "Automation run was stopped by the user")
         self.assertEqual(status["last_error"], "Automation run was stopped by the user")
 
+    def test_aborted_cycle_does_not_advance_period_schedule_clock(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+
+        advanced = manager._advance_period_run_timestamps(
+            {("period-1", "Full Check"): {"channels": [1, 2, 3]}},
+            "aborted",
+        )
+
+        self.assertFalse(advanced)
+        self.assertEqual(manager.period_last_run["period-1"], original_last_run)
+        self.assertEqual(manager.last_playlist_update, original_last_run)
+        manager._save_state.assert_not_called()
+
+    def test_manual_stop_aborted_cycle_advances_period_schedule_clock(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+
+        advanced = manager._advance_period_run_timestamps(
+            {("period-1", "Full Check"): {"channels": [1, 2, 3]}},
+            "aborted",
+            manual_stop=True,
+        )
+
+        self.assertTrue(advanced)
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        self.assertGreater(manager.last_playlist_update, original_last_run)
+        manager._save_state.assert_called_once()
+
+    def test_late_manual_stop_finalizer_advances_period_schedule_clock(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        active_periods = {("period-1", "Full Check"): {"channels": [1, 2, 3]}}
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+        manager._manual_stop_requested.set()
+
+        cycle_abort_message, manual_stop_abort = manager._normalize_manual_cycle_abort(None)
+        run_job_outcome = "aborted" if cycle_abort_message else "completed"
+        advanced = manager._advance_period_run_timestamps(
+            active_periods,
+            run_job_outcome,
+            manual_stop=manual_stop_abort,
+        )
+
+        self.assertEqual(cycle_abort_message, "Automation run was stopped by the user")
+        self.assertTrue(manual_stop_abort)
+        self.assertTrue(advanced)
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        manager._save_state.assert_called_once()
+
+    def test_child_stage_abort_still_invokes_manual_stop_handler(self):
+        manager = self._manager()
+        active_periods = {("period-1", "Full Check"): {"channels": [1, 2, 3]}}
+        manager._abort_run_if_manual_stop_requested = Mock(return_value=True)
+
+        message, handled = manager._handle_child_stage_abort(
+            {"aborted": True, "error": "child stopped"},
+            active_periods,
+            "fallback",
+        )
+
+        self.assertIsNone(message)
+        self.assertTrue(handled)
+        manager._abort_run_if_manual_stop_requested.assert_called_once_with(
+            active_periods=active_periods
+        )
+
+    def test_child_stage_abort_without_manual_stop_returns_abort_message(self):
+        manager = self._manager()
+        active_periods = {("period-1", "Full Check"): {"channels": [1, 2, 3]}}
+        manager._abort_run_if_manual_stop_requested = Mock(return_value=False)
+
+        message, handled = manager._handle_child_stage_abort(
+            {"aborted": True},
+            active_periods,
+            "fallback",
+        )
+
+        self.assertEqual(message, "fallback")
+        self.assertFalse(handled)
+        manager._abort_run_if_manual_stop_requested.assert_called_once_with(
+            active_periods=active_periods
+        )
+
+    def test_manual_stop_abort_marks_active_periods_to_prevent_immediate_retry(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+        manager._clear_persisted_manual_stop_request = Mock()
+        manager._manual_stop_requested.set()
+
+        aborted = manager._abort_run_if_manual_stop_requested(
+            active_periods={("period-1", "Full Check"): {"channels": [1, 2, 3]}},
+        )
+
+        status = manager.get_run_status()
+        self.assertTrue(aborted)
+        self.assertEqual(status["state"], "aborted")
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        manager._save_state.assert_called_once()
+        manager._clear_persisted_manual_stop_request.assert_called_once()
+
+    def test_completed_cycle_advances_period_schedule_clock(self):
+        manager = self._manager()
+        original_last_run = datetime.now() - timedelta(minutes=90)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager.last_playlist_update = original_last_run
+        manager._save_state = Mock()
+
+        advanced = manager._advance_period_run_timestamps(
+            {("period-1", "Full Check"): {"channels": [1, 2, 3]}},
+            "completed",
+        )
+
+        self.assertTrue(advanced)
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        self.assertGreater(manager.last_playlist_update, original_last_run)
+        manager._save_state.assert_called_once()
+
+    def test_request_active_run_stop_keeps_scheduler_service_running(self):
+        manager = self._manager()
+
+        manager._start_run_status(forced=False, forced_period_id=None)
+        manager.automation_running = True
+        manager.running = True
+
+        requested = manager.request_active_run_stop()
+
+        status = manager.get_run_status()
+        self.assertTrue(requested)
+        self.assertTrue(manager._manual_stop_requested.is_set())
+        self.assertTrue(manager.automation_running)
+        self.assertTrue(manager.running)
+        self.assertFalse(manager.automation_wake_event.is_set())
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(status["message"], "Stop requested; active automation run is shutting down")
+
+    def test_automation_loop_consumes_trigger_wake_event_before_running_cycle(self):
+        manager = self._manager()
+        manager.automation_running = True
+        manager.running = True
+        manager.force_next_run = True
+        manager.forced_period_id = None
+        manager.automation_wake_event.set()
+
+        udi = Mock()
+        udi.is_network_ready.return_value = True
+
+        def run_once(*_args, **_kwargs):
+            self.assertFalse(manager.automation_wake_event.is_set())
+            manager.automation_running = False
+
+        manager.run_automation_cycle = Mock(side_effect=run_once)
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi):
+            manager._automation_loop()
+
+        manager.run_automation_cycle.assert_called_once_with(forced=True, forced_period_id=None)
+
     def test_stop_automation_requests_abort_for_active_run(self):
         manager = self._manager()
 
@@ -531,9 +700,11 @@ class AutomationRunStatusTests(unittest.TestCase):
         udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
         udi.get_streams.return_value = [{"id": 10}, {"id": 11}]
 
-        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
-            "apps.automation.automated_stream_manager.time.sleep"
-        ) as sleep_mock:
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch.object(
+            manager._manual_stop_requested,
+            "wait",
+            return_value=False,
+        ) as wait_mock:
             result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
 
         self.assertTrue(result["ok"])
@@ -541,7 +712,7 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(events[-1]["state"], "settled")
         self.assertEqual(events[-1]["wait_streams_seen"], 2)
         udi.refresh_streams.assert_not_called()
-        sleep_mock.assert_called_once_with(1)
+        wait_mock.assert_called_once_with(timeout=1)
 
     def test_m3u_refresh_wait_treats_parsing_account_as_busy(self):
         manager = self._manager()
@@ -563,9 +734,11 @@ class AutomationRunStatusTests(unittest.TestCase):
         udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
         udi.get_streams.return_value = [{"id": 10}, {"id": 11}]
 
-        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
-            "apps.automation.automated_stream_manager.time.sleep"
-        ) as sleep_mock:
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch.object(
+            manager._manual_stop_requested,
+            "wait",
+            return_value=False,
+        ) as wait_mock:
             result = manager._wait_for_m3u_refresh_completion([{"id": 1, "name": "One"}], events.append)
 
         self.assertTrue(result["ok"])
@@ -576,7 +749,175 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertIn("playlist parsing", events[0]["message"])
         self.assertEqual(events[-1]["state"], "settled")
         udi.refresh_streams.assert_not_called()
-        sleep_mock.assert_called_once_with(1)
+        wait_mock.assert_called_once_with(timeout=1)
+
+    def test_m3u_refresh_wait_aborts_when_manual_stop_requested(self):
+        manager = self._manager()
+        manager.config = {
+            "m3u_refresh_wait": {
+                "timeout_seconds": 30,
+                "poll_interval_seconds": 60,
+                "stable_polls_required": 1,
+                "min_wait_seconds": 0,
+            },
+        }
+        events = []
+        udi = Mock()
+        udi.refresh_m3u_accounts.return_value = True
+        udi.get_m3u_accounts.return_value = [{"id": 1, "name": "One", "status": "parsing"}]
+        udi.refresh_streams.side_effect = AssertionError("M3U refresh wait must not sync full stream cache")
+        udi.get_streams.return_value = [{"id": 10}]
+
+        def record_and_stop(payload):
+            events.append(payload)
+            if payload.get("state") == "waiting":
+                manager._manual_stop_requested.set()
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi):
+            result = manager._wait_for_m3u_refresh_completion(
+                [{"id": 1, "name": "One"}],
+                record_and_stop,
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["state"], "aborted")
+        self.assertEqual(result["message"], "Automation run was stopped by the user")
+        self.assertEqual(events[-1]["state"], "aborted")
+        self.assertTrue(manager._manual_stop_requested.is_set())
+        udi.refresh_streams.assert_not_called()
+
+    def test_stream_matching_parallel_loop_aborts_when_manual_stop_requested(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {"auto_stream_discovery": True},
+            "enabled_m3u_accounts": [],
+        }
+        manager._lock = threading.Lock()
+        manager._m3u_accounts_cache = [{"id": 1, "name": "Provider", "is_active": True}]
+        manager.regex_matcher = Mock()
+        manager.regex_matcher.reload_patterns.return_value = None
+        manager.regex_matcher.has_regex_patterns.return_value = True
+        manager.regex_matcher.get_match_by_tvg_id.return_value = False
+        manager._filter_channels_by_profile = Mock(side_effect=lambda channels, _reason: channels)
+        manager._record_channel_visibility_events = Mock()
+        manager._is_dead_stream_removal_enabled = Mock(return_value=False)
+        manager._update_run_progress = Mock()
+        manager._get_channel_visibility_config = Mock(return_value={})
+
+        streams = [{"id": i, "name": f"Stream {i}", "m3u_account": 1} for i in range(2000)]
+        channels = [{"id": 10, "name": "Channel 10"}]
+        automation_config = Mock()
+        automation_config.get_effective_configuration.return_value = {
+            "profile": {
+                "stream_matching": {"enabled": True, "match_priority_order": ["regex"]},
+                "stream_checking": {"enabled": False},
+            }
+        }
+        udi = Mock()
+        udi.get_channel_streams.return_value = []
+        session_manager = Mock()
+        session_manager.get_channels_in_active_sessions.return_value = []
+
+        def stop_during_batch(*_args, **_kwargs):
+            manager._manual_stop_requested.set()
+            return {}, {}
+
+        manager._match_streams_batch = Mock(side_effect=stop_during_batch)
+
+        with patch("apps.automation.automated_stream_manager.get_streams", return_value=streams), \
+             patch("apps.automation.automated_stream_manager.get_channels", return_value=channels), \
+             patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), \
+             patch("apps.automation.automated_stream_manager.get_automation_config_manager", return_value=automation_config), \
+             patch("apps.stream.stream_session_manager.get_session_manager", return_value=session_manager):
+            result = manager._discover_and_assign_streams_impl(force=True, skip_check_trigger=True)
+
+        self.assertTrue(result["aborted"])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "Automation run was stopped by the user")
+        self.assertEqual(result["assignment_count"], {})
+        self.assertTrue(manager._manual_stop_requested.is_set())
+
+    def test_stream_validation_parallel_loop_aborts_when_manual_stop_requested(self):
+        manager = self._manager()
+        manager.config = {}
+        manager._lock = threading.Lock()
+        manager._filter_channels_by_profile = Mock(side_effect=lambda channels, _reason: channels)
+        manager.changelog = Mock()
+
+        channels = [{"id": i, "name": f"Channel {i}"} for i in range(60)]
+        streams = [{"id": i, "name": f"Stream {i}"} for i in range(10)]
+        udi = Mock()
+        udi.get_channels.return_value = channels
+        udi.get_streams.return_value = streams
+        automation_config = Mock()
+        automation_config.get_effective_configuration.return_value = {
+            "profile": {
+                "stream_matching": {
+                    "enabled": True,
+                    "validate_existing_streams": True,
+                }
+            }
+        }
+
+        def stop_during_batch(*_args, **_kwargs):
+            manager._manual_stop_requested.set()
+            return {"channels_checked": 0, "details": []}
+
+        manager._validate_channels_batch = Mock(side_effect=stop_during_batch)
+
+        with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), \
+             patch("apps.automation.automation_config_manager.get_automation_config_manager", return_value=automation_config):
+            result = manager._validate_and_remove_non_matching_streams_impl(force=True)
+
+        self.assertTrue(result["aborted"])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error"], "Automation run was stopped by the user")
+        self.assertTrue(manager._manual_stop_requested.is_set())
+        manager.changelog.add_entry.assert_not_called()
+
+    def test_manual_stop_request_is_persisted_for_other_manager_instances(self):
+        manager = self._manager()
+        fake_db = FakeSettingsDB()
+        manager._start_run_status(forced=True)
+
+        with patch("apps.database.manager.get_db_manager", return_value=fake_db):
+            requested = manager.request_active_run_stop()
+
+        self.assertTrue(requested)
+        token = fake_db.get_system_setting(AutomatedStreamManager.MANUAL_STOP_REQUEST_KEY)
+        self.assertIsInstance(token, dict)
+        self.assertEqual(token["run_id"], manager.get_run_status()["run_id"])
+        self.assertTrue(token["all_active"])
+
+    def test_manual_stop_request_can_be_seen_from_persisted_token(self):
+        manager = self._manager()
+        fake_db = FakeSettingsDB()
+        manager._start_run_status(forced=True)
+        run_id = manager.get_run_status()["run_id"]
+        fake_db.set_system_setting(
+            AutomatedStreamManager.MANUAL_STOP_REQUEST_KEY,
+            {"run_id": run_id, "all_active": True},
+        )
+
+        with patch("apps.database.manager.get_db_manager", return_value=fake_db):
+            self.assertTrue(manager._is_manual_stop_requested())
+
+        self.assertTrue(manager._manual_stop_requested.is_set())
+
+    def test_manual_stop_abort_clears_persisted_token(self):
+        manager = self._manager()
+        fake_db = FakeSettingsDB()
+        manager._start_run_status(forced=True)
+        fake_db.set_system_setting(
+            AutomatedStreamManager.MANUAL_STOP_REQUEST_KEY,
+            {"all_active": True},
+        )
+
+        with patch("apps.database.manager.get_db_manager", return_value=fake_db):
+            self.assertTrue(manager._abort_run_if_manual_stop_requested())
+
+        self.assertEqual(manager.get_run_status()["state"], "aborted")
+        self.assertIsNone(fake_db.get_system_setting(AutomatedStreamManager.MANUAL_STOP_REQUEST_KEY))
 
     def test_m3u_refresh_wait_reports_failed_account_status(self):
         manager = self._manager()
@@ -659,8 +1000,10 @@ class AutomationRunStatusTests(unittest.TestCase):
         with patch("apps.automation.automated_stream_manager.get_udi_manager", return_value=udi), patch(
             "apps.automation.automated_stream_manager.refresh_m3u_playlists",
             return_value=response,
-        ) as refresh_mock, patch(
-            "apps.automation.automated_stream_manager.time.sleep"
+        ) as refresh_mock, patch.object(
+            manager._manual_stop_requested,
+            "wait",
+            return_value=False,
         ):
             result = manager._wait_for_m3u_refresh_completion(
                 [{"id": 1, "name": "One"}, {"id": 2, "name": "Two"}],
@@ -684,7 +1027,7 @@ class AutomationRunStatusTests(unittest.TestCase):
 
         udi = Mock()
 
-        def refresh_streams(progress_callback=None):
+        def refresh_streams(progress_callback=None, cancel_check=None):
             status = manager.get_run_status()
             self.assertEqual(status["current"], 1)
             self.assertEqual(status["total"], 100)
@@ -692,6 +1035,8 @@ class AutomationRunStatusTests(unittest.TestCase):
             stages = {stage["key"]: stage for stage in status["stages"]}
             self.assertEqual(stages["cache_sync"]["percent"], 1)
             self.assertIsNotNone(progress_callback)
+            self.assertIsNotNone(cancel_check)
+            self.assertFalse(cancel_check())
             progress_callback({
                 "completed_pages": 2,
                 "total_pages": 4,
@@ -721,6 +1066,34 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(status["percent"], 100)
         self.assertEqual(status["counts"]["cache_sync_successful_steps"], 2)
         self.assertEqual(status["counts"]["cache_sync_total_steps"], 2)
+
+    def test_cache_sync_propagates_manual_stop_cancellation(self):
+        manager = self._manager()
+        manager._start_run_status(forced=True)
+        manager._update_run_status(
+            stage="cache_sync",
+            stage_label="Syncing Cache",
+            message="Refreshing cache after playlist update",
+        )
+        manager._manual_stop_requested.set()
+
+        udi = Mock()
+
+        def refresh_streams(progress_callback=None, cancel_check=None):
+            self.assertIsNotNone(cancel_check)
+            self.assertTrue(cancel_check())
+            raise FetchCancelled("stopped")
+
+        udi.refresh_streams.side_effect = refresh_streams
+
+        with self.assertRaises(FetchCancelled):
+            manager._sync_udi_cache_after_playlist_refresh(udi)
+
+        status = manager.get_run_status()
+        self.assertEqual(status["current"], 1)
+        self.assertEqual(status["percent"], 1)
+        self.assertEqual(status["message"], "Cache sync stopped by user")
+        udi.refresh_channels.assert_not_called()
 
 
 class FetcherTimingSummaryTests(unittest.TestCase):

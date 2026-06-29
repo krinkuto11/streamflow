@@ -413,7 +413,7 @@ export default function Dashboard() {
         await streamCheckerAPI.clearQueue()
       }
       if (activeAutomationRun) {
-        await automationAPI.stop()
+        await automationAPI.abortRun()
       }
 
       toast({

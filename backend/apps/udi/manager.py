@@ -33,7 +33,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
 
-from apps.udi.fetcher import UDIFetcher, FetchResult
+from apps.udi.fetcher import UDIFetcher, FetchResult, FetchCancelled
 from apps.udi.cache import UDICache
 from apps.udi.storage import UDIStorage
 from apps.core.auth import _get_auth_headers
@@ -1681,7 +1681,7 @@ class UDIManager:
             logger.error(f"Error refreshing channel {channel_id}: {e}")
             return False
     
-    def refresh_streams(self, progress_callback=None) -> bool:
+    def refresh_streams(self, progress_callback=None, cancel_check=None) -> bool:
         """Refresh only streams data.
         
         Returns:
@@ -1689,7 +1689,10 @@ class UDIManager:
         """
         logger.info("Refreshing streams...")
         try:
-            result = self.fetcher.fetch_streams(progress_callback=progress_callback)
+            result = self.fetcher.fetch_streams(
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
             existing_stream_count = len(self._streams_cache)
             if not (
                 _check_fetch_integrity('streams', result)
@@ -1721,6 +1724,9 @@ class UDIManager:
                 self._has_custom_streams = any(st.get('is_custom', False) for st in result.items)
             self.cache.mark_refreshed('streams')
             return True
+        except FetchCancelled:
+            logger.info("Stream cache refresh cancelled")
+            raise
         except Exception as e:
             logger.error(f"Error refreshing streams: {e}")
             return False

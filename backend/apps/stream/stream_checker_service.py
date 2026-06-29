@@ -1557,6 +1557,16 @@ class StreamCheckerService:
         context.setdefault("preserved_bitrate_source", "previous_stream_stats")
         analyzed["measurement_incomplete_context"] = context
 
+    @staticmethod
+    def _current_probe_stats_source(
+        stream_data: Optional[Dict[str, Any]],
+        analyzed: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Return current probe stats when present, avoiding stale cache display."""
+        if isinstance(analyzed, dict):
+            return analyzed
+        return stream_data if isinstance(stream_data, dict) else {}
+
     @classmethod
     def _has_incomplete_bitrate_measurement(cls, stream_data: Optional[Dict[str, Any]]) -> bool:
         if not isinstance(stream_data, dict):
@@ -7048,8 +7058,11 @@ class StreamCheckerService:
                 reverse=True
             )
             for stream in streams_sorted:
+                analyzed = analyzed_lookup.get(stream.get('id'))
+
                 # Extract stats using centralized utility
-                extracted_stats = extract_stream_stats(stream)
+                detail_stats_source = self._current_probe_stats_source(stream, analyzed)
+                extracted_stats = extract_stream_stats(detail_stats_source)
                 formatted_stats = format_stream_stats_for_display(extracted_stats)
                 
                 # Calculate score for this stream using its stats
@@ -7085,7 +7098,6 @@ class StreamCheckerService:
                 # settings at the time of the check. Recalculate only as a fallback
                 # for streams not present in the lookup (e.g. pre-existing streams
                 # not re-analyzed in this run).
-                analyzed = analyzed_lookup.get(stream.get('id'))
                 if analyzed and analyzed.get('score') is not None:
                     score = analyzed.get('score')
                 else:

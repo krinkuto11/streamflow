@@ -7,6 +7,7 @@ Cache is invalidated when automation periods are modified.
 """
 
 import json
+import sys
 import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Any
@@ -174,9 +175,15 @@ class AutomationEventsScheduler:
             # Try to align the schedule track with the *actual* last run time for this period
             base_time = current_time
             try:
-                from web_api import get_automation_manager
-                manager = get_automation_manager()
-                last_run = manager.period_last_run.get(period_id)
+                manager = None
+                for module_name in ("apps.api.web_api", "web_api", "__main__"):
+                    module = sys.modules.get(module_name)
+                    manager_factory = getattr(module, "get_automation_manager", None) if module else None
+                    if callable(manager_factory):
+                        manager = manager_factory()
+                        break
+
+                last_run = manager.period_last_run.get(period_id) if manager else None
                 if last_run:
                     if isinstance(last_run, datetime):
                         base_time = last_run

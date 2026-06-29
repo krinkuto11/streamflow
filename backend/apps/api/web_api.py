@@ -103,6 +103,7 @@ from apps.api.automation_handlers import (
     invalidate_automation_events_cache_response,
     remove_period_from_channels_response,
     remove_period_from_groups_response,
+    abort_automation_run_api_response,
     start_automation_service_api_response,
     stop_automation_service_api_response,
     trigger_automation_cycle_response,
@@ -1842,6 +1843,13 @@ def start_automation_service_api():
 def stop_automation_service_api():
     """Stop the automation background service."""
     return stop_automation_service_api_response(get_automation_manager=get_automation_manager)
+
+
+@app.route('/api/automation/abort-run', methods=['POST'])
+@log_function_call
+def abort_automation_run_api():
+    """Stop the active automation run without stopping the background scheduler."""
+    return abort_automation_run_api_response(get_automation_manager=get_automation_manager)
 
 
 @app.route('/api/automation/trigger', methods=['POST'])
