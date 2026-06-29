@@ -118,6 +118,9 @@ class ChannelVisibilityAutomation:
         if total_streams == 0 and merged.get("hide_on_no_streams"):
             return self.hide_channel(channel, reason="no_streams", details=details)
 
+        if good_streams_count <= 0 and dead_streams_count > 0 and merged.get("hide_on_all_failed"):
+            return self.hide_channel(channel, reason="all_failed", details=details)
+
         if total_streams and total_streams > 0 and merged.get("unhide_on_recovered"):
             state_entry = self._state_entry_for_channel(channel)
             if state_entry and state_entry.get("reason") == "no_streams":
@@ -125,8 +128,6 @@ class ChannelVisibilityAutomation:
 
         if (good_streams_count > 0 or revived_streams_count > 0) and merged.get("unhide_on_recovered"):
             return self.unhide_channel(channel, reason="recovered", details=details)
-        if good_streams_count <= 0 and dead_streams_count > 0 and merged.get("hide_on_all_failed"):
-            return self.hide_channel(channel, reason="all_failed", details=details)
         return self._skipped(channel, "no_visibility_change", "quality_result")
 
     def hide_channel(

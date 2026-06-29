@@ -178,6 +178,37 @@ def test_streams_recovered_unhides_only_no_streams_state():
     assert "19" not in db.settings[STATE_KEY]
 
 
+def test_all_failed_wins_over_no_streams_recovery_after_visual_probe():
+    db = FakeDb(state={"20": {"hidden_by": "streamflow", "reason": "no_streams"}})
+    patch = Mock(return_value=FakeResponse())
+    service = make_service(db, patch_request=patch)
+
+    result = service.handle_quality_result(
+        {"id": 20, "name": "NASA", "hidden_from_output": True},
+        good_streams_count=0,
+        dead_streams_count=2,
+        revived_streams_count=2,
+        config={
+            "enabled": True,
+            "hide_on_no_streams": True,
+            "hide_on_all_failed": True,
+            "unhide_on_recovered": True,
+        },
+        details={
+            "total_streams": 2,
+            "good_streams_count": 0,
+            "dead_streams_count": 2,
+            "revived_streams_count": 2,
+        },
+    )
+
+    assert result["action"] == "hidden_already_managed"
+    assert result["reason"] == "all_failed"
+    assert result["changed"] is False
+    assert db.settings[STATE_KEY]["20"]["reason"] == "all_failed"
+    patch.assert_not_called()
+
+
 def test_disabled_visibility_automation_is_read_only():
     db = FakeDb()
     patch = Mock(return_value=FakeResponse())
