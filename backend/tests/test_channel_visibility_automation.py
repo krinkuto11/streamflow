@@ -142,6 +142,30 @@ def test_all_failed_hide_uses_quality_result_gate():
     assert db.settings[STATE_KEY]["14"]["reason"] == "all_failed"
 
 
+def test_all_failed_hide_accepts_visual_failure_count_without_dead_streams():
+    db = FakeDb()
+    patch = Mock(return_value=FakeResponse())
+    service = make_service(db, patch_request=patch)
+
+    result = service.handle_quality_result(
+        {"id": 21, "name": "NASA", "hidden_from_output": False},
+        good_streams_count=0,
+        dead_streams_count=0,
+        failed_streams_count=2,
+        config={"enabled": True, "hide_on_all_failed": True},
+        details={
+            "total_streams": 2,
+            "blank_streams_count": 2,
+            "freeze_streams_count": 2,
+        },
+    )
+
+    assert result["action"] == "hidden"
+    assert result["reason"] == "all_failed"
+    assert result["details"]["failed_streams_count"] == 2
+    assert db.settings[STATE_KEY]["21"]["reason"] == "all_failed"
+
+
 def test_no_streams_hide_uses_quality_result_total_streams_gate():
     db = FakeDb()
     patch = Mock(return_value=FakeResponse())
@@ -176,6 +200,37 @@ def test_streams_recovered_unhides_only_no_streams_state():
     assert result["action"] == "unhidden"
     assert result["reason"] == "streams_recovered"
     assert "19" not in db.settings[STATE_KEY]
+
+
+def test_all_failed_wins_over_no_streams_recovery_after_visual_probe():
+    db = FakeDb(state={"20": {"hidden_by": "streamflow", "reason": "no_streams"}})
+    patch = Mock(return_value=FakeResponse())
+    service = make_service(db, patch_request=patch)
+
+    result = service.handle_quality_result(
+        {"id": 20, "name": "NASA", "hidden_from_output": True},
+        good_streams_count=0,
+        dead_streams_count=2,
+        revived_streams_count=2,
+        config={
+            "enabled": True,
+            "hide_on_no_streams": True,
+            "hide_on_all_failed": True,
+            "unhide_on_recovered": True,
+        },
+        details={
+            "total_streams": 2,
+            "good_streams_count": 0,
+            "dead_streams_count": 2,
+            "revived_streams_count": 2,
+        },
+    )
+
+    assert result["action"] == "hidden_already_managed"
+    assert result["reason"] == "all_failed"
+    assert result["changed"] is False
+    assert db.settings[STATE_KEY]["20"]["reason"] == "all_failed"
+    patch.assert_not_called()
 
 
 def test_disabled_visibility_automation_is_read_only():
