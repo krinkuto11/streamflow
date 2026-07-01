@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from flask import Flask
 from werkzeug.datastructures import MultiDict
@@ -419,3 +420,76 @@ def test_changelog_run_export_dead_scope_enriches_reasons_and_profiles():
     assert rows[302]["reason_detail"] == "inferred_from_run_metrics"
     assert rows[304]["status"] == "freeze"
     assert rows[304]["reason"] == "freeze"
+
+
+def test_changelog_run_export_enriches_provider_fields_from_current_udi_reference():
+    save_generic_telemetry(
+        "single_channel_check",
+        {
+            "channel_id": 31,
+            "channel_name": "Fixture Provider Enrichment",
+            "success": True,
+            "stream_details": [
+                {
+                    "stream_id": 701,
+                    "stream_name": "Name Only Provider",
+                    "status": "completed",
+                    "m3u_account": "Provider One",
+                },
+                {
+                    "stream_id": 702,
+                    "stream_name": "ID Only Provider",
+                    "status": "completed",
+                    "m3u_account": 8,
+                },
+                {
+                    "stream_id": 703,
+                    "stream_name": "Stream Context Provider",
+                    "status": "completed",
+                },
+            ],
+        },
+    )
+
+    session = get_session()
+    try:
+        run = session.query(Run).filter(Run.job_subject_ref == "channel:31").one()
+        run_id = run.id
+    finally:
+        session.close()
+
+    provider_refs = {
+        "streams": {
+            703: {"provider_id": 9, "provider_name": "Provider Three"},
+        },
+        "account_names_by_id": {
+            "7": "Provider One",
+            "8": "Provider Two",
+            "9": "Provider Three",
+        },
+        "account_ids_by_name": {
+            "provider one": 7,
+            "provider two": 8,
+            "provider three": 9,
+        },
+    }
+
+    app = Flask(__name__)
+    with app.app_context(), patch(
+        "apps.api.telemetry_handlers._provider_reference_context",
+        return_value=provider_refs,
+    ):
+        response = export_changelog_run_response(
+            run_id=run_id,
+            request_args=MultiDict({"format": "json", "include_url": "false"}),
+        )
+
+    payload = response.get_json()
+    rows = {row["stream_id"]: row for row in payload["streams"]}
+
+    assert rows[701]["provider_id"] == 7
+    assert rows[701]["provider_name"] == "Provider One"
+    assert rows[702]["provider_id"] == 8
+    assert rows[702]["provider_name"] == "Provider Two"
+    assert rows[703]["provider_id"] == 9
+    assert rows[703]["provider_name"] == "Provider Three"

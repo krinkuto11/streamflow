@@ -788,6 +788,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             'dead_streams_count': 3,
             'blank_streams_count': 1,
             'freeze_streams_count': 2,
+            'channels_hidden': 1,
+            'channels_ready': 1,
+            'channel_visibility_changed': 2,
             'generation': 4,
         }
         service.checking = True
@@ -806,6 +809,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(service.sync_batch_state['dead_streams_count'], 0)
         self.assertEqual(service.sync_batch_state['blank_streams_count'], 0)
         self.assertEqual(service.sync_batch_state['freeze_streams_count'], 0)
+        self.assertEqual(service.sync_batch_state['channels_hidden'], 0)
+        self.assertEqual(service.sync_batch_state['channels_ready'], 0)
+        self.assertEqual(service.sync_batch_state['channel_visibility_changed'], 0)
         self.assertEqual(service._sync_batch_generation, 5)
         self.assertFalse(service.checking)
 
@@ -826,6 +832,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             'dead_streams_count': 3,
             'blank_streams_count': 1,
             'freeze_streams_count': 2,
+            'channels_hidden': 1,
+            'channels_ready': 1,
+            'channel_visibility_changed': 2,
             'started_at': '2026-05-29T18:03:41',
             'generation': 1,
         }
@@ -848,6 +857,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['queue']['dead_streams_count'], 3)
         self.assertEqual(status['queue']['blank_streams_count'], 1)
         self.assertEqual(status['queue']['freeze_streams_count'], 2)
+        self.assertEqual(status['queue']['channels_hidden'], 1)
+        self.assertEqual(status['queue']['channels_ready'], 1)
+        self.assertEqual(status['queue']['channel_visibility_changed'], 2)
         self.assertEqual(status['queue']['started_at'], '2026-05-29T18:03:41')
         self.assertTrue(status['stream_checking_mode'])
 
@@ -1050,6 +1062,10 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
                 'dead_streams_count': 2,
                 'blank_streams_count': 1,
                 'freeze_streams_count': 0,
+                'channel_visibility': {
+                    'action': 'hidden',
+                    'changed': True,
+                },
             },
             {
                 'success': True,
@@ -1058,6 +1074,10 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
                 'dead_streams_count': 1,
                 'blank_streams_count': 0,
                 'freeze_streams_count': 2,
+                'channel_visibility': {
+                    'action': 'unhidden',
+                    'changed': True,
+                },
             },
         ])
 
@@ -1076,12 +1096,15 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
                     service.sync_batch_state.get('blank_streams_count'),
                     service.sync_batch_state.get('freeze_streams_count'),
                     service.sync_batch_state.get('good_streams_count'),
+                    service.sync_batch_state.get('channels_hidden'),
+                    service.sync_batch_state.get('channels_ready'),
+                    service.sync_batch_state.get('channel_visibility_changed'),
                 )),
             )
 
         self.assertEqual(list(result.keys()), [101, 102])
         self.assertEqual(progress_events, [(1, 2, 'One'), (2, 2, 'Two')])
-        self.assertEqual(sync_counts, [(2, 1, 0, 4), (3, 1, 2, 7)])
+        self.assertEqual(sync_counts, [(2, 1, 0, 4, 1, 0, 1), (3, 1, 2, 7, 1, 1, 2)])
         self.assertFalse(service.sync_batch_state['active'])
 
     def test_sync_batch_counts_blank_and_freeze_from_checked_streams_fallback(self):

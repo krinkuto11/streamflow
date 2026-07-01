@@ -332,6 +332,9 @@ class StreamCheckerService:
             'dead_streams_count': 0,
             'blank_streams_count': 0,
             'freeze_streams_count': 0,
+            'channels_hidden': 0,
+            'channels_ready': 0,
+            'channel_visibility_changed': 0,
         }
         
         # Event for immediate triggering of updated channels check
@@ -5644,6 +5647,9 @@ class StreamCheckerService:
             queue_status['dead_streams_count'] = sync_state.get('dead_streams_count', 0)
             queue_status['blank_streams_count'] = sync_state.get('blank_streams_count', 0)
             queue_status['freeze_streams_count'] = sync_state.get('freeze_streams_count', 0)
+            queue_status['channels_hidden'] = sync_state.get('channels_hidden', 0)
+            queue_status['channels_ready'] = sync_state.get('channels_ready', 0)
+            queue_status['channel_visibility_changed'] = sync_state.get('channel_visibility_changed', 0)
             
             # Use real queue averages if available, otherwise 0
             queue_snapshot = self.check_queue.get_status()
@@ -6253,6 +6259,9 @@ class StreamCheckerService:
                 'dead_streams_count': 0,
                 'blank_streams_count': 0,
                 'freeze_streams_count': 0,
+                'channels_hidden': 0,
+                'channels_ready': 0,
+                'channel_visibility_changed': 0,
                 'started_at': datetime.now().isoformat(),
                 'generation': sync_generation,
             }
@@ -6318,6 +6327,15 @@ class StreamCheckerService:
                                     channel_result,
                                     'freeze_streams_count',
                                     fallback_status='freeze',
+                                )
+                                visibility_summary = self._single_channel_visibility_summary(
+                                    channel_result.get('channel_visibility')
+                                )
+                                self.sync_batch_state['channels_hidden'] += visibility_summary.get('channels_hidden', 0)
+                                self.sync_batch_state['channels_ready'] += visibility_summary.get('channels_ready', 0)
+                                self.sync_batch_state['channel_visibility_changed'] += visibility_summary.get(
+                                    'channel_visibility_changed',
+                                    0,
                                 )
 
                     if isinstance(channel_result, dict) and channel_result.get('aborted'):
@@ -7594,6 +7612,9 @@ class StreamCheckerService:
                     'dead_streams_count': 0,
                     'blank_streams_count': 0,
                     'freeze_streams_count': 0,
+                    'channels_hidden': 0,
+                    'channels_ready': 0,
+                    'channel_visibility_changed': 0,
                     'generation': self._sync_batch_generation,
                 }
                 self.checking = False
