@@ -297,18 +297,38 @@ def _coerce_dead_stream_rows(raw: Any) -> List[Dict[str, Any]]:
     return []
 
 
-def _provider_context_by_stream_id() -> Dict[int, Dict[str, Any]]:
+def _provider_value_missing(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
+def _provider_is_numeric(value: Any) -> bool:
+    return str(value or "").strip().isdigit()
+
+
+def _provider_reference_context() -> Dict[str, Any]:
     try:
         from apps.udi import get_udi_manager
 
         udi = get_udi_manager()
         if not udi:
-            return {}
+            return {"streams": {}, "account_names_by_id": {}, "account_ids_by_name": {}}
         accounts = udi.get_m3u_accounts() if hasattr(udi, "get_m3u_accounts") else []
-        account_names = {
-            str(account.get("id")): account.get("name")
-            for account in accounts or []
-            if isinstance(account, dict)
+        account_names_by_id: Dict[str, Any] = {}
+        account_name_candidates: Dict[str, List[Any]] = {}
+        for account in accounts or []:
+            if not isinstance(account, dict):
+                continue
+            account_id = account.get("id")
+            account_name = account.get("name")
+            if not _provider_value_missing(account_id):
+                account_names_by_id[str(account_id)] = account_name
+            if not _provider_value_missing(account_id) and account_name:
+                account_name_candidates.setdefault(_text(account_name), []).append(account_id)
+
+        account_ids_by_name = {
+            name: ids[0]
+            for name, ids in account_name_candidates.items()
+            if len({str(item) for item in ids}) == 1
         }
 
         context = {}
@@ -319,20 +339,63 @@ def _provider_context_by_stream_id() -> Dict[int, Dict[str, Any]]:
             stream_id = stream.get("id")
             if stream_id is None:
                 continue
-            provider_id = stream.get("m3u_account_id") or stream.get("m3u_account")
-            provider_name = (
-                stream.get("m3u_account_name")
-                or account_names.get(str(provider_id))
-                or stream.get("m3u_account")
+            m3u_account = stream.get("m3u_account")
+            provider_id = _first_present(
+                stream.get("provider_id"),
+                stream.get("m3u_account_id"),
+                stream.get("m3u_account_id_id"),
             )
+            if _provider_value_missing(provider_id) and _provider_is_numeric(m3u_account):
+                provider_id = m3u_account
+            provider_name = (
+                stream.get("provider_name")
+                or stream.get("m3u_account_name")
+                or account_names_by_id.get(str(provider_id))
+                or (m3u_account if not _provider_is_numeric(m3u_account) else None)
+            )
+            if _provider_value_missing(provider_id) and not _provider_value_missing(provider_name):
+                provider_id = account_ids_by_name.get(_text(provider_name))
             context[int(stream_id)] = {
                 "provider_id": provider_id,
                 "provider_name": provider_name,
             }
-        return context
+        return {
+            "streams": context,
+            "account_names_by_id": account_names_by_id,
+            "account_ids_by_name": account_ids_by_name,
+        }
     except Exception as exc:
-        logger.debug(f"Dead-stream export provider enrichment unavailable: {exc}")
-        return {}
+        logger.debug(f"Provider reference enrichment unavailable: {exc}")
+        return {"streams": {}, "account_names_by_id": {}, "account_ids_by_name": {}}
+
+
+def _provider_context_by_stream_id() -> Dict[int, Dict[str, Any]]:
+    return _provider_reference_context().get("streams", {})
+
+
+def _enrich_run_stream_provider_fields(
+    row: Dict[str, Any],
+    provider_refs: Dict[str, Any],
+) -> Dict[str, Any]:
+    enriched = dict(row)
+    provider_id = enriched.get("provider_id")
+    provider_name = enriched.get("provider_name")
+    stream_context = (provider_refs.get("streams") or {}).get(_as_int(enriched.get("stream_id")), {})
+    account_names_by_id = provider_refs.get("account_names_by_id") or {}
+    account_ids_by_name = provider_refs.get("account_ids_by_name") or {}
+
+    if _provider_value_missing(provider_id):
+        provider_id = stream_context.get("provider_id")
+    if _provider_value_missing(provider_name):
+        provider_name = stream_context.get("provider_name")
+    if _provider_value_missing(provider_name) and not _provider_value_missing(provider_id):
+        provider_name = account_names_by_id.get(str(provider_id))
+    if _provider_value_missing(provider_id) and not _provider_value_missing(provider_name):
+        provider_id = account_ids_by_name.get(_text(provider_name))
+
+    enriched["provider_id"] = None if _provider_value_missing(provider_id) else provider_id
+    enriched["provider_name"] = None if _provider_value_missing(provider_name) else provider_name
+    return enriched
 
 
 def _prepare_dead_stream_export_rows(
@@ -351,8 +414,10 @@ def _prepare_dead_stream_export_rows(
     provider_context = _provider_context_by_stream_id() if enrich_providers else {}
     for row in rows:
         context = provider_context.get(_as_int(row.get("stream_id")), {})
-        row.setdefault("provider_id", context.get("provider_id"))
-        row.setdefault("provider_name", context.get("provider_name"))
+        if _provider_value_missing(row.get("provider_id")):
+            row["provider_id"] = context.get("provider_id")
+        if _provider_value_missing(row.get("provider_name")):
+            row["provider_name"] = context.get("provider_name")
 
     search_text = str(search or "").strip().casefold()
     reason_text = str(reason or "").strip().casefold()
@@ -648,7 +713,7 @@ def _run_stream_row(
         return None
 
     m3u_account = item.get("m3u_account")
-    provider_id = item.get("provider_id") or item.get("m3u_account_id")
+    provider_id = _first_present(item.get("provider_id"), item.get("m3u_account_id"))
     if provider_id in (None, "") and _text(m3u_account).isdigit():
         provider_id = m3u_account
     provider_name = item.get("provider_name") or item.get("m3u_account_name")
@@ -720,6 +785,7 @@ def _extract_changelog_run_stream_rows(run: Any, details: Dict[str, Any], subent
         "job_outcome": getattr(run, "job_outcome", None),
     }
     rows: List[Dict[str, Any]] = []
+    provider_refs = _provider_reference_context()
 
     def walk(node: Any, channel_context: Optional[Dict[str, Any]] = None) -> None:
         context = dict(channel_context or {})
@@ -771,7 +837,7 @@ def _extract_changelog_run_stream_rows(run: Any, details: Dict[str, Any], subent
     deduped: List[Dict[str, Any]] = []
     seen = set()
     for raw_row in rows:
-        row = _enrich_run_stream_row(raw_row)
+        row = _enrich_run_stream_provider_fields(_enrich_run_stream_row(raw_row), provider_refs)
         key = (
             row.get("bucket"),
             row.get("channel_id"),
