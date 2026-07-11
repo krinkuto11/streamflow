@@ -439,6 +439,7 @@ export const operatorHelpDetailTopics = [
       'For static teams, read Missing Channel as a missing persistent Dispatcharr team-channel mapping, not as a failed quality check.',
       'Use exclude filters for temporary suppression; leave include filters broad unless a narrow whitelist is intended.',
       'Keep Queue Events During Active Checks on when due event checks should enter the priority queue during Automation or Stream Checker runs; turn it off only when new event checks must not queue until active work is done.',
+      'Use Scan & Queue Due Checks when candidates should be refreshed immediately; this action also queues every check that is currently due.',
       'Confirm active event checks and recent events before changing scoring rules.',
     ],
     settings: [
@@ -541,6 +542,15 @@ export const operatorHelpDetailTopics = [
         risk: 'Turning it off can delay kickoff checks until regular automation or a long Stream Checker run has finished.',
       },
       {
+        name: 'Scan & Queue Due Checks',
+        controlType: 'Visible UI action',
+        defaultValue: 'Manual action',
+        location: 'Teamarr Preflight -> page actions -> Scan & Queue Due Checks',
+        effect: 'Refreshes managed-event and static-team candidates immediately, then starts or queues every preflight check that is currently due. Static-team status requests use bounded parallelism and return a visible partial result if the request budget is exhausted.',
+        useWhen: 'Use after Teamarr event data or team windows changed and the next scheduled poll should not be awaited.',
+        risk: 'This is not a read-only refresh. Due checks consume Stream Checker and provider/profile capacity.',
+      },
+      {
         name: 'Event Priority Queue',
         controlType: 'Status/API',
         defaultValue: 'Teamarr event checks use high waiting priority',
@@ -559,6 +569,7 @@ export const operatorHelpDetailTopics = [
       'A busy Stream Checker state shows queued or deferred event-check context instead of losing the event check.',
       'Queued event checks appear in Active Event Checks or Stream Checker queue context and run after the active channel, before lower-priority waiting work.',
       'Static teams with Missing Channel, No Game Window, or No Game Evidence stay diagnostic until a real live game window and persistent Dispatcharr team channel are both present; Coming Up preview blocks must not start checks.',
+      'A partial or degraded static-team scan reports completed, failed, cancelled, and pending requests instead of claiming that the scan stopped cleanly.',
       'The default event profile keeps dead-stream removal off; enable destructive removal only after a dry event run proves the timing is reliable.',
       'Event and static-team checks show the selected quality profile in queue or active-check context.',
     ],

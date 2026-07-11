@@ -40,8 +40,17 @@ def get_teamarr_preflight_status_response(*, get_service: Callable[[], Any]):
 
 def start_teamarr_preflight_response(*, get_service: Callable[[], Any]):
     try:
-        get_service().start()
-        return jsonify({"success": True, "status": get_service().get_status()}), 200
+        service = get_service()
+        started = bool(service.start())
+        status = service.get_status()
+        if not started:
+            return jsonify({
+                "success": False,
+                "error": "Teamarr preflight is still stopping",
+                "code": "preflight_stopping",
+                "status": status,
+            }), 409
+        return jsonify({"success": True, "status": status}), 200
     except Exception as exc:
         logger.error(f"Error starting Teamarr preflight: {exc}", exc_info=True)
         return error_response("Internal Server Error", status_code=500, code="internal_error")
@@ -49,8 +58,17 @@ def start_teamarr_preflight_response(*, get_service: Callable[[], Any]):
 
 def stop_teamarr_preflight_response(*, get_service: Callable[[], Any]):
     try:
-        get_service().stop()
-        return jsonify({"success": True, "status": get_service().get_status()}), 200
+        service = get_service()
+        stopped = bool(service.stop())
+        status = service.get_status()
+        if not stopped:
+            return jsonify({
+                "success": False,
+                "stopping": True,
+                "message": "Waiting for active Teamarr requests to finish",
+                "status": status,
+            }), 202
+        return jsonify({"success": True, "stopping": False, "status": status}), 200
     except Exception as exc:
         logger.error(f"Error stopping Teamarr preflight: {exc}", exc_info=True)
         return error_response("Internal Server Error", status_code=500, code="internal_error")
@@ -58,7 +76,9 @@ def stop_teamarr_preflight_response(*, get_service: Callable[[], Any]):
 
 def run_teamarr_preflight_once_response(*, get_service: Callable[[], Any]):
     try:
-        return jsonify(get_service().run_once(force=True)), 200
+        result = get_service().run_once(force=True)
+        status_code = 409 if result.get("code") == "scan_in_progress" else 200
+        return jsonify(result), status_code
     except Exception as exc:
         logger.error(f"Error running Teamarr preflight scan: {exc}", exc_info=True)
         return error_response("Internal Server Error", status_code=500, code="internal_error")

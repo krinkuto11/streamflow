@@ -455,6 +455,7 @@ export default function TeamarrPreflight() {
   const allPreflightItemsCount = preflightItems.length
   const pastEventsCount = preflightItems.filter(item => String(item?.state || '') === 'past').length
   const teamStatus = status?.team_status || {}
+  const scanStatus = status?.scan_status || {}
   const managedCandidates = Number(status?.managed_candidates ?? upcomingEvents.length)
   const managedEventsSeen = Number(status?.managed_events_seen ?? managedCandidates)
   const managedEventsReturned = Number(status?.managed_events_returned ?? upcomingEvents.length)
@@ -701,13 +702,23 @@ export default function TeamarrPreflight() {
   const runAction = async (name, action, success) => {
     try {
       setActionLoading(name)
-      await action()
+      const response = await action()
       await loadData()
+      if (response?.data?.stopping) {
+        toast({
+          title: 'Stopping',
+          description: response.data?.message || 'Waiting for active Teamarr requests to finish',
+        })
+        return
+      }
+      if (response?.data?.success === false) {
+        throw new Error(response.data?.error || 'Teamarr preflight action did not complete')
+      }
       toast({ title: 'Success', description: success })
     } catch (err) {
       toast({
         title: 'Error',
-        description: err.response?.data?.error || 'Teamarr preflight action failed',
+        description: err.response?.data?.error || err.message || 'Teamarr preflight action failed',
         variant: 'destructive',
       })
     } finally {
@@ -747,6 +758,8 @@ export default function TeamarrPreflight() {
   }
 
   const running = Boolean(status?.running)
+  const stopping = Boolean(status?.stopping || scanStatus?.stopping)
+  const scanning = Boolean(scanStatus?.active)
   const enabled = Boolean(editedConfig?.enabled)
   const renderFilterDropdown = (label, value, setValue, options, emptyLabel = 'Any') => {
     const selected = new Set(parseFilterCsv(value))
@@ -817,14 +830,14 @@ export default function TeamarrPreflight() {
             {actionLoading === 'save' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
             Save
           </Button>
-          {running ? (
+          {running || stopping ? (
             <Button
               variant="outline"
               onClick={() => runAction('stop', teamarrPreflightAPI.stop, 'Teamarr preflight stopped')}
-              disabled={actionLoading !== ''}
+              disabled={actionLoading !== '' || stopping}
             >
               {actionLoading === 'stop' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
-              Stop
+              {stopping ? 'Stopping' : 'Stop'}
             </Button>
           ) : (
             <Button
@@ -838,11 +851,12 @@ export default function TeamarrPreflight() {
           )}
           <Button
             variant="outline"
-            onClick={() => runAction('scan', teamarrPreflightAPI.runOnce, 'Teamarr preflight scan completed')}
-            disabled={actionLoading !== ''}
+            onClick={() => runAction('scan', teamarrPreflightAPI.runOnce, 'Candidates refreshed and due checks queued')}
+            disabled={actionLoading !== '' || scanning || stopping}
+            title="Refresh candidates and queue every preflight check that is currently due"
           >
-            {actionLoading === 'scan' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-            Scan Now
+            {actionLoading === 'scan' || scanning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+            Scan & Queue Due Checks
           </Button>
         </div>
       </div>
@@ -854,9 +868,9 @@ export default function TeamarrPreflight() {
             <Activity className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <Badge variant={running ? 'default' : 'secondary'} className={running ? 'bg-green-500' : ''}>
-              {running ? <CheckCircle2 className="mr-1 h-3 w-3" /> : null}
-              {running ? 'Running' : 'Stopped'}
+            <Badge variant={stopping ? 'outline' : (running ? 'default' : 'secondary')} className={running && !stopping ? 'bg-green-500' : ''}>
+              {running && !stopping ? <CheckCircle2 className="mr-1 h-3 w-3" /> : null}
+              {stopping ? 'Stopping' : (running ? 'Running' : 'Stopped')}
             </Badge>
             <p className="mt-2 text-xs text-muted-foreground">{enabled ? 'Enabled' : 'Disabled'}</p>
           </CardContent>
@@ -899,10 +913,14 @@ export default function TeamarrPreflight() {
           <CardContent>
             <div className="text-2xl font-bold">{Number(teamStatus.ready || 0)}</div>
             <p className="mt-2 text-xs text-muted-foreground">
-              {teamStatus.enabled ? `${Number(teamStatus.seen || 0)} seen, ${Number(teamStatus.queueable || 0)} queueable` : 'Disabled'}
+              {teamStatus.enabled
+                ? `${Number(teamStatus.completed ?? teamStatus.seen ?? 0)}/${Number(teamStatus.requested ?? teamStatus.seen ?? 0)} statuses, ${Number(teamStatus.queueable || 0)} queueable`
+                : 'Disabled'}
             </p>
             <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-              {teamStatus.last_error || `${Number(teamStatus.incomplete || 0)} incomplete`}
+              {teamStatus.stopping
+                ? `${Number(teamStatus.pending_requests || 0)} requests stopping`
+                : (teamStatus.last_error || `${Number(teamStatus.incomplete || 0)} incomplete`)}
             </p>
           </CardContent>
         </Card>

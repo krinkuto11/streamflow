@@ -139,8 +139,8 @@ describe('operatorHelpSections', () => {
           useWhen: expect.any(String),
           risk: expect.any(String),
         }))
-        expect(['Visible UI setting', 'Container setting', 'Status/API']).toContain(setting.controlType)
-        if (setting.controlType === 'Visible UI setting') {
+        expect(['Visible UI setting', 'Visible UI action', 'Container setting', 'Status/API']).toContain(setting.controlType)
+        if (['Visible UI setting', 'Visible UI action'].includes(setting.controlType)) {
           expect(setting.locationTo || topic.settingsLocationTo).toMatch(/^\//)
           expect(setting.location.split('->').map(part => part.trim()).filter(Boolean).length).toBeGreaterThanOrEqual(3)
         }
@@ -154,6 +154,8 @@ describe('operatorHelpSections', () => {
     expect(getOperatorHelpDetailTopic('teamarr-preflight').settings.map(setting => setting.name)).toContain('Post-Start Checks')
     const teamarr = getOperatorHelpDetailTopic('teamarr-preflight')
     expect(teamarr.settings.map(setting => setting.name)).toContain('Static Teams')
+    expect(teamarr.settings.map(setting => setting.name)).toContain('Scan & Queue Due Checks')
+    expect(teamarr.settings.find(setting => setting.name === 'Scan & Queue Due Checks').risk).toMatch(/not a read-only refresh/i)
     expect(teamarr.settings.find(setting => setting.name === 'Quality Profile').effect).toMatch(/static-team preflight checks/i)
     expect(teamarr.settings.find(setting => setting.name === 'Static Teams').effect).toMatch(/mapped persistent Dispatcharr team channel/i)
     expect(teamarr.settings.find(setting => setting.name === 'Static Teams').risk).toMatch(/Missing Channel/i)

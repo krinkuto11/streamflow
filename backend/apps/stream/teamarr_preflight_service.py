@@ -14,6 +14,7 @@ import re
 import sys
 import threading
 import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from copy import deepcopy
 from collections import deque
 from datetime import datetime, timezone
@@ -35,6 +36,10 @@ TEAMARR_PREFLIGHT_QUEUE_PRIORITY = 100
 ATTEMPT_STATE_KEY = "teamarr_preflight_attempt_state"
 ATTEMPT_STATE_VERSION = 1
 MAX_PERSISTED_ATTEMPTS = 5000
+STATIC_TEAM_SCAN_WORKERS = 4
+STATIC_TEAM_REQUEST_TIMEOUT_SECONDS = 5.0
+STATIC_TEAM_SCAN_BUDGET_SECONDS = 30.0
+PREFLIGHT_STOP_WAIT_SECONDS = 5.0
 
 READY_SYNC_STATES = {"in_sync", "synced", "ready"}
 STATIC_TEAM_MATCHUP_RE = re.compile(
@@ -324,6 +329,10 @@ class TeamarrPreflightService:
         automation_config_provider: Optional[Callable[[], Any]] = None,
         automation_status_provider: Optional[Callable[[], Dict[str, Any]]] = None,
         db_provider: Optional[Callable[[], Any]] = None,
+        static_team_scan_workers: int = STATIC_TEAM_SCAN_WORKERS,
+        static_team_request_timeout_seconds: float = STATIC_TEAM_REQUEST_TIMEOUT_SECONDS,
+        static_team_scan_budget_seconds: float = STATIC_TEAM_SCAN_BUDGET_SECONDS,
+        stop_wait_seconds: float = PREFLIGHT_STOP_WAIT_SECONDS,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.config_file = config_file
@@ -337,11 +346,42 @@ class TeamarrPreflightService:
 
             db_provider = get_db_manager
         self.db_provider = db_provider
+        self.static_team_scan_workers = max(1, min(8, int(static_team_scan_workers)))
+        self.static_team_request_timeout_seconds = max(
+            0.1, min(30.0, float(static_team_request_timeout_seconds))
+        )
+        self.static_team_scan_budget_seconds = max(
+            self.static_team_request_timeout_seconds,
+            min(120.0, float(static_team_scan_budget_seconds)),
+        )
+        self.stop_wait_seconds = max(0.1, min(30.0, float(stop_wait_seconds)))
         self.clock = clock
 
         self._lock = threading.RLock()
+        self._run_once_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._active_scan_cancel_event: Optional[threading.Event] = None
+        self._scan_finished_event = threading.Event()
+        self._scan_finished_event.set()
+        self._static_requests_finished_event = threading.Event()
+        self._static_requests_finished_event.set()
+        self._static_requests_pending = 0
+        self._scan_status: Dict[str, Any] = {
+            "state": "idle",
+            "active": False,
+            "stopping": False,
+            "partial": False,
+            "degraded": False,
+            "requested": 0,
+            "completed": 0,
+            "failed": 0,
+            "cancelled": 0,
+            "pending_requests": 0,
+            "budget_exhausted": False,
+            "started_at": None,
+            "completed_at": None,
+        }
         self._config = self._load_config()
         self._default_profile_id: str = ""
         self._default_profile_error: Optional[str] = None
@@ -524,6 +564,9 @@ class TeamarrPreflightService:
         self._load_attempted_buckets()
         self._reconcile_attempted_buckets_from_queue()
         with self._lock:
+            if self._active_scan_cancel_event is not None or self._static_requests_pending:
+                self._scan_status.update({"state": "stopping", "stopping": True})
+                return False
             if persist:
                 self._config["enabled"] = True
                 self._save_config()
@@ -545,11 +588,31 @@ class TeamarrPreflightService:
                 self._save_config()
             self._stop_event.set()
             thread = self._thread
+            scan_cancel_event = self._active_scan_cancel_event
+            if scan_cancel_event is not None:
+                scan_cancel_event.set()
+                self._scan_status.update({"state": "stopping", "stopping": True})
         self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_automation")
         self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_direct")
+        stop_deadline = time.monotonic() + self.stop_wait_seconds
         if thread and thread.is_alive():
-            thread.join(timeout=5)
-        return True
+            thread.join(timeout=max(0.0, stop_deadline - time.monotonic()))
+        self._scan_finished_event.wait(timeout=max(0.0, stop_deadline - time.monotonic()))
+        self._static_requests_finished_event.wait(timeout=max(0.0, stop_deadline - time.monotonic()))
+        with self._lock:
+            still_running = bool(
+                (thread and thread.is_alive())
+                or self._active_scan_cancel_event is not None
+                or self._static_requests_pending
+            )
+            self._scan_status["stopping"] = still_running
+            if still_running:
+                self._scan_status["state"] = "stopping"
+            elif self._scan_status.get("state") == "stopping":
+                self._scan_status["state"] = "cancelled"
+                self._scan_status["active"] = False
+                self._scan_status["completed_at"] = self.clock()
+        return not still_running
 
     def get_status(self) -> Dict[str, Any]:
         queue_snapshot = self._teamarr_queue_snapshot()
@@ -562,6 +625,8 @@ class TeamarrPreflightService:
             return {
                 "enabled": bool(self._config.get("enabled")),
                 "running": bool(self._thread and self._thread.is_alive()),
+                "stopping": bool(self._scan_status.get("stopping")),
+                "scan_status": dict(self._scan_status),
                 "last_scan_at": self._last_scan_at,
                 "last_error": self._last_error,
                 "last_team_error": self._last_team_error,
@@ -751,6 +816,7 @@ class TeamarrPreflightService:
         team_statuses: List[Dict[str, Any]] = []
         team_candidates: List[Dict[str, Any]] = []
         team_error: Optional[str] = None
+        team_scan_status: Dict[str, Any] = {}
 
         if config.get("managed_event_preflight_enabled", True):
             raw_events = self._fetch_managed_events(config)
@@ -759,8 +825,13 @@ class TeamarrPreflightService:
 
         if config.get("static_team_preflight_enabled"):
             try:
-                team_statuses = self._fetch_static_team_statuses(config)
+                team_statuses, team_scan_status = self._fetch_static_team_statuses(
+                    config,
+                    self._active_scan_cancel_event,
+                )
                 team_candidates = self._build_team_candidates(team_statuses, config, now)
+                if team_scan_status.get("degraded"):
+                    team_error = "Teamarr static team endpoint returned a partial scan"
             except Exception as exc:
                 logger.warning("Teamarr static team preflight source degraded: %s", exc)
                 team_error = "Teamarr static team endpoint did not complete the last scan"
@@ -775,6 +846,7 @@ class TeamarrPreflightService:
             seen=len(team_statuses),
             candidates=team_candidates,
             error=team_error,
+            scan_status=team_scan_status,
         )
         return {
             "raw_events": raw_events,
@@ -785,6 +857,7 @@ class TeamarrPreflightService:
             "filter_options": filter_options,
             "team_status": team_status,
             "team_error": team_error,
+            "scan_status": team_scan_status,
         }
 
     def _store_preflight_scan(self, scan: Dict[str, Any], *, scan_error: Optional[str] = None) -> None:
@@ -806,11 +879,63 @@ class TeamarrPreflightService:
             self._upcoming_truncated = len(event_candidates) > len(self._upcoming)
             self._filter_options = dict(scan.get("filter_options") or {})
 
+    def _begin_scan(self) -> Optional[threading.Event]:
+        if not self._run_once_lock.acquire(blocking=False):
+            return None
+        scan_cancel_event = threading.Event()
+        with self._lock:
+            self._active_scan_cancel_event = scan_cancel_event
+            self._scan_finished_event.clear()
+            self._scan_status = {
+                "state": "scanning",
+                "active": True,
+                "stopping": False,
+                "partial": False,
+                "degraded": False,
+                "requested": 0,
+                "completed": 0,
+                "failed": 0,
+                "cancelled": 0,
+                "pending_requests": 0,
+                "budget_exhausted": False,
+                "started_at": self.clock(),
+                "completed_at": None,
+            }
+        return scan_cancel_event
+
+    def _finish_scan(self, scan_cancel_event: threading.Event) -> None:
+        with self._lock:
+            if self._active_scan_cancel_event is scan_cancel_event:
+                self._active_scan_cancel_event = None
+            self._scan_status["active"] = False
+            self._scan_status["completed_at"] = self.clock()
+            if self._scan_status.get("stopping"):
+                if self._static_requests_pending:
+                    self._scan_status["state"] = "stopping"
+                else:
+                    self._scan_status.update({"state": "cancelled", "stopping": False})
+            elif self._scan_status.get("state") == "cancelled":
+                pass
+            elif self._scan_status.get("degraded"):
+                self._scan_status["state"] = "degraded"
+            else:
+                self._scan_status["state"] = "idle"
+        self._scan_finished_event.set()
+        self._run_once_lock.release()
+
     def run_once(self, *, force: bool = False) -> Dict[str, Any]:
         config = self.get_config(include_secret=True)
         if not config.get("enabled") and not force:
             self._set_stream_checker_event_gate(False, gate_name="teamarr_preflight_automation")
             return {"success": True, "skipped": True, "reason": "disabled"}
+
+        scan_cancel_event = self._begin_scan()
+        if scan_cancel_event is None:
+            return {
+                "success": False,
+                "error": "Teamarr preflight scan is already running",
+                "code": "scan_in_progress",
+            }
 
         try:
             self._purge_old_attempts()
@@ -822,6 +947,9 @@ class TeamarrPreflightService:
             launched = 0
             skipped = 0
             for event in candidates:
+                if scan_cancel_event.is_set():
+                    skipped += 1
+                    continue
                 if event.get("state") != "due":
                     skipped += 1
                     continue
@@ -842,6 +970,8 @@ class TeamarrPreflightService:
                 "team_error": scan.get("team_error"),
                 "launched": launched,
                 "skipped": skipped,
+                "partial": bool(scan.get("scan_status", {}).get("partial")),
+                "degraded": bool(scan.get("scan_status", {}).get("degraded")),
             }
         except Exception as exc:
             logger.error(f"Teamarr preflight scan failed: {exc}", exc_info=True)
@@ -851,6 +981,8 @@ class TeamarrPreflightService:
                 self._last_error = safe_error
             self._record_event("scan_failed", {}, {"error": safe_error})
             return {"success": False, "error": safe_error}
+        finally:
+            self._finish_scan(scan_cancel_event)
 
     def force_check_event(self, identity: Any) -> Dict[str, Any]:
         requested_identity = str(identity or "").strip()
@@ -859,6 +991,14 @@ class TeamarrPreflightService:
                 "success": False,
                 "error": "Managed event identity is required",
                 "code": "missing_identity",
+            }
+
+        scan_cancel_event = self._begin_scan()
+        if scan_cancel_event is None:
+            return {
+                "success": False,
+                "error": "Teamarr preflight scan is already running",
+                "code": "scan_in_progress",
             }
 
         config = self.get_config(include_secret=True)
@@ -876,6 +1016,13 @@ class TeamarrPreflightService:
             )
 
             self._store_preflight_scan(scan, scan_error=None)
+
+            if scan_cancel_event.is_set():
+                return {
+                    "success": False,
+                    "error": "Teamarr preflight scan was cancelled",
+                    "code": "scan_cancelled",
+                }
 
             if target is None:
                 return {
@@ -920,6 +1067,8 @@ class TeamarrPreflightService:
                 self._last_error = safe_error
             self._record_event("scan_failed", {}, {"error": safe_error})
             return {"success": False, "error": safe_error, "code": "scan_failed"}
+        finally:
+            self._finish_scan(scan_cancel_event)
 
     def _worker(self) -> None:
         while not self._stop_event.is_set():
@@ -957,33 +1106,183 @@ class TeamarrPreflightService:
             return [item for item in payload if isinstance(item, dict)]
         return []
 
-    def _fetch_static_team_statuses(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    @staticmethod
+    def _incomplete_static_team_status(team: Dict[str, Any], error: str) -> Dict[str, Any]:
+        return {
+            "team": dict(team),
+            "dispatcharr_channel": {"found": False, "error": error},
+            "next_live_window": {"found": False, "is_live": False, "source": "team_epg_xmltv"},
+            "status": "incomplete",
+            "missing": ["channel_status"],
+            "error": error,
+        }
+
+    def _static_request_done(self, _future: Future[Any]) -> None:
+        with self._lock:
+            self._static_requests_pending = max(0, self._static_requests_pending - 1)
+            self._scan_status["pending_requests"] = self._static_requests_pending
+            if self._static_requests_pending == 0:
+                self._static_requests_finished_event.set()
+                if self._scan_status.get("stopping") and self._active_scan_cancel_event is None:
+                    self._scan_status.update({
+                        "state": "cancelled",
+                        "active": False,
+                        "stopping": False,
+                        "completed_at": self.clock(),
+                    })
+
+    def _submit_static_team_status(
+        self,
+        executor: ThreadPoolExecutor,
+        config: Dict[str, Any],
+        team: Dict[str, Any],
+        timeout_seconds: float,
+        cancel_event: Optional[threading.Event],
+    ) -> Future[Any]:
+        future = executor.submit(
+            self._fetch_teamarr_json,
+            config,
+            f"/api/v1/teams/{team.get('id')}/channel-status",
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
+        )
+        with self._lock:
+            self._static_requests_pending += 1
+            self._static_requests_finished_event.clear()
+            self._scan_status["pending_requests"] = self._static_requests_pending
+        future.add_done_callback(self._static_request_done)
+        return future
+
+    def _fetch_static_team_statuses(
+        self,
+        config: Dict[str, Any],
+        cancel_event: Optional[threading.Event] = None,
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        deadline = time.monotonic() + self.static_team_scan_budget_seconds
         teams = self._extract_teamarr_items(
-            self._fetch_teamarr_json(config, "/api/v1/teams?active_only=true")
+            self._fetch_teamarr_json(
+                config,
+                "/api/v1/teams?active_only=true",
+                timeout_seconds=min(
+                    self.static_team_request_timeout_seconds,
+                    max(0.1, deadline - time.monotonic()),
+                ),
+                cancel_event=cancel_event,
+            )
         )
         statuses: List[Dict[str, Any]] = []
-        for team in teams:
-            team_id = team.get("id")
-            if team_id in (None, ""):
-                continue
-            try:
-                status = self._fetch_teamarr_json(config, f"/api/v1/teams/{team_id}/channel-status")
-                if isinstance(status, dict):
-                    statuses.append(status)
-                    continue
-            except Exception as exc:
-                logger.warning("Teamarr team channel status degraded for team id=%s: %s", team_id, exc)
-            statuses.append({
-                "team": dict(team),
-                "dispatcharr_channel": {"found": False, "error": "Team channel status unavailable"},
-                "next_live_window": {"found": False, "is_live": False, "source": "team_epg_xmltv"},
-                "status": "incomplete",
-                "missing": ["channel_status"],
-                "error": "Team channel status unavailable",
-            })
-        return statuses
+        valid_teams = [dict(team) for team in teams if team.get("id") not in (None, "")]
+        pending_teams = deque(valid_teams)
+        futures: Dict[Future[Any], Dict[str, Any]] = {}
+        completed = 0
+        failed = 0
+        budget_exhausted = False
+        cancelled = False
+        unresolved: List[tuple[Future[Any], Dict[str, Any]]] = []
+        executor = ThreadPoolExecutor(
+            max_workers=self.static_team_scan_workers,
+            thread_name_prefix="TeamarrTeamStatus",
+        )
 
-    def _fetch_teamarr_json(self, config: Dict[str, Any], path: str) -> Any:
+        def submit_available() -> None:
+            while pending_teams and len(futures) < self.static_team_scan_workers:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or (cancel_event and cancel_event.is_set()):
+                    return
+                team = pending_teams.popleft()
+                future = self._submit_static_team_status(
+                    executor,
+                    config,
+                    team,
+                    min(self.static_team_request_timeout_seconds, max(0.1, remaining)),
+                    cancel_event,
+                )
+                futures[future] = team
+
+        try:
+            submit_available()
+            while futures:
+                if cancel_event and cancel_event.is_set():
+                    cancelled = True
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    budget_exhausted = True
+                    break
+                done, _ = wait(
+                    tuple(futures),
+                    timeout=min(0.1, remaining),
+                    return_when=FIRST_COMPLETED,
+                )
+                if not done:
+                    continue
+                for future in done:
+                    team = futures.pop(future)
+                    try:
+                        status = future.result()
+                        if not isinstance(status, dict):
+                            raise ValueError("Team channel status response is invalid")
+                        statuses.append(status)
+                        completed += 1
+                    except Exception as exc:
+                        failed += 1
+                        logger.warning(
+                            "Teamarr team channel status degraded for team id=%s: %s",
+                            team.get("id"),
+                            exc,
+                        )
+                        statuses.append(self._incomplete_static_team_status(
+                            team, "Team channel status unavailable"
+                        ))
+                submit_available()
+        finally:
+            unresolved = list(futures.items())
+            for future, _team in unresolved:
+                future.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+
+        cancelled = cancelled or bool(cancel_event and cancel_event.is_set())
+        unresolved_teams = [team for _future, team in unresolved]
+        unresolved_teams.extend(list(pending_teams))
+        unresolved_error = (
+            "Team channel status scan cancelled"
+            if cancelled
+            else "Team channel status scan budget exhausted"
+        )
+        for team in unresolved_teams:
+            statuses.append(self._incomplete_static_team_status(team, unresolved_error))
+
+        cancelled_count = len(unresolved_teams)
+        partial = bool(failed or cancelled_count)
+        scan_status = {
+            "state": "cancelled" if cancelled else ("degraded" if partial else "idle"),
+            "active": False,
+            "stopping": bool(cancelled and self._static_requests_pending),
+            "partial": partial,
+            "degraded": partial,
+            "requested": len(valid_teams),
+            "completed": completed,
+            "failed": failed,
+            "cancelled": cancelled_count,
+            "pending_requests": self._static_requests_pending,
+            "budget_exhausted": budget_exhausted,
+            "started_at": self.clock(),
+            "completed_at": self.clock(),
+        }
+        with self._lock:
+            self._scan_status.update(scan_status)
+        return statuses, scan_status
+
+    def _fetch_teamarr_json(
+        self,
+        config: Dict[str, Any],
+        path: str,
+        *,
+        timeout_seconds: Optional[float] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> Any:
+        if cancel_event and cancel_event.is_set():
+            raise InterruptedError("Teamarr preflight scan was cancelled")
         base_url = str(config.get("teamarr_base_url") or "").rstrip("/")
         if not base_url:
             raise ValueError("Teamarr base URL is required")
@@ -996,8 +1295,10 @@ class TeamarrPreflightService:
         response = self.http_get(
             f"{base_url}{path}",
             headers=headers,
-            timeout=20,
+            timeout=float(timeout_seconds or 20),
         )
+        if cancel_event and cancel_event.is_set():
+            raise InterruptedError("Teamarr preflight scan was cancelled")
         response.raise_for_status()
         return response.json()
 
@@ -1320,9 +1621,10 @@ class TeamarrPreflightService:
         seen: int,
         candidates: Iterable[Dict[str, Any]],
         error: Optional[str],
+        scan_status: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         candidate_list = list(candidates)
-        return {
+        summary = {
             "enabled": bool(enabled),
             "seen": int(seen),
             "ready": sum(1 for item in candidate_list if item.get("team_status") == "ready"),
@@ -1330,6 +1632,8 @@ class TeamarrPreflightService:
             "queueable": sum(1 for item in candidate_list if item.get("state") in MANUAL_FORCE_ALLOWED_STATES),
             "last_error": error,
         }
+        summary.update(dict(scan_status or {}))
+        return summary
 
     @staticmethod
     def _candidate_sort_key(event: Dict[str, Any]) -> tuple[int, int, str]:
