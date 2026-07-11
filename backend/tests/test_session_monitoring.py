@@ -157,8 +157,12 @@ class TestStreamMonitoring(unittest.TestCase):
         """Test that the dictionary iteration bug is fixed."""
         # This test verifies that we don't get RuntimeError when monitors dict changes during iteration
         from apps.stream.stream_monitoring_service import StreamMonitoringService
-        
-        service = StreamMonitoringService()
+
+        with patch(
+            'apps.stream.stream_monitoring_service.get_screenshot_service',
+            return_value=Mock(),
+        ):
+            service = StreamMonitoringService()
         
         # Create a mock session with monitors
         service.monitors = {

@@ -5301,10 +5301,6 @@ def test_switch_resolves_missing_numeric_channel_id_by_uuid(tmp_path):
 
 def test_preprobed_switch_resolves_missing_numeric_channel_id_by_uuid(tmp_path):
     switch_calls = []
-    probe_results = iter([
-        {"blank_detected": True},
-        {"blank_detected": False},
-    ])
     udi = FakeUdi(
         statuses=[{"uuid-1": active_status(stream_id=10)}],
         channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
@@ -5313,9 +5309,10 @@ def test_preprobed_switch_resolves_missing_numeric_channel_id_by_uuid(tmp_path):
     service = make_service(
         tmp_path,
         udi=udi,
-        blank_probe=lambda url, config: next(probe_results),
+        blank_probe=lambda url, config: {"blank_detected": True},
         switch_calls=switch_calls,
     )
+    service._run_blank_probe = lambda url, config: {"blank_detected": False}
     config = normalize_config({
         "enabled": False,
         "dry_run": False,
