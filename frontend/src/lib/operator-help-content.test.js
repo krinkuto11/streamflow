@@ -238,8 +238,11 @@ describe('operatorHelpSections', () => {
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')
     const troubleshooting = getOperatorHelpDetailTopic('troubleshooting')
-    expect(troubleshooting.settings.map(setting => setting.controlType)).toEqual(
-      troubleshooting.settings.map(() => 'Status/API'),
+    const troubleshootingStatusSettings = troubleshooting.settings.filter(
+      setting => setting.name !== 'Analytics history range',
+    )
+    expect(troubleshootingStatusSettings.map(setting => setting.controlType)).toEqual(
+      troubleshootingStatusSettings.map(() => 'Status/API'),
     )
     expect(troubleshooting.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Startup readiness',
@@ -247,6 +250,7 @@ describe('operatorHelpSections', () => {
       'Previous progress hidden',
       'Dispatcharr status notice',
       'Dashboard and Changelog counters',
+      'Analytics history range',
       'Quality reason details',
       'Hardware status',
       'Teamarr Preflight status',
@@ -258,6 +262,9 @@ describe('operatorHelpSections', () => {
     expect(troubleshooting.settings.find(setting => setting.name === 'Dispatcharr status notice').effect).toMatch(/not automatically a quality-check failure/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Dashboard and Changelog counters').effect).toMatch(/Channels Restored/)
     expect(troubleshooting.settings.find(setting => setting.name === 'Dashboard and Changelog counters').effect).toMatch(/not the total number of visible channels/)
+    expect(troubleshooting.settings.find(setting => setting.name === 'Analytics history range').location).toBe('Analytics -> System Analytics header -> Date Range')
+    expect(troubleshooting.settings.find(setting => setting.name === 'Analytics history range').controlType).toBe('Visible UI setting')
+    expect(troubleshooting.settings.find(setting => setting.name === 'Analytics history range').effect).toMatch(/retained seven-day telemetry history/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').effect).toMatch(/elapsed\/limit/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').useWhen).toMatch(/timeout values/)
     expect(troubleshooting.settings.find(setting => setting.name === 'Changelog and logs').effect).toMatch(/full run or only dead\/blank\/freeze\/failed/i)
