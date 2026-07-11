@@ -478,6 +478,7 @@ class ShadowBlankMonitorService:
         self._pre_probe_metrics: Dict[str, int] = defaultdict(int)
         self._last_pre_probe: Optional[Dict[str, Any]] = None
         self._active_probes: set[str] = set()
+        self._probe_cancel_events: Dict[str, threading.Event] = {}
         self._persistent_watchers: Dict[str, Dict[str, Any]] = {}
         self._last_loop_probe_started_at: Dict[str, float] = {}
         self._last_scan_at: Optional[float] = None
@@ -657,11 +658,14 @@ class ShadowBlankMonitorService:
                 self._config["enabled"] = False
                 self._save_config()
             self._stop_event.set()
+            probe_cancel_events = list(self._probe_cancel_events.values())
             self._watched = {}
             self._watcher_absences = {}
             self._viewer_absences = {}
             thread = self._thread
             watcher_keys = list(self._persistent_watchers)
+        for cancel_event in probe_cancel_events:
+            cancel_event.set()
         if thread and thread.is_alive():
             thread.join(timeout=5)
         for channel_uuid in watcher_keys:
@@ -870,7 +874,9 @@ class ShadowBlankMonitorService:
             previous_target = previous_watched.get(channel_uuid) or {}
             count_target = (
                 previous_target
-                if continuous_mode and previous_target.get("active_probe_started_at") is not None
+                if continuous_mode
+                and previous_target.get("probe_state") in {"probing", "settling"}
+                and previous_target.get("active_probe_started_at") is not None
                 else None
             )
             real_clients = self._real_client_count(raw_status, config, count_target)
@@ -1371,11 +1377,13 @@ class ShadowBlankMonitorService:
             with self._lock:
                 if channel_uuid in self._active_probes:
                     continue
+                cancel_event = threading.Event()
                 self._active_probes.add(channel_uuid)
+                self._probe_cancel_events[channel_uuid] = cancel_event
 
             thread = threading.Thread(
                 target=self._probe_target,
-                args=(udi, target, dict(config), single_pass),
+                args=(udi, target, dict(config), single_pass, cancel_event),
                 name=f"ShadowBlankProbe-{channel_uuid[:8]}",
                 daemon=True,
             )
@@ -1392,9 +1400,11 @@ class ShadowBlankMonitorService:
         target: Dict[str, Any],
         config: Dict[str, Any],
         single_pass: bool = False,
+        cancel_event: Optional[threading.Event] = None,
     ) -> None:
         channel_uuid = target["channel_uuid"]
         config = dict(config)
+        probe_stop_event = cancel_event or self._stop_event
         if (
             not single_pass
             and config.get("watch_mode") == "continuous"
@@ -1404,9 +1414,10 @@ class ShadowBlankMonitorService:
             config["_shadow_allow_viewer_left_grace"] = True
         try:
             first_probe = True
-            while first_probe or not self._stop_event.is_set():
+            while first_probe or not (self._stop_event.is_set() or probe_stop_event.is_set()):
                 first_probe = False
                 should_continue = self._probe_target_once(udi, target, config)
+                self._set_probe_state(channel_uuid, target, "settling")
                 if single_pass:
                     break
                 if not (
@@ -1415,7 +1426,7 @@ class ShadowBlankMonitorService:
                     and self._uses_default_blank_probe
                 ):
                     break
-                if self._stop_event.is_set():
+                if self._stop_event.is_set() or probe_stop_event.is_set():
                     break
 
                 fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
@@ -1456,7 +1467,8 @@ class ShadowBlankMonitorService:
                 blocking_watcher_count = self._blocking_watcher_count(target, watcher_count)
                 if blocking_watcher_count > 0:
                     if self._watcher_status_has_current_probe_client(target, fresh_status, config):
-                        time.sleep(float(config.get("watch_gap_seconds", 1)))
+                        if probe_stop_event.wait(float(config.get("watch_gap_seconds", 1))):
+                            break
                         continue
                     bypass_details = self._pending_media_recovery_guard_bypass_details(
                         channel_uuid,
@@ -1468,7 +1480,8 @@ class ShadowBlankMonitorService:
                         target["media_recovery_guard_bypass"] = bypass_details
                         target["media_recovery_guard_observed"] = bypass_details
                         self._record_event("watcher_recovery_observed", target, bypass_details)
-                        time.sleep(float(config.get("watch_gap_seconds", 1)))
+                        if probe_stop_event.wait(float(config.get("watch_gap_seconds", 1))):
+                            break
                         continue
                     guard_details = {
                         "reason": "active_watcher_between_confirmations",
@@ -1481,11 +1494,65 @@ class ShadowBlankMonitorService:
                     break
 
                 delay = self._continuous_probe_delay_seconds(channel_uuid, config)
+                self._set_probe_state(
+                    channel_uuid,
+                    target,
+                    "waiting",
+                    next_probe_at=self.clock() + max(0.0, delay),
+                )
                 if delay > 0:
-                    self._stop_event.wait(delay)
+                    if probe_stop_event.wait(delay):
+                        break
         finally:
             with self._lock:
-                self._active_probes.discard(channel_uuid)
+                registered_event = self._probe_cancel_events.get(channel_uuid)
+                if cancel_event is None or registered_event is cancel_event:
+                    self._probe_cancel_events.pop(channel_uuid, None)
+                    self._active_probes.discard(channel_uuid)
+                    watched = self._watched.get(channel_uuid)
+                    if watched is not None:
+                        watched["probe_state"] = "idle"
+                        watched["probe_active"] = False
+                        watched.pop("active_probe_started_at", None)
+                        watched.pop("next_probe_at", None)
+
+    def _cancel_active_probe(self, channel_uuid: str) -> bool:
+        with self._lock:
+            cancel_event = self._probe_cancel_events.get(str(channel_uuid))
+        if cancel_event is None:
+            return False
+        cancel_event.set()
+        return True
+
+    def _set_probe_state(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        state: str,
+        *,
+        next_probe_at: Optional[float] = None,
+    ) -> None:
+        target["probe_state"] = state
+        target["probe_active"] = state in {"probing", "settling"}
+        if next_probe_at is None:
+            target.pop("next_probe_at", None)
+        else:
+            target["next_probe_at"] = next_probe_at
+        with self._lock:
+            watched = self._watched.get(channel_uuid)
+            if watched is None:
+                return
+            watched["probe_state"] = target["probe_state"]
+            watched["probe_active"] = target["probe_active"]
+            if (
+                target.get("active_probe_started_at") is not None
+                and watched.get("watcher_recovered_after_seconds") is None
+            ):
+                watched["active_probe_started_at"] = target["active_probe_started_at"]
+            if next_probe_at is None:
+                watched.pop("next_probe_at", None)
+            else:
+                watched["next_probe_at"] = next_probe_at
 
     def _continuous_probe_delay_seconds(self, channel_uuid: str, config: Dict[str, Any]) -> float:
         """Space out clean continuous probes so Shadow does not become load-bearing.
@@ -1522,6 +1589,7 @@ class ShadowBlankMonitorService:
             target.pop("media_recovery_guard_reason", None)
             target.pop("media_recovery_guard_bypass", None)
             target["active_probe_started_at"] = self.clock()
+            self._set_probe_state(channel_uuid, target, "probing")
             proxy_url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
             media_probe_url, media_probe_source = self._media_probe_url(udi, target, proxy_url)
             media_probe_config = dict(config)
@@ -5013,6 +5081,7 @@ class ShadowBlankMonitorService:
         )
         if event_type == "viewer_left" and target.get("channel_uuid"):
             channel_uuid = str(target.get("channel_uuid"))
+            self._cancel_active_probe(channel_uuid)
             self._stop_persistent_watcher(channel_uuid)
             with self._lock:
                 self._last_loop_probe_started_at.pop(channel_uuid, None)
@@ -5179,6 +5248,10 @@ class ShadowBlankMonitorService:
             "channel_name",
             "cooldown_seconds",
             "viewer_output_format",
+            "probe_state",
+            "probe_active",
+            "active_probe_started_at",
+            "next_probe_at",
             "last_probe",
             "last_event",
         }

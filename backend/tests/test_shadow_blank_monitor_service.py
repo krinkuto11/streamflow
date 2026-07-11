@@ -314,6 +314,7 @@ def test_discovery_keeps_grace_when_only_unmarked_probe_client_remains(tmp_path)
         "real_client_count": 1,
         "real_client_refs": ["client_id:real-viewer"],
         "active_probe_started_at": 997.0,
+        "probe_state": "probing",
     }
     service._active_probes.add("uuid-1")
     config = normalize_config({
@@ -6692,6 +6693,96 @@ def test_continuous_default_probe_does_not_block_new_scans(tmp_path):
     assert final_status["watched_channels"][0]["viewer_left_grace_active"] is True
     assert final_status["watched_channels"][0]["real_client_count"] == 0
     assert final_status["recent_events"] == []
+
+
+def test_viewer_left_cancels_healthy_probe_wait_and_releases_channel_slot(tmp_path, monkeypatch):
+    probe_started = threading.Event()
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service._uses_default_blank_probe = True
+
+    def clean_probe(_udi, _target, _config):
+        probe_started.set()
+        return True
+
+    monkeypatch.setattr(service, "_probe_target_once", clean_probe)
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "continuous_probe_interval_seconds": 45,
+        "watcher_api_key": "test-watcher-key",
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+    }
+    with service._lock:
+        service._watched["uuid-1"] = dict(target)
+
+    service._probe_targets(udi, [target], config)
+    assert probe_started.wait(0.5)
+
+    for _ in range(20):
+        with service._lock:
+            if service._watched["uuid-1"].get("probe_state") == "waiting":
+                break
+        time.sleep(0.01)
+
+    started = time.monotonic()
+    service._record_event("viewer_left", target, {})
+    for _ in range(50):
+        with service._lock:
+            if "uuid-1" not in service._active_probes:
+                break
+        time.sleep(0.01)
+
+    assert time.monotonic() - started < 0.75
+    with service._lock:
+        assert "uuid-1" not in service._active_probes
+        assert "uuid-1" not in service._probe_cancel_events
+        assert service._watched["uuid-1"]["probe_state"] == "idle"
+
+
+def test_waiting_probe_thread_does_not_reclassify_new_real_viewer_as_shadow(tmp_path):
+    channel = {"id": 1, "uuid": "uuid-1", "name": "Das Erste HD", "streams": [10, 11]}
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[{"client_id": "new-real-viewer", "user_agent": "TiviMate"}],
+            )
+        }],
+        channels=[channel],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: 1100.0)
+    with service._lock:
+        service._watched["uuid-1"] = {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "channel_ref": "channel-1",
+            "channel_name": "Das Erste HD",
+            "stream_id": 10,
+            "stream_ref": "stream-10",
+            "real_client_count": 1,
+            "real_client_refs": ["client_id:old-real-viewer"],
+            "active_probe_started_at": 1000.0,
+            "probe_state": "waiting",
+        }
+        service._active_probes.add("uuid-1")
+    config = normalize_config({"watch_mode": "continuous", "viewer_left_grace_seconds": 5})
+
+    targets = service.discover_active_targets(udi, config)
+
+    assert len(targets) == 1
+    assert targets[0]["real_client_count"] == 1
+    assert targets[0].get("viewer_left_grace_active") is not True
 
 
 def test_quality_checker_guard_is_opt_in(tmp_path):
