@@ -43,7 +43,7 @@ for _alias, _target in LEGACY_MODULE_ALIASES.items():
 
 
 @pytest.fixture(autouse=True, scope='function')
-def clean_test_db(monkeypatch):
+def clean_test_db(monkeypatch, tmp_path):
     """Each test function gets its own in-memory SQLite database.
 
     The fixture patches ``database.connection.get_engine`` and
@@ -73,6 +73,14 @@ def clean_test_db(monkeypatch):
     import apps.database.connection as conn
     import apps.database.manager as mgr
     import apps.config.dispatcharr_config as dispatcharr_config_module
+    import apps.stream.stream_screenshot_service as screenshot_module
+
+    screenshot_module._service_instance = None
+    monkeypatch.setattr(
+        screenshot_module,
+        'SCREENSHOT_DIR',
+        tmp_path / 'screenshots',
+    )
 
     # Create a brand-new in-memory engine for this test
     test_engine = create_engine(
@@ -105,4 +113,5 @@ def clean_test_db(monkeypatch):
     reset_stream_limiter_state()
     mgr._db_manager = None
     dispatcharr_config_module._dispatcharr_config = None
+    screenshot_module._service_instance = None
     Base.metadata.drop_all(test_engine)
