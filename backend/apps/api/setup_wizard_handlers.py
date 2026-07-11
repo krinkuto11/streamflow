@@ -1,6 +1,5 @@
 """Setup wizard API handler functions extracted from web_api."""
 
-import json
 import threading
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -8,6 +7,7 @@ from typing import Any, Callable, Optional
 from flask import jsonify
 
 from apps.automation.regex_settings import default_channel_regex_global_settings
+from apps.core.atomic_json import atomic_write_json
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
@@ -89,26 +89,22 @@ def ensure_wizard_config_response(
 
             automation_file = config_dir / "automation_config.json"
             if not automation_file.exists():
-                automation_file.write_text(
-                    """{
-  "playlist_update_interval_minutes": 5,
-  "autostart_automation": false
-}
-""",
-                    encoding="utf-8",
+                atomic_write_json(
+                    automation_file,
+                    {
+                        "playlist_update_interval_minutes": 5,
+                        "autostart_automation": False,
+                    },
                 )
 
             regex_file = config_dir / "channel_regex_config.json"
             if not regex_file.exists():
-                regex_file.write_text(
-                    json.dumps(
-                        {
-                            "patterns": {},
-                            "global_settings": default_channel_regex_global_settings(),
-                        },
-                        indent=2,
-                    ),
-                    encoding="utf-8",
+                atomic_write_json(
+                    regex_file,
+                    {
+                        "patterns": {},
+                        "global_settings": default_channel_regex_global_settings(),
+                    },
                 )
 
         automation_defaults = {

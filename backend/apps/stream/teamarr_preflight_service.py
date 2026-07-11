@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import requests
 
+from apps.core.atomic_json import atomic_write_json, load_json_with_backup
 from apps.core.logging_config import setup_logging
 from apps.udi import get_udi_manager
 
@@ -412,26 +413,20 @@ class TeamarrPreflightService:
         self._upcoming_truncated = False
 
     def _load_config(self) -> Dict[str, Any]:
-        try:
-            if self.config_file.exists():
-                with open(self.config_file, "r", encoding="utf-8") as handle:
-                    raw_config = json.load(handle)
-                config = normalize_config(raw_config)
-                if any(key in raw_config for key in LEGACY_CONFIG_KEYS):
-                    self.config_file.parent.mkdir(parents=True, exist_ok=True)
-                    with open(self.config_file, "w", encoding="utf-8") as handle:
-                        json.dump(config, handle, indent=2, sort_keys=True)
-                        handle.write("\n")
-                return config
-        except Exception as exc:
-            logger.warning(f"Failed to load Teamarr preflight config: {exc}")
+        raw_config = load_json_with_backup(
+            self.config_file,
+            default=None,
+            validator=lambda value: isinstance(value, dict),
+        )
+        if raw_config is not None:
+            config = normalize_config(raw_config)
+            if any(key in raw_config for key in LEGACY_CONFIG_KEYS):
+                atomic_write_json(self.config_file, config, sort_keys=True)
+            return config
         return normalize_config({})
 
     def _save_config(self) -> None:
-        self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_file, "w", encoding="utf-8") as handle:
-            json.dump(self._config, handle, indent=2, sort_keys=True)
-            handle.write("\n")
+        atomic_write_json(self.config_file, self._config, sort_keys=True)
 
     @staticmethod
     def _profile_items(payload: Any) -> List[Dict[str, Any]]:

@@ -8,6 +8,7 @@ tests and helper scripts without reintroducing startup persistence.
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from apps.core.atomic_json import atomic_write_json, load_json_with_backup
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
@@ -32,12 +33,14 @@ class UDIStorage:
 
     def _load_json(self, entity: str) -> List[Dict[str, Any]]:
         path = self._path(entity)
-        if not path or not path.exists():
+        if not path:
             return []
         try:
-            import json
-
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = load_json_with_backup(
+                path,
+                default=[],
+                validator=lambda value: isinstance(value, list),
+            )
             return data if isinstance(data, list) else []
         except Exception as exc:
             logger.warning("Failed to load UDIStorage %s data: %s", entity, exc)
@@ -48,10 +51,7 @@ class UDIStorage:
         if not path:
             return True
         try:
-            import json
-
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(rows, indent=2), encoding="utf-8")
+            atomic_write_json(path, rows)
             return True
         except Exception as exc:
             logger.warning("Failed to save UDIStorage %s data: %s", entity, exc)
@@ -87,7 +87,11 @@ class UDIStorage:
         if not self.storage_dir:
             return True
         ok = True
-        for path in self.storage_dir.glob("*.json"):
+        paths = {
+            *self.storage_dir.glob("*.json"),
+            *self.storage_dir.glob("*.json.last-good"),
+        }
+        for path in paths:
             try:
                 path.unlink()
             except Exception as exc:

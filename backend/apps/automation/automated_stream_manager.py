@@ -86,6 +86,7 @@ from apps.core.api_utils import (
     update_channel_streams,
     _get_base_url
 )
+from apps.core.atomic_json import atomic_write_json
 
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
@@ -556,9 +557,7 @@ class RegexChannelMatcher:
                 "patterns": {},
                 "global_settings": default_channel_regex_global_settings(),
             }
-            self._config_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._config_file, 'w', encoding='utf-8') as fh:
-                json.dump(empty, fh, indent=2)
+            atomic_write_json(self._config_file, empty)
             return empty
 
         from apps.database.manager import get_db_manager
@@ -642,9 +641,7 @@ class RegexChannelMatcher:
             legacy_payload['global_settings'] = global_settings
         db.set_system_setting('channel_regex_config', legacy_payload)
         if self._config_file is not None and self._file_backed_compat:
-            self._config_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._config_file, 'w', encoding='utf-8') as fh:
-                json.dump(legacy_payload, fh, indent=2)
+            atomic_write_json(self._config_file, legacy_payload)
             self._remember_config_file_signature()
         # Keep in-memory cache in sync
         self.channel_patterns = self._build_in_memory(
@@ -881,9 +878,7 @@ class RegexChannelMatcher:
                 'regex_patterns': normalized_patterns,
             }
             if self._config_file is not None and self._file_backed_compat:
-                self._config_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(self._config_file, 'w', encoding='utf-8') as fh:
-                    json.dump(self.channel_patterns, fh, indent=2)
+                atomic_write_json(self._config_file, self.channel_patterns)
                 self._remember_config_file_signature()
         self._clear_runtime_caches()
         
@@ -1553,9 +1548,7 @@ class AutomatedStreamManager:
     def _save_config(self, config: Dict):
         """Save configuration to SQL."""
         try:
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_file, 'w', encoding='utf-8') as fh:
-                json.dump(config, fh, indent=2)
+            atomic_write_json(self.config_file, config)
         except Exception as file_exc:
             logger.debug(f"Could not write automation config file {self.config_file}: {file_exc}")
 

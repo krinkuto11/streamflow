@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from flask import Flask
 
+from apps.core.atomic_json import atomic_write_json
 from apps.api.shadow_blank_monitor_handlers import (
     learn_shadow_offline_image_response,
     run_shadow_blank_monitor_once_response,
@@ -328,6 +329,20 @@ def test_discovery_keeps_grace_when_only_unmarked_probe_client_remains(tmp_path)
     assert targets[0]["viewer_left_grace_active"] is True
     assert targets[0]["real_client_count"] == 0
     assert targets[0]["viewer_left_grace_remaining_seconds"] == 5
+
+
+def test_shadow_config_recovers_from_last_known_good_copy(tmp_path):
+    config_file = tmp_path / "shadow.json"
+    atomic_write_json(config_file, {"dry_run": False})
+    atomic_write_json(config_file, {"dry_run": True})
+    config_file.write_text("{broken", encoding="utf-8")
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+
+    assert service.get_config()["dry_run"] is False
 
 
 def test_stale_dispatcharr_client_is_not_counted_as_real_after_short_viewer_grace(tmp_path):

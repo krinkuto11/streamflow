@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.api_utils import change_channel_stream
+from apps.core.atomic_json import atomic_write_json, load_json_with_backup
 from apps.core.logging_config import setup_logging
 from apps.stream.stream_check_utils import (
     BLACK_DURATION_RE,
@@ -494,26 +495,27 @@ class ShadowBlankMonitorService:
         self._load_safety_state()
 
     def _load_config(self) -> Dict[str, Any]:
-        try:
-            if self.config_file.exists():
-                with open(self.config_file, "r", encoding="utf-8") as handle:
-                    return normalize_config(json.load(handle))
-        except Exception as exc:
-            logger.warning(f"Failed to load shadow blank monitor config: {exc}")
+        payload = load_json_with_backup(
+            self.config_file,
+            default=None,
+            validator=lambda value: isinstance(value, dict),
+        )
+        if payload is not None:
+            return normalize_config(payload)
         return normalize_config({})
 
     def _save_config(self) -> None:
-        self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_file, "w", encoding="utf-8") as handle:
-            json.dump(self._config, handle, indent=2, sort_keys=True)
-            handle.write("\n")
+        atomic_write_json(self.config_file, self._config, sort_keys=True)
 
     def _load_safety_state(self) -> None:
         try:
-            if not self.safety_state_file.exists():
+            payload = load_json_with_backup(
+                self.safety_state_file,
+                default=None,
+                validator=lambda value: isinstance(value, dict),
+            )
+            if payload is None:
                 return
-            with open(self.safety_state_file, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
             if not isinstance(payload, dict):
                 raise ValueError("safety state must be an object")
 
@@ -575,14 +577,7 @@ class ShadowBlankMonitorService:
             "switch_history": switch_history,
         }
         try:
-            self.safety_state_file.parent.mkdir(parents=True, exist_ok=True)
-            temp_file = self.safety_state_file.with_suffix(self.safety_state_file.suffix + ".tmp")
-            with open(temp_file, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_file, self.safety_state_file)
+            atomic_write_json(self.safety_state_file, payload, sort_keys=True)
         except Exception as exc:
             logger.warning("Failed to persist Shadow Monitor safety state: %s", exc)
 

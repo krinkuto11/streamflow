@@ -9,6 +9,7 @@ from unittest.mock import Mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from apps.core.atomic_json import atomic_write_json
 from apps.stream.teamarr_preflight_service import (
     ATTEMPT_STATE_KEY,
     DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
@@ -351,6 +352,15 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             "retry_offsets_minutes": [10, 3],
         })
         return service, checker, http_get
+
+    def test_config_recovers_from_last_known_good_copy(self):
+        atomic_write_json(self.config_file, {"enabled": False})
+        atomic_write_json(self.config_file, {"enabled": True})
+        self.config_file.write_text("{broken", encoding="utf-8")
+
+        service, _, _ = self.make_service([])
+
+        self.assertFalse(service.get_config()["enabled"])
 
     def test_config_redacts_api_key_and_normalizes_filters(self):
         config = normalize_config({

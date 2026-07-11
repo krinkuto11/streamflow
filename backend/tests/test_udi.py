@@ -199,6 +199,7 @@ class TestUDIStorage(unittest.TestCase):
         
         self.assertEqual(self.storage.load_channels(), [])
         self.assertEqual(self.storage.load_streams(), [])
+        self.assertEqual(list(self.storage.storage_dir.glob("*.last-good")), [])
     
     def test_is_initialized(self):
         """Test checking if storage is initialized."""

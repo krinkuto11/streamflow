@@ -8,6 +8,35 @@ import {
 } from './startup-gate-state.js'
 
 describe('startup gate state', () => {
+  it('keeps the startup gate active until the readiness endpoint is ready', () => {
+    expect(getInitializationStateFromStatus({
+      status: 'not_ready',
+      ready: false,
+      checks: { database: { ready: true }, udi: { ready: false } },
+      initialization: {
+        status: 'in_progress',
+        percentage: 60,
+        message: 'Fetching data',
+      },
+    })).toMatchObject({
+      inProgress: true,
+      status: 'not_ready',
+      percentage: 60,
+      message: 'Fetching data',
+      checks: { database: { ready: true }, udi: { ready: false } },
+    })
+
+    expect(getInitializationStateFromStatus({
+      status: 'ready',
+      ready: true,
+      initialization: { status: 'completed', percentage: 100 },
+    })).toMatchObject({
+      inProgress: false,
+      status: 'ready',
+      percentage: 100,
+    })
+  })
+
   it('does not treat an in-progress status as startup when a usable cache exists', () => {
     expect(getInitializationStateFromStatus({
       status: 'in_progress',

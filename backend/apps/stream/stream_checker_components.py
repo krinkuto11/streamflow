@@ -1,7 +1,6 @@
 """Support components used by the stream checker service."""
 
 import copy
-import json
 import queue
 import threading
 import time
@@ -11,6 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from apps.udi import get_udi_manager
+from apps.core.atomic_json import atomic_write_json, load_json_with_backup
 from apps.core.logging_config import setup_logging, log_function_call
 
 logger = setup_logging(__name__)
@@ -178,15 +178,19 @@ class StreamCheckConfig:
             )
             return True
 
-        if self.config_file is not None and self.config_file.exists():
+        if self.config_file is not None:
             try:
-                with open(self.config_file, 'r', encoding='utf-8') as fh:
-                    loaded_file = json.load(fh) or {}
-                config = copy.deepcopy(self.DEFAULT_CONFIG)
-                config = deep_merge(config, loaded_file)
-                if migrate_loaded_config(config, loaded_file):
-                    self._save_config(config)
-                return config
+                loaded_file = load_json_with_backup(
+                    self.config_file,
+                    default=None,
+                    validator=lambda value: isinstance(value, dict),
+                )
+                if loaded_file is not None:
+                    config = copy.deepcopy(self.DEFAULT_CONFIG)
+                    config = deep_merge(config, loaded_file)
+                    if migrate_loaded_config(config, loaded_file):
+                        self._save_config(config)
+                    return config
             except Exception as exc:
                 logger.warning(f"Could not load stream checker config file {self.config_file}: {exc}")
 
@@ -223,9 +227,7 @@ class StreamCheckConfig:
         if config is None:
             config = self.config
         if self.config_file is not None:
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_file, 'w', encoding='utf-8') as fh:
-                json.dump(config, fh, indent=2)
+            atomic_write_json(self.config_file, config)
             return
         
         self.db.set_system_setting('stream_checker_config', config)
@@ -1485,12 +1487,7 @@ class StreamCheckerProgress:
                 logger.warning(f"Failed to write progress to database: {e}")
             if self.progress_file:
                 try:
-                    import json
-                    from pathlib import Path
-
-                    path = Path(self.progress_file)
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(json.dumps(progress_data), encoding='utf-8')
+                    atomic_write_json(Path(self.progress_file), progress_data)
                 except Exception as e:
                     logger.warning(f"Failed to write progress to file: {e}")
     
@@ -1505,9 +1502,7 @@ class StreamCheckerProgress:
                 logger.warning(f"Failed to clear progress in database: {e}")
             if self.progress_file:
                 try:
-                    from pathlib import Path
-
-                    Path(self.progress_file).write_text("{}", encoding='utf-8')
+                    atomic_write_json(Path(self.progress_file), {})
                 except Exception as e:
                     logger.warning(f"Failed to clear progress file: {e}")
     
@@ -1524,13 +1519,13 @@ class StreamCheckerProgress:
                 pass
             if self.progress_file:
                 try:
-                    import json
-                    from pathlib import Path
-
                     path = Path(self.progress_file)
-                    if path.exists():
-                        data = json.loads(path.read_text(encoding='utf-8'))
-                        return data if data else None
+                    data = load_json_with_backup(
+                        path,
+                        default=None,
+                        validator=lambda value: isinstance(value, dict),
+                    )
+                    return data if data else None
                 except Exception:
                     return None
             return None

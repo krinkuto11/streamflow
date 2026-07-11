@@ -83,13 +83,21 @@ function App() {
 
     const pollInitializationStatus = async () => {
       try {
-        const response = await api.get('/dispatcharr/initialization-status')
+        const response = await api.get('/readiness')
         if (cancelled) return
 
         const data = response.data || {}
         setUdiInitialization(getInitializationStateFromStatus(data))
         setUdiInitializationChecked(true)
       } catch (err) {
+        const readiness = err?.response?.data
+        if (readiness && typeof readiness.ready === 'boolean') {
+          if (!cancelled) {
+            setUdiInitialization(getInitializationStateFromStatus(readiness))
+            setUdiInitializationChecked(true)
+          }
+          return
+        }
         console.error('Failed to check initialization status:', err)
         if (!cancelled) {
           setUdiInitialization((previous) => getInitializationStateFromStatusError(previous))

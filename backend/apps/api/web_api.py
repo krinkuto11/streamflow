@@ -249,6 +249,7 @@ from apps.api.stream_sessions_handlers import (
 from apps.api.meta_handlers import (
     get_environment_response,
     health_check_response,
+    readiness_check_response,
     get_version_response,
     root_response,
     serve_frontend_response,
@@ -320,7 +321,14 @@ def _apply_rate_limit():
     path = request.path or ""
     if not path.startswith('/api/'):
         return None
-    if path in {'/api/health', '/api/v1/health', '/api/version', '/api/environment'}:
+    if path in {
+        '/api/health',
+        '/api/v1/health',
+        '/api/readiness',
+        '/api/v1/readiness',
+        '/api/version',
+        '/api/environment',
+    }:
         return None
 
     client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown')
@@ -676,6 +684,147 @@ def health_check():
 def health_check_stripped():
     """Health check endpoint for nginx proxy (stripped /api prefix)."""
     return health_check_response()
+
+
+def _required_services_readiness():
+    """Describe configured runtime workers without creating new singletons."""
+    if not check_wizard_complete():
+        return {}
+
+    from apps.stream import shadow_blank_monitor_service as shadow_module
+    from apps.stream import stream_checker_service as checker_module
+    from apps.stream import stream_monitoring_service as monitoring_module
+    from apps.stream import teamarr_preflight_service as preflight_module
+
+    def item(required, ready, state):
+        return {
+            "required": bool(required),
+            "ready": bool(ready) if required else True,
+            "state": state,
+        }
+
+    monitoring = monitoring_module._monitoring_instance
+    checker = checker_module._service_instance
+    shadow = shadow_module._shadow_monitor_instance
+    preflight = preflight_module._teamarr_preflight_instance
+
+    checker_controls = checker.config.get('automation_controls', {}) if checker else {}
+    checker_required = bool(
+        checker
+        and checker.config.get('enabled', True)
+        and (
+            checker_controls.get('auto_m3u_updates', True)
+            or checker_controls.get('auto_stream_matching', True)
+            or checker_controls.get('auto_quality_checking', True)
+            or checker_controls.get('scheduled_global_action', False)
+        )
+    )
+    automation_required = bool(
+        automation_manager
+        and get_automation_config_manager().get_global_settings().get(
+            'regular_automation_enabled',
+            False,
+        )
+    )
+    shadow_required = bool(shadow and shadow.get_config().get("enabled"))
+    preflight_required = bool(preflight and preflight.get_config().get("enabled"))
+    monitoring_threads_ready = bool(
+        monitoring
+        and monitoring._running
+        and all(
+            thread is not None and thread.is_alive()
+            for thread in (
+                monitoring._monitor_thread,
+                monitoring._refresh_thread,
+                monitoring._screenshot_thread,
+            )
+        )
+    )
+    checker_threads_ready = bool(
+        checker
+        and checker.running
+        and checker.worker_thread
+        and checker.worker_thread.is_alive()
+        and checker.scheduler_thread
+        and checker.scheduler_thread.is_alive()
+    )
+    automation_thread_ready = bool(
+        automation_manager
+        and automation_manager.automation_running
+        and automation_manager.automation_thread
+        and automation_manager.automation_thread.is_alive()
+    )
+
+    return {
+        "stream_monitoring": item(
+            True,
+            monitoring_threads_ready,
+            "running" if monitoring_threads_ready else "stopped",
+        ),
+        "stream_checker": item(
+            checker_required,
+            checker_threads_ready,
+            "running" if checker_threads_ready else (
+                "stopped" if checker_required else "disabled"
+            ),
+        ),
+        "automation": item(
+            automation_required,
+            automation_thread_ready,
+            "running" if automation_thread_ready else (
+                "stopped" if automation_required else "disabled"
+            ),
+        ),
+        "scheduled_events": item(
+            True,
+            scheduled_event_processor_thread.is_alive(),
+            "running" if scheduled_event_processor_thread.is_alive() else "stopped",
+        ),
+        "epg_refresh": item(
+            True,
+            bool(epg_refresh_thread and epg_refresh_thread.is_alive()),
+            "running" if epg_refresh_thread and epg_refresh_thread.is_alive() else "stopped",
+        ),
+        "udi_refresh": item(
+            True,
+            bool(udi_refresh_thread and udi_refresh_thread.is_alive()),
+            "running" if udi_refresh_thread and udi_refresh_thread.is_alive() else "stopped",
+        ),
+        "shadow_monitor": item(
+            shadow_required,
+            bool(shadow and shadow.get_status().get("running")),
+            "running" if shadow and shadow.get_status().get("running") else (
+                "stopped" if shadow_required else "disabled"
+            ),
+        ),
+        "teamarr_preflight": item(
+            preflight_required,
+            bool(preflight and preflight.get_status().get("running")),
+            "running" if preflight and preflight.get_status().get("running") else (
+                "stopped" if preflight_required else "disabled"
+            ),
+        ),
+    }
+
+
+@app.route('/api/readiness', methods=['GET'])
+@app.route('/api/v1/readiness', methods=['GET'])
+def readiness_check():
+    """Readiness gate for the UI and deployment verification."""
+    from apps.database.connection import get_engine
+
+    return readiness_check_response(
+        get_engine=get_engine,
+        get_dispatcharr_config=get_dispatcharr_config,
+        get_udi_manager=get_udi_manager,
+        get_required_services_status=_required_services_readiness,
+    )
+
+
+@app.route('/ready', methods=['GET'])
+def readiness_check_stripped():
+    """Readiness endpoint for a proxy with a stripped API prefix."""
+    return readiness_check()
 
 @app.route('/api/version', methods=['GET'])
 def get_version():
