@@ -312,6 +312,143 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(manager.last_playlist_update, original_last_run)
         manager._save_state.assert_not_called()
 
+    def test_connectivity_retry_persists_only_unfinished_quality_channels(self):
+        manager = self._manager()
+        manager.config = {
+            "scheduler_retry": {
+                "enabled": True,
+                "max_attempts": 3,
+                "base_delay_seconds": 30,
+                "max_delay_seconds": 120,
+            },
+        }
+        manager._scheduler_retry_state = {}
+        manager.period_last_run = {"period-1": datetime.now() - timedelta(hours=2)}
+        manager._save_state = Mock()
+        active_periods = {
+            ("period-1", "Full Check"): {
+                "period_name": "Full Check",
+                "channels": [{"id": 1}, {"id": 2}, {"id": 3}],
+            },
+        }
+
+        summary = manager._schedule_connectivity_retries(
+            active_periods,
+            message="Dispatcharr API connectivity probe timed out",
+            selected_channel_ids=[1, 2, 3],
+            completed_channel_ids=[1],
+            target_stream_ids={2: [20, 21], 3: [30]},
+            check_all_stream_ids=[3],
+        )
+
+        retry = manager._scheduler_retry_state["period-1"]
+        self.assertTrue(summary["scheduled"])
+        self.assertEqual(summary["attempt"], 1)
+        self.assertEqual(retry["pending_channel_ids"], [2, 3])
+        self.assertEqual(retry["completed_channel_ids"], [1])
+        self.assertEqual(retry["target_stream_ids"], {"2": [20, 21], "3": [30]})
+        self.assertEqual(retry["check_all_stream_ids"], [3])
+        self.assertTrue(retry["skip_provider_refresh"])
+        self.assertEqual(retry["resume_stage"], "quality_checking")
+        self.assertTrue(manager._scheduler_retry_is_due(
+            "period-1",
+            now=datetime.fromisoformat(retry["next_retry_at"]),
+        ))
+        manager._save_state.assert_called_once()
+
+    def test_connectivity_retry_exhaustion_waits_for_next_regular_schedule(self):
+        manager = self._manager()
+        manager.config = {
+            "scheduler_retry": {
+                "enabled": True,
+                "max_attempts": 2,
+                "base_delay_seconds": 30,
+                "max_delay_seconds": 60,
+            },
+        }
+        manager._scheduler_retry_state = {}
+        original_last_run = datetime.now() - timedelta(hours=2)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager._save_state = Mock()
+        active_periods = {
+            ("period-1", "Full Check"): {
+                "period_name": "Full Check",
+                "channels": [{"id": 1}],
+            },
+        }
+
+        first = manager._schedule_connectivity_retries(
+            active_periods,
+            message="timeout",
+            selected_channel_ids=[1],
+            completed_channel_ids=[],
+        )
+        second = manager._schedule_connectivity_retries(
+            active_periods,
+            message="timeout",
+            selected_channel_ids=[1],
+            completed_channel_ids=[],
+        )
+        exhausted = manager._schedule_connectivity_retries(
+            active_periods,
+            message="timeout",
+            selected_channel_ids=[1],
+            completed_channel_ids=[],
+        )
+
+        retry = manager._scheduler_retry_state["period-1"]
+        self.assertTrue(first["scheduled"])
+        self.assertTrue(second["scheduled"])
+        self.assertFalse(exhausted["scheduled"])
+        self.assertTrue(exhausted["exhausted"])
+        self.assertTrue(retry["exhausted"])
+        self.assertIsNone(retry["next_retry_at"])
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        self.assertFalse(manager._scheduler_retry_is_due("period-1"))
+
+    def test_scheduler_retry_prunes_removed_periods_and_unassigned_channels(self):
+        manager = self._manager()
+        manager._scheduler_retry_state = {
+            "removed-period": {
+                "pending_channel_ids": [1],
+            },
+            "period-1": {
+                "pending_channel_ids": [2, 3],
+                "target_stream_ids": {"2": [20], "3": [30]},
+                "check_all_stream_ids": [2, 3],
+            },
+        }
+        manager._save_state = Mock()
+
+        changed = manager._prune_scheduler_retries({"period-1": {3}})
+
+        self.assertTrue(changed)
+        self.assertNotIn("removed-period", manager._scheduler_retry_state)
+        retry = manager._scheduler_retry_state["period-1"]
+        self.assertEqual(retry["pending_channel_ids"], [3])
+        self.assertEqual(retry["target_stream_ids"], {"3": [30]})
+        self.assertEqual(retry["check_all_stream_ids"], [3])
+        manager._save_state.assert_called_once()
+
+    def test_quality_summary_identifies_connectivity_abort_for_scheduler_retry(self):
+        summary = AutomatedStreamManager._summarize_quality_check_results(
+            {
+                1: {"success": True},
+                2: {
+                    "success": False,
+                    "aborted": True,
+                    "error": "connectivity_guard",
+                    "message": "Dispatcharr API timeout",
+                },
+            },
+            expected_count=3,
+        )
+
+        self.assertFalse(summary["ok"])
+        self.assertTrue(summary["connectivity_aborted"])
+        self.assertEqual(summary["checked_count"], 2)
+        self.assertEqual(summary["incomplete_count"], 1)
+
     def test_manual_stop_aborted_cycle_advances_period_schedule_clock(self):
         manager = self._manager()
         original_last_run = datetime.now() - timedelta(minutes=90)

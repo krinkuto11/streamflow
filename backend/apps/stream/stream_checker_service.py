@@ -1906,7 +1906,14 @@ class StreamCheckerService:
 
     # Removed _refine_sorted_streams in favor of lexicographical Sort Keys.
 
-    def _run_connectivity_guard(self, phase: str) -> ConnectivityCheckResult:
+    def _run_connectivity_guard(
+        self,
+        phase: str,
+        *,
+        operation: str = 'destructive_write',
+        channel_id: Optional[int] = None,
+        channel_name: Optional[str] = None,
+    ) -> ConnectivityCheckResult:
         """Run and record the fail-closed connectivity guard."""
         try:
             result = self.connectivity_guard.check(
@@ -1914,6 +1921,7 @@ class StreamCheckerService:
                 dispatcharr_base_url=_get_base_url(),
                 dispatcharr_headers_provider=_get_auth_headers,
                 dispatcharr_auth_refresh_provider=_refresh_token,
+                operation=operation,
             )
         except Exception as exc:
             logger.warning("Connectivity guard failed unexpectedly during %s: %s", phase, exc)
@@ -1926,6 +1934,11 @@ class StreamCheckerService:
 
         status = result.to_dict()
         status['phase'] = phase
+        status['operation'] = operation
+        if channel_id is not None:
+            status['channel_id'] = channel_id
+        if channel_name:
+            status['channel_name'] = channel_name
         status['checked_at'] = datetime.now().isoformat()
         self.connectivity_guard_status = status
         return result
@@ -1967,7 +1980,10 @@ class StreamCheckerService:
 
         self._last_connectivity_guard_recovery_probe_at = now
         logger.info("Rechecking stale connectivity guard failure after %.0fs", interval)
-        self._run_connectivity_guard('stale_failure_recovery')
+        self._run_connectivity_guard(
+            'stale_failure_recovery',
+            operation='analysis',
+        )
 
     @staticmethod
     def _bounded_float(value: Any, *, default: float, minimum: float, maximum: float) -> float:
@@ -2021,19 +2037,31 @@ class StreamCheckerService:
         update_progress: bool = True,
         progress_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[ConnectivityCheckResult]:
-        """Return a failed result when destructive quality work must abort."""
-        result = self._run_connectivity_guard(phase)
-        if result.ok:
-            return None
-        progress_context = dict(progress_context or {})
-
-        recoverable_phases = {
+        """Return a failed result when the requested quality operation must abort."""
+        destructive_phases = {
             'mark_dead_stream',
             'keep_dead_stream_marked',
             'channel_stream_update',
             'single_channel_validation_removal',
             'single_channel_matching_update',
+            'automation_quality_preflight',
         }
+        operation = (
+            'destructive_write'
+            if phase in destructive_phases
+            else 'analysis'
+        )
+        result = self._run_connectivity_guard(
+            phase,
+            operation=operation,
+            channel_id=channel_id,
+            channel_name=channel_name,
+        )
+        if result.ok:
+            return None
+        progress_context = dict(progress_context or {})
+
+        recoverable_phases = destructive_phases
         config = self.config.get('connectivity_guard', {}) or {}
         recovery_wait_seconds = self._bounded_float(
             config.get('recovery_wait_seconds', 240),
@@ -2052,6 +2080,12 @@ class StreamCheckerService:
                 f"Channel {channel_id}" if channel_id is not None else "Quality check"
             )
             deadline = time.time() + recovery_wait_seconds
+            first_failure = {
+                'reason': result.reason,
+                'message': result.message,
+                'checked_at': datetime.now().isoformat(),
+            }
+            recovery_attempts = 0
             logger.warning(
                 "Connectivity guard failed at %s for %s: %s; waiting up to %.0fs for recovery",
                 phase,
@@ -2062,6 +2096,18 @@ class StreamCheckerService:
             while time.time() < deadline and not self.abort_current_check.is_set():
                 remaining = max(0.0, deadline - time.time())
                 sleep_for = min(recovery_poll_seconds, remaining)
+                recovery_attempts += 1
+                self.connectivity_guard_status = {
+                    **dict(self.connectivity_guard_status or {}),
+                    'recovery': {
+                        'active': True,
+                        'first_failure': first_failure,
+                        'attempts': recovery_attempts,
+                        'remaining_seconds': round(remaining, 1),
+                        'channel_id': channel_id,
+                        'channel_name': safe_channel_name,
+                    },
+                }
                 if update_progress and channel_id is not None:
                     try:
                         self.progress.update(
@@ -2080,8 +2126,22 @@ class StreamCheckerService:
                         logger.debug("Failed to publish connectivity recovery progress: %s", exc)
                 if sleep_for > 0:
                     time.sleep(sleep_for)
-                recovery_result = self._run_connectivity_guard(f"{phase}_recovery")
+                recovery_result = self._run_connectivity_guard(
+                    f"{phase}_recovery",
+                    operation=operation,
+                    channel_id=channel_id,
+                    channel_name=safe_channel_name,
+                )
                 if recovery_result.ok:
+                    self.connectivity_guard_status['recovery'] = {
+                        'active': False,
+                        'first_failure': first_failure,
+                        'attempts': recovery_attempts,
+                        'remaining_seconds': round(max(0.0, deadline - time.time()), 1),
+                        'channel_id': channel_id,
+                        'channel_name': safe_channel_name,
+                        'recovered': True,
+                    }
                     logger.info(
                         "Connectivity guard recovered at %s for %s; continuing quality work",
                         phase,
@@ -2089,6 +2149,16 @@ class StreamCheckerService:
                     )
                     return None
                 result = recovery_result
+            self.connectivity_guard_status['recovery'] = {
+                'active': False,
+                'first_failure': first_failure,
+                'attempts': recovery_attempts,
+                'remaining_seconds': 0.0,
+                'channel_id': channel_id,
+                'channel_name': safe_channel_name,
+                'recovered': False,
+                'exhausted': not self.abort_current_check.is_set(),
+            }
 
         self.abort_current_check.set()
         self._cancel_queueing = True

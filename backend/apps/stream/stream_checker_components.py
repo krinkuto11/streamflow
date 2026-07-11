@@ -110,6 +110,7 @@ class StreamCheckConfig:
             'require_internet': True,
             'require_dispatcharr_api': True,
             'timeout_seconds': 3.0,
+            'analysis_timeout_seconds': 10.0,
             'retry_attempts': 2,
             'retry_backoff_seconds': 1.0,
             'recovery_wait_seconds': DEFAULT_RECOVERY_WAIT_SECONDS,

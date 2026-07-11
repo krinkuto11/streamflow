@@ -54,6 +54,15 @@ class TestServicesSQL(unittest.TestCase):
         # Test Save State
         now = datetime.now()
         manager.period_last_run = {"period_1": now}
+        manager._scheduler_retry_state = {
+            "period_1": {
+                "attempt": 1,
+                "max_attempts": 3,
+                "next_retry_at": (now + timedelta(minutes=5)).isoformat(),
+                "pending_channel_ids": [101],
+                "exhausted": False,
+            },
+        }
         manager._save_state()
         
         # Verify in DB
@@ -61,6 +70,10 @@ class TestServicesSQL(unittest.TestCase):
         setting = session.query(SystemSetting).filter(SystemSetting.key == 'automation_state').first()
         self.assertIsNotNone(setting)
         self.assertIn("period_1", setting.value['period_last_run'])
+        self.assertEqual(
+            setting.value['scheduler_retry_state']['period_1']['pending_channel_ids'],
+            [101],
+        )
         session.close()
         
         # Test Load State
@@ -69,6 +82,10 @@ class TestServicesSQL(unittest.TestCase):
         self.assertTrue(isinstance(loaded_runs["period_1"], datetime))
         # Account for microsecond truncation in string conversion if any, but should be close
         self.assertEqual(loaded_runs["period_1"].isoformat(), now.isoformat())
+        self.assertEqual(
+            manager._scheduler_retry_state["period_1"]["next_retry_at"],
+            (now + timedelta(minutes=5)).isoformat(),
+        )
 
     def test_scheduling_service_sql(self):
         service = SchedulingService()

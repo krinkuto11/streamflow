@@ -66,6 +66,7 @@ class StreamConnectivityGuard:
         dispatcharr_base_url: Optional[str],
         dispatcharr_headers_provider: Optional[Callable[[], Dict[str, str]]] = None,
         dispatcharr_auth_refresh_provider: Optional[Callable[[], bool]] = None,
+        operation: str = "destructive_write",
     ) -> ConnectivityCheckResult:
         cfg = config or {}
         if cfg.get("enabled", True) is False:
@@ -77,6 +78,18 @@ class StreamConnectivityGuard:
             )
 
         timeout_seconds = max(0.1, self._safe_float(cfg.get("timeout_seconds", 3.0), 3.0))
+        analysis_timeout_seconds = max(
+            timeout_seconds,
+            min(
+                60.0,
+                self._safe_float(cfg.get("analysis_timeout_seconds", 10.0), 10.0),
+            ),
+        )
+        operation = (
+            "analysis"
+            if str(operation or "").strip().lower() == "analysis"
+            else "destructive_write"
+        )
         retry_attempts = max(0, min(10, self._safe_int(cfg.get("retry_attempts", 2), 2)))
         retry_backoff_seconds = max(
             0.0,
@@ -84,6 +97,11 @@ class StreamConnectivityGuard:
         )
         require_internet = cfg.get("require_internet", True) is not False
         require_dispatcharr_api = cfg.get("require_dispatcharr_api", True) is not False
+        dispatcharr_timeout_seconds = (
+            analysis_timeout_seconds
+            if operation == "analysis"
+            else timeout_seconds
+        )
         checked: Dict[str, Any] = {}
 
         if require_internet:
@@ -130,7 +148,7 @@ class StreamConnectivityGuard:
             dispatcharr_result = self._probe_http_endpoint(
                 url=dispatcharr_probe_url,
                 label="dispatcharr_api",
-                timeout_seconds=timeout_seconds,
+                timeout_seconds=dispatcharr_timeout_seconds,
                 retry_attempts=retry_attempts,
                 retry_backoff_seconds=retry_backoff_seconds,
                 headers=headers,
@@ -146,19 +164,55 @@ class StreamConnectivityGuard:
                     dispatcharr_probe_url=dispatcharr_probe_url,
                     dispatcharr_headers_provider=dispatcharr_headers_provider,
                     dispatcharr_auth_refresh_provider=dispatcharr_auth_refresh_provider,
-                    timeout_seconds=timeout_seconds,
+                    timeout_seconds=dispatcharr_timeout_seconds,
                     retry_attempts=retry_attempts,
                     retry_backoff_seconds=retry_backoff_seconds,
                     previous_result=dispatcharr_result,
                 )
             checked["dispatcharr_api"] = dispatcharr_result.details
             if not dispatcharr_result.ok:
+                api_reachable = dispatcharr_result.details.get("status_code") is not None
+                dispatcharr_result.details = {
+                    **dispatcharr_result.details,
+                    "api_reachable": api_reachable,
+                    "api_authenticated": (
+                        False
+                        if dispatcharr_result.reason == "dispatcharr_auth_failed"
+                        else None
+                    ),
+                    "operation": operation,
+                    "destructive_writes_allowed": False,
+                    "destructive_timeout_seconds": timeout_seconds,
+                    "analysis_timeout_seconds": analysis_timeout_seconds,
+                }
                 return dispatcharr_result
+
+            api_latency_seconds = self._safe_float(
+                dispatcharr_result.details.get("elapsed_seconds"),
+                0.0,
+            )
+            checked["dispatcharr_api"] = {
+                **dispatcharr_result.details,
+                "api_reachable": True,
+                "api_authenticated": True,
+                "api_latency_seconds": round(api_latency_seconds, 3),
+                "operation": operation,
+                "destructive_writes_allowed": bool(
+                    operation == "destructive_write"
+                    and api_latency_seconds <= timeout_seconds
+                ),
+                "destructive_timeout_seconds": timeout_seconds,
+                "analysis_timeout_seconds": analysis_timeout_seconds,
+            }
 
         return ConnectivityCheckResult(
             ok=True,
             reason="ok",
-            message="Connectivity verified",
+            message=(
+                "Connectivity verified for non-destructive analysis"
+                if operation == "analysis"
+                else "Connectivity verified for destructive writes"
+            ),
             details=checked,
         )
 
@@ -315,8 +369,12 @@ class StreamConnectivityGuard:
 
         max_attempts = retry_attempts + 1
         last_result: Optional[ConnectivityCheckResult] = None
+        attempt_history = []
+        first_error_reason: Optional[str] = None
+        probe_started = time.monotonic()
 
         for attempt in range(1, max_attempts + 1):
+            attempt_started = time.monotonic()
             attempt_details = {
                 **safe_details,
                 "attempts": attempt,
@@ -330,6 +388,12 @@ class StreamConnectivityGuard:
                     allow_redirects=True,
                 )
             except requests.exceptions.Timeout:
+                first_error_reason = first_error_reason or "connectivity_timeout"
+                attempt_history.append({
+                    "attempt": attempt,
+                    "reason": "connectivity_timeout",
+                    "elapsed_seconds": round(time.monotonic() - attempt_started, 3),
+                })
                 last_result = ConnectivityCheckResult(
                     ok=False,
                     reason="connectivity_timeout",
@@ -337,6 +401,12 @@ class StreamConnectivityGuard:
                     details=attempt_details,
                 )
             except requests.exceptions.RequestException:
+                first_error_reason = first_error_reason or "network_unreachable"
+                attempt_history.append({
+                    "attempt": attempt,
+                    "reason": "network_unreachable",
+                    "elapsed_seconds": round(time.monotonic() - attempt_started, 3),
+                })
                 last_result = ConnectivityCheckResult(
                     ok=False,
                     reason="network_unreachable",
@@ -345,6 +415,19 @@ class StreamConnectivityGuard:
                 )
             else:
                 attempt_details["status_code"] = response.status_code
+                attempt_elapsed = round(time.monotonic() - attempt_started, 3)
+                attempt_history.append({
+                    "attempt": attempt,
+                    "status_code": response.status_code,
+                    "elapsed_seconds": attempt_elapsed,
+                })
+                attempt_details["elapsed_seconds"] = round(
+                    time.monotonic() - probe_started,
+                    3,
+                )
+                attempt_details["attempt_history"] = list(attempt_history)
+                if first_error_reason:
+                    attempt_details["first_error_reason"] = first_error_reason
 
                 if 200 <= response.status_code < 400:
                     return ConnectivityCheckResult(True, "ok", f"{label} connectivity verified", attempt_details)
@@ -365,13 +448,24 @@ class StreamConnectivityGuard:
                     message=f"{label} connectivity probe returned HTTP {response.status_code} after {attempt} attempt(s)",
                     details=attempt_details,
                 )
+                first_error_reason = first_error_reason or "endpoint_unhealthy"
                 if not self._should_retry_status(response.status_code):
                     return last_result
 
             if attempt < max_attempts and retry_backoff_seconds > 0:
                 time.sleep(retry_backoff_seconds)
 
-        return last_result or ConnectivityCheckResult(
+        if last_result is not None:
+            last_result.details = {
+                **last_result.details,
+                "elapsed_seconds": round(time.monotonic() - probe_started, 3),
+                "attempt_history": attempt_history,
+            }
+            if first_error_reason:
+                last_result.details["first_error_reason"] = first_error_reason
+            return last_result
+
+        return ConnectivityCheckResult(
             ok=False,
             reason="network_unreachable",
             message=f"{label} connectivity probe could not reach its endpoint",
@@ -381,7 +475,7 @@ class StreamConnectivityGuard:
     @staticmethod
     def _build_dispatcharr_probe_url(base_url: str) -> str:
         clean = base_url.rstrip("/")
-        return f"{clean}/api/channels/channels/"
+        return f"{clean}/api/channels/channels/?page=1&page_size=1"
 
     @staticmethod
     def _safe_host(url: str) -> Optional[str]:

@@ -83,6 +83,28 @@ class _RequestsDispatcharrAlwaysTimeout:
         raise requests.exceptions.Timeout("persistent timeout")
 
 
+class _RequestsDispatcharrRequiresLongBudget:
+    def __init__(self):
+        self.dispatcharr_timeouts = []
+
+    def get(self, url, **kwargs):
+        if "channels/channels" not in url:
+            return _Response(204)
+
+        timeout = kwargs.get("timeout")
+        self.dispatcharr_timeouts.append(timeout)
+        if timeout <= 3:
+            raise requests.exceptions.Timeout("response needs more than three seconds")
+        return _Response(200)
+
+
+class _RequestsUnauthorized:
+    def get(self, url, **kwargs):
+        if "channels/channels" in url:
+            return _Response(403)
+        return _Response(204)
+
+
 def test_connectivity_guard_passes_when_internet_and_dispatcharr_are_reachable():
     requests_ok = _RequestsOk()
     guard = StreamConnectivityGuard(
@@ -101,8 +123,62 @@ def test_connectivity_guard_passes_when_internet_and_dispatcharr_are_reachable()
     assert result.reason == "ok"
     assert requests_ok.urls == [
         "https://probe.example/generate_204",
-        "http://dispatcharr.local/api/channels/channels/",
+        "http://dispatcharr.local/api/channels/channels/?page=1&page_size=1",
     ]
+    assert result.details["dispatcharr_api"]["api_reachable"] is True
+    assert result.details["dispatcharr_api"]["destructive_writes_allowed"] is True
+
+
+def test_slow_dispatcharr_read_can_continue_analysis_without_allowing_writes():
+    requests_slow = _RequestsDispatcharrRequiresLongBudget()
+    guard = StreamConnectivityGuard(
+        requests_module=requests_slow,
+        socket_module=_ResolvingSocket(),
+        default_internet_probe_urls=("https://probe.example/generate_204",),
+    )
+
+    result = guard.check(
+        config={
+            "enabled": True,
+            "timeout_seconds": 3,
+            "analysis_timeout_seconds": 8,
+            "retry_attempts": 0,
+        },
+        dispatcharr_base_url="http://dispatcharr.local",
+        dispatcharr_headers_provider=lambda: {"Authorization": "Bearer test"},
+        operation="analysis",
+    )
+
+    assert result.ok is True
+    assert requests_slow.dispatcharr_timeouts == [8]
+    assert result.details["dispatcharr_api"]["operation"] == "analysis"
+    assert result.details["dispatcharr_api"]["destructive_writes_allowed"] is False
+
+
+def test_slow_dispatcharr_read_still_fails_closed_for_destructive_writes():
+    requests_slow = _RequestsDispatcharrRequiresLongBudget()
+    guard = StreamConnectivityGuard(
+        requests_module=requests_slow,
+        socket_module=_ResolvingSocket(),
+        default_internet_probe_urls=("https://probe.example/generate_204",),
+    )
+
+    result = guard.check(
+        config={
+            "enabled": True,
+            "timeout_seconds": 3,
+            "analysis_timeout_seconds": 8,
+            "retry_attempts": 0,
+        },
+        dispatcharr_base_url="http://dispatcharr.local",
+        dispatcharr_headers_provider=lambda: {"Authorization": "Bearer test"},
+        operation="destructive_write",
+    )
+
+    assert result.ok is False
+    assert result.reason == "connectivity_timeout"
+    assert requests_slow.dispatcharr_timeouts == [3]
+    assert result.details["destructive_writes_allowed"] is False
 
 
 def test_connectivity_guard_refreshes_auth_once_when_dispatcharr_token_is_stale():
@@ -132,6 +208,27 @@ def test_connectivity_guard_refreshes_auth_once_when_dispatcharr_token_is_stale(
     assert headers.call_count == 2
     assert result.details["dispatcharr_api"]["auth_refresh_attempted"] is True
     assert result.details["dispatcharr_api"]["auth_refresh_ok"] is True
+
+
+def test_dispatcharr_auth_failure_keeps_reachability_separate_from_write_permission():
+    guard = StreamConnectivityGuard(
+        requests_module=_RequestsUnauthorized(),
+        socket_module=_ResolvingSocket(),
+        default_internet_probe_urls=("https://probe.example/generate_204",),
+    )
+
+    result = guard.check(
+        config={"enabled": True, "retry_attempts": 0},
+        dispatcharr_base_url="http://dispatcharr.local",
+        dispatcharr_headers_provider=lambda: {"Authorization": "Bearer denied"},
+        operation="destructive_write",
+    )
+
+    assert result.ok is False
+    assert result.reason == "dispatcharr_auth_failed"
+    assert result.details["api_reachable"] is True
+    assert result.details["api_authenticated"] is False
+    assert result.details["destructive_writes_allowed"] is False
 
 
 def test_connectivity_guard_retries_transient_dispatcharr_timeout():
@@ -241,6 +338,49 @@ def test_quality_check_startup_offline_aborts_before_channel_check():
     assert result["skip_reason"] == "connectivity_guard"
     assert service.connectivity_guard_status["ok"] is False
     service.connectivity_guard.check.assert_called_once()
+    assert service.connectivity_guard.check.call_args.kwargs["operation"] == "analysis"
+
+
+def test_destructive_quality_phase_uses_strict_write_connectivity_mode():
+    service = StreamCheckerService()
+    failed = ConnectivityCheckResult(
+        ok=False,
+        reason="connectivity_timeout",
+        message="Dispatcharr API response exceeded the write budget",
+    )
+    service.connectivity_guard.check = Mock(return_value=failed)
+    service.config.config["connectivity_guard"]["recovery_wait_seconds"] = 0
+
+    result = service._require_quality_check_connectivity(
+        phase="channel_stream_update",
+        channel_id=42,
+        channel_name="Test Channel",
+        update_progress=False,
+    )
+
+    assert result is failed
+    assert service.connectivity_guard.check.call_args.kwargs["operation"] == "destructive_write"
+    assert service.connectivity_guard_status["channel_id"] == 42
+    assert service.connectivity_guard_status["channel_name"] == "Test Channel"
+
+
+def test_automation_matching_preflight_uses_strict_write_connectivity_mode():
+    service = StreamCheckerService()
+    service.connectivity_guard.check = Mock(
+        return_value=ConnectivityCheckResult(
+            ok=True,
+            reason="ok",
+            message="Connectivity verified for destructive writes",
+        )
+    )
+
+    result = service._require_quality_check_connectivity(
+        phase="automation_quality_preflight",
+        update_progress=False,
+    )
+
+    assert result is None
+    assert service.connectivity_guard.check.call_args.kwargs["operation"] == "destructive_write"
 
 
 def test_idle_status_marks_previous_connectivity_failure_as_stale():
@@ -326,6 +466,7 @@ def test_connectivity_recovery_wait_default_is_four_minutes():
     service = StreamCheckerService()
 
     assert service.config.config["connectivity_guard"]["recovery_wait_seconds"] == 240
+    assert service.config.config["connectivity_guard"]["analysis_timeout_seconds"] == 10.0
 
 
 def test_stream_checker_config_migrates_legacy_recovery_wait_from_db():
