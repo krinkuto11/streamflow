@@ -169,6 +169,14 @@ def test_incomplete_bitrate_can_reuse_previous_value_for_scoring_without_persist
         "measurement_incomplete_reason": "missing_bitrate",
         "measurement_incomplete_context": {},
         "bitrate_recheck_required": True,
+        "visual_probe_ran": True,
+        "visual_probe_completed": True,
+        "visual_probe_incomplete": False,
+        "visual_probe_requested_duration_seconds": 5,
+        "visual_probe_minimum_duration_seconds": 10,
+        "visual_probe_duration_seconds": 10,
+        "visual_probe_duration_adjusted": True,
+        "visual_probe_duration_adjustment_reason": "detector_minimum_window",
     }
     existing_stream = {
         "stream_stats": {
@@ -186,6 +194,16 @@ def test_incomplete_bitrate_can_reuse_previous_value_for_scoring_without_persist
     assert "ffmpeg_output_bitrate" not in payload["stream_stats"]
     assert payload["stream_stats"]["measurement_incomplete"] is True
     assert payload["stream_stats"]["bitrate_recheck_required"] is True
+    assert payload["stream_stats"]["visual_probe_ran"] is True
+    assert payload["stream_stats"]["visual_probe_completed"] is True
+    assert payload["stream_stats"]["visual_probe_requested_duration_seconds"] == 5
+    assert payload["stream_stats"]["visual_probe_minimum_duration_seconds"] == 10
+    assert payload["stream_stats"]["visual_probe_duration_seconds"] == 10
+    assert payload["stream_stats"]["visual_probe_duration_adjusted"] is True
+    assert (
+        payload["stream_stats"]["visual_probe_duration_adjustment_reason"]
+        == "detector_minimum_window"
+    )
 
 
 def test_single_channel_details_do_not_mix_cached_bitrate_with_current_missing_bitrate():

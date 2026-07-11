@@ -64,6 +64,20 @@ from apps.automation.channel_visibility_automation import (
 )
 from apps.core.auth import _refresh_token
 
+
+VISUAL_PROBE_REPORT_FIELDS = (
+    "visual_probe_ran",
+    "visual_probe_completed",
+    "visual_probe_incomplete",
+    "visual_probe_incomplete_reason",
+    "visual_probe_requested_duration_seconds",
+    "visual_probe_minimum_duration_seconds",
+    "visual_probe_duration_seconds",
+    "visual_probe_duration_adjusted",
+    "visual_probe_duration_adjustment_reason",
+    "visual_probe_elapsed_time",
+)
+
 # Import channel settings manager
 # Import channel settings manager - DEPRECATED/REMOVED
 # from channel_settings_manager import get_channel_settings_manager
@@ -1293,7 +1307,17 @@ class StreamCheckerService:
                 if "visual_probe_ran" in stream_data or "visual_probe_incomplete_reason" in stream_data
                 else None
             ),
+            "visual_probe_requested_duration_seconds": stream_data.get(
+                "visual_probe_requested_duration_seconds"
+            ),
+            "visual_probe_minimum_duration_seconds": stream_data.get(
+                "visual_probe_minimum_duration_seconds"
+            ),
             "visual_probe_duration_seconds": stream_data.get("visual_probe_duration_seconds"),
+            "visual_probe_duration_adjusted": stream_data.get("visual_probe_duration_adjusted"),
+            "visual_probe_duration_adjustment_reason": stream_data.get(
+                "visual_probe_duration_adjustment_reason"
+            ),
             "visual_probe_elapsed_time": stream_data.get("visual_probe_elapsed_time"),
             # PRESERVE_FALSE: emit False (not None) so the None-filter below keeps these
             # fields in the payload even when the probe ran but found no loop.
@@ -1326,6 +1350,7 @@ class StreamCheckerService:
             "visual_probe_ran",
             "visual_probe_completed",
             "visual_probe_incomplete",
+            "visual_probe_duration_adjusted",
             "measurement_incomplete",
             "bitrate_recheck_required",
         }
@@ -1436,7 +1461,17 @@ class StreamCheckerService:
                 if "visual_probe_ran" in stream_data or "visual_probe_incomplete_reason" in stream_data
                 else None
             ),
+            "visual_probe_requested_duration_seconds": stream_data.get(
+                "visual_probe_requested_duration_seconds"
+            ),
+            "visual_probe_minimum_duration_seconds": stream_data.get(
+                "visual_probe_minimum_duration_seconds"
+            ),
             "visual_probe_duration_seconds": stream_data.get("visual_probe_duration_seconds"),
+            "visual_probe_duration_adjusted": stream_data.get("visual_probe_duration_adjusted"),
+            "visual_probe_duration_adjustment_reason": stream_data.get(
+                "visual_probe_duration_adjustment_reason"
+            ),
             "visual_probe_elapsed_time": stream_data.get("visual_probe_elapsed_time"),
             # PRESERVE_FALSE: emit False (not None) so the None-filter below keeps these
             # fields in the payload even when the probe ran but found no loop.
@@ -1469,6 +1504,7 @@ class StreamCheckerService:
             "visual_probe_ran",
             "visual_probe_completed",
             "visual_probe_incomplete",
+            "visual_probe_duration_adjusted",
             "measurement_incomplete",
             "bitrate_recheck_required",
         }
@@ -3460,6 +3496,10 @@ class StreamCheckerService:
                         stream_stat['quality_reason_detail'] = analyzed.get('quality_reason_detail')
                         stream_stat['quality_reason_context'] = analyzed.get('quality_reason_context')
 
+                    for field in VISUAL_PROBE_REPORT_FIELDS:
+                        if field in analyzed:
+                            stream_stat[field] = analyzed.get(field)
+
                     # Include loop detection results if the probe ran
                     if analyzed.get('loop_probe_ran'):
                         stream_stat['loop_probe_ran']      = True
@@ -4615,6 +4655,10 @@ class StreamCheckerService:
                         stream_stat['quality_reason'] = analyzed.get('quality_reason')
                         stream_stat['quality_reason_detail'] = analyzed.get('quality_reason_detail')
                         stream_stat['quality_reason_context'] = analyzed.get('quality_reason_context')
+
+                    for field in VISUAL_PROBE_REPORT_FIELDS:
+                        if field in analyzed:
+                            stream_stat[field] = analyzed.get(field)
 
                     # Include loop detection results if the probe ran
                     if analyzed.get('loop_probe_ran'):
@@ -7222,6 +7266,15 @@ class StreamCheckerService:
                 if dead_entry:
                     dead_reason = dead_reason or dead_entry.get('reason') or dead_entry.get('dead_reason')
                     dead_reason_detail = dead_reason_detail or dead_entry.get('reason_detail') or dead_entry.get('dead_reason_detail')
+
+                visual_source = (
+                    analyzed
+                    if analyzed and 'visual_probe_ran' in analyzed
+                    else stream_stats
+                )
+                for field in VISUAL_PROBE_REPORT_FIELDS:
+                    if field in visual_source:
+                        stream_detail[field] = visual_source.get(field)
 
                 # Loop detection: prefer in-memory analyzed dict (authoritative, always
                 # current) over Dispatcharr stream_stats (may lag UDI refresh timing).

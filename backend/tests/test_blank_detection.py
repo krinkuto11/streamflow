@@ -15,6 +15,7 @@ from apps.stream.stream_checker_service import StreamCheckerService
 from apps.stream.stream_check_utils import (
     _parse_blank_detection,
     _parse_freeze_detection,
+    _visual_probe_duration,
     analyze_stream,
     get_stream_info_and_bitrate,
 )
@@ -103,7 +104,71 @@ class TestFreezeDetectionParsing(unittest.TestCase):
         self.assertEqual(result["freeze_ratio"], 1.0)
 
 
+class TestVisualProbeDurationContract(unittest.TestCase):
+    def test_no_visual_detector_keeps_requested_duration(self):
+        self.assertEqual(_visual_probe_duration(
+            duration=5,
+            blank_check_enabled=False,
+            blank_check_min_duration=2.0,
+            freeze_check_enabled=False,
+            freeze_check_min_duration=5.0,
+        ), 5)
+
+    def test_visual_detector_can_extend_beyond_requested_duration(self):
+        self.assertEqual(_visual_probe_duration(
+            duration=5,
+            blank_check_enabled=False,
+            blank_check_min_duration=2.0,
+            freeze_check_enabled=True,
+            freeze_check_min_duration=5.0,
+        ), 10)
+        self.assertEqual(_visual_probe_duration(
+            duration=5,
+            blank_check_enabled=True,
+            blank_check_min_duration=12.0,
+            freeze_check_enabled=False,
+            freeze_check_min_duration=5.0,
+        ), 13)
+
+    def test_visual_probe_remains_short_when_requested_basis_window_is_longer(self):
+        self.assertEqual(_visual_probe_duration(
+            duration=30,
+            blank_check_enabled=True,
+            blank_check_min_duration=2.0,
+            freeze_check_enabled=True,
+            freeze_check_min_duration=5.0,
+        ), 10)
+
+
 class TestBlankDetectionFfmpegCommand(unittest.TestCase):
+    @patch.object(stream_check_utils.subprocess, "run")
+    def test_visual_probe_extends_to_detector_minimum_and_reports_adjustment(self, mock_run):
+        mock_run.side_effect = [
+            Mock(stderr=_ffmpeg_output(), returncode=0),
+            Mock(stderr=_ffmpeg_output(), returncode=0),
+        ]
+
+        result = get_stream_info_and_bitrate(
+            "http://example.com/test.m3u8",
+            duration=5,
+            timeout=30,
+            freeze_check_enabled=True,
+            freeze_check_min_duration=5.0,
+        )
+
+        visual_command = mock_run.call_args_list[1].args[0]
+        duration_index = visual_command.index("-t") + 1
+        self.assertEqual(visual_command[duration_index], "10")
+        self.assertEqual(result["visual_probe_requested_duration_seconds"], 5)
+        self.assertEqual(result["visual_probe_minimum_duration_seconds"], 10)
+        self.assertEqual(result["visual_probe_duration_seconds"], 10)
+        self.assertTrue(result["visual_probe_duration_adjusted"])
+        self.assertEqual(
+            result["visual_probe_duration_adjustment_reason"],
+            "detector_minimum_window",
+        )
+        self.assertTrue(result["visual_probe_completed"])
+
     @patch.object(stream_check_utils.subprocess, "run")
     def test_blank_detection_runs_separate_visual_probe(self, mock_run):
         mock_run.side_effect = [

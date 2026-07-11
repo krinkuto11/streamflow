@@ -91,6 +91,18 @@ function getActionColor(action) {
 
 const entrySearchText = (entry) => JSON.stringify(entry || {}).toLowerCase()
 
+function visualProbeLabel(stream) {
+  if (stream?.visual_probe_incomplete) {
+    return `Incomplete: ${stream.visual_probe_incomplete_reason || 'unknown'}`
+  }
+  if (stream?.visual_probe_completed) {
+    const duration = stream.visual_probe_duration_seconds
+    const adjusted = stream.visual_probe_duration_adjusted ? ' adjusted' : ''
+    return duration != null ? `${duration}s${adjusted}` : `Complete${adjusted}`
+  }
+  return 'Pending'
+}
+
 function entryMatchesSourceFilter(entry, sourceFilter) {
   if (sourceFilter === 'all') return true
   const action = entry?.action
@@ -122,6 +134,7 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
     null
   const streamDetails = item.stats?.stream_details || []
   const hasScore = streamDetails.some(s => s.score !== undefined && s.score !== null)
+  const hasVisualProbe = streamDetails.some(s => s.visual_probe_ran)
   const hasLoopProbe = streamDetails.some(s => s.loop_probe_ran)
   const hasBlankProbe = streamDetails.some(s => s.blank_probe_ran)
   const hasFreezeProbe = streamDetails.some(s => s.freeze_probe_ran)
@@ -167,6 +180,7 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                     <TableHead>Framerate</TableHead>
                     <TableHead>Bitrate</TableHead>
                     <TableHead>Codec</TableHead>
+                    {hasVisualProbe && <TableHead>Visual Probe</TableHead>}
                     {hasScore && <TableHead>Score</TableHead>}
                     {hasLoopProbe && <TableHead>Loop</TableHead>}
                     {hasBlankProbe && <TableHead>Blank</TableHead>}
@@ -197,6 +211,16 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                         <TableCell>{streamDetail.fps || 'N/A'}</TableCell>
                         <TableCell>{streamDetail.bitrate || 'N/A'}</TableCell>
                         <TableCell>{streamDetail.video_codec || 'N/A'}</TableCell>
+                        {hasVisualProbe && (
+                          <TableCell>
+                            <span
+                              className={streamDetail.visual_probe_incomplete ? 'text-amber-500 text-xs' : 'text-muted-foreground text-xs'}
+                              title={`Requested ${streamDetail.visual_probe_requested_duration_seconds ?? '-'}s; minimum ${streamDetail.visual_probe_minimum_duration_seconds ?? '-'}s; effective ${streamDetail.visual_probe_duration_seconds ?? '-'}s`}
+                            >
+                              {streamDetail.visual_probe_ran ? visualProbeLabel(streamDetail) : '-'}
+                            </span>
+                          </TableCell>
+                        )}
                         {hasScore && (
                           <TableCell>{streamDetail.score !== undefined && streamDetail.score !== null ? streamDetail.score.toFixed(2) : 'N/A'}</TableCell>
                         )}
@@ -464,6 +488,9 @@ function StepContent({ step }) {
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Rate</TableHead>
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Bitrate</TableHead>
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Codec</TableHead>
+                      {details.checked_streams.some(s => s.visual_probe_ran) && (
+                        <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Visual Probe</TableHead>
+                      )}
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Score</TableHead>
                       {details.checked_streams.some(s => s.loop_probe_ran) && (
                         <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Loop</TableHead>
@@ -499,6 +526,16 @@ function StepContent({ step }) {
                         <TableCell className="py-1 text-muted-foreground">
                           {s.video_codec || '-'}
                         </TableCell>
+                        {details.checked_streams.some(stream => stream.visual_probe_ran) && (
+                          <TableCell className="py-1">
+                            <span
+                              className={s.visual_probe_incomplete ? 'text-amber-500 text-xs' : 'text-muted-foreground text-xs'}
+                              title={`Requested ${s.visual_probe_requested_duration_seconds ?? '-'}s; minimum ${s.visual_probe_minimum_duration_seconds ?? '-'}s; effective ${s.visual_probe_duration_seconds ?? '-'}s`}
+                            >
+                              {s.visual_probe_ran ? visualProbeLabel(s) : '-'}
+                            </span>
+                          </TableCell>
+                        )}
                         <TableCell className="py-1 text-right font-mono text-xs">
                           {s.score !== undefined && s.score !== null ? s.score.toFixed(2) : '-'}
                         </TableCell>

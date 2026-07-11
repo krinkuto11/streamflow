@@ -48,6 +48,18 @@ RUN_STREAM_EXPORT_FIELDS = [
     "video_codec",
     "audio_codec",
     "score",
+    "visual_probe_ran",
+    "visual_probe_completed",
+    "visual_probe_incomplete",
+    "visual_probe_incomplete_reason",
+    "visual_probe_requested_duration_seconds",
+    "visual_probe_minimum_duration_seconds",
+    "visual_probe_duration_seconds",
+    "visual_probe_duration_adjusted",
+    "visual_probe_duration_adjustment_reason",
+    "visual_probe_elapsed_time",
+    "blank_detected",
+    "freeze_detected",
 ]
 RUN_SNAPSHOT_EXPORT_FIELDS = [
     "schema_version",
@@ -767,6 +779,22 @@ def _run_stream_row(
         "video_codec": item.get("video_codec"),
         "audio_codec": item.get("audio_codec"),
         "score": item.get("score"),
+        "visual_probe_ran": item.get("visual_probe_ran"),
+        "visual_probe_completed": item.get("visual_probe_completed"),
+        "visual_probe_incomplete": item.get("visual_probe_incomplete"),
+        "visual_probe_incomplete_reason": item.get("visual_probe_incomplete_reason"),
+        "visual_probe_requested_duration_seconds": item.get(
+            "visual_probe_requested_duration_seconds"
+        ),
+        "visual_probe_minimum_duration_seconds": item.get(
+            "visual_probe_minimum_duration_seconds"
+        ),
+        "visual_probe_duration_seconds": item.get("visual_probe_duration_seconds"),
+        "visual_probe_duration_adjusted": item.get("visual_probe_duration_adjusted"),
+        "visual_probe_duration_adjustment_reason": item.get(
+            "visual_probe_duration_adjustment_reason"
+        ),
+        "visual_probe_elapsed_time": item.get("visual_probe_elapsed_time"),
         "blank_detected": item.get("blank_detected"),
         "freeze_detected": item.get("freeze_detected"),
     }

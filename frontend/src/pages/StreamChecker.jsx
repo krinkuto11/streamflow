@@ -1140,7 +1140,7 @@ export default function StreamChecker() {
                         max={120}
                       />
                       <p className="text-xs text-muted-foreground">
-                        Duration to analyze each stream (5-120 seconds)
+                        Basis analysis duration (5-120 seconds). Blank/freeze profiles use a separate visual probe that is automatically extended to at least the detector threshold plus 1 second; Changelog shows its effective duration and completion state.
                       </p>
                     </div>
 

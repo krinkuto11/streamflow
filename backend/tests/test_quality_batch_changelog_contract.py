@@ -23,7 +23,19 @@ def _service_with_changelog():
 
 def _mixed_stream_stats():
     return [
-        {"stream_id": 1, "status": "completed", "bitrate": "8.0 Mbps"},
+        {
+            "stream_id": 1,
+            "status": "completed",
+            "bitrate": "8.0 Mbps",
+            "visual_probe_ran": True,
+            "visual_probe_completed": True,
+            "visual_probe_incomplete": False,
+            "visual_probe_requested_duration_seconds": 5,
+            "visual_probe_minimum_duration_seconds": 10,
+            "visual_probe_duration_seconds": 10,
+            "visual_probe_duration_adjusted": True,
+            "visual_probe_duration_adjustment_reason": "detector_minimum_window",
+        },
         {"stream_id": 2, "status": "dead", "reason": "offline"},
         {"stream_id": 3, "status": "blank", "blank_detected": True},
         {"stream_id": 4, "status": "freeze", "freeze_detected": True},
@@ -157,6 +169,12 @@ def test_batch_finalizer_serialized_json_export_keeps_every_stream_row():
     assert len(payload["streams"]) == 14
     assert {row["stream_id"] for row in payload["streams"]} == set(range(1, 15))
     statuses = {row["stream_id"]: row["status"] for row in payload["streams"]}
+    visual = next(row for row in payload["streams"] if row["stream_id"] == 1)
+    assert visual["visual_probe_completed"] is True
+    assert visual["visual_probe_requested_duration_seconds"] == 5
+    assert visual["visual_probe_minimum_duration_seconds"] == 10
+    assert visual["visual_probe_duration_seconds"] == 10
+    assert visual["visual_probe_duration_adjusted"] is True
     assert statuses[2] == "dead"
     assert statuses[3] == "blank"
     assert statuses[4] == "freeze"

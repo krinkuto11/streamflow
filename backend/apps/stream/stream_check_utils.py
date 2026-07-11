@@ -646,7 +646,7 @@ def _visual_probe_duration(
     freeze_check_enabled: bool,
     freeze_check_min_duration: float,
 ) -> int:
-    """Pick a short visual probe window while respecting the user analysis window."""
+    """Pick a short visual window that can prove each enabled detector threshold."""
     requested = max(1.0, float(duration or 0))
     target = 0.0
     if blank_check_enabled:
@@ -663,7 +663,7 @@ def _visual_probe_duration(
         )
     if target <= 0:
         return max(1, int(math.ceil(requested)))
-    return max(1, int(math.ceil(min(requested, target))))
+    return max(1, int(math.ceil(target)))
 
 
 def _parse_blank_detection(
@@ -1262,15 +1262,23 @@ def _ffprobe_media_fallback(
 def _visual_probe_default_result(
     *,
     visual_duration: int,
+    requested_duration: int,
     blank_check_enabled: bool,
     freeze_check_enabled: bool,
 ) -> Dict[str, Any]:
+    duration_adjusted = visual_duration > requested_duration
     return {
         'visual_probe_ran': bool(blank_check_enabled or freeze_check_enabled),
         'visual_probe_completed': False,
         'visual_probe_incomplete': False,
         'visual_probe_incomplete_reason': 'none',
+        'visual_probe_requested_duration_seconds': requested_duration,
+        'visual_probe_minimum_duration_seconds': visual_duration,
         'visual_probe_duration_seconds': visual_duration,
+        'visual_probe_duration_adjusted': duration_adjusted,
+        'visual_probe_duration_adjustment_reason': (
+            'detector_minimum_window' if duration_adjusted else 'none'
+        ),
         'visual_probe_elapsed_time': None,
         'blank_probe_ran': bool(blank_check_enabled),
         'blank_detected': False,
@@ -1301,7 +1309,17 @@ def _mark_visual_probe_incomplete(
     result['measurement_incomplete_reason'] = f'visual_probe_{reason}'
     result['measurement_incomplete_context'] = {
         'reason': reason,
+        'visual_probe_requested_duration_seconds': result.get(
+            'visual_probe_requested_duration_seconds'
+        ),
+        'visual_probe_minimum_duration_seconds': result.get(
+            'visual_probe_minimum_duration_seconds'
+        ),
         'visual_probe_duration_seconds': result.get('visual_probe_duration_seconds'),
+        'visual_probe_duration_adjusted': result.get('visual_probe_duration_adjusted'),
+        'visual_probe_duration_adjustment_reason': result.get(
+            'visual_probe_duration_adjustment_reason'
+        ),
         'visual_probe_elapsed_time': result.get('visual_probe_elapsed_time'),
         'blank_probe_ran': result.get('blank_probe_ran'),
         'freeze_probe_ran': result.get('freeze_probe_ran'),
@@ -1335,8 +1353,10 @@ def _run_visual_detection_probe(
         freeze_check_enabled=freeze_check_enabled,
         freeze_check_min_duration=freeze_check_min_duration,
     )
+    requested_duration = max(1, int(math.ceil(float(duration or 0))))
     result_data = _visual_probe_default_result(
         visual_duration=visual_duration,
+        requested_duration=requested_duration,
         blank_check_enabled=blank_check_enabled,
         freeze_check_enabled=freeze_check_enabled,
     )
@@ -1629,7 +1649,11 @@ def get_stream_info_and_bitrate(
         'visual_probe_completed': False,
         'visual_probe_incomplete': False,
         'visual_probe_incomplete_reason': 'none',
+        'visual_probe_requested_duration_seconds': None,
+        'visual_probe_minimum_duration_seconds': None,
         'visual_probe_duration_seconds': None,
+        'visual_probe_duration_adjusted': False,
+        'visual_probe_duration_adjustment_reason': 'none',
         'visual_probe_elapsed_time': None,
         'measurement_incomplete': False,
         'measurement_incomplete_reason': 'none',
@@ -2538,7 +2562,11 @@ def analyze_stream(
         'visual_probe_completed': False,
         'visual_probe_incomplete': False,
         'visual_probe_incomplete_reason': 'none',
+        'visual_probe_requested_duration_seconds': None,
+        'visual_probe_minimum_duration_seconds': None,
         'visual_probe_duration_seconds': None,
+        'visual_probe_duration_adjusted': False,
+        'visual_probe_duration_adjustment_reason': 'none',
         'visual_probe_elapsed_time': None,
         'preempted': False,
         'preempt_reason': None,
@@ -2635,7 +2663,19 @@ def analyze_stream(
                     'visual_probe_completed': bool(result_data.get('visual_probe_completed')),
                     'visual_probe_incomplete': bool(result_data.get('visual_probe_incomplete')),
                     'visual_probe_incomplete_reason': result_data.get('visual_probe_incomplete_reason') or 'none',
+                    'visual_probe_requested_duration_seconds': result_data.get(
+                        'visual_probe_requested_duration_seconds'
+                    ),
+                    'visual_probe_minimum_duration_seconds': result_data.get(
+                        'visual_probe_minimum_duration_seconds'
+                    ),
                     'visual_probe_duration_seconds': result_data.get('visual_probe_duration_seconds'),
+                    'visual_probe_duration_adjusted': bool(
+                        result_data.get('visual_probe_duration_adjusted')
+                    ),
+                    'visual_probe_duration_adjustment_reason': (
+                        result_data.get('visual_probe_duration_adjustment_reason') or 'none'
+                    ),
                     'visual_probe_elapsed_time': result_data.get('visual_probe_elapsed_time'),
                     'preempted': bool(result_data.get('preempted')),
                     'preempt_reason': result_data.get('preempt_reason'),

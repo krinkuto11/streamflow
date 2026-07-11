@@ -888,6 +888,16 @@ export const operatorHelpDetailTopics = [
         risk: 'Starting overlapping work can hide the original reason behind capacity or busy states.',
       },
       {
+        name: 'Effective visual probe duration',
+        controlType: 'Status/API',
+        defaultValue: 'Detector minimum plus 1 second',
+        location: 'Stream Checker -> Stream Analysis tab -> FFmpeg Duration; Changelog -> Quality Check -> Visual Probe',
+        locationTo: '/stream-checker',
+        effect: 'Keeps the normal bitrate probe at the configured duration while giving a separate Blank/Freeze probe enough time to prove the active detector threshold. Changelog shows requested, minimum, effective, adjusted, completed, and incomplete state.',
+        useWhen: 'Inspect after a profile enables Blank or Freeze detection, especially when FFmpeg Duration is shorter than a detector threshold.',
+        risk: 'An incomplete visual probe is not a clean negative Blank/Freeze result; use its reason before changing removal rules.',
+      },
+      {
         name: 'Previous progress hidden',
         controlType: 'Status/API',
         defaultValue: 'Hidden during normal idle state',
