@@ -198,7 +198,7 @@ describe('operatorHelpSections', () => {
     expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Concurrent Checking tab -> Global Concurrent Limit')
     const shadowSettings = getOperatorHelpDetailTopic('shadow-monitor').settings
     expect(shadowSettings.map(setting => setting.name)).toEqual(expect.arrayContaining([
-      'Continuous mode',
+      'Continuous Monitoring',
       'Viewer Output Format',
       'Watcher User Agent',
       'Viewer Grace',
@@ -214,8 +214,8 @@ describe('operatorHelpSections', () => {
       'Healthy Probe Interval',
       'Channel Switch Limit',
     ]))
-    expect(shadowSettings.find(setting => setting.name === 'Continuous mode').defaultValue).toBe('Continuous')
-    expect(shadowSettings.find(setting => setting.name === 'Continuous mode').effect).toMatch(/Legacy periodic config is normalized/i)
+    expect(shadowSettings.find(setting => setting.name === 'Continuous Monitoring').defaultValue).toBe('Continuous')
+    expect(shadowSettings.find(setting => setting.name === 'Continuous Monitoring').effect).toMatch(/Legacy periodic config is normalized/i)
     expect(shadowSettings.find(setting => setting.name === 'Viewer Output Format').effect).toMatch(/fMP4 or MPEGTS/i)
     expect(shadowSettings.find(setting => setting.name === 'Watcher User Agent').defaultValue).toMatch(/TiviMate/i)
     expect(shadowSettings.find(setting => setting.name === 'Watcher User Agent').effect).toMatch(/unique marker/i)
@@ -224,6 +224,7 @@ describe('operatorHelpSections', () => {
     expect(shadowSettings.find(setting => setting.name === 'Viewer Grace').risk).toMatch(/provider\/profile capacity/i)
     expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').defaultValue).toBe('120 seconds')
     expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').effect).toMatch(/constant extra viewer/i)
+    expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').effect).toMatch(/Probe active.*Last probe.*Next probe/i)
     expect(shadowSettings.find(setting => setting.name === 'Dry Run').defaultValue).toBe('Off')
     expect(shadowSettings.find(setting => setting.name === 'Freeze Detection').defaultValue).toBe('On')
     expect(shadowSettings.find(setting => setting.name === 'Silent Audio').effect).toMatch(/no usable audio stream/i)

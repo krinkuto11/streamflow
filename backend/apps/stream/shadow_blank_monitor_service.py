@@ -1740,6 +1740,8 @@ class ShadowBlankMonitorService:
                 "",
             )
             target["last_probe"] = {
+                "started_at": target.get("active_probe_started_at"),
+                "completed_at": self.clock(),
                 "blank_detected": blank,
                 "blank_ratio": result.get("blank_ratio"),
                 "blank_duration_secs": result.get("blank_duration_secs"),

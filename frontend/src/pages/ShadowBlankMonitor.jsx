@@ -325,7 +325,7 @@ export default function ShadowBlankMonitor() {
       <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">Shadow Monitor</h1>
-          <p className="text-muted-foreground">Active viewer blank detection and stream switching</p>
+          <p className="text-muted-foreground">Continuously tracks viewers and performs periodic low-impact media probes</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <Button
@@ -569,9 +569,12 @@ export default function ShadowBlankMonitor() {
               </div>
 
               <div className="rounded-md border p-3 md:col-span-2">
-                <Label className="text-sm font-medium">Continuous Monitoring</Label>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Label className="text-sm font-medium">Continuous Monitoring</Label>
+                  <Badge variant="secondary">Only mode</Badge>
+                </div>
                 <p className="mt-1 text-xs text-muted-foreground">
-                  Watches active viewer sessions as they appear. Use excludes for channels the watcher should ignore; Scan Now is hidden while continuous watching is already active.
+                  Continuously tracks viewers and performs periodic low-impact media probes. A healthy channel waits between probes; Shadow is not a permanently connected viewer unless Persistent Watcher is explicitly enabled.
                 </p>
               </div>
             </div>
@@ -773,10 +776,15 @@ export default function ShadowBlankMonitor() {
                 <div className="space-y-3">
                   {watchedChannels.map(channel => {
                     const programLabel = getProgramDisplayLabel(channel.current_program)
+                    const lastProbeAt = channel.last_probe?.completed_at
+                    const nextProbeAt = channel.next_probe_at
                     return (
                       <div key={channel.channel_ref} className="rounded-md border p-3">
                         <div className="flex items-center justify-between gap-3">
-                          <span className="font-mono text-xs">{channel.channel_ref}</span>
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{channel.channel_name || channel.channel_ref}</p>
+                            <p className="mt-1 truncate font-mono text-xs text-muted-foreground">{channel.channel_ref}</p>
+                          </div>
                           <div className="flex shrink-0 flex-wrap justify-end gap-2">
                             <Badge variant="outline">{formatViewerClientCount(channel.real_client_count)}</Badge>
                             {(channel.watcher_client_count || 0) > 0 && (
@@ -806,8 +814,13 @@ export default function ShadowBlankMonitor() {
                         )}
                         <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                           <span>{channel.stream_ref}</span>
-                          {!programLabel && channel.watcher_state === 'waiting' && (
-                            <span>Waiting for next shadow probe</span>
+                          {channel.probe_active && <Badge>Probe active</Badge>}
+                          {channel.probe_state === 'waiting' && (
+                            <Badge variant="outline">Waiting for healthy interval</Badge>
+                          )}
+                          {lastProbeAt && <span>Last probe {formatTime(lastProbeAt)}</span>}
+                          {nextProbeAt && channel.probe_state === 'waiting' && (
+                            <span>Next probe {formatTime(nextProbeAt)}</span>
                           )}
                           {channel.watcher_client_ref && <span>{channel.watcher_client_ref}</span>}
                           {formatDuration(channel.watcher_uptime_seconds) && (
