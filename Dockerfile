@@ -14,11 +14,11 @@ RUN apt-get update && apt-get install -y \
 # Create working directory for backend
 WORKDIR /app
 
-# Copy backend requirements first for better caching
-COPY backend/requirements.txt .
+# Copy the compiled production lock first for deterministic caching.
+COPY backend/requirements.lock .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt
+# Install only artifacts whose versions and hashes were reviewed at lock time.
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Copy backend application code
 COPY backend/ ./

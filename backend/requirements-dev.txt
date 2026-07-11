@@ -4,3 +4,4 @@ flake8
 black
 requests-mock
 watchdog
+pip-audit==2.10.1

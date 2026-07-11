@@ -17,6 +17,22 @@ def test_dockerfile_uses_the_direct_entrypoint_without_bundled_services():
     assert "ENV STREAMFLOW_RUN_AS_ROOT=false" in content
 
 
+def test_dockerfile_installs_the_hashed_production_lock():
+    content = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "COPY backend/requirements.lock ." in content
+    assert "pip install --no-cache-dir --require-hashes -r requirements.lock" in content
+    assert "COPY backend/requirements.txt ." not in content
+
+
+def test_test_workflow_installs_locks_and_audits_dependencies():
+    content = (REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+
+    assert content.count("pip install --require-hashes -r backend/requirements-test.lock") == 2
+    assert "pip-audit -r backend/requirements.lock" in content
+    assert "npm audit --audit-level=high" in content
+
+
 def test_compose_does_not_restore_removed_sidecar_services():
     content = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
 
