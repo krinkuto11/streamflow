@@ -187,15 +187,20 @@ class StreamConnectivityGuard:
                 }
                 return dispatcharr_result
 
-            api_latency_seconds = self._safe_float(
+            total_probe_elapsed_seconds = self._safe_float(
                 dispatcharr_result.details.get("elapsed_seconds"),
                 0.0,
+            )
+            api_latency_seconds = self._safe_float(
+                dispatcharr_result.details.get("successful_attempt_elapsed_seconds"),
+                total_probe_elapsed_seconds,
             )
             checked["dispatcharr_api"] = {
                 **dispatcharr_result.details,
                 "api_reachable": True,
                 "api_authenticated": True,
                 "api_latency_seconds": round(api_latency_seconds, 3),
+                "total_probe_elapsed_seconds": round(total_probe_elapsed_seconds, 3),
                 "operation": operation,
                 "destructive_writes_allowed": bool(
                     operation == "destructive_write"
@@ -425,6 +430,7 @@ class StreamConnectivityGuard:
                     time.monotonic() - probe_started,
                     3,
                 )
+                attempt_details["successful_attempt_elapsed_seconds"] = attempt_elapsed
                 attempt_details["attempt_history"] = list(attempt_history)
                 if first_error_reason:
                     attempt_details["first_error_reason"] = first_error_reason

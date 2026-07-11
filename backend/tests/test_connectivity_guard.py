@@ -255,6 +255,48 @@ def test_connectivity_guard_retries_transient_dispatcharr_timeout():
     assert requests_retry.dispatcharr_attempts == 2
     assert result.details["dispatcharr_api"]["attempts"] == 2
     assert result.details["dispatcharr_api"]["max_attempts"] == 2
+    assert result.details["dispatcharr_api"]["destructive_writes_allowed"] is True
+
+
+def test_retry_uses_successful_attempt_latency_for_write_permission():
+    class _RequestsSlowTimeoutThenFastSuccess:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, url, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise requests.exceptions.Timeout("first attempt timed out")
+            return _Response(200)
+
+    requests_retry = _RequestsSlowTimeoutThenFastSuccess()
+    guard = StreamConnectivityGuard(
+        requests_module=requests_retry,
+        socket_module=_ResolvingSocket(),
+    )
+
+    with patch(
+        "apps.stream.connectivity_guard.time.monotonic",
+        side_effect=[0.0, 0.0, 3.1, 3.1, 3.2, 3.2],
+    ):
+        result = guard.check(
+            config={
+                "enabled": True,
+                "require_internet": False,
+                "timeout_seconds": 3,
+                "retry_attempts": 1,
+                "retry_backoff_seconds": 0,
+            },
+            dispatcharr_base_url="http://dispatcharr.local",
+            dispatcharr_headers_provider=lambda: {"Authorization": "Bearer test"},
+            operation="destructive_write",
+        )
+
+    assert result.ok is True
+    details = result.details["dispatcharr_api"]
+    assert details["api_latency_seconds"] == 0.1
+    assert details["total_probe_elapsed_seconds"] == 3.2
+    assert details["destructive_writes_allowed"] is True
 
 
 def test_connectivity_guard_fails_after_configured_dispatcharr_timeout_retries():
