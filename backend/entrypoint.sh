@@ -44,6 +44,8 @@ if [ "$(id -u)" = "0" ] && [ "$run_as_root" != "true" ]; then
     fi
     mkdir -p csv logs "$CONFIG_DIR"
     chown -R "$PUID:$PGID" csv logs "$CONFIG_DIR"
+    chmod 700 csv logs "$CONFIG_DIR"
+    find "$CONFIG_DIR" -maxdepth 1 -type f -exec chmod 600 {} +
     echo "[INFO] Dropping runtime privileges to ${PUID}:${PGID}."
     exec gosu "$PUID:$PGID" "$0" "$@"
 fi

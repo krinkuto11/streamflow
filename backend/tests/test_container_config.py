@@ -32,6 +32,7 @@ def test_entrypoint_execs_the_api_as_pid_one():
     assert "exec python3 apps/api/web_api.py" in content
     assert 'exec gosu "$PUID:$PGID" "$0" "$@"' in content
     assert 'chown -R "$PUID:$PGID" csv logs "$CONFIG_DIR"' in content
+    assert 'find "$CONFIG_DIR" -maxdepth 1 -type f -exec chmod 600 {} +' in content
 
 
 def test_compose_exposes_unraid_compatible_runtime_identity_defaults():
