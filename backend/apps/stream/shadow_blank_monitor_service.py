@@ -112,6 +112,7 @@ PROXY_OUTPUT_FORMAT_ALIASES = {
 }
 SHADOW_WATCHER_USER_AGENT_MARKER = "StreamFlow-Shadow-Blank-Monitor/1.0"
 DEFAULT_WATCHER_USER_AGENT = f"TiviMate/5.1.6 {SHADOW_WATCHER_USER_AGENT_MARKER}"
+POST_SWITCH_STATUS_SETTLE_SECONDS = 15
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -1139,9 +1140,19 @@ class ShadowBlankMonitorService:
                         previous_stream_id,
                         stream_id,
                     )
-                    self._reset_detection_state(channel_uuid)
-                    self._clear_cooldown(channel_uuid)
-                    if not expected_shadow_switch:
+                    expected_shadow_switch = (
+                        expected_shadow_switch
+                        or self._recent_switch_attempt_transition(
+                            channel_uuid,
+                            previous_stream_id,
+                            stream_id,
+                        )
+                    )
+                    if expected_shadow_switch:
+                        self._reset_blank_count(channel_uuid)
+                    else:
+                        self._reset_detection_state(channel_uuid)
+                        self._clear_cooldown(channel_uuid)
                         continuity_events.append((
                             "external_stream_change",
                             {
@@ -2069,7 +2080,7 @@ class ShadowBlankMonitorService:
             )
         self._reset_blank_count(channel_uuid)
         if success:
-            self._record_successful_switch(channel_uuid)
+            self._record_successful_switch(channel_uuid, config)
         else:
             self._set_cooldown(channel_uuid, config)
         switch_details["switch_api_success"] = api_success
@@ -4914,9 +4925,17 @@ class ShadowBlankMonitorService:
             if self._cooldowns.pop(channel_uuid, None) is not None:
                 self._save_safety_state_locked()
 
-    def _record_successful_switch(self, channel_uuid: str) -> None:
+    def _record_successful_switch(
+        self,
+        channel_uuid: str,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
         with self._lock:
             self._switch_history[channel_uuid].append(self.clock())
+            if config is not None:
+                self._cooldowns[channel_uuid] = (
+                    self.clock() + int(config["channel_cooldown_seconds"])
+                )
             self._save_safety_state_locked()
 
     def _attempted_switch_targets(
@@ -4956,8 +4975,14 @@ class ShadowBlankMonitorService:
         with self._lock:
             entry = self._switch_attempts.get(channel_uuid)
             if not entry or entry.get("origin_stream_id") != origin:
-                entry = {"origin_stream_id": origin, "target_stream_ids": []}
+                entry = {
+                    "origin_stream_id": origin,
+                    "target_stream_ids": [],
+                    "recorded_at": self.clock(),
+                }
                 self._switch_attempts[channel_uuid] = entry
+            else:
+                entry["recorded_at"] = self.clock()
             targets = entry.setdefault("target_stream_ids", [])
             if target not in targets:
                 targets.append(target)
@@ -4973,6 +4998,38 @@ class ShadowBlankMonitorService:
         except (TypeError, ValueError):
             return False
         return target in self._attempted_switch_targets(channel_uuid, origin_stream_id)
+
+    def _recent_switch_attempt_transition(
+        self,
+        channel_uuid: str,
+        previous_stream_id: Optional[int],
+        current_stream_id: Optional[int],
+    ) -> bool:
+        try:
+            previous = int(previous_stream_id) if previous_stream_id is not None else None
+            current = int(current_stream_id) if current_stream_id is not None else None
+        except (TypeError, ValueError):
+            return False
+        if previous is None or current is None:
+            return False
+        with self._lock:
+            entry = self._switch_attempts.get(channel_uuid) or {}
+            try:
+                recorded_at = float(entry.get("recorded_at"))
+                origin = int(entry.get("origin_stream_id"))
+            except (TypeError, ValueError):
+                return False
+            if self.clock() - recorded_at > POST_SWITCH_STATUS_SETTLE_SECONDS:
+                return False
+            targets = {
+                int(item)
+                for item in entry.get("target_stream_ids", [])
+                if item is not None and str(item).isdigit()
+            }
+            return (
+                (previous == origin and current in targets)
+                or (current == origin and previous in targets)
+            )
 
     def _clear_switch_attempts(self, channel_uuid: str) -> None:
         with self._lock:

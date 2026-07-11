@@ -2911,7 +2911,8 @@ def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
     assert status["recent_events"][0]["decision_group"] == "switch"
     assert status["recent_events"][0]["trigger_reason"] == "blank"
     assert status["recent_events"][0]["details"]["post_switch_verification"] is True
-    assert status["cooldowns"] == []
+    assert len(status["cooldowns"]) == 1
+    assert status["cooldowns"][0]["cooldown_seconds"] == 300
     assert status["switch_summary"]["successful_switches"] == 1
     assert status["switch_summary"]["last_switch_reason"] == "blank"
     assert status["switch_summary"]["prevented_false_switches"] == 0
@@ -3246,7 +3247,8 @@ def test_confirmed_freeze_switches_to_next_stream_when_live(tmp_path):
     assert status["recent_events"][0]["details"]["reason"] == "freeze"
     assert status["recent_events"][0]["trigger_reason"] == "freeze"
     assert status["recent_events"][0]["details"]["detection"]["reason"] == "freeze"
-    assert status["cooldowns"] == []
+    assert len(status["cooldowns"]) == 1
+    assert status["cooldowns"][0]["cooldown_seconds"] == 300
 
 
 def test_confirmed_no_decodable_frames_switches_to_next_stream_when_live(tmp_path):
@@ -3278,7 +3280,8 @@ def test_confirmed_no_decodable_frames_switches_to_next_stream_when_live(tmp_pat
     assert switch_calls == [("uuid-1", 11, None)]
     assert status["recent_events"][0]["type"] == "switch_success"
     assert status["recent_events"][0]["details"]["reason"] == "no_decodable_frames"
-    assert status["cooldowns"] == []
+    assert len(status["cooldowns"]) == 1
+    assert status["cooldowns"][0]["cooldown_seconds"] == 300
 
 
 def test_audio_detection_parser_detects_garbled_audio_after_threshold():
@@ -3585,7 +3588,8 @@ def test_enabled_media_fault_switches_to_next_stream_when_live(tmp_path):
         assert switch_calls == [("uuid-1", 11, None)]
         assert status["recent_events"][0]["type"] == "switch_success"
         assert status["recent_events"][0]["details"]["reason"] == reason
-        assert status["cooldowns"] == []
+        assert len(status["cooldowns"]) == 1
+        assert status["cooldowns"][0]["cooldown_seconds"] == 300
 
 
 def test_missing_audio_stream_switches_as_silent_audio_when_enabled(tmp_path):
@@ -4990,6 +4994,7 @@ def test_continuous_media_fault_continues_when_watcher_reappears_between_confirm
 
 
 def test_confirmed_blank_rechecks_after_switch_and_skips_attempted_target(tmp_path):
+    now = {"value": 1_000.0}
     switch_calls = []
     udi = FakeUdi(
         statuses=[{"uuid-1": active_status(stream_id=10)}],
@@ -5000,15 +5005,22 @@ def test_confirmed_blank_rechecks_after_switch_and_skips_attempted_target(tmp_pa
         udi=udi,
         blank_probe=lambda url, config: {"blank_detected": True},
         switch_calls=switch_calls,
+        clock=lambda: now["value"],
     )
-    service.update_config({"enabled": False, "dry_run": False, "confirmation_count": 1})
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "channel_cooldown_seconds": 30,
+    })
 
     first_status = service.run_once(force=True)
+    now["value"] += 31
     second_status = service.run_once(force=True)
 
     assert switch_calls == [("uuid-1", 11, None), ("uuid-1", 12, None)]
-    assert first_status["cooldowns"] == []
-    assert second_status["cooldowns"] == []
+    assert first_status["cooldowns"][0]["cooldown_seconds"] == 30
+    assert second_status["cooldowns"][0]["cooldown_seconds"] == 30
     assert second_status["recent_events"][0]["type"] == "switch_success"
     assert second_status["recent_events"][0]["details"]["target_stream_ref"].startswith("stream-")
 
@@ -5133,7 +5145,8 @@ def test_default_switch_accepts_proxy_probe_when_status_lacks_stream_id(tmp_path
     assert event["details"]["post_switch_verification_mode"] == "proxy_probe"
     assert event["details"]["post_switch_proxy_probe_accepted"] is True
     assert "observed_stream_ref" not in event["details"]
-    assert status["cooldowns"] == []
+    assert len(status["cooldowns"]) == 1
+    assert status["cooldowns"][0]["cooldown_seconds"] == 300
 
 
 def test_default_switch_accepts_proxy_probe_when_status_reports_stale_stream(tmp_path, monkeypatch):
@@ -5206,7 +5219,8 @@ def test_default_switch_accepts_proxy_probe_when_status_reports_stale_stream(tmp
     assert event["details"]["post_switch_proxy_probe_accepted"] is True
     assert event["details"]["observed_stream_ref"].startswith("stream-")
     assert event["details"]["expected_stream_ref"].startswith("stream-")
-    assert status["cooldowns"] == []
+    assert len(status["cooldowns"]) == 1
+    assert status["cooldowns"][0]["cooldown_seconds"] == 300
 
 
 def test_default_switch_rejects_proxy_probe_when_output_still_bad(tmp_path, monkeypatch):
@@ -5423,6 +5437,7 @@ def test_switch_prefers_channel_uuid_over_numeric_id(tmp_path):
 
 
 def test_successful_proxy_probe_clears_attempted_switch_targets(tmp_path):
+    now = {"value": 1_000.0}
     switch_calls = []
     probe_results = iter([
         {"blank_detected": True},
@@ -5438,11 +5453,18 @@ def test_successful_proxy_probe_clears_attempted_switch_targets(tmp_path):
         udi=udi,
         blank_probe=lambda url, config: next(probe_results),
         switch_calls=switch_calls,
+        clock=lambda: now["value"],
     )
-    service.update_config({"enabled": False, "dry_run": False, "confirmation_count": 1})
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "channel_cooldown_seconds": 30,
+    })
 
     service.run_once(force=True)
     service.run_once(force=True)
+    now["value"] += 31
     status = service.run_once(force=True)
 
     assert switch_calls == [("uuid-1", 11, None), ("uuid-1", 11, None)]
@@ -6509,7 +6531,8 @@ def test_reconnect_probe_can_switch_after_watcher_recovery_without_channel_coold
     assert switch_calls == [("uuid-1", 11, None)]
     assert switch_status["recent_events"][0]["type"] == "switch_success"
     assert switch_status["recent_events"][0]["details"]["reason"] == "blank"
-    assert switch_status["cooldowns"] == []
+    assert len(switch_status["cooldowns"]) == 1
+    assert switch_status["cooldowns"][0]["cooldown_seconds"] == 300
 
 
 def test_watcher_recovery_does_not_start_channel_cooldown(tmp_path):
@@ -6632,6 +6655,43 @@ def test_external_stream_change_is_recorded_and_clears_cooldown(tmp_path):
     assert event["details"]["target_stream_ref"] == shadow_module._ref("stream", 12)
     assert event["details"]["switch_source"] == "external"
     assert status["cooldowns"] == []
+
+
+def test_expected_shadow_stream_status_changes_keep_success_cooldown(tmp_path):
+    now = {"value": 1_000.0}
+    real_viewer = {"user_agent": "VLC"}
+    udi = FakeUdi(
+        statuses=[
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer])},
+            {"uuid-1": active_status(stream_id=11, clients=[real_viewer])},
+            {"uuid-1": active_status(stream_id=10, clients=[real_viewer])},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    service.update_config({
+        "enabled": False,
+        "watch_mode": "continuous",
+        "channel_cooldown_seconds": 300,
+    })
+    config = service.get_config(include_secret=True)
+
+    service.discover_active_targets(udi, config)
+    service._record_switch_attempt("uuid-1", 10, 11)
+    service._record_successful_switch("uuid-1", config)
+
+    now["value"] += 1
+    service.discover_active_targets(udi, config)
+    assert service._cooldown_remaining("uuid-1") == 299
+
+    now["value"] += 1
+    status = service.discover_active_targets(udi, config)
+    assert status[0]["stream_id"] == 10
+    assert service._cooldown_remaining("uuid-1") == 298
+    assert not any(
+        event["type"] == "external_stream_change"
+        for event in service.get_status()["recent_events"]
+    )
 
 
 def test_scoped_continuous_mode_reprobes_orphaned_watcher_and_uncovered_target(tmp_path):
