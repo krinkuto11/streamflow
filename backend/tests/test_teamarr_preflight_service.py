@@ -430,6 +430,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(status["upcoming_teams"][0]["preflight_kind"], "team")
         self.assertEqual(status["upcoming_teams"][0]["teamarr_team_id"], 501)
         self.assertEqual(status["upcoming_teams"][0]["state"], "due")
+        self.assertEqual(status["preflight_items"][0]["identity"], status["upcoming_teams"][0]["identity"])
 
     def test_static_team_status_requests_use_bounded_parallelism(self):
         base_team = make_team_status()["team"]
@@ -552,7 +553,41 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertFalse(final_status["stopping"])
         self.assertEqual(final_status["scan_status"]["state"], "cancelled")
         self.assertEqual(checker.calls, [])
-        self.assertEqual(status["preflight_items"][0]["identity"], status["upcoming_teams"][0]["identity"])
+
+    def test_cancelled_manual_scan_does_not_report_success(self):
+        release = threading.Event()
+        http_get = SlowTeamStatusHttpGet([make_team_status()["team"]], block_event=release)
+        service, checker, _ = self.make_service(
+            [],
+            http_get=http_get,
+            service_options={
+                "static_team_scan_workers": 1,
+                "static_team_request_timeout_seconds": 1,
+                "static_team_scan_budget_seconds": 2,
+                "stop_wait_seconds": 0.05,
+            },
+        )
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+        result = {}
+
+        scan_thread = threading.Thread(
+            target=lambda: result.update(service.run_once(force=True)),
+            daemon=True,
+        )
+        scan_thread.start()
+        self.assertTrue(http_get.entered.wait(timeout=1))
+        self.assertFalse(service.stop(persist=False))
+        release.set()
+        scan_thread.join(timeout=1)
+
+        self.assertFalse(scan_thread.is_alive())
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "scan_cancelled")
+        self.assertTrue(result["partial"])
+        self.assertEqual(checker.calls, [])
 
     def test_incomplete_static_team_is_visible_but_not_queueable(self):
         incomplete = make_team_status(

@@ -960,6 +960,20 @@ class TeamarrPreflightService:
 
             self._store_preflight_scan(scan, scan_error=None)
 
+            if scan_cancel_event.is_set():
+                return {
+                    "success": False,
+                    "error": "Teamarr preflight scan was cancelled",
+                    "code": "scan_cancelled",
+                    "events_seen": len(scan["raw_events"]),
+                    "teams_seen": len(scan["team_statuses"]),
+                    "candidates": len(candidates),
+                    "launched": launched,
+                    "skipped": skipped,
+                    "partial": True,
+                    "degraded": True,
+                }
+
             return {
                 "success": True,
                 "events_seen": len(scan["raw_events"]),
