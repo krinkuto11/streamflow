@@ -42,6 +42,8 @@ logger = setup_logging(__name__)
 
 CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/data"))
 CONFIG_FILE = CONFIG_DIR / "shadow_blank_monitor_config.json"
+SAFETY_STATE_FILE = CONFIG_DIR / "shadow_blank_monitor_safety_state.json"
+SAFETY_STATE_VERSION = 1
 MAX_EVENTS = 100
 LOOP_SWITCH_REQUIRES_PRE_PROBE = True
 LOOP_PENDING_PROBE_OK_MISS_TOLERANCE = 1
@@ -439,6 +441,7 @@ class ShadowBlankMonitorService:
         self,
         *,
         config_file: Path = CONFIG_FILE,
+        safety_state_file: Optional[Path] = None,
         udi_provider: Callable[[], Any] = get_udi_manager,
         switch_stream: Callable[..., bool] = change_channel_stream,
         base_url_provider: Optional[Callable[[], Optional[str]]] = None,
@@ -448,6 +451,11 @@ class ShadowBlankMonitorService:
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.config_file = config_file
+        self.safety_state_file = safety_state_file or (
+            SAFETY_STATE_FILE
+            if config_file == CONFIG_FILE
+            else config_file.with_name(f"{config_file.stem}_safety_state.json")
+        )
         self.udi_provider = udi_provider
         self.switch_stream = switch_stream
         self._uses_default_switch_stream = switch_stream is change_channel_stream
@@ -483,6 +491,7 @@ class ShadowBlankMonitorService:
         self._last_loop_probe_started_at: Dict[str, float] = {}
         self._last_scan_at: Optional[float] = None
         self._last_error: Optional[str] = None
+        self._load_safety_state()
 
     def _load_config(self) -> Dict[str, Any]:
         try:
@@ -498,6 +507,84 @@ class ShadowBlankMonitorService:
         with open(self.config_file, "w", encoding="utf-8") as handle:
             json.dump(self._config, handle, indent=2, sort_keys=True)
             handle.write("\n")
+
+    def _load_safety_state(self) -> None:
+        try:
+            if not self.safety_state_file.exists():
+                return
+            with open(self.safety_state_file, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if not isinstance(payload, dict):
+                raise ValueError("safety state must be an object")
+
+            now = self.clock()
+            max_cooldown = int(
+                self._config.get("channel_cooldown_seconds")
+                or DEFAULT_CONFIG["channel_cooldown_seconds"]
+            )
+            cooldowns: Dict[str, float] = {}
+            for channel_uuid, raw_until in (payload.get("cooldowns") or {}).items():
+                try:
+                    until = float(raw_until)
+                except (TypeError, ValueError):
+                    continue
+                if until > now:
+                    cooldowns[str(channel_uuid)] = min(until, now + max_cooldown)
+
+            switch_history: Dict[str, deque[float]] = defaultdict(deque)
+            for channel_uuid, raw_history in (payload.get("switch_history") or {}).items():
+                if not isinstance(raw_history, list):
+                    continue
+                restored = []
+                for raw_timestamp in raw_history:
+                    try:
+                        timestamp = min(float(raw_timestamp), now)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= now - timestamp <= 3600:
+                        restored.append(timestamp)
+                if restored:
+                    switch_history[str(channel_uuid)].extend(sorted(restored))
+
+            with self._lock:
+                self._cooldowns = cooldowns
+                self._switch_history = switch_history
+        except Exception as exc:
+            logger.warning("Failed to load Shadow Monitor safety state: %s", exc)
+
+    def _save_safety_state_locked(self) -> None:
+        now = self.clock()
+        cooldowns = {
+            channel_uuid: until
+            for channel_uuid, until in self._cooldowns.items()
+            if until > now
+        }
+        switch_history = {
+            channel_uuid: [timestamp for timestamp in history if 0 <= now - timestamp <= 3600]
+            for channel_uuid, history in self._switch_history.items()
+        }
+        switch_history = {
+            channel_uuid: history
+            for channel_uuid, history in switch_history.items()
+            if history
+        }
+        payload = {
+            "version": SAFETY_STATE_VERSION,
+            "updated_at": now,
+            "cooldowns": cooldowns,
+            "switch_history": switch_history,
+        }
+        try:
+            self.safety_state_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_file = self.safety_state_file.with_suffix(self.safety_state_file.suffix + ".tmp")
+            with open(temp_file, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_file, self.safety_state_file)
+        except Exception as exc:
+            logger.warning("Failed to persist Shadow Monitor safety state: %s", exc)
 
     def get_config(self, *, include_secret: bool = False) -> Dict[str, Any]:
         with self._lock:
@@ -1950,8 +2037,7 @@ class ShadowBlankMonitorService:
             )
         self._reset_blank_count(channel_uuid)
         if success:
-            with self._lock:
-                self._switch_history[channel_uuid].append(self.clock())
+            self._record_successful_switch(channel_uuid)
         else:
             self._set_cooldown(channel_uuid, config)
         switch_details["switch_api_success"] = api_success
@@ -4778,15 +4864,28 @@ class ShadowBlankMonitorService:
 
     def _cooldown_remaining(self, channel_uuid: str) -> int:
         with self._lock:
-            return max(0, int(self._cooldowns.get(channel_uuid, 0) - self.clock()))
+            now = self.clock()
+            until = self._cooldowns.get(channel_uuid, 0)
+            if until <= now and channel_uuid in self._cooldowns:
+                self._cooldowns.pop(channel_uuid, None)
+                self._save_safety_state_locked()
+                return 0
+            return max(0, int(until - now))
 
     def _set_cooldown(self, channel_uuid: str, config: Dict[str, Any]) -> None:
         with self._lock:
             self._cooldowns[channel_uuid] = self.clock() + int(config["channel_cooldown_seconds"])
+            self._save_safety_state_locked()
 
     def _clear_cooldown(self, channel_uuid: str) -> None:
         with self._lock:
-            self._cooldowns.pop(channel_uuid, None)
+            if self._cooldowns.pop(channel_uuid, None) is not None:
+                self._save_safety_state_locked()
+
+    def _record_successful_switch(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._switch_history[channel_uuid].append(self.clock())
+            self._save_safety_state_locked()
 
     def _attempted_switch_targets(
         self,
@@ -4851,8 +4950,12 @@ class ShadowBlankMonitorService:
         now = self.clock()
         with self._lock:
             history = self._switch_history[channel_uuid]
+            pruned = False
             while history and now - history[0] > 3600:
                 history.popleft()
+                pruned = True
+            if pruned:
+                self._save_safety_state_locked()
             return len(history) < int(config["max_switches_per_hour"])
 
     @staticmethod

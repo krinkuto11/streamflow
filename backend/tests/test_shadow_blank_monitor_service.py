@@ -1396,6 +1396,38 @@ def test_shadow_loop_cooldown_blocks_repeated_probe_switch(tmp_path):
     assert status["switch_summary"]["successful_switches"] == 0
 
 
+def test_shadow_safety_gates_survive_service_restart_and_expire(tmp_path):
+    now = {"value": 1000.0}
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    config = normalize_config({
+        "channel_cooldown_seconds": 300,
+        "max_switches_per_hour": 1,
+    })
+
+    first = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    first._set_cooldown("uuid-1", config)
+    first._record_successful_switch("uuid-1")
+
+    restarted = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+
+    assert restarted._cooldown_remaining("uuid-1") == 300
+    assert restarted._switch_allowed("uuid-1", config) is False
+    assert restarted.safety_state_file.exists()
+
+    now["value"] = 1401.0
+    after_cooldown = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    assert after_cooldown._cooldown_remaining("uuid-1") == 0
+    assert after_cooldown._switch_allowed("uuid-1", config) is False
+
+    now["value"] = 4601.0
+    after_window = make_service(tmp_path, udi=udi, clock=lambda: now["value"])
+    assert after_window._cooldown_remaining("uuid-1") == 0
+    assert after_window._switch_allowed("uuid-1", config) is True
+
+
 def test_learn_offline_image_from_current_frame_adds_hash(tmp_path, monkeypatch):
     service = make_service(
         tmp_path,
