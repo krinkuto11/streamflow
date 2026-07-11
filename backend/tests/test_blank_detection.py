@@ -141,6 +141,55 @@ class TestVisualProbeDurationContract(unittest.TestCase):
 
 
 class TestBlankDetectionFfmpegCommand(unittest.TestCase):
+    @patch.object(stream_check_utils, "_ffprobe_media_fallback")
+    @patch.object(stream_check_utils.subprocess, "run")
+    def test_visual_probe_runs_after_basis_timeout_with_valid_media_fallback(
+        self,
+        mock_run,
+        mock_ffprobe_fallback,
+    ):
+        mock_run.side_effect = [
+            subprocess.TimeoutExpired(["ffmpeg"], 45),
+            Mock(stderr=_ffmpeg_output(), returncode=0),
+        ]
+        mock_ffprobe_fallback.return_value = {
+            "video_codec": "h264",
+            "audio_codec": "aac",
+            "resolution": "1920x1080",
+            "fps": 25.0,
+            "bitrate_kbps": None,
+            "bitrate_source": "ffprobe_media_fallback_no_bitrate",
+            "hdr_format": None,
+            "pixel_format": "yuv420p",
+            "audio_sample_rate": 48000,
+            "audio_channels": 2,
+            "channel_layout": "stereo",
+            "audio_bitrate": 128,
+            "status": "OK",
+            "ffprobe_fallback_ran": True,
+            "ffprobe_fallback_reason": "ffmpeg_timeout",
+            "ffprobe_fallback_elapsed_time": 0.5,
+        }
+
+        result = get_stream_info_and_bitrate(
+            "http://example.com/test.m3u8",
+            duration=5,
+            timeout=30,
+            blank_check_enabled=True,
+            freeze_check_enabled=True,
+            freeze_check_min_duration=5.0,
+        )
+
+        self.assertEqual(mock_run.call_count, 2)
+        visual_command = mock_run.call_args_list[1].args[0]
+        self.assertIn("-vf", visual_command)
+        self.assertEqual(visual_command[visual_command.index("-t") + 1], "10")
+        self.assertTrue(result["ffprobe_fallback_ran"])
+        self.assertTrue(result["visual_probe_ran"])
+        self.assertTrue(result["visual_probe_completed"])
+        self.assertTrue(result["blank_probe_ran"])
+        self.assertTrue(result["freeze_probe_ran"])
+
     @patch.object(stream_check_utils.subprocess, "run")
     def test_visual_probe_extends_to_detector_minimum_and_reports_adjustment(self, mock_run):
         mock_run.side_effect = [

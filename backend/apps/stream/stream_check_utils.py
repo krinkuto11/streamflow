@@ -1665,6 +1665,28 @@ def get_stream_info_and_bitrate(
         'ffprobe_fallback_elapsed_time': None,
     }
 
+    def apply_visual_probe() -> None:
+        if not (blank_check_enabled or freeze_check_enabled):
+            return
+        visual_result = _run_visual_detection_probe(
+            url,
+            duration=duration,
+            timeout=timeout,
+            user_agent=user_agent,
+            stream_startup_buffer=stream_startup_buffer,
+            blank_check_enabled=blank_check_enabled,
+            blank_check_min_duration=blank_check_min_duration,
+            blank_check_pixel_threshold=blank_check_pixel_threshold,
+            blank_check_ratio_threshold=blank_check_ratio_threshold,
+            freeze_check_enabled=freeze_check_enabled,
+            freeze_check_min_duration=freeze_check_min_duration,
+            freeze_check_noise_threshold=freeze_check_noise_threshold,
+            freeze_check_ratio_threshold=freeze_check_ratio_threshold,
+            hardware_acceleration=hardware_acceleration,
+            preempt_check=preempt_check,
+        )
+        result_data.update(visual_result)
+
     try:
         start = time.time()
         result = _run_ffmpeg_with_optional_fallback(
@@ -1904,25 +1926,7 @@ def get_stream_info_and_bitrate(
                 ]
                 _log_ffmpeg_errors(output, logger, error_patterns)
 
-        if blank_check_enabled or freeze_check_enabled:
-            visual_result = _run_visual_detection_probe(
-                url,
-                duration=duration,
-                timeout=timeout,
-                user_agent=user_agent,
-                stream_startup_buffer=stream_startup_buffer,
-                blank_check_enabled=blank_check_enabled,
-                blank_check_min_duration=blank_check_min_duration,
-                blank_check_pixel_threshold=blank_check_pixel_threshold,
-                blank_check_ratio_threshold=blank_check_ratio_threshold,
-                freeze_check_enabled=freeze_check_enabled,
-                freeze_check_min_duration=freeze_check_min_duration,
-                freeze_check_noise_threshold=freeze_check_noise_threshold,
-                freeze_check_ratio_threshold=freeze_check_ratio_threshold,
-                hardware_acceleration=hardware_acceleration,
-                preempt_check=preempt_check,
-            )
-            result_data.update(visual_result)
+        apply_visual_probe()
 
         logger.debug(f"  Analysis completed in {elapsed:.2f}s")
 
@@ -1939,6 +1943,7 @@ def get_stream_info_and_bitrate(
             result_data['elapsed_time'] = actual_timeout + float(
                 fallback.get('ffprobe_fallback_elapsed_time') or 0.0
             )
+            apply_visual_probe()
         else:
             result_data['status'] = "Timeout"
             result_data['elapsed_time'] = actual_timeout
