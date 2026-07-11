@@ -25,6 +25,7 @@ import math
 import os
 import threading
 import time
+from copy import deepcopy
 from collections import defaultdict, deque, Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1620,6 +1621,51 @@ class StreamCheckerService:
             if self.batch_start_time is not None:
                 self.batch_changelog_entries.append(channel_entry)
                 logger.debug(f"Added channel entry to batch (total: {len(self.batch_changelog_entries)})")
+
+    def _build_batch_changelog_entry(
+        self,
+        *,
+        channel_id: int,
+        channel_name: str,
+        logo_url: Optional[str],
+        total_streams: int,
+        stream_stats: List[Dict[str, Any]],
+        averages: Dict[str, Any],
+        skipped_streams: Optional[List[Dict[str, Any]]] = None,
+        channel_visibility: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build the canonical, complete per-channel batch changelog payload."""
+        complete_stats = deepcopy([
+            item for item in stream_stats
+            if isinstance(item, dict)
+        ])
+        checked = {"checked_streams": complete_stats}
+        entry = {
+            "channel_id": channel_id,
+            "channel_name": channel_name,
+            "logo_url": logo_url,
+            "total_streams": total_streams,
+            "streams_analyzed": len(complete_stats),
+            "dead_streams_detected": self._count_failed_checked_streams(checked),
+            "blank_streams_detected": self._count_checked_stream_status(checked, "blank"),
+            "freeze_streams_detected": self._count_checked_stream_status(checked, "freeze"),
+            "streams_revived": sum(
+                1 for item in complete_stats if item.get("status") == "revived"
+            ),
+            "incomplete_bitrate_streams": sum(
+                1 for item in complete_stats if item.get("status") == "incomplete_bitrate"
+            ),
+            "avg_resolution": averages.get("avg_resolution", "N/A"),
+            "avg_bitrate": averages.get("avg_bitrate", "N/A"),
+            "avg_fps": averages.get("avg_fps", "N/A"),
+            "success": True,
+            "stream_stats": complete_stats,
+            "skipped_streams": deepcopy(skipped_streams or []),
+        }
+        visibility_changelog = self._visibility_changelog_result(channel_visibility)
+        if visibility_changelog:
+            entry["channel_visibility"] = visibility_changelog
+        return entry
     
     def _finalize_batch_changelog(self):
         """Finalize the current batch and create a consolidated changelog entry."""
@@ -1657,15 +1703,13 @@ class StreamCheckerService:
                 total_streams = sum(entry.get('total_streams', 0) for entry in self.batch_changelog_entries)
                 streams_analyzed = sum(entry.get('streams_analyzed', 0) for entry in self.batch_changelog_entries)
                 dead_streams = sum(entry.get('dead_streams_detected', 0) for entry in self.batch_changelog_entries)
-                blank_streams = sum(
-                    self._count_checked_stream_status({'checked_streams': entry.get('stream_stats', [])}, 'blank')
-                    for entry in self.batch_changelog_entries
-                )
-                freeze_streams = sum(
-                    self._count_checked_stream_status({'checked_streams': entry.get('stream_stats', [])}, 'freeze')
-                    for entry in self.batch_changelog_entries
-                )
+                blank_streams = sum(entry.get('blank_streams_detected', 0) for entry in self.batch_changelog_entries)
+                freeze_streams = sum(entry.get('freeze_streams_detected', 0) for entry in self.batch_changelog_entries)
                 streams_revived = sum(entry.get('streams_revived', 0) for entry in self.batch_changelog_entries)
+                incomplete_bitrate_streams = sum(
+                    entry.get('incomplete_bitrate_streams', 0)
+                    for entry in self.batch_changelog_entries
+                )
                 successful_checks = sum(1 for entry in self.batch_changelog_entries if entry.get('success', False))
                 failed_checks = total_channels - successful_checks
                 
@@ -1681,15 +1725,10 @@ class StreamCheckerService:
                                 "total_streams": entry.get('total_streams', 0),
                                 "streams_analyzed": entry.get('streams_analyzed', 0),
                                 "dead_streams": entry.get('dead_streams_detected', 0),
-                                "blank_streams": self._count_checked_stream_status(
-                                    {'checked_streams': entry.get('stream_stats', [])},
-                                    'blank',
-                                ),
-                                "freeze_streams": self._count_checked_stream_status(
-                                    {'checked_streams': entry.get('stream_stats', [])},
-                                    'freeze',
-                                ),
+                                "blank_streams": entry.get('blank_streams_detected', 0),
+                                "freeze_streams": entry.get('freeze_streams_detected', 0),
                                 "streams_revived": entry.get('streams_revived', 0),
+                                "incomplete_bitrate_streams": entry.get('incomplete_bitrate_streams', 0),
                                 "avg_resolution": entry.get('avg_resolution', 'N/A'),
                                 "avg_bitrate": entry.get('avg_bitrate', 'N/A'),
                                 "avg_fps": entry.get('avg_fps', 'N/A'),
@@ -1714,6 +1753,7 @@ class StreamCheckerService:
                         'blank_streams': blank_streams,
                         'freeze_streams': freeze_streams,
                         'streams_revived': streams_revived,
+                        'incomplete_bitrate_streams': incomplete_bitrate_streams,
                         'duration': duration_str,
                         'duration_seconds': duration_seconds
                     },
@@ -3473,24 +3513,16 @@ class StreamCheckerService:
                     # Add to batch instead of creating individual changelog entry
                     # Only add to batch if not explicitly skipped (e.g., when called from check_single_channel)
                     if not skip_batch_changelog:
-                        batch_entry = {
-                            'channel_id': channel_id,
-                            'channel_name': channel_name,
-                            'logo_url': logo_url,
-                            'total_streams': len(streams),
-                            'streams_analyzed': len(analyzed_streams),
-                            'dead_streams_detected': len(dead_stream_ids),
-                            'streams_revived': len(revived_stream_ids),
-                            'avg_resolution': averages['avg_resolution'],
-                            'avg_bitrate': averages['avg_bitrate'],
-                            'avg_fps': averages['avg_fps'],
-                            'success': True,
-                            'stream_stats': stream_stats,
-                            'skipped_streams': active_viewer_skipped_streams,
-                        }
-                        visibility_changelog = self._visibility_changelog_result(visibility_result)
-                        if visibility_changelog:
-                            batch_entry['channel_visibility'] = visibility_changelog
+                        batch_entry = self._build_batch_changelog_entry(
+                            channel_id=channel_id,
+                            channel_name=channel_name,
+                            logo_url=logo_url,
+                            total_streams=len(streams),
+                            stream_stats=stream_stats,
+                            averages=averages,
+                            skipped_streams=active_viewer_skipped_streams,
+                            channel_visibility=visibility_result,
+                        )
                         self._add_to_batch_changelog(batch_entry)
                 except Exception as e:
                     logger.warning(f"Failed to add to batch changelog: {e}")
@@ -4636,24 +4668,16 @@ class StreamCheckerService:
                     # Add to batch changelog instead of creating individual entry
                     # Only add to batch if not explicitly skipped (e.g., when called from check_single_channel)
                     if not skip_batch_changelog:
-                        batch_entry = {
-                            'channel_id': channel_id,
-                            'channel_name': channel_name,
-                            'logo_url': logo_url,
-                            'total_streams': len(streams),
-                            'streams_analyzed': len(analyzed_streams),
-                            'dead_streams_detected': len(dead_stream_ids),
-                            'streams_revived': len(revived_stream_ids),
-                            'avg_resolution': averages['avg_resolution'],
-                            'avg_bitrate': averages['avg_bitrate'],
-                            'avg_fps': averages['avg_fps'],
-                            'success': True,
-                            'stream_details': stream_stats[:10],  # Limit to top 10 for brevity
-                            'skipped_streams': active_viewer_skipped_streams,
-                        }
-                        visibility_changelog = self._visibility_changelog_result(visibility_result)
-                        if visibility_changelog:
-                            batch_entry['channel_visibility'] = visibility_changelog
+                        batch_entry = self._build_batch_changelog_entry(
+                            channel_id=channel_id,
+                            channel_name=channel_name,
+                            logo_url=logo_url,
+                            total_streams=len(streams),
+                            stream_stats=stream_stats,
+                            averages=averages,
+                            skipped_streams=active_viewer_skipped_streams,
+                            channel_visibility=visibility_result,
+                        )
                         self._add_to_batch_changelog(batch_entry)
                         logger.info(f"Added channel {channel_name} to batch changelog")
                 except Exception as e:
