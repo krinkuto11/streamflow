@@ -14,6 +14,7 @@ import {
   getChangelogVisibilityMetrics,
 } from '@/lib/changelog-run-summary.js'
 import { formatDuration } from '@/lib/time-format.js'
+import { TELEMETRY_DATE_RANGES } from '@/lib/telemetry-retention.js'
 import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download, EyeOff } from 'lucide-react'
 
 function formatTimestamp(timestamp) {
@@ -1173,10 +1174,9 @@ export default function Changelog() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="1">Last 24 hours</SelectItem>
-              <SelectItem value="7">Last 7 days</SelectItem>
-              <SelectItem value="30">Last 30 days</SelectItem>
-              <SelectItem value="90">Last 90 days</SelectItem>
+              {TELEMETRY_DATE_RANGES.map((range) => (
+                <SelectItem key={range.value} value={range.value}>{range.label}</SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
