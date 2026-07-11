@@ -54,6 +54,7 @@ def clean_test_db(monkeypatch):
     """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
 
     for alias, target in LEGACY_MODULE_ALIASES.items():
         _install_legacy_module_alias(alias, target, force=True)
@@ -71,9 +72,15 @@ def clean_test_db(monkeypatch):
 
     import apps.database.connection as conn
     import apps.database.manager as mgr
+    import apps.config.dispatcharr_config as dispatcharr_config_module
 
     # Create a brand-new in-memory engine for this test
-    test_engine = create_engine('sqlite:///:memory:', echo=False)
+    test_engine = create_engine(
+        'sqlite://',
+        echo=False,
+        connect_args={'check_same_thread': False},
+        poolclass=StaticPool,
+    )
     TestSession = sessionmaker(bind=test_engine)
 
     monkeypatch.setattr(conn, 'get_engine', lambda: test_engine)
@@ -82,6 +89,7 @@ def clean_test_db(monkeypatch):
     # Reset the singleton so the next get_db_manager() call creates a fresh
     # instance that uses the patched session factory.
     mgr._db_manager = None
+    dispatcharr_config_module._dispatcharr_config = None
 
     # Create all tables
     from apps.database.connection import Base
@@ -96,4 +104,5 @@ def clean_test_db(monkeypatch):
     # Cleanup
     reset_stream_limiter_state()
     mgr._db_manager = None
+    dispatcharr_config_module._dispatcharr_config = None
     Base.metadata.drop_all(test_engine)

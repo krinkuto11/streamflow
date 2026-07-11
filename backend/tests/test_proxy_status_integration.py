@@ -11,6 +11,7 @@ This test suite verifies that:
 import sys
 import os
 import unittest
+import pytest
 from unittest.mock import Mock, patch, MagicMock
 import time
 
@@ -18,6 +19,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.udi.manager import UDIManager
+
+pytestmark = pytest.mark.integration
 
 
 class TestProxyStatusIntegration(unittest.TestCase):

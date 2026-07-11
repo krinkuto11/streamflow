@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   backend:
-    name: Backend smoke tests
+    name: Backend stable suite
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -31,8 +31,35 @@ jobs:
           python -m pip install -r backend/requirements.txt
           python -m pip install -r backend/requirements-dev.txt
 
-      - name: Run backend checks
-        run: python scripts/run_ci_checks.py
+      - name: Compile backend
+        run: python -m compileall backend/apps
+
+      - name: Run stable backend suite
+        run: python -m pytest backend/tests -m "not integration and not live" -q
+
+  backend-integration:
+    name: Backend integration contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+
+      - name: Install backend dependencies
+        run: |
+          python -m pip install -r backend/requirements.txt
+          python -m pip install -r backend/requirements-dev.txt
+
+      - name: Run isolated integration contracts
+        run: python -m pytest backend/tests -m "integration and not live" -q
 
   frontend:
     name: Frontend build and tests

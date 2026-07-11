@@ -7,10 +7,13 @@ with the stream checking service.
 """
 
 import unittest
+import pytest
 from unittest.mock import Mock, patch, MagicMock
 import sys
 import os
 import json
+
+pytestmark = pytest.mark.integration
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

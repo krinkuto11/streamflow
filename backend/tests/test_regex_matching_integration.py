@@ -9,6 +9,9 @@ This test ensures:
 """
 
 import unittest
+import pytest
+
+pytestmark = pytest.mark.integration
 import tempfile
 import json
 import os

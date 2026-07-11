@@ -8,6 +8,7 @@ continuous monitoring, and reliability scoring using a Capped Sliding Window alg
 import json
 import logging
 import os
+import copy
 import threading
 import time
 from datetime import datetime, timedelta
@@ -275,6 +276,13 @@ class StreamSessionManager:
         self.session_locks: Dict[str, threading.Lock] = {}
         self.scoring_windows: Dict[str, Dict[int, CappedSlidingWindow]] = {}  # session_id -> stream_id -> window
         self.channel_ownership: Dict[int, str] = {}  # channel_id -> session_id
+        self._session_save_condition = threading.Condition()
+        self._session_save_generation = 0
+        self._session_persisted_generation = 0
+        self._session_failed_generation = 0
+        self._pending_session_snapshot = None
+        self._session_save_worker_thread = None
+        self._last_session_save_error = None
         
         from apps.database.manager import get_db_manager
         self.db = get_db_manager()
@@ -303,6 +311,14 @@ class StreamSessionManager:
         """Initialize volatile fields for reused or legacy singleton instances."""
         if not hasattr(self, '_last_streams_refresh'):
             self._last_streams_refresh = 0
+        if not hasattr(self, '_session_save_condition'):
+            self._session_save_condition = threading.Condition()
+            self._session_save_generation = 0
+            self._session_persisted_generation = 0
+            self._session_failed_generation = 0
+            self._pending_session_snapshot = None
+            self._session_save_worker_thread = None
+            self._last_session_save_error = None
 
     def get_review_duration(self) -> float: return self.review_duration
     def set_review_duration(self, duration: float):
@@ -378,47 +394,131 @@ class StreamSessionManager:
         finally:
             session.close()
 
-    def _save_sessions(self):
+    def _save_sessions(self, *, wait: bool = False, timeout_seconds: float = 10.0) -> bool:
+        """Queue the latest complete session snapshot for serialized persistence."""
+        self._ensure_runtime_state()
         try:
-            import copy
             snapshot = copy.deepcopy(dict(self.sessions))
-            def _execute_save(snapshot):
-                from apps.database.models import MonitoringSession
-                from apps.database.connection import get_session
-                session = get_session()
-                try:
-                    for cs_id, s_info in snapshot.items():
-                         # Pack Session Info
-                         base_raw = {k: v for k, v in self._serialize_session(s_info).items() if k != 'streams'}
-                         base_raw['channel_session_id'] = cs_id
-                         
-                         for stream_id, stream_info in s_info.streams.items():
-                              ms_id = f"{cs_id}_{stream_id}"
-                              ms = session.query(MonitoringSession).filter(MonitoringSession.session_id == ms_id).first()
-                              if not ms:
-                                   ms = MonitoringSession(session_id=ms_id)
-                                   session.add(ms)
-                              ms.stream_id = stream_id
-                              ms.status = stream_info.status
-                              ms.current_speed = getattr(stream_info, 'current_speed', 0.0)
-                              ms.current_bitrate = getattr(stream_info, 'bitrate', 0)
-                              
-                              # Combine base_raw with stream info
-                              from dataclasses import asdict
-                              item_raw = base_raw.copy()
-                              item_raw.update(asdict(stream_info) if not isinstance(stream_info, dict) else stream_info)
-                              if 'metrics_history' in item_raw: del item_raw['metrics_history']
-                              ms.raw_info = item_raw
-                    session.commit()
-                except Exception as e:
-                    session.rollback()
-                    logger.error(f"Background save sessions failed: {e}")
-                finally: session.close()
-
-            import threading
-            threading.Thread(target=_execute_save, args=(snapshot,), daemon=True, name="SessionSaver").start()
         except Exception as e:
             logger.error(f"Failed to trigger save sessions: {e}")
+            return False
+
+        with self._session_save_condition:
+            self._session_save_generation += 1
+            generation = self._session_save_generation
+            self._pending_session_snapshot = (generation, snapshot)
+            worker = self._session_save_worker_thread
+            if worker is None or not worker.is_alive():
+                worker = threading.Thread(
+                    target=self._session_save_worker,
+                    daemon=True,
+                    name="SessionSaver",
+                )
+                self._session_save_worker_thread = worker
+                worker.start()
+
+            if not wait:
+                return True
+
+            deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+            while (
+                self._session_persisted_generation < generation
+                and self._session_failed_generation < generation
+            ):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.error("Timed out waiting for session snapshot generation %s", generation)
+                    return False
+                self._session_save_condition.wait(timeout=remaining)
+
+            return self._session_persisted_generation >= generation
+
+    def _session_save_worker(self) -> None:
+        """Persist queued snapshots one at a time, coalescing intermediate saves."""
+        while True:
+            with self._session_save_condition:
+                pending = self._pending_session_snapshot
+                self._pending_session_snapshot = None
+                if pending is None:
+                    self._session_save_worker_thread = None
+                    self._session_save_condition.notify_all()
+                    return
+
+            generation, snapshot = pending
+            ok, error = self._persist_sessions_snapshot(snapshot)
+
+            with self._session_save_condition:
+                if ok:
+                    self._session_persisted_generation = max(
+                        self._session_persisted_generation,
+                        generation,
+                    )
+                    self._last_session_save_error = None
+                else:
+                    self._session_failed_generation = max(
+                        self._session_failed_generation,
+                        generation,
+                    )
+                    self._last_session_save_error = error
+                self._session_save_condition.notify_all()
+
+    def _persist_sessions_snapshot(self, snapshot: Dict[str, SessionInfo]):
+        """Atomically reconcile the SQL table with one complete snapshot."""
+        from apps.database.models import MonitoringSession
+        from apps.database.connection import get_session
+
+        desired_rows = {}
+        for session_id, session_info in snapshot.items():
+            serialized = self._serialize_session(session_info)
+            base_raw = {key: value for key, value in serialized.items() if key != 'streams'}
+            base_raw['channel_session_id'] = session_id
+            desired_rows[session_id] = {
+                'stream_id': None,
+                'status': 'active' if session_info.is_active else 'stopped',
+                'current_speed': 0.0,
+                'current_bitrate': 0,
+                'raw_info': base_raw,
+            }
+
+            for stream_id, stream_info in session_info.streams.items():
+                stream_raw = asdict(stream_info) if not isinstance(stream_info, dict) else dict(stream_info)
+                stream_raw.pop('metrics_history', None)
+                item_raw = dict(base_raw)
+                item_raw.update(stream_raw)
+                desired_rows[f"{session_id}_{stream_id}"] = {
+                    'stream_id': stream_id,
+                    'status': stream_info.status if not isinstance(stream_info, dict) else stream_info.get('status', 'review'),
+                    'current_speed': getattr(stream_info, 'current_speed', 0.0) if not isinstance(stream_info, dict) else stream_info.get('current_speed', 0.0),
+                    'current_bitrate': getattr(stream_info, 'bitrate', 0) if not isinstance(stream_info, dict) else stream_info.get('bitrate', 0),
+                    'raw_info': item_raw,
+                }
+
+        db_session = get_session()
+        try:
+            existing = {
+                row.session_id: row
+                for row in db_session.query(MonitoringSession).all()
+            }
+            for row_id, row in existing.items():
+                if row_id not in desired_rows:
+                    db_session.delete(row)
+
+            for row_id, values in desired_rows.items():
+                row = existing.get(row_id)
+                if row is None:
+                    row = MonitoringSession(session_id=row_id)
+                    db_session.add(row)
+                for key, value in values.items():
+                    setattr(row, key, value)
+
+            db_session.commit()
+            return True, None
+        except Exception as exc:
+            db_session.rollback()
+            logger.error("Background save sessions failed: %s", exc, exc_info=True)
+            return False, str(exc)
+        finally:
+            db_session.close()
 
     def _serialize_session(self, session: SessionInfo) -> Dict[str, Any]:
         """Serialize session to JSON-compatible dict"""
@@ -1227,14 +1327,23 @@ class StreamSessionManager:
         except Exception as e:
             logger.error(f"Error cleaning up screenshots for deleted session {session_id}: {e}")
         
-        # Remove session
-        del self.sessions[session_id]
-        if session_id in self.session_locks:
-            del self.session_locks[session_id]
-        if session_id in self.scoring_windows:
-            del self.scoring_windows[session_id]
-        
-        self._save_sessions()
+        removed_session = self.sessions.pop(session_id)
+        removed_lock = self.session_locks.pop(session_id, None)
+        removed_windows = self.scoring_windows.pop(session_id, None)
+        removed_owner = self.channel_ownership.pop(removed_session.channel_id, None)
+
+        if not self._save_sessions(wait=True):
+            self.sessions[session_id] = removed_session
+            if removed_lock is not None:
+                self.session_locks[session_id] = removed_lock
+            if removed_windows is not None:
+                self.scoring_windows[session_id] = removed_windows
+            if removed_owner is not None:
+                self.channel_ownership[removed_session.channel_id] = removed_owner
+            self._save_sessions()
+            logger.error("Delete session %s rolled back because persistence failed", session_id)
+            return False
+
         logger.info(f"Deleted session {session_id}")
         return True
 

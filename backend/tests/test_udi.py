@@ -734,6 +734,7 @@ class TestUDIManager(unittest.TestCase):
             result = self.manager.refresh_all()
 
         self.assertTrue(result)
+        self.assertTrue(self.manager.is_initialized())
         self.assertEqual({channel['id'] for channel in self.manager.get_channels()}, {1, 42})
         self.assertEqual(self.manager.get_channel_by_id(42)['name'], 'Hidden News')
         self.assertEqual(self.manager.get_profile_channels(7)['channels'], [42])

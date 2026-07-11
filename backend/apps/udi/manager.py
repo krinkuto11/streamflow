@@ -1356,6 +1356,7 @@ class UDIManager:
                 self._stream_account_id       = new_stream_account_id
                 self._profile_to_account_id   = new_profile_to_account
                 self._has_custom_streams      = new_has_custom
+                self._initialized             = True
 
             now = datetime.now()
 

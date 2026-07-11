@@ -9,12 +9,15 @@ This test shows that the single channel check now correctly:
 """
 
 import unittest
+import pytest
 from unittest.mock import Mock, patch
 import sys
 import os
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+pytestmark = pytest.mark.integration
 
 
 class TestSingleChannelCheckIntegration(unittest.TestCase):

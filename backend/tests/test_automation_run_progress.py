@@ -72,7 +72,9 @@ def test_udi_cache_sync_progress_tracks_streams_and_channels():
     observed = []
     udi = Mock()
 
-    def refresh_streams(progress_callback=None):
+    def refresh_streams(progress_callback=None, cancel_check=None):
+        assert cancel_check is not None
+        assert cancel_check() is False
         observed.append(manager.get_run_status()["progress"].copy())
         if progress_callback is not None:
             progress_callback({
