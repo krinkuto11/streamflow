@@ -1076,6 +1076,16 @@ class ShadowBlankMonitorService:
             target.update(watcher_details)
             if continuous_mode:
                 probe_running = channel_uuid in active_probe_channels
+                for probe_status_key in (
+                    "probe_state",
+                    "probe_active",
+                    "active_probe_started_at",
+                    "next_probe_at",
+                    "last_probe",
+                    "last_event",
+                ):
+                    if probe_status_key in previous_target:
+                        target[probe_status_key] = previous_target[probe_status_key]
                 previous_probe_started = previous_target.get("active_probe_started_at")
                 if previous_probe_started is not None and previous_target.get("real_client_refs"):
                     target["real_client_refs"] = list(previous_target.get("real_client_refs") or [])

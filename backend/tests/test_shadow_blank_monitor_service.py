@@ -6817,6 +6817,50 @@ def test_waiting_probe_thread_does_not_reclassify_new_real_viewer_as_shadow(tmp_
     assert targets[0].get("viewer_left_grace_active") is not True
 
 
+def test_discovery_preserves_probe_status_for_ui_between_healthy_probes(tmp_path):
+    channel = {"id": 1, "uuid": "uuid-1", "name": "Das Erste HD", "streams": [10, 11]}
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(
+                stream_id=10,
+                clients=[{"client_id": "real-viewer", "user_agent": "TiviMate"}],
+            )
+        }],
+        channels=[channel],
+    )
+    service = make_service(tmp_path, udi=udi, clock=lambda: 1100.0)
+    last_probe = {"completed_at": 1090.0, "blank_detected": False}
+    last_event = {"timestamp": 1090.0, "type": "probe_ok"}
+    with service._lock:
+        service._watched["uuid-1"] = {
+            "channel_uuid": "uuid-1",
+            "channel_id": 1,
+            "channel_ref": "channel-1",
+            "channel_name": "Das Erste HD",
+            "stream_id": 10,
+            "stream_ref": "stream-10",
+            "real_client_count": 1,
+            "real_client_refs": ["client_id:real-viewer"],
+            "probe_state": "waiting",
+            "probe_active": False,
+            "next_probe_at": 1210.0,
+            "last_probe": last_probe,
+            "last_event": last_event,
+        }
+        service._active_probes.add("uuid-1")
+    config = normalize_config({"watch_mode": "continuous"})
+
+    targets = service.discover_active_targets(udi, config)
+    public_target = service.get_status()["watched_channels"][0]
+
+    assert targets[0]["probe_state"] == "waiting"
+    assert public_target["probe_state"] == "waiting"
+    assert public_target["probe_active"] is False
+    assert public_target["next_probe_at"] == 1210.0
+    assert public_target["last_probe"] == last_probe
+    assert public_target["last_event"] == last_event
+
+
 def test_quality_checker_guard_is_opt_in(tmp_path):
     probe_urls = []
     udi = FakeUdi(
