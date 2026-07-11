@@ -12,9 +12,41 @@ API_HOST="${API_HOST:-0.0.0.0}"
 API_PORT="${API_PORT:-5000}"
 DEBUG_MODE="${DEBUG_MODE:-false}"
 CONFIG_DIR="${CONFIG_DIR:-/app/data}"
+PUID="${PUID:-99}"
+PGID="${PGID:-100}"
+STREAMFLOW_RUN_AS_ROOT="${STREAMFLOW_RUN_AS_ROOT:-false}"
 
 # Export environment variables for the Flask application
 export API_HOST API_PORT DEBUG_MODE CONFIG_DIR
+
+run_as_root=false
+case "${STREAMFLOW_RUN_AS_ROOT,,}" in
+    true|1|yes|on) run_as_root=true ;;
+esac
+
+if [ "$(id -u)" = "0" ] && [ "$run_as_root" != "true" ]; then
+    case "$PUID:$PGID" in
+        *[!0-9:]*|:*|*:)
+            echo "[ERROR] PUID and PGID must be numeric." >&2
+            exit 1
+            ;;
+    esac
+
+    target_group="$(getent group "$PGID" | cut -d: -f1 || true)"
+    if [ -z "$target_group" ]; then
+        target_group="streamflow-runtime"
+        groupadd --gid "$PGID" "$target_group"
+    fi
+
+    existing_user="$(getent passwd "$PUID" | cut -d: -f1 || true)"
+    if [ -z "$existing_user" ] || [ "$existing_user" = "streamflow" ]; then
+        usermod --uid "$PUID" --gid "$PGID" streamflow
+    fi
+    mkdir -p csv logs "$CONFIG_DIR"
+    chown -R "$PUID:$PGID" csv logs "$CONFIG_DIR"
+    echo "[INFO] Dropping runtime privileges to ${PUID}:${PGID}."
+    exec gosu "$PUID:$PGID" "$0" "$@"
+fi
 
 # Deprecated: Old manual interval approach (kept for backward compatibility warnings)
 if [ -n "$INTERVAL_SECONDS" ]; then

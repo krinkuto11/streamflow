@@ -25,6 +25,7 @@ from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.api_utils import change_channel_stream
 from apps.core.atomic_json import atomic_write_json, load_json_with_backup
 from apps.core.logging_config import setup_logging
+from apps.core.secret_sources import external_secret_source, read_external_secret
 from apps.stream.stream_check_utils import (
     BLACK_DURATION_RE,
     BLACK_END_RE,
@@ -470,6 +471,16 @@ class ShadowBlankMonitorService:
         self._lock = threading.RLock()
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._external_watcher_api_key = read_external_secret(
+            "SHADOW_WATCHER_API_KEY",
+            "SHADOW_WATCHER_API_KEY_FILE",
+        )
+        self._watcher_api_key_managed_externally = bool(
+            external_secret_source(
+                "SHADOW_WATCHER_API_KEY",
+                "SHADOW_WATCHER_API_KEY_FILE",
+            )
+        )
         self._config = self._load_config()
         self._events: deque[Dict[str, Any]] = deque(maxlen=MAX_EVENTS)
         self._watched: Dict[str, Dict[str, Any]] = {}
@@ -500,12 +511,16 @@ class ShadowBlankMonitorService:
             default=None,
             validator=lambda value: isinstance(value, dict),
         )
-        if payload is not None:
-            return normalize_config(payload)
-        return normalize_config({})
+        config = normalize_config(payload if payload is not None else {})
+        if self._watcher_api_key_managed_externally:
+            config["watcher_api_key"] = self._external_watcher_api_key or ""
+        return config
 
     def _save_config(self) -> None:
-        atomic_write_json(self.config_file, self._config, sort_keys=True)
+        persisted = dict(self._config)
+        if self._watcher_api_key_managed_externally:
+            persisted["watcher_api_key"] = ""
+        atomic_write_json(self.config_file, persisted, sort_keys=True)
 
     def _load_safety_state(self) -> None:
         try:
@@ -583,13 +598,23 @@ class ShadowBlankMonitorService:
 
     def get_config(self, *, include_secret: bool = False) -> Dict[str, Any]:
         with self._lock:
-            return dict(self._config) if include_secret else public_config(self._config)
+            if include_secret:
+                return dict(self._config)
+            visible = public_config(self._config)
+            visible["watcher_api_key_managed_externally"] = bool(
+                self._watcher_api_key_managed_externally
+            )
+            return visible
 
     def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         with self._lock:
             payload = dict(payload or {})
             current = dict(self._config)
-            if payload.get("clear_watcher_api_key"):
+            if self._watcher_api_key_managed_externally:
+                payload.pop("clear_watcher_api_key", None)
+                payload.pop("watcher_api_key", None)
+                current["watcher_api_key"] = self._external_watcher_api_key or ""
+            elif payload.get("clear_watcher_api_key"):
                 current["watcher_api_key"] = ""
                 payload.pop("watcher_api_key", None)
             elif payload.get("watcher_api_key", "") == "":

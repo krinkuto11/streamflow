@@ -11,6 +11,24 @@ Configure via environment variables:
 - `API_RATE_LIMIT_ENABLED` (default: `true`)
 - `API_RATE_LIMIT_MAX_REQUESTS` (default: `240`)
 - `API_RATE_LIMIT_WINDOW_SECONDS` (default: `60`)
+- `API_RATE_LIMIT_MAX_BUCKETS` (default: `4096`)
+- `STREAMFLOW_TRUSTED_PROXY_CIDRS` (default: empty). `X-Forwarded-For` is ignored
+  unless the direct peer belongs to one of these comma-separated proxy networks.
+
+StreamFlow does not currently provide its own UI/API login. Treat the API as a
+trusted-LAN-only control plane and do not expose it directly to the internet.
+Adding a StreamFlow authentication boundary is intentionally a separate
+compatibility decision.
+
+Dispatcharr and Shadow watcher secrets may be supplied without saving them in
+the StreamFlow database/config files:
+- `DISPATCHARR_API_KEY_FILE` or `DISPATCHARR_API_KEY`
+- `DISPATCHARR_PASS_FILE` or `DISPATCHARR_PASS`
+- `SHADOW_WATCHER_API_KEY_FILE` or `SHADOW_WATCHER_API_KEY`
+
+The `*_FILE` form takes precedence and fails closed when the configured file
+cannot be read. API responses report only whether a secret is configured and
+never return its value.
 
 ---
 
@@ -18,8 +36,10 @@ Configure via environment variables:
 
 | Method | Path           | Description         |
 | ------ | -------------- | ------------------- |
-| GET    | `/api/health`  | Health check        |
-| GET    | `/api/v1/health` | Versioned health check |
+| GET    | `/api/health`  | Process/HTTP liveness check |
+| GET    | `/api/v1/health` | Versioned liveness check |
+| GET    | `/api/readiness` | DB/schema/config/UDI/service readiness |
+| GET    | `/api/v1/readiness` | Versioned readiness check |
 | GET    | `/api/version` | Application version |
 
 ---

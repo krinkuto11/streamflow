@@ -14,7 +14,7 @@ import os
 # Add backend to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from apps.core.logging_config import HTTPLogFilter
+from apps.core.logging_config import HTTPLogFilter, SensitiveDataFilter
 
 
 class TestHTTPLogFilter(unittest.TestCase):
@@ -36,7 +36,6 @@ class TestHTTPLogFilter(unittest.TestCase):
             exc_info=None
         )
         self.assertFalse(self.filter.filter(record))
-    
     def test_filter_http_response_log(self):
         """Test that HTTP response logs are filtered out."""
         record = logging.LogRecord(
@@ -49,7 +48,6 @@ class TestHTTPLogFilter(unittest.TestCase):
             exc_info=None
         )
         self.assertFalse(self.filter.filter(record))
-    
     def test_filter_get_request_log(self):
         """Test that GET request logs are filtered out."""
         record = logging.LogRecord(
@@ -140,6 +138,26 @@ class TestHTTPLogFilter(unittest.TestCase):
             exc_info=None
         )
         self.assertFalse(self.filter.filter(record))
+
+
+class TestSensitiveDataFilter(unittest.TestCase):
+    def test_redacts_formatted_args_before_emission(self):
+        record = logging.LogRecord(
+            name="test",
+            level=logging.ERROR,
+            pathname="",
+            lineno=0,
+            msg="Failed %s with api_key=%s",
+            args=("http://provider.example/live/user/pass/1.ts", "top-secret"),
+            exc_info=None,
+        )
+
+        assert SensitiveDataFilter().filter(record)
+        rendered = record.getMessage()
+        assert "provider.example" not in rendered
+        assert "top-secret" not in rendered
+        assert "<url-" in rendered
+        assert "<redacted>" in rendered
 
 
 if __name__ == '__main__':

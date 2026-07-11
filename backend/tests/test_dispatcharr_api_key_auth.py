@@ -77,6 +77,48 @@ def test_api_key_only_legacy_config_selects_api_key_mode(monkeypatch):
     assert config.is_configured() is True
 
 
+def test_external_api_key_overrides_stored_secret_and_is_not_persisted(monkeypatch):
+    from apps.config import dispatcharr_config as config_module
+
+    fake_db = FakeDB({
+        "base_url": "http://stored.test",
+        "auth_mode": "credentials",
+        "api_key": "stored-key",
+    })
+    monkeypatch.setattr("apps.database.manager.get_db_manager", lambda: fake_db)
+    monkeypatch.setenv("DISPATCHARR_BASE_URL", "http://external.test")
+    monkeypatch.setenv("DISPATCHARR_API_KEY", "external-key")
+
+    config = config_module.DispatcharrConfig()
+
+    assert config.get_base_url() == "http://external.test"
+    assert config.get_api_key() == "external-key"
+    assert config.get_auth_mode() == "api_key"
+    assert config.get_config()["api_key_managed_externally"] is True
+
+    assert config.update_config(api_key="ui-key", stream_fetch_page_size=500)
+    assert fake_db.settings["dispatcharr_config"]["api_key"] == "stored-key"
+    assert fake_db.settings["dispatcharr_config"]["stream_fetch_page_size"] == 500
+
+
+def test_missing_external_api_key_file_fails_closed(monkeypatch, tmp_path):
+    from apps.config import dispatcharr_config as config_module
+
+    fake_db = FakeDB({
+        "base_url": "http://dispatcharr.test",
+        "auth_mode": "api_key",
+        "api_key": "stored-key",
+    })
+    monkeypatch.setattr("apps.database.manager.get_db_manager", lambda: fake_db)
+    monkeypatch.setenv("DISPATCHARR_API_KEY_FILE", str(tmp_path / "missing"))
+
+    config = config_module.DispatcharrConfig()
+
+    assert config.api_key_managed_externally() is True
+    assert config.get_api_key() is None
+    assert config.is_configured() is False
+
+
 def test_auth_headers_keep_existing_bearer_flow(monkeypatch):
     from apps.core import auth
 

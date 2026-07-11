@@ -1,4 +1,5 @@
 import io
+import json
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -343,6 +344,40 @@ def test_shadow_config_recovers_from_last_known_good_copy(tmp_path):
     )
 
     assert service.get_config()["dry_run"] is False
+
+
+def test_shadow_external_watcher_key_is_effective_but_not_persisted(tmp_path, monkeypatch):
+    monkeypatch.setenv("SHADOW_WATCHER_API_KEY", "external-watcher-key")
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        watcher_api_key=None,
+    )
+
+    assert service.get_config()["has_watcher_api_key"] is True
+    assert service.get_config()["watcher_api_key_managed_externally"] is True
+    assert service.get_config(include_secret=True)["watcher_api_key"] == "external-watcher-key"
+
+    service.update_config({"dry_run": True, "watcher_api_key": "ui-key"})
+    persisted = json.loads(service.config_file.read_text(encoding="utf-8"))
+
+    assert persisted["watcher_api_key"] == ""
+    assert service.get_config(include_secret=True)["watcher_api_key"] == "external-watcher-key"
+
+
+def test_missing_external_watcher_key_file_overrides_stored_key(tmp_path, monkeypatch):
+    atomic_write_json(tmp_path / "shadow.json", {"watcher_api_key": "stored-key"})
+    monkeypatch.setenv("SHADOW_WATCHER_API_KEY_FILE", str(tmp_path / "missing"))
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        watcher_api_key=None,
+    )
+
+    assert service.get_config()["watcher_api_key_managed_externally"] is True
+    assert service.get_config()["has_watcher_api_key"] is False
+    assert service.get_config(include_secret=True)["watcher_api_key"] == ""
 
 
 def test_stale_dispatcharr_client_is_not_counted_as_real_after_short_viewer_grace(tmp_path):

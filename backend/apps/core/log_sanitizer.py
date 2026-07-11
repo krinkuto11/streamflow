@@ -7,6 +7,13 @@ from typing import Any, Optional
 
 
 _URL_RE = re.compile(r"(?i)\b(?:https?|rtmps?|rtsp|rtp|udp|tcp)://[^\s'\"<>]+")
+_AUTH_VALUE_RE = re.compile(
+    r"(?i)\b(?:bearer|apikey|basic)\s+[A-Za-z0-9._~+/=-]+"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)([\"']?(?:api[_-]?key|watcher_api_key|password|passwd|token|authorization)"
+    r"[\"']?\s*[:=]\s*)([\"']?)([^\s,}\]]+)([\"']?)"
+)
 _TRUE_VALUES = {"true", "1", "yes", "on"}
 
 
@@ -37,19 +44,30 @@ def stream_ref(stream_id: Any = None, stream_url: Optional[str] = None) -> str:
 
 
 def url_ref(url: Optional[str]) -> str:
-    return audit_ref("url", url)
+    if url is None or url == "":
+        return "url-unknown"
+    digest = hashlib.sha256(f"url:{url}".encode("utf-8")).hexdigest()[:12]
+    return f"url-{digest}"
 
 
 def scrub_urls(message: Any) -> str:
     """Replace raw stream/API URLs inside a log message with stable URL refs."""
     text = str(message)
-    if debug_mode_enabled():
-        return text
-
     def _replace(match: re.Match) -> str:
         return f"<{url_ref(match.group(0))}>"
 
     return _URL_RE.sub(_replace, text)
+
+
+def scrub_secrets(message: Any) -> str:
+    """Redact common credential forms from an already formatted log message."""
+    text = scrub_urls(message)
+    text = _AUTH_VALUE_RE.sub("<authorization-redacted>", text)
+
+    def _replace_assignment(match: re.Match) -> str:
+        return f"{match.group(1)}<redacted>"
+
+    return _SECRET_ASSIGNMENT_RE.sub(_replace_assignment, text)
 
 
 def stream_context(

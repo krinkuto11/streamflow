@@ -254,7 +254,12 @@ from apps.api.meta_handlers import (
     root_response,
     serve_frontend_response,
 )
-from apps.api.middleware import API_RATE_LIMIT_ENABLED, api_rate_limiter
+from apps.api.middleware import (
+    API_RATE_LIMIT_ENABLED,
+    TRUSTED_PROXY_NETWORKS,
+    api_rate_limiter,
+    resolve_client_ip,
+)
 from apps.core.api_responses import error_response
 
 # Pre-compiled regex pattern for whitespace conversion (performance optimization)
@@ -331,8 +336,13 @@ def _apply_rate_limit():
     }:
         return None
 
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown')
-    key = f"{client_ip}:{path}"
+    client_ip = resolve_client_ip(
+        request.remote_addr,
+        request.headers.get('X-Forwarded-For'),
+        TRUSTED_PROXY_NETWORKS,
+    )
+    route = request.url_rule.rule if request.url_rule is not None else path
+    key = f"{client_ip}:{request.method}:{route}"
     decision = api_rate_limiter.check(key)
     if decision.allowed:
         return None

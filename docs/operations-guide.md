@@ -304,7 +304,18 @@ services:
     environment:
       TZ: Europe/Berlin
       CONFIG_DIR: /app/data
+      PUID: 99
+      PGID: 100
 ```
+
+The container prepares mounted directories as root and then runs migrations,
+StreamFlow, and ffmpeg as `PUID:PGID` (`99:100` by default for Unraid-style
+hosts). Set both values to the owner expected by the host volume. The explicit
+`STREAMFLOW_RUN_AS_ROOT=true` compatibility escape hatch should only be used
+when a legacy or remote mount cannot support the non-root runtime. NVIDIA
+devices that are exposed with normal container-runtime permissions continue to
+work; hosts with group-restricted DRI devices must also pass the render group as
+described below.
 
 For NVIDIA/CUDA probing on a normal Docker Compose host, install the NVIDIA
 Container Toolkit on the host first, then expose the GPU runtime to StreamFlow:

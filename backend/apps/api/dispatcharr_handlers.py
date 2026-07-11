@@ -67,9 +67,9 @@ def update_dispatcharr_config_response(
             os.environ["DISPATCHARR_BASE_URL"] = base_url.strip()
         if username is not None:
             os.environ["DISPATCHARR_USER"] = username.strip()
-        if password is not None:
+        if password is not None and not config_manager.password_managed_externally():
             os.environ["DISPATCHARR_PASS"] = password
-        if api_key is not None:
+        if api_key is not None and not config_manager.api_key_managed_externally():
             os.environ["DISPATCHARR_API_KEY"] = api_key
 
         os.environ["DISPATCHARR_TOKEN"] = ""

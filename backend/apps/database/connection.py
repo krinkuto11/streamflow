@@ -15,60 +15,6 @@ _engine = None
 logger = logging.getLogger(__name__)
 
 
-def _reconcile_sqlite_schema(engine) -> None:
-    """Apply idempotent startup schema fixes for existing SQLite databases.
-
-    ``Base.metadata.create_all`` only creates missing tables. It does not add
-    new columns to already-existing tables, so older DB files can drift behind
-    model changes and trigger runtime ``OperationalError`` failures.
-    """
-    if engine.dialect.name != 'sqlite':
-        return
-
-    # Keep this map explicit so startup upgrades are predictable and safe.
-    required_columns = {
-        'runs': {
-            'job_category': "VARCHAR(50)",
-            'job_outcome': "VARCHAR(50)",
-            'job_subject_ref': "VARCHAR(100)",
-            'job_correlation_id': "VARCHAR(100)",
-        },
-    }
-
-    with engine.begin() as conn:
-        existing_tables = {
-            row[0]
-            for row in conn.exec_driver_sql(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            ).fetchall()
-        }
-
-        for table_name, columns in required_columns.items():
-            if table_name not in existing_tables:
-                continue
-
-            existing_column_names = {
-                row[1]
-                for row in conn.exec_driver_sql(
-                    f'PRAGMA table_info("{table_name}")'
-                ).fetchall()
-            }
-
-            for column_name, column_def in columns.items():
-                if column_name in existing_column_names:
-                    continue
-
-                conn.exec_driver_sql(
-                    f'ALTER TABLE "{table_name}" '
-                    f'ADD COLUMN "{column_name}" {column_def}'
-                )
-                logger.warning(
-                    "Database schema upgraded on startup: added %s.%s",
-                    table_name,
-                    column_name,
-                )
-
-
 def _as_positive_int(name: str, default: int) -> int:
     raw_value = os.getenv(name)
     if raw_value is None:
@@ -149,5 +95,8 @@ def init_db():
     )
     
     Base.metadata.create_all(engine)
-    _reconcile_sqlite_schema(engine)
+    from apps.database.migrations import run_migrations
+    applied = run_migrations(engine, DB_PATH)
+    if applied:
+        logger.warning("Applied database migrations: %s", applied)
     return True

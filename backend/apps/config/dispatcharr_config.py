@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from apps.core.logging_config import setup_logging
+from apps.core.secret_sources import external_secret_source, read_external_secret
 
 logger = setup_logging(__name__)
 
@@ -135,7 +136,7 @@ class DispatcharrConfig:
         if not db_config:
             self._load_config()
             db_config = self._config
-        return db_config.get('base_url') or os.getenv('DISPATCHARR_BASE_URL')
+        return os.getenv('DISPATCHARR_BASE_URL') or db_config.get('base_url')
     
     def get_username(self) -> Optional[str]:
         """Get Dispatcharr username from database.
@@ -148,7 +149,7 @@ class DispatcharrConfig:
         if not db_config:
             self._load_config()
             db_config = self._config
-        return db_config.get('username') or os.getenv('DISPATCHARR_USER')
+        return os.getenv('DISPATCHARR_USER') or db_config.get('username')
     
     def get_password(self) -> Optional[str]:
         """Get Dispatcharr password from database.
@@ -156,24 +157,38 @@ class DispatcharrConfig:
         Returns:
             Password or None if not configured
         """
+        external = read_external_secret('DISPATCHARR_PASS', 'DISPATCHARR_PASS_FILE')
+        if self.password_managed_externally():
+            return external
         from apps.database.manager import get_db_manager
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
         if not db_config:
             self._load_config()
             db_config = self._config
-        return db_config.get('password') or os.getenv('DISPATCHARR_PASS')
+        return db_config.get('password')
 
     def get_api_key(self) -> Optional[str]:
         """Get Dispatcharr API key from database."""
+        external = read_external_secret(
+            'DISPATCHARR_API_KEY',
+            'DISPATCHARR_API_KEY_FILE',
+        )
+        if self.api_key_managed_externally():
+            return external
         from apps.database.manager import get_db_manager
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
         if not db_config:
             self._load_config()
             db_config = self._config
-        return db_config.get('api_key') or os.environ.get('DISPATCHARR_API_KEY')
+        return db_config.get('api_key')
 
     def get_auth_mode(self) -> str:
         """Get configured Dispatcharr authentication mode."""
+        external_mode = os.getenv('DISPATCHARR_AUTH_MODE')
+        if external_mode:
+            return _normalize_auth_mode(external_mode)
+        if self.api_key_managed_externally():
+            return 'api_key'
         from apps.database.manager import get_db_manager
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
         if not db_config and os.environ.get('DISPATCHARR_API_KEY'):
@@ -221,9 +236,22 @@ class DispatcharrConfig:
             'username': self.get_username() or '',
             'has_password': bool(self.get_password()),
             'has_api_key': bool(self.get_api_key()),
+            'password_managed_externally': self.password_managed_externally(),
+            'api_key_managed_externally': self.api_key_managed_externally(),
             'stream_fetch_page_size': self.get_stream_fetch_page_size(),
             'stream_fetch_max_workers': self.get_stream_fetch_max_workers(),
         }
+
+    def password_managed_externally(self) -> bool:
+        return bool(external_secret_source('DISPATCHARR_PASS', 'DISPATCHARR_PASS_FILE'))
+
+    def api_key_managed_externally(self) -> bool:
+        return bool(
+            external_secret_source(
+                'DISPATCHARR_API_KEY',
+                'DISPATCHARR_API_KEY_FILE',
+            )
+        )
     
     def update_config(self, base_url: Optional[str] = None, 
                      auth_mode: Optional[str] = None,
@@ -260,9 +288,9 @@ class DispatcharrConfig:
                 self._config['auth_mode'] = _normalize_auth_mode(auth_mode)
             if username is not None:
                 self._config['username'] = username.strip()
-            if password is not None:
+            if password is not None and not self.password_managed_externally():
                 self._config['password'] = password
-            if api_key is not None:
+            if api_key is not None and not self.api_key_managed_externally():
                 self._config['api_key'] = api_key.strip()
             if stream_fetch_page_size is not None:
                 self._config['stream_fetch_page_size'] = _coerce_int(

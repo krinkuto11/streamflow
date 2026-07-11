@@ -27,6 +27,22 @@ LEGACY_MODULE_ALIASES = {
     'udi': 'apps.udi',
 }
 
+RUNTIME_CREDENTIAL_ENV_KEYS = (
+    'DISPATCHARR_AUTH_MODE',
+    'DISPATCHARR_API_KEY',
+    'DISPATCHARR_API_KEY_FILE',
+    'DISPATCHARR_PASS',
+    'DISPATCHARR_PASS_FILE',
+    'DISPATCHARR_TOKEN',
+    'DISPATCHARR_USER',
+    'SHADOW_WATCHER_API_KEY',
+    'SHADOW_WATCHER_API_KEY_FILE',
+)
+ORIGINAL_RUNTIME_CREDENTIAL_ENV = {
+    key: os.environ.get(key)
+    for key in RUNTIME_CREDENTIAL_ENV_KEYS
+}
+
 
 def _install_legacy_module_alias(alias: str, target: str, *, force: bool = False) -> None:
     """Expose old top-level module names used by legacy tests."""
@@ -55,6 +71,9 @@ def clean_test_db(monkeypatch, tmp_path):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
+
+    for key in RUNTIME_CREDENTIAL_ENV_KEYS:
+        os.environ.pop(key, None)
 
     for alias, target in LEGACY_MODULE_ALIASES.items():
         _install_legacy_module_alias(alias, target, force=True)
@@ -115,3 +134,9 @@ def clean_test_db(monkeypatch, tmp_path):
     dispatcharr_config_module._dispatcharr_config = None
     screenshot_module._service_instance = None
     Base.metadata.drop_all(test_engine)
+    test_engine.dispose()
+    for key in RUNTIME_CREDENTIAL_ENV_KEYS:
+        os.environ.pop(key, None)
+        original = ORIGINAL_RUNTIME_CREDENTIAL_ENV.get(key)
+        if original is not None:
+            os.environ[key] = original
