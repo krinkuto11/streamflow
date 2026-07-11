@@ -9,6 +9,7 @@ from unittest.mock import Mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.stream.teamarr_preflight_service import (
+    ATTEMPT_STATE_KEY,
     DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
     DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY,
     TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
@@ -31,6 +32,18 @@ class FakeResponse:
 
     def json(self):
         return self.payload
+
+
+class FakeDb:
+    def __init__(self):
+        self.settings = {}
+
+    def get_system_setting(self, key, default=None):
+        return self.settings.get(key, default)
+
+    def set_system_setting(self, key, value):
+        self.settings[key] = value
+        return True
 
 
 class RouteHttpGet:
@@ -112,6 +125,7 @@ class QueueBackedChecker(FakeChecker):
         self.check_queue.queued_metadata = {
             77: {
                 "source": "teamarr_preflight",
+                "attempted_key": "id:queued:pre",
                 "program_name": "Queued Match",
                 "trigger_bucket": "pre",
                 "event": {
@@ -130,6 +144,7 @@ class QueueBackedChecker(FakeChecker):
         self.check_queue.in_progress_metadata = {
             78: {
                 "source": "teamarr_preflight",
+                "attempted_key": "id:running:pre",
                 "program_name": "Running Match",
                 "event": {
                     "identity": "id:running",
@@ -257,12 +272,23 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def make_service(self, events, *, checker=None, udi=None, automation_config=None, automation_status=None, http_get=None):
+    def make_service(
+        self,
+        events,
+        *,
+        checker=None,
+        udi=None,
+        automation_config=None,
+        automation_status=None,
+        http_get=None,
+        db=None,
+    ):
         checker = checker or FakeChecker()
         udi = udi or FakeUdi()
         automation_config = automation_config or FakeAutomationConfig()
         automation_status = automation_status or {}
         http_get = http_get or Mock(return_value=FakeResponse(events))
+        db = db or FakeDb()
         service = TeamarrPreflightService(
             config_file=self.config_file,
             http_get=http_get,
@@ -270,6 +296,7 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             stream_checker_provider=lambda: checker,
             automation_config_provider=lambda: automation_config,
             automation_status_provider=lambda: automation_status,
+            db_provider=lambda: db,
             clock=lambda: FIXED_NOW,
         )
         service.update_config({
@@ -1031,6 +1058,85 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(len(checker.calls), 1)
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["details"]["bucket"], "post+2m")
+
+    def test_managed_event_attempt_survives_service_restart(self):
+        db = FakeDb()
+        first_checker = FakeChecker()
+        first, _, _ = self.make_service([make_event()], checker=first_checker, db=db)
+
+        first_result = first.run_once(force=True)
+        self.assertTrue(first_result["success"])
+        self.assertEqual(first_result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not first_checker.calls:
+            time.sleep(0.01)
+        self.assertEqual(len(first_checker.calls), 1)
+        self.assertIn(ATTEMPT_STATE_KEY, db.settings)
+
+        second_checker = FakeChecker()
+        second, _, _ = self.make_service([make_event()], checker=second_checker, db=db)
+        second_result = second.run_once(force=True)
+
+        self.assertTrue(second_result["success"])
+        self.assertEqual(second_result["launched"], 0)
+        self.assertEqual(second_checker.calls, [])
+        self.assertEqual(second.get_status()["upcoming_events"][0]["state"], "already_attempted")
+
+    def test_static_team_attempt_survives_service_restart(self):
+        db = FakeDb()
+        team_status = make_team_status()
+        routes = {
+            "/api/v1/teams?active_only=true": [team_status["team"]],
+            "/api/v1/teams/501/channel-status": team_status,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        }
+        first_checker = FakeChecker()
+        first, _, _ = self.make_service(
+            [], checker=first_checker, db=db, http_get=RouteHttpGet(routes)
+        )
+        first.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        first_result = first.run_once(force=True)
+        self.assertTrue(first_result["success"])
+        self.assertEqual(first_result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not first_checker.calls:
+            time.sleep(0.01)
+        self.assertEqual(len(first_checker.calls), 1)
+
+        second_checker = FakeChecker()
+        second, _, _ = self.make_service(
+            [], checker=second_checker, db=db, http_get=RouteHttpGet(routes)
+        )
+        second.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+        second_result = second.run_once(force=True)
+
+        self.assertTrue(second_result["success"])
+        self.assertEqual(second_result["launched"], 0)
+        self.assertEqual(second_checker.calls, [])
+        self.assertEqual(second.get_status()["upcoming_teams"][0]["state"], "already_attempted")
+
+    def test_queue_state_reconciles_missing_persisted_attempt_on_start(self):
+        db = FakeDb()
+        checker = QueueBackedChecker()
+        service, _, _ = self.make_service([], checker=checker, db=db)
+
+        service.start(persist=False)
+        service.stop(persist=False)
+
+        attempts = db.settings[ATTEMPT_STATE_KEY]["attempts"]
+        self.assertIn("id:queued:pre", attempts)
+        self.assertIn("id:running:pre", attempts)
 
     def test_second_post_start_bucket_runs_after_first_post_start_attempt(self):
         checker = FakeChecker()

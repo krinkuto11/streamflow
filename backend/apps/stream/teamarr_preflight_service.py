@@ -32,6 +32,9 @@ CONFIG_FILE = CONFIG_DIR / "teamarr_preflight_config.json"
 MAX_EVENTS = 120
 MAX_UPCOMING_EVENTS = 1000
 TEAMARR_PREFLIGHT_QUEUE_PRIORITY = 100
+ATTEMPT_STATE_KEY = "teamarr_preflight_attempt_state"
+ATTEMPT_STATE_VERSION = 1
+MAX_PERSISTED_ATTEMPTS = 5000
 
 READY_SYNC_STATES = {"in_sync", "synced", "ready"}
 STATIC_TEAM_MATCHUP_RE = re.compile(
@@ -320,6 +323,7 @@ class TeamarrPreflightService:
         stream_checker_provider: Optional[Callable[[], Any]] = None,
         automation_config_provider: Optional[Callable[[], Any]] = None,
         automation_status_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        db_provider: Optional[Callable[[], Any]] = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.config_file = config_file
@@ -328,6 +332,11 @@ class TeamarrPreflightService:
         self.stream_checker_provider = stream_checker_provider or self._default_stream_checker_provider
         self.automation_config_provider = automation_config_provider or self._default_automation_config_provider
         self.automation_status_provider = automation_status_provider or self._default_automation_status_provider
+        if db_provider is None:
+            from apps.database.manager import get_db_manager
+
+            db_provider = get_db_manager
+        self.db_provider = db_provider
         self.clock = clock
 
         self._lock = threading.RLock()
@@ -343,6 +352,7 @@ class TeamarrPreflightService:
         self._preflight_items: List[Dict[str, Any]] = []
         self._filter_options: Dict[str, Any] = {"sports": [], "leagues": [], "source": "events"}
         self._attempted_buckets: Dict[str, float] = {}
+        self._load_attempted_buckets()
         self._active_checks: Dict[str, Dict[str, Any]] = {}
         self._last_scan_at: Optional[float] = None
         self._last_error: Optional[str] = None
@@ -511,6 +521,8 @@ class TeamarrPreflightService:
         return self.get_config()
 
     def start(self, *, persist: bool = True) -> bool:
+        self._load_attempted_buckets()
+        self._reconcile_attempted_buckets_from_queue()
         with self._lock:
             if persist:
                 self._config["enabled"] = True
@@ -603,6 +615,7 @@ class TeamarrPreflightService:
                     event = {}
                 dispatcharr_channel_id = event.get("dispatcharr_channel_id") or raw_channel_id
                 item = {
+                    "attempted_key": metadata.get("attempted_key"),
                     "identity": event.get("identity"),
                     "preflight_kind": event.get("preflight_kind") or metadata.get("preflight_kind") or "event",
                     "teamarr_id": event.get("teamarr_id"),
@@ -800,6 +813,8 @@ class TeamarrPreflightService:
             return {"success": True, "skipped": True, "reason": "disabled"}
 
         try:
+            self._purge_old_attempts()
+            self._reconcile_attempted_buckets_from_queue()
             self._sync_automation_queue_gate(config)
             now = datetime.fromtimestamp(self.clock(), tz=timezone.utc)
             scan = self._collect_preflight_scan(config, now)
@@ -2091,20 +2106,100 @@ class TeamarrPreflightService:
         with self._lock:
             return key in self._attempted_buckets
 
+    def _load_attempted_buckets(self) -> None:
+        try:
+            raw_state = self.db_provider().get_system_setting(ATTEMPT_STATE_KEY, {}) or {}
+        except Exception as exc:
+            logger.warning("Could not load Teamarr preflight attempt state: %s", exc)
+            return
+
+        raw_attempts = raw_state.get("attempts", {}) if isinstance(raw_state, dict) else {}
+        if not isinstance(raw_attempts, dict):
+            raw_attempts = {}
+
+        now = self.clock()
+        cutoff = now - int(self._config.get("event_cooldown_minutes", 720)) * 60
+        valid_attempts: List[tuple[str, float]] = []
+        for raw_key, raw_timestamp in raw_attempts.items():
+            key = str(raw_key or "").strip()
+            try:
+                timestamp = float(raw_timestamp)
+            except (TypeError, ValueError):
+                continue
+            if key and cutoff <= timestamp <= now + 300:
+                valid_attempts.append((key, timestamp))
+
+        valid_attempts.sort(key=lambda item: item[1], reverse=True)
+        normalized = dict(valid_attempts[:MAX_PERSISTED_ATTEMPTS])
+        with self._lock:
+            self._attempted_buckets = normalized
+
+        if len(normalized) != len(raw_attempts):
+            self._save_attempted_buckets()
+
+    def _attempt_state_payload_locked(self) -> Dict[str, Any]:
+        attempts = sorted(
+            self._attempted_buckets.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        )[:MAX_PERSISTED_ATTEMPTS]
+        return {
+            "version": ATTEMPT_STATE_VERSION,
+            "updated_at": self.clock(),
+            "attempts": dict(attempts),
+        }
+
+    def _save_attempted_buckets(self) -> None:
+        with self._lock:
+            payload = self._attempt_state_payload_locked()
+        try:
+            self.db_provider().set_system_setting(ATTEMPT_STATE_KEY, payload)
+        except Exception as exc:
+            logger.warning("Could not persist Teamarr preflight attempt state: %s", exc)
+
+    def _reconcile_attempted_buckets_from_queue(self) -> None:
+        snapshot = self._teamarr_queue_snapshot()
+        reconciled = False
+        with self._lock:
+            for item in snapshot["queued_checks"] + snapshot["queue_active_checks"]:
+                attempted_key = str(item.get("attempted_key") or "").strip()
+                if attempted_key and attempted_key not in self._attempted_buckets:
+                    self._attempted_buckets[attempted_key] = self.clock()
+                    reconciled = True
+        if reconciled:
+            self._save_attempted_buckets()
+
     def _mark_attempted(self, event: Dict[str, Any], *, key: Optional[str] = None) -> None:
         attempted_key = key or self._attempted_key(event)
         with self._lock:
             self._attempted_buckets[attempted_key] = self.clock()
+        self._save_attempted_buckets()
 
     def _clear_attempted(self, key: str) -> None:
+        removed = False
         with self._lock:
-            self._attempted_buckets.pop(key, None)
+            removed = self._attempted_buckets.pop(key, None) is not None
+        if removed:
+            self._save_attempted_buckets()
 
     def _purge_old_attempts(self) -> None:
         cutoff = self.clock() - int(self._config.get("event_cooldown_minutes", 720)) * 60
-        for key, timestamp in list(self._attempted_buckets.items()):
-            if timestamp < cutoff:
-                self._attempted_buckets.pop(key, None)
+        changed = False
+        with self._lock:
+            for key, timestamp in list(self._attempted_buckets.items()):
+                if timestamp < cutoff:
+                    self._attempted_buckets.pop(key, None)
+                    changed = True
+            if len(self._attempted_buckets) > MAX_PERSISTED_ATTEMPTS:
+                newest = sorted(
+                    self._attempted_buckets.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:MAX_PERSISTED_ATTEMPTS]
+                self._attempted_buckets = dict(newest)
+                changed = True
+        if changed:
+            self._save_attempted_buckets()
 
     def _record_event(self, event_type: str, event: Dict[str, Any], details: Dict[str, Any]) -> None:
         details = dict(details or {})
