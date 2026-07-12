@@ -37,6 +37,52 @@ describe('startup gate state', () => {
     })
   })
 
+  it('opens the dashboard when initialization is complete but a runtime service is stopped', () => {
+    expect(getInitializationStateFromStatus({
+      status: 'not_ready',
+      ready: false,
+      checks: {
+        database: { ready: true },
+        dispatcharr_config: { ready: true },
+        udi: { ready: true, initialization_pending: false },
+        services: {
+          ready: false,
+          items: {
+            automation: { required: true, ready: false, state: 'stopped' },
+          },
+        },
+      },
+      initialization: {
+        status: 'completed',
+        percentage: 100,
+        message: 'Initialization complete',
+        last_refresh_time: '2026-07-12T22:03:20Z',
+      },
+    })).toMatchObject({
+      inProgress: false,
+      status: 'not_ready',
+      percentage: 100,
+      message: 'Initialization complete',
+    })
+  })
+
+  it('keeps blocking for core startup checks even if a stale completed cache is reported', () => {
+    expect(getInitializationStateFromStatus({
+      status: 'not_ready',
+      ready: false,
+      checks: {
+        database: { ready: false },
+        dispatcharr_config: { ready: true },
+        udi: { ready: true },
+      },
+      initialization: {
+        status: 'completed',
+        percentage: 100,
+        last_refresh_time: '2026-07-12T22:03:20Z',
+      },
+    }).inProgress).toBe(true)
+  })
+
   it('does not treat an in-progress status as startup when a usable cache exists', () => {
     expect(getInitializationStateFromStatus({
       status: 'in_progress',
