@@ -2353,11 +2353,15 @@ class ShadowBlankMonitorService:
             candidate_ref = _ref("stream", candidate_id)
             candidate_stream = self._stream_for_id(udi, channel_id, candidate_id)
             candidate_url = self._stream_url(candidate_stream)
+            configured_duration = int(config.get("next_stream_pre_probe_duration_seconds", 8))
+            effective_duration = self._effective_pre_probe_duration_seconds(config)
             details: Dict[str, Any] = {
                 "enabled": True,
                 "target_stream_ref": candidate_ref,
-                "duration_seconds": int(config.get("next_stream_pre_probe_duration_seconds", 8)),
+                "duration_seconds": effective_duration,
             }
+            if effective_duration != configured_duration:
+                details["configured_duration_seconds"] = configured_duration
             if current_stream_id is not None and int(candidate_id) == int(current_stream_id):
                 details["reported_current_reprobe"] = True
             if not candidate_url:
@@ -2600,9 +2604,7 @@ class ShadowBlankMonitorService:
         reason: str = "",
     ) -> Dict[str, Any]:
         pre_probe_config = dict(config)
-        pre_probe_config["probe_duration_seconds"] = int(
-            config.get("next_stream_pre_probe_duration_seconds", 8)
-        )
+        pre_probe_config["probe_duration_seconds"] = self._effective_pre_probe_duration_seconds(config)
         pre_probe_config["watcher_api_key"] = ""
         if str(reason or "") != "loop":
             pre_probe_config["loop_detection_enabled"] = False
@@ -2611,6 +2613,20 @@ class ShadowBlankMonitorService:
             return result
         result.update(self._run_loop_probe_if_enabled(url, {"channel_ref": "pre_probe"}, pre_probe_config))
         return result
+
+    @staticmethod
+    def _effective_pre_probe_duration_seconds(config: Dict[str, Any]) -> int:
+        configured = int(config.get("next_stream_pre_probe_duration_seconds", 8))
+        minimums = [int(float(config.get("blank_min_duration_seconds", 2.0))) + 2]
+        if config.get("freeze_detection_enabled"):
+            minimums.append(int(float(config.get("freeze_min_duration_seconds", 5.0))) + 2)
+        if config.get("no_decodable_frames_detection_enabled"):
+            minimums.append(int(float(config.get("no_decodable_frames_min_duration_seconds", 10.0))) + 2)
+        if config.get("silent_audio_detection_enabled"):
+            minimums.append(int(float(config.get("silent_audio_min_duration_seconds", 10.0))) + 2)
+        if config.get("offline_image_detection_enabled"):
+            minimums.append(int(config.get("offline_image_capture_offset_seconds", 3)) + 2)
+        return min(120, max(configured, *minimums))
 
     @staticmethod
     def _pre_probe_rejection_reason(result: Dict[str, Any]) -> Optional[str]:

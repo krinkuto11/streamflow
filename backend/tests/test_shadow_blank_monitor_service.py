@@ -563,6 +563,22 @@ def test_watch_mode_controls_scan_delay():
     assert viewer_grace_bounds["viewer_left_grace_seconds"] == 10
 
 
+def test_pre_probe_duration_covers_enabled_detection_thresholds():
+    defaults = normalize_config({"next_stream_pre_probe_duration_seconds": 5})
+    assert ShadowBlankMonitorService._effective_pre_probe_duration_seconds(defaults) == 12
+
+    silent = normalize_config({
+        "next_stream_pre_probe_duration_seconds": 5,
+        "no_decodable_frames_detection_enabled": False,
+        "silent_audio_detection_enabled": True,
+        "silent_audio_min_duration_seconds": 15,
+    })
+    assert ShadowBlankMonitorService._effective_pre_probe_duration_seconds(silent) == 17
+
+    configured_longer = normalize_config({"next_stream_pre_probe_duration_seconds": 30})
+    assert ShadowBlankMonitorService._effective_pre_probe_duration_seconds(configured_longer) == 30
+
+
 def test_offline_image_status_warns_about_missing_or_invalid_hashes(tmp_path):
     service = make_service(
         tmp_path,
@@ -2983,8 +2999,8 @@ def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
     status = service.run_once(force=True)
 
     assert pre_probe_calls == [
-        ("http://candidate.local/bad", 5, ""),
-        ("http://candidate.local/good", 5, ""),
+        ("http://candidate.local/bad", 12, ""),
+        ("http://candidate.local/good", 12, ""),
     ]
     assert switch_calls == [("uuid-1", 12, None)]
     assert status["recent_events"][0]["type"] == "switch_success"
