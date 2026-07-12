@@ -3911,19 +3911,36 @@ class ShadowBlankMonitorService:
 
         output = output or ""
         lowered = output.lower()
+        decoded_frames = 0
+        saw_media_stream = False
+        saw_video_stream = False
+        for line in output.splitlines():
+            if ShadowBlankMonitorService._line_has_video_stream(line):
+                saw_video_stream = True
+                saw_media_stream = True
+            if ShadowBlankMonitorService._line_has_audio_stream(line):
+                saw_media_stream = True
+            if ShadowBlankMonitorService._line_marks_stream_mapping(line):
+                saw_media_stream = True
+            match = FFMPEG_FRAME_RE.search(line)
+            if match:
+                try:
+                    decoded_frames = max(decoded_frames, int(match.group("frames")))
+                except (TypeError, ValueError):
+                    continue
+
         matched_pattern = next(
             (pattern for pattern in NO_DECODABLE_FRAME_ERROR_PATTERNS if pattern in lowered),
             None,
         )
+        if (
+            not matched_pattern
+            and saw_media_stream
+            and not (decoded_frames > 0 and saw_video_stream)
+        ):
+            matched_pattern = "no decoded video frames"
         if not matched_pattern:
             return result
-
-        decoded_frames = 0
-        for match in FFMPEG_FRAME_RE.finditer(output):
-            try:
-                decoded_frames = max(decoded_frames, int(match.group("frames")))
-            except (TypeError, ValueError):
-                continue
         if decoded_frames > 0:
             return result
 

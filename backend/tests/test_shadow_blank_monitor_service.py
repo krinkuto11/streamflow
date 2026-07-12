@@ -2447,6 +2447,52 @@ def test_no_decodable_parser_treats_invalid_data_as_terminal_decoder_stall():
     assert result["no_decodable_frames_error"] == "invalid data found"
 
 
+def test_no_decodable_parser_detects_audio_only_stream_without_decoder_error():
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+    output = (
+        "  Stream #0:0[0x100]: Audio: aac (LC), 48000 Hz, mono, fltp, 67 kb/s\n"
+        "Stream mapping:\n"
+        "  Stream #0:0 -> #0:0 (aac (native) -> pcm_s16le (native))\n"
+        "size=N/A time=00:00:12.00 bitrate=N/A speed=1.68x\n"
+    )
+
+    result = ShadowBlankMonitorService._parse_no_decodable_frames_detection(
+        output,
+        config,
+        observed_duration=12.6,
+        returncode=0,
+    )
+
+    assert result["no_decodable_frames_detected"] is True
+    assert result["no_decodable_frames_duration_secs"] == 12.6
+    assert result["no_decodable_frames_error"] == "no decoded video frames"
+
+
+def test_no_decodable_parser_keeps_audio_only_stream_pending_before_minimum():
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "no_decodable_frames_min_duration_seconds": 10,
+    })
+    output = (
+        "  Stream #0:0: Audio: aac, 48000 Hz, stereo, fltp, 128 kb/s\n"
+        "Stream mapping:\n"
+        "  Stream #0:0 -> #0:0 (aac (native) -> pcm_s16le (native))\n"
+    )
+
+    result = ShadowBlankMonitorService._parse_no_decodable_frames_detection(
+        output,
+        config,
+        observed_duration=9.9,
+        returncode=0,
+    )
+
+    assert result["no_decodable_frames_detected"] is False
+    assert result["no_decodable_frames_error"] is None
+
+
 def test_no_decodable_parser_ignores_invalid_data_after_decoded_frames():
     config = normalize_config({
         "watch_mode": "continuous",
