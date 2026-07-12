@@ -2123,6 +2123,7 @@ class ShadowBlankMonitorService:
         )
         deadline = time.monotonic() + verification_window_seconds
         observed_stream_id: Optional[int] = None
+        last_probe_details: Optional[Dict[str, Any]] = None
         while time.monotonic() < deadline and not self._stop_event.is_set():
             try:
                 status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
@@ -2140,33 +2141,67 @@ class ShadowBlankMonitorService:
                         }
             except (TypeError, ValueError):
                 pass
+
+            if require_proxy_probe:
+                probe_details = self._verify_proxy_output_after_switch(target, config)
+                last_probe_details = self._post_switch_verification_details(
+                    observed_stream_id,
+                    expected_stream_id,
+                    verification_window_seconds,
+                    probe_details,
+                    require_proxy_probe=True,
+                )
+                if probe_details.get("accepted"):
+                    return True, observed_stream_id, last_probe_details
+                rejection_reason = (
+                    probe_details.get("post_switch_proxy_probe") or {}
+                ).get("rejection_reason")
+                if rejection_reason not in {"incomplete_probe", "timeout"}:
+                    return False, observed_stream_id, last_probe_details
             time.sleep(0.5)
 
-        if observed_stream_id is not None:
-            details: Dict[str, Any] = {
-                "post_switch_verification_mode": "status_stream_id",
-                "expected_stream_ref": _ref("stream", expected_stream_id),
-                "post_switch_verification_window_seconds": int(verification_window_seconds),
-            }
-            try:
-                status_matches = int(observed_stream_id) == int(expected_stream_id)
-            except (TypeError, ValueError):
-                status_matches = False
-            if not status_matches:
-                details["post_switch_status_mismatch"] = True
-            if require_proxy_probe:
-                details["post_switch_proxy_probe_required"] = True
-            probe_details = self._verify_proxy_output_after_switch(target, config)
-            details.update(probe_details)
-            if probe_details.get("accepted"):
-                details["post_switch_verification_mode"] = "status_stream_id+proxy_probe"
-                return True, observed_stream_id, details
-            return False, observed_stream_id, details
+        if last_probe_details is not None:
+            return False, observed_stream_id, last_probe_details
 
         probe_details = self._verify_proxy_output_after_switch(target, config)
+        details = self._post_switch_verification_details(
+            observed_stream_id,
+            expected_stream_id,
+            verification_window_seconds,
+            probe_details,
+            require_proxy_probe=False,
+        )
+        return bool(probe_details.get("accepted")), observed_stream_id, details
+
+    @staticmethod
+    def _post_switch_verification_details(
+        observed_stream_id: Optional[int],
+        expected_stream_id: int,
+        verification_window_seconds: float,
+        probe_details: Dict[str, Any],
+        *,
+        require_proxy_probe: bool,
+    ) -> Dict[str, Any]:
+        if observed_stream_id is None:
+            return dict(probe_details)
+
+        details: Dict[str, Any] = {
+            "post_switch_verification_mode": "status_stream_id",
+            "expected_stream_ref": _ref("stream", expected_stream_id),
+            "post_switch_verification_window_seconds": int(verification_window_seconds),
+        }
+        try:
+            status_matches = int(observed_stream_id) == int(expected_stream_id)
+        except (TypeError, ValueError):
+            status_matches = False
+        if not status_matches:
+            details["post_switch_status_mismatch"] = True
+        if require_proxy_probe:
+            details["post_switch_proxy_probe_required"] = True
+        details.update(probe_details)
         if probe_details.get("accepted"):
-            return True, observed_stream_id, probe_details
-        return False, observed_stream_id, probe_details
+            details["post_switch_verification_mode"] = "status_stream_id+proxy_probe"
+        return details
 
     def _verify_proxy_output_after_switch(
         self,

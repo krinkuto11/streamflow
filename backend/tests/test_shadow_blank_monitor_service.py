@@ -3157,6 +3157,83 @@ def test_pre_probe_recovers_when_proxy_status_reports_stale_current_stream(tmp_p
     assert "post_switch_status_mismatch" not in event["details"]
 
 
+def test_required_fmp4_proxy_probe_retries_incomplete_reconnect(tmp_path, monkeypatch):
+    proxy_probe_calls = []
+    proxy_results = iter([
+        {"blank_detected": False, "freeze_detected": True},
+        {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "probe_incomplete": True,
+            "probe_elapsed_seconds": 6.2,
+            "probe_expected_duration_seconds": 12,
+        },
+        {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "probe_incomplete": False,
+            "probe_elapsed_seconds": 12.1,
+            "probe_expected_duration_seconds": 12,
+        },
+    ])
+    current_time = {"value": 100.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.0
+        return current_time["value"]
+
+    def proxy_probe(url, config):
+        proxy_probe_calls.append(url)
+        return next(proxy_results)
+
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={
+            10: {"id": 10, "url": "http://candidate.local/good"},
+            11: {"id": 11, "url": "http://candidate.local/bad"},
+        },
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=proxy_probe,
+        switch_calls=[],
+    )
+    service._run_blank_probe = lambda url, config: {
+        "blank_detected": False,
+        "freeze_detected": "bad" in url,
+    }
+    service._uses_default_switch_stream = True
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+        "viewer_output_format": "fmp4",
+    }
+
+    should_continue = service._probe_target_once(udi, target, config)
+    event = service.get_status()["recent_events"][0]
+
+    assert should_continue is False
+    assert len(proxy_probe_calls) == 3
+    assert event["type"] == "switch_success"
+    assert event["details"]["post_switch_proxy_probe_accepted"] is True
+    assert event["details"]["post_switch_proxy_probe"]["probe_incomplete"] is False
+
+
 def test_next_stream_pre_probe_rejects_missing_audio_candidate(tmp_path):
     switch_calls = []
     udi = FakeUdi(
