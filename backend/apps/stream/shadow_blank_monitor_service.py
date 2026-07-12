@@ -113,6 +113,9 @@ PROXY_OUTPUT_FORMAT_ALIASES = {
 SHADOW_WATCHER_USER_AGENT_MARKER = "StreamFlow-Shadow-Blank-Monitor/1.0"
 DEFAULT_WATCHER_USER_AGENT = f"TiviMate/5.1.6 {SHADOW_WATCHER_USER_AGENT_MARKER}"
 POST_SWITCH_STATUS_SETTLE_SECONDS = 15
+PROBE_CLIENT_RELEASE_POLL_SECONDS = 0.5
+PROBE_CLIENT_RELEASE_STABLE_POLLS = 2
+PROBE_CLIENT_RELEASE_TIMEOUT_SECONDS = 30.0
 
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
@@ -1607,11 +1610,71 @@ class ShadowBlankMonitorService:
                         self._watcher_absences.pop(channel_uuid, None)
                     self._watched[channel_uuid] = dict(target)
                 blocking_watcher_count = self._blocking_watcher_count(target, watcher_count)
+                if self._has_pending_detection(channel_uuid) and blocking_watcher_count <= 0:
+                    release = self._wait_for_channel_probe_client_release(
+                        udi,
+                        target,
+                        config,
+                        initial_status=fresh_status,
+                        stop_event=probe_stop_event,
+                    )
+                    if release["released"]:
+                        watcher_count = 0
+                        blocking_watcher_count = 0
+                    elif release["reason"] == "viewer_left":
+                        self._handle_viewer_left_or_grace(
+                            channel_uuid,
+                            target,
+                            config,
+                            release.get("status") or fresh_status,
+                        )
+                        break
+                    elif release["reason"] == "timeout":
+                        self._record_event(
+                            "watcher_release_timeout",
+                            target,
+                            {
+                                "reason": "pending_confirmation",
+                                "waited_seconds": release["waited_seconds"],
+                                "watcher_client_count": release["watcher_client_count"],
+                            },
+                        )
+                        break
+                    else:
+                        break
                 if blocking_watcher_count > 0:
                     if self._watcher_status_has_current_probe_client(target, fresh_status, config):
-                        if probe_stop_event.wait(float(config.get("watch_gap_seconds", 1))):
+                        release = self._wait_for_channel_probe_client_release(
+                            udi,
+                            target,
+                            config,
+                            initial_status=fresh_status,
+                            stop_event=probe_stop_event,
+                        )
+                        if release["released"]:
+                            if probe_stop_event.wait(float(config.get("watch_gap_seconds", 1))):
+                                break
+                            continue
+                        if release["reason"] == "viewer_left":
+                            self._handle_viewer_left_or_grace(
+                                channel_uuid,
+                                target,
+                                config,
+                                release.get("status") or fresh_status,
+                            )
+                        elif release["reason"] == "timeout":
+                            self._record_event(
+                                "watcher_release_timeout",
+                                target,
+                                {
+                                    "reason": "probe_rollover",
+                                    "waited_seconds": release["waited_seconds"],
+                                    "watcher_client_count": release["watcher_client_count"],
+                                },
+                            )
+                        if probe_stop_event.is_set() or self._stop_event.is_set():
                             break
-                        continue
+                        break
                     bypass_details = self._pending_media_recovery_guard_bypass_details(
                         channel_uuid,
                         target,
@@ -1619,6 +1682,32 @@ class ShadowBlankMonitorService:
                         config,
                     )
                     if bypass_details is not None:
+                        release = self._wait_for_channel_probe_client_release(
+                            udi,
+                            target,
+                            config,
+                            initial_status=fresh_status,
+                            stop_event=probe_stop_event,
+                        )
+                        if not release["released"]:
+                            if release["reason"] == "viewer_left":
+                                self._handle_viewer_left_or_grace(
+                                    channel_uuid,
+                                    target,
+                                    config,
+                                    release.get("status") or fresh_status,
+                                )
+                            elif release["reason"] == "timeout":
+                                self._record_event(
+                                    "watcher_release_timeout",
+                                    target,
+                                    {
+                                        "reason": "media_recovery_confirmation",
+                                        "waited_seconds": release["waited_seconds"],
+                                        "watcher_client_count": release["watcher_client_count"],
+                                    },
+                                )
+                            break
                         target["media_recovery_guard_bypass"] = bypass_details
                         target["media_recovery_guard_observed"] = bypass_details
                         self._record_event("watcher_recovery_observed", target, bypass_details)
@@ -2170,6 +2259,26 @@ class ShadowBlankMonitorService:
                 probe_duration = self._post_switch_probe_duration_seconds(config)
                 if remaining_seconds < probe_duration + 1.0:
                     break
+                release = self._wait_for_channel_probe_client_release(
+                    udi,
+                    target,
+                    config,
+                    initial_status=status,
+                    max_wait_seconds=max(0.0, remaining_seconds - probe_duration - 1.0),
+                )
+                if not release["released"]:
+                    if last_probe_details is None:
+                        last_probe_details = {
+                            "post_switch_verification_mode": "proxy_probe",
+                            "post_switch_proxy_probe_accepted": False,
+                            "post_switch_proxy_probe_attempts": proxy_probe_attempts,
+                            "post_switch_proxy_release": {
+                                "reason": release["reason"],
+                                "waited_seconds": release["waited_seconds"],
+                                "watcher_client_count": release["watcher_client_count"],
+                            },
+                        }
+                    break
                 proxy_probe_attempts += 1
                 probe_details = self._verify_proxy_output_after_switch(
                     target,
@@ -2191,6 +2300,23 @@ class ShadowBlankMonitorService:
         if last_probe_details is not None:
             return False, observed_stream_id, last_probe_details
 
+        release = self._wait_for_channel_probe_client_release(
+            udi,
+            target,
+            config,
+            max_wait_seconds=PROBE_CLIENT_RELEASE_TIMEOUT_SECONDS,
+        )
+        if not release["released"]:
+            return False, observed_stream_id, {
+                "post_switch_verification_mode": "proxy_probe",
+                "post_switch_proxy_probe_accepted": False,
+                "post_switch_proxy_probe_attempts": proxy_probe_attempts,
+                "post_switch_proxy_release": {
+                    "reason": release["reason"],
+                    "waited_seconds": release["waited_seconds"],
+                    "watcher_client_count": release["watcher_client_count"],
+                },
+            }
         probe_details = self._verify_proxy_output_after_switch(target, config)
         details = self._post_switch_verification_details(
             observed_stream_id,
@@ -2200,6 +2326,87 @@ class ShadowBlankMonitorService:
             require_proxy_probe=False,
         )
         return bool(probe_details.get("accepted")), observed_stream_id, details
+
+    def _wait_for_channel_probe_client_release(
+        self,
+        udi: Any,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        initial_status: Optional[Dict[str, Any]] = None,
+        stop_event: Optional[threading.Event] = None,
+        max_wait_seconds: float = PROBE_CLIENT_RELEASE_TIMEOUT_SECONDS,
+    ) -> Dict[str, Any]:
+        """Wait until a closed Shadow proxy probe is absent for consecutive polls."""
+        started = time.monotonic()
+        deadline = started + max(0.0, float(max_wait_seconds))
+        status = initial_status if isinstance(initial_status, dict) else None
+        stable_absent_polls = 0
+        watcher_count = 0
+        blocker = stop_event or self._stop_event
+
+        while True:
+            if status is None:
+                try:
+                    status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                except Exception:
+                    status = {}
+
+            watcher_count = self._blocking_watcher_count(
+                target,
+                self._watcher_client_count(status, config),
+            )
+            if watcher_count <= 0:
+                stable_absent_polls += 1
+                if stable_absent_polls >= PROBE_CLIENT_RELEASE_STABLE_POLLS:
+                    return {
+                        "released": True,
+                        "reason": "released",
+                        "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                        "watcher_client_count": 0,
+                        "status": status,
+                    }
+            else:
+                stable_absent_polls = 0
+
+            if self._real_client_count(status, config, target) <= 0:
+                return {
+                    "released": False,
+                    "reason": "viewer_left",
+                    "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                    "watcher_client_count": watcher_count,
+                    "status": status,
+                }
+
+            now = time.monotonic()
+            if now >= deadline:
+                return {
+                    "released": False,
+                    "reason": "timeout",
+                    "waited_seconds": round(max(0.0, now - started), 3),
+                    "watcher_client_count": watcher_count,
+                    "status": status,
+                }
+
+            wait_seconds = min(PROBE_CLIENT_RELEASE_POLL_SECONDS, max(0.0, deadline - now))
+            if blocker.is_set():
+                return {
+                    "released": False,
+                    "reason": "stopped",
+                    "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                    "watcher_client_count": watcher_count,
+                    "status": status,
+                }
+            time.sleep(wait_seconds)
+            if blocker.is_set():
+                return {
+                    "released": False,
+                    "reason": "stopped",
+                    "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                    "watcher_client_count": watcher_count,
+                    "status": status,
+                }
+            status = None
 
     @staticmethod
     def _post_switch_verification_details(

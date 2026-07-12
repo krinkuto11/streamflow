@@ -3465,6 +3465,91 @@ def test_required_fmp4_proxy_probe_retries_incomplete_reconnect(tmp_path, monkey
     assert event["details"]["post_switch_proxy_probe_attempts"] == 2
 
 
+def test_post_switch_proxy_retries_wait_for_previous_shadow_client_release(tmp_path, monkeypatch):
+    proxy_probe_calls = []
+    current_time = {"value": 100.0}
+    watcher = {
+        "client_id": "previous-shadow-probe",
+        "user_agent": DEFAULT_WATCHER_USER_AGENT,
+        "connected_at": 99.0,
+    }
+
+    def fake_monotonic():
+        return current_time["value"]
+
+    def fake_sleep(seconds):
+        current_time["value"] += seconds
+
+    def proxy_probe(_url, _config):
+        proxy_probe_calls.append(current_time["value"])
+        if len(proxy_probe_calls) == 1:
+            return {
+                "blank_detected": False,
+                "freeze_detected": False,
+                "probe_incomplete": True,
+            }
+        return {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "probe_incomplete": False,
+        }
+
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", fake_sleep)
+
+    with_watcher = {
+        "uuid-1": active_status(
+            stream_id=11,
+            clients=[{"client_id": "viewer", "user_agent": "TiviMate"}, watcher],
+        )
+    }
+    without_watcher = {
+        "uuid-1": active_status(
+            stream_id=11,
+            clients=[{"client_id": "viewer", "user_agent": "TiviMate"}],
+        )
+    }
+    udi = FakeUdi(
+        statuses=[
+            with_watcher,
+            with_watcher,
+            without_watcher,
+            without_watcher,
+            with_watcher,
+            with_watcher,
+            without_watcher,
+            without_watcher,
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, blank_probe=proxy_probe)
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+        "viewer_output_format": "fmp4",
+    }
+
+    success, observed_stream_id, details = service._verify_active_stream_after_switch(
+        udi,
+        target,
+        11,
+        normalize_config({"next_stream_pre_probe_enabled": True}),
+        require_proxy_probe=True,
+    )
+
+    assert success is True
+    assert observed_stream_id == 11
+    assert len(proxy_probe_calls) == 2
+    assert proxy_probe_calls[0] >= 101.5
+    assert proxy_probe_calls[1] >= proxy_probe_calls[0] + 2.0
+    assert details["post_switch_proxy_probe_attempts"] == 2
+    assert details["post_switch_proxy_probe_accepted"] is True
+
+
 def test_required_proxy_probe_keeps_fault_rejection_until_window_expires(tmp_path, monkeypatch):
     proxy_probe_calls = []
     current_time = {"value": 100.0}
@@ -5329,12 +5414,16 @@ def test_continuous_probe_continues_with_current_probe_watcher_between_confirmat
             current_probe_watcher,
         ],
     )
+    active_without_current_watcher = active_status(
+        stream_id=10,
+        clients=[{"user_agent": "VLC"}],
+    )
     udi = FakeUdi(
         statuses=[
             {"uuid-1": active_with_current_watcher},
             {"uuid-1": active_with_current_watcher},
-            {"uuid-1": active_with_current_watcher},
-            {"uuid-1": active_with_current_watcher},
+            {"uuid-1": active_without_current_watcher},
+            {"uuid-1": active_without_current_watcher},
         ],
         channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
     )
@@ -5515,7 +5604,34 @@ def test_continuous_media_fault_continues_when_watcher_reappears_between_confirm
                         },
                     ],
                 )
-            }
+            },
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-between-confirmations",
+                        },
+                    ],
+                )
+            },
+            {
+                "uuid-1": active_status(
+                    stream_id=10,
+                    clients=[
+                        {"user_agent": "VLC"},
+                        {
+                            "user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0",
+                            "client_id": "raw-between-confirmations",
+                        },
+                    ],
+                )
+            },
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
+            {"uuid-1": active_status(stream_id=10, clients=[{"user_agent": "VLC"}])},
         ],
         channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
         streams={11: {"id": 11, "url": "http://candidate.local/good"}},
