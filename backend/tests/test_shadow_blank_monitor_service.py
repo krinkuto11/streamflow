@@ -5496,6 +5496,7 @@ def test_stale_stream_guard_skips_switch_if_dispatcharr_already_changed(tmp_path
     udi = FakeUdi(
         statuses=[
             {"uuid-1": active_status(stream_id=10)},
+            {"uuid-1": active_status(stream_id=10)},
             {"uuid-1": active_status(stream_id=11)},
         ],
         channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
@@ -6655,6 +6656,60 @@ def test_external_stream_change_is_recorded_and_clears_cooldown(tmp_path):
     assert event["details"]["target_stream_ref"] == shadow_module._ref("stream", 12)
     assert event["details"]["switch_source"] == "external"
     assert status["cooldowns"] == []
+
+
+def test_probe_discards_fault_when_stream_changes_during_probe(tmp_path):
+    switch_calls = []
+    real_viewer = {"user_agent": "VLC"}
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=12, clients=[real_viewer])}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, _config: {
+            "freeze_detected": True,
+            "freeze_ratio": 1.0,
+            "freeze_duration_secs": 12.0,
+            "audio_stream_present": False,
+        },
+        switch_calls=switch_calls,
+    )
+    config = normalize_config({
+        "watch_mode": "continuous",
+        "confirmation_count": 1,
+        "channel_cooldown_seconds": 300,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": shadow_module._ref("channel", 1),
+        "stream_id": 10,
+        "stream_ref": shadow_module._ref("stream", 10),
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+        "watcher_state": "waiting",
+    }
+    with service._lock:
+        service._watched["uuid-1"] = dict(target)
+    service._set_cooldown("uuid-1", config)
+
+    should_continue = service._probe_target_once(udi, target, config)
+    status = service.get_status()
+
+    assert should_continue is True
+    assert switch_calls == []
+    assert target["stream_id"] == 12
+    assert target["stream_ref"] == shadow_module._ref("stream", 12)
+    assert target["last_probe"]["discarded"] is True
+    assert target["last_probe"]["discarded_reason"] == "stream_changed_during_probe"
+    assert status["cooldowns"] == []
+    event = next(event for event in status["recent_events"] if event["type"] == "external_stream_change")
+    assert event["stream_ref"] == shadow_module._ref("stream", 10)
+    assert event["details"]["target_stream_ref"] == shadow_module._ref("stream", 12)
+    assert event["details"]["probe_result_discarded"] is True
+    assert event["details"]["probe_discard_reason"] == "stream_changed_during_probe"
 
 
 def test_expected_shadow_stream_status_changes_keep_success_cooldown(tmp_path):

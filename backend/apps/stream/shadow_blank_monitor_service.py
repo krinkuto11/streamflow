@@ -1826,6 +1826,9 @@ class ShadowBlankMonitorService:
                 self._handle_viewer_left_or_grace(channel_uuid, target, config, fresh_status)
                 return False
 
+            if self._discard_probe_after_stream_change(target, fresh_status):
+                return True
+
             if not detection_reason:
                 loop_result = self._run_loop_probe_if_enabled(media_probe_url, target, media_probe_config, udi=udi)
                 if loop_result:
@@ -1848,6 +1851,8 @@ class ShadowBlankMonitorService:
                     if self._real_client_count(fresh_status, config, target) <= 0:
                         self._handle_viewer_left_or_grace(channel_uuid, target, config, fresh_status)
                         return False
+                    if self._discard_probe_after_stream_change(target, fresh_status):
+                        return True
 
             if not detection_reason:
                 preserved_pending = self._reset_blank_count_after_probe_ok(channel_uuid, config)
@@ -5490,6 +5495,78 @@ class ShadowBlankMonitorService:
                 return status
 
         return {}
+
+    def _discard_probe_after_stream_change(
+        self,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+    ) -> bool:
+        previous_stream_id = target.get("stream_id")
+        observed_stream_id = self._extract_stream_id(fresh_status)
+        if (
+            previous_stream_id is None
+            or observed_stream_id is None
+            or str(previous_stream_id) == str(observed_stream_id)
+        ):
+            return False
+
+        channel_uuid = str(target.get("channel_uuid") or "")
+        previous_stream_ref = target.get("stream_ref") or _ref("stream", previous_stream_id)
+        observed_stream_ref = _ref("stream", observed_stream_id)
+        event_target = dict(target)
+        event_target["stream_id"] = previous_stream_id
+        event_target["stream_ref"] = previous_stream_ref
+
+        last_probe = dict(target.get("last_probe") or {})
+        last_probe.update({
+            "discarded": True,
+            "discarded_reason": "stream_changed_during_probe",
+            "observed_stream_ref": observed_stream_ref,
+        })
+        target["last_probe"] = last_probe
+        target["stream_id"] = observed_stream_id
+        target["stream_ref"] = observed_stream_ref
+
+        self._reset_detection_state(channel_uuid)
+        self._clear_cooldown(channel_uuid)
+
+        with self._lock:
+            watched = self._watched.get(channel_uuid) or {}
+            already_observed = (
+                watched.get("stream_id") is not None
+                and str(watched.get("stream_id")) == str(observed_stream_id)
+            )
+
+        if not already_observed:
+            self._record_event(
+                "external_stream_change",
+                event_target,
+                {
+                    "target_stream_ref": observed_stream_ref,
+                    "observed_stream_ref": observed_stream_ref,
+                    "switch_source": "external",
+                    "switch_actor": "unknown",
+                    "switch_actor_note": (
+                        "Dispatcharr proxy status does not expose who changed "
+                        "the active stream."
+                    ),
+                    "stream_change_source": "dispatcharr_proxy_status",
+                    "probe_result_discarded": True,
+                    "probe_discard_reason": "stream_changed_during_probe",
+                    "operator_note": (
+                        "Active stream changed while Shadow was probing. The mixed probe "
+                        "result was discarded and the new stream will be probed cleanly."
+                    ),
+                },
+            )
+
+        with self._lock:
+            current = dict(self._watched.get(channel_uuid) or {})
+            current.update(target)
+            if self._events and self._events[0].get("channel_ref") == target.get("channel_ref"):
+                current["last_event"] = self._events[0]
+            self._watched[channel_uuid] = current
+        return True
 
 
 _shadow_monitor_instance: Optional[ShadowBlankMonitorService] = None
