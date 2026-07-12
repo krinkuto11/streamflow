@@ -2082,6 +2082,9 @@ class ShadowBlankMonitorService:
                 target,
                 alternative,
                 config,
+                require_proxy_probe=bool(
+                    pre_probe_details and pre_probe_details.get("reported_current_reprobe")
+                ),
             )
         self._reset_blank_count(channel_uuid)
         if success:
@@ -2110,6 +2113,8 @@ class ShadowBlankMonitorService:
         target: Dict[str, Any],
         expected_stream_id: int,
         config: Dict[str, Any],
+        *,
+        require_proxy_probe: bool = False,
     ) -> tuple[bool, Optional[int], Dict[str, Any]]:
         deadline = time.monotonic() + 20.0
         observed_stream_id: Optional[int] = None
@@ -2124,9 +2129,10 @@ class ShadowBlankMonitorService:
                 observed_stream_id = stream_id
             try:
                 if stream_id is not None and int(stream_id) == int(expected_stream_id):
-                    return True, observed_stream_id, {
-                        "post_switch_verification_mode": "status_stream_id",
-                    }
+                    if not require_proxy_probe:
+                        return True, observed_stream_id, {
+                            "post_switch_verification_mode": "status_stream_id",
+                        }
             except (TypeError, ValueError):
                 pass
             time.sleep(0.5)
@@ -2134,9 +2140,16 @@ class ShadowBlankMonitorService:
         if observed_stream_id is not None:
             details: Dict[str, Any] = {
                 "post_switch_verification_mode": "status_stream_id",
-                "post_switch_status_mismatch": True,
                 "expected_stream_ref": _ref("stream", expected_stream_id),
             }
+            try:
+                status_matches = int(observed_stream_id) == int(expected_stream_id)
+            except (TypeError, ValueError):
+                status_matches = False
+            if not status_matches:
+                details["post_switch_status_mismatch"] = True
+            if require_proxy_probe:
+                details["post_switch_proxy_probe_required"] = True
             probe_details = self._verify_proxy_output_after_switch(target, config)
             details.update(probe_details)
             if probe_details.get("accepted"):
@@ -2312,12 +2325,31 @@ class ShadowBlankMonitorService:
         if channel_id is not None and target.get("channel_id") != channel_id:
             target["channel_id"] = channel_id
             target["channel_ref"] = _ref("channel", channel_id)
-        for candidate_id in self._ordered_alternative_streams(
+        excluded = {
+            int(item)
+            for item in (excluded_stream_ids or [])
+            if item is not None and str(item).isdigit()
+        }
+        candidate_ids = self._ordered_alternative_streams(
             udi,
             channel_id,
             current_stream_id,
             excluded_stream_ids=excluded_stream_ids,
+        )
+        # Dispatcharr can change the live fMP4 input on its owner worker while
+        # proxy status still reports the previous stream ID. After every true
+        # alternative has failed its pre-probe, retry the reported current
+        # stream as a final recovery candidate. Its own pre-probe still has to
+        # pass, and the resulting switch requires content verification.
+        if (
+            candidate_ids
+            and current_stream_id is not None
+            and int(current_stream_id) not in excluded
+            and self._stream_for_id(udi, channel_id, int(current_stream_id)) is not None
         ):
+            candidate_ids.append(int(current_stream_id))
+
+        for candidate_id in candidate_ids:
             candidate_ref = _ref("stream", candidate_id)
             candidate_stream = self._stream_for_id(udi, channel_id, candidate_id)
             candidate_url = self._stream_url(candidate_stream)
@@ -2326,6 +2358,8 @@ class ShadowBlankMonitorService:
                 "target_stream_ref": candidate_ref,
                 "duration_seconds": int(config.get("next_stream_pre_probe_duration_seconds", 8)),
             }
+            if current_stream_id is not None and int(candidate_id) == int(current_stream_id):
+                details["reported_current_reprobe"] = True
             if not candidate_url:
                 details["result"] = "missing_url"
                 self._record_pre_probe_metric("preprobe_skipped_missing_url", target, details)
