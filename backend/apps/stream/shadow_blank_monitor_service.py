@@ -2153,11 +2153,6 @@ class ShadowBlankMonitorService:
                 )
                 if probe_details.get("accepted"):
                     return True, observed_stream_id, last_probe_details
-                rejection_reason = (
-                    probe_details.get("post_switch_proxy_probe") or {}
-                ).get("rejection_reason")
-                if rejection_reason not in {"incomplete_probe", "timeout"}:
-                    return False, observed_stream_id, last_probe_details
             time.sleep(0.5)
 
         if last_probe_details is not None:
