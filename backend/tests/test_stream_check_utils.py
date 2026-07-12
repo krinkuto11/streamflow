@@ -61,13 +61,12 @@ class TestLoopProbeSampling(unittest.TestCase):
                 ))
         return f"P6\n{width} {height}\n255\n".encode() + bytes(pixels)
 
-    def test_loop_probe_samples_high_fps_frames_before_buffering(self):
-        frames_per_second = 25
+    def test_loop_probe_uses_media_time_when_one_fps_frames_arrive_in_a_burst(self):
         loop_period_seconds = 20
         total_seconds = 45
         raw_frames = [
-            self._ppm_frame((frame_index // frames_per_second) % loop_period_seconds)
-            for frame_index in range(frames_per_second * total_seconds)
+            self._ppm_frame(frame_index % loop_period_seconds)
+            for frame_index in range(total_seconds)
         ]
         pipe_bytes = b"".join(raw_frames)
 
@@ -114,8 +113,46 @@ class TestLoopProbeSampling(unittest.TestCase):
         self.assertTrue(loop_detected)
         self.assertIsNotNone(loop_duration)
         self.assertGreaterEqual(loop_duration, 10.0)
-        self.assertLess(frames_processed, len(raw_frames))
-        self.assertGreaterEqual(frames_processed, 20)
+        self.assertGreaterEqual(loop_duration, 20.0)
+        self.assertEqual(loop_duration % 20.0, 0.0)
+        self.assertEqual(frames_processed, len(raw_frames))
+
+    def test_loop_probe_caps_unexpected_excess_frame_output(self):
+        raw_frames = [self._ppm_frame(index) for index in range(200)]
+        pipe_bytes = b"".join(raw_frames)
+
+        class FakeProcess:
+            def __init__(self, payload):
+                self.stdout = io.BytesIO(payload)
+                self.stderr = io.BytesIO(b"")
+                self._size = len(payload)
+
+            def wait(self, timeout=None):
+                deadline = real_monotonic() + 5
+                while real_monotonic() < deadline:
+                    try:
+                        if self.stdout.tell() >= self._size:
+                            break
+                    except ValueError:
+                        break
+                    real_sleep(0.001)
+                return 0
+
+            def kill(self):
+                return None
+
+        with patch.object(
+            stream_check_utils.subprocess,
+            "Popen",
+            return_value=FakeProcess(pipe_bytes),
+        ):
+            _detected, _duration, frames_processed = _probe_stream_for_loops(
+                url="http://example.invalid/excess.ts",
+                stream_tag="test-loop-cap",
+                probe_duration=60,
+            )
+
+        self.assertEqual(frames_processed, 62)
 
     def test_loop_probe_abort_callback_terminates_ffmpeg(self):
         class BlockingProcess:

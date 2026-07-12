@@ -69,7 +69,6 @@ _LOOP_PROBE_HAMMING_TOLERANCE = 3
 _LOOP_PROBE_DURATION          = 360   # 6 minutes — catches loops up to 3 min period
 _LOOP_PROBE_DURATION_MIN      = 60    # enforced floor
 _LOOP_PROBE_DURATION_MAX      = 720   # 12 minutes — ceiling for future flexibility
-_LOOP_PROBE_SAMPLE_INTERVAL   = 1.0   # Safety throttle; FFmpeg also emits a 1 FPS frame pipe
 
 # Constants for error detection and logging
 FFMPEG_HWACCEL_MODES = {
@@ -2175,8 +2174,7 @@ def _probe_stream_for_loops(
         f"[loop-probe:{stream_tag}] Starting {clamped}s probe "
         f"(hamming_tolerance={_LOOP_PROBE_HAMMING_TOLERANCE}, "
         f"sequence_length=3, duration_threshold=10.0s, "
-        f"ffmpeg_fps=1, "
-        f"sample_interval={_LOOP_PROBE_SAMPLE_INTERVAL:.1f}s)"
+        f"ffmpeg_fps=1, media_time_sampling=true)"
     )
 
     hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
@@ -2249,7 +2247,7 @@ def _probe_stream_for_loops(
     def _reader():
         nonlocal loop_detected, loop_duration
         logger.debug(f"[loop-probe:{stream_tag}] Reader thread started")
-        last_process_time = 0.0
+        max_media_frames = clamped + 2
         try:
             while not detector.is_closed:
                 frame_data = detector._read_ppm_frame()
@@ -2257,16 +2255,17 @@ def _probe_stream_for_loops(
                     logger.debug(f"[loop-probe:{stream_tag}] Pipe EOF — reader exiting")
                     break
 
-                ts = time.monotonic()
-                detector.last_frame_time = ts
-                if ts - last_process_time < _LOOP_PROBE_SAMPLE_INTERVAL:
-                    continue
-                last_process_time = ts
+                wall_time = time.monotonic()
+                detector.last_frame_time = wall_time
+                # FFmpeg already emits one frame per media second via fps=1.
+                # Dispatcharr may deliver buffered media faster than wall clock,
+                # so a second wall-time throttle would discard valid samples.
+                media_time = float(frames_done[0])
 
                 try:
                     img = Image.open(io.BytesIO(frame_data))
                     h   = detector.frame_signature(img)
-                    detector.buffer.append((ts, h))
+                    detector.buffer.append((media_time, h))
                     frames_done[0] += 1
 
                     display_hash = h.get("phash") if isinstance(h, dict) else h
@@ -2291,6 +2290,13 @@ def _probe_stream_for_loops(
                     else:
                         detector._is_looping   = False
                         detector._loop_duration = 0.0
+
+                    if frames_done[0] >= max_media_frames:
+                        logger.debug(
+                            f"[loop-probe:{stream_tag}] Reached media-frame safety cap "
+                            f"({max_media_frames})"
+                        )
+                        break
 
                 except Exception as frame_err:
                     logger.debug(f"[loop-probe:{stream_tag}] Frame error: {frame_err}")
