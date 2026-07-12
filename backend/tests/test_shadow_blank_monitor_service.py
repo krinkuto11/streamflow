@@ -598,6 +598,63 @@ def test_short_completed_probe_is_not_accepted_as_healthy(monkeypatch, tmp_path)
     assert service._pre_probe_rejection_reason(result) == "incomplete_probe"
 
 
+def test_full_media_window_survives_ffmpeg_teardown_timeout(monkeypatch, tmp_path):
+    stderr = (
+        b"frame=  144 fps=12.0 q=-0.0 size=N/A time=00:00:12.00 "
+        b"bitrate=N/A speed=1x\n"
+    )
+
+    def timeout_probe(*args, **kwargs):
+        raise shadow_module.subprocess.TimeoutExpired(args[0], timeout=27, stderr=stderr)
+
+    monkeypatch.setattr(shadow_module.subprocess, "run", timeout_probe)
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({
+        "probe_duration_seconds": 12,
+        "offline_image_detection_enabled": False,
+    })
+
+    result = service._run_blank_probe("http://example.test/healthy", config)
+
+    assert result["probe_teardown_timeout"] is True
+    assert result["probe_media_window_complete"] is True
+    assert result["probe_media_duration_seconds"] == 12.0
+    assert result["decoded_video_frames"] == 144
+    assert result.get("timeout") is not True
+    assert service._pre_probe_rejection_reason(result) is None
+
+
+def test_partial_media_does_not_survive_ffmpeg_teardown_timeout(monkeypatch, tmp_path):
+    stderr = (
+        b"frame=    1 fps=0.1 q=-0.0 size=N/A time=00:00:01.00 "
+        b"bitrate=N/A speed=0.1x\n"
+    )
+
+    def timeout_probe(*args, **kwargs):
+        raise shadow_module.subprocess.TimeoutExpired(args[0], timeout=27, stderr=stderr)
+
+    monkeypatch.setattr(shadow_module.subprocess, "run", timeout_probe)
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({
+        "probe_duration_seconds": 12,
+        "offline_image_detection_enabled": False,
+    })
+
+    result = service._run_blank_probe("http://example.test/stalled", config)
+
+    assert result["probe_teardown_timeout"] is True
+    assert result["probe_media_window_complete"] is False
+    assert result["probe_media_duration_seconds"] == 1.0
+    assert result["timeout"] is True
+    assert service._pre_probe_rejection_reason(result) == "timeout"
+
+
 def test_offline_image_status_warns_about_missing_or_invalid_hashes(tmp_path):
     service = make_service(
         tmp_path,

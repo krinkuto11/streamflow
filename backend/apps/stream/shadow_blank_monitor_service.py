@@ -2249,6 +2249,10 @@ class ShadowBlankMonitorService:
                 "probe_incomplete",
                 "probe_elapsed_seconds",
                 "probe_expected_duration_seconds",
+                "probe_media_window_complete",
+                "probe_media_duration_seconds",
+                "decoded_video_frames",
+                "probe_teardown_timeout",
                 "timeout",
             )
             if key in result
@@ -3965,7 +3969,11 @@ class ShadowBlankMonitorService:
             parsed["probe_incomplete"] = elapsed + 1.0 < float(duration)
             return parsed
         except subprocess.TimeoutExpired as exc:
-            output = exc.stderr if isinstance(exc.stderr, str) else ""
+            raw_output = exc.stderr or ""
+            if isinstance(raw_output, bytes):
+                output = raw_output.decode("utf-8", errors="replace")
+            else:
+                output = str(raw_output)
             parsed = _parse_blank_detection(
                 output,
                 duration,
@@ -3994,7 +4002,27 @@ class ShadowBlankMonitorService:
                 returncode=None,
             ))
             parsed.update(self._run_offline_image_probe(url, config))
-            parsed["timeout"] = True
+            decoded_frames = 0
+            media_duration = 0.0
+            for line in output.splitlines():
+                progress_time = _parse_ffmpeg_progress_time(line)
+                if progress_time is not None:
+                    media_duration = max(media_duration, progress_time)
+            for match in FFMPEG_FRAME_RE.finditer(output):
+                try:
+                    decoded_frames = max(decoded_frames, int(match.group("frames")))
+                except (TypeError, ValueError):
+                    continue
+            media_window_complete = (
+                decoded_frames > 0
+                and media_duration + 1.0 >= float(duration)
+            )
+            parsed["decoded_video_frames"] = decoded_frames
+            parsed["probe_media_duration_seconds"] = round(media_duration, 3)
+            parsed["probe_media_window_complete"] = media_window_complete
+            parsed["probe_teardown_timeout"] = True
+            if not media_window_complete:
+                parsed["timeout"] = True
             parsed["probe_elapsed_seconds"] = duration
             parsed["probe_expected_duration_seconds"] = duration
             parsed["probe_incomplete"] = False
