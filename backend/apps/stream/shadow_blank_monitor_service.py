@@ -3999,10 +3999,18 @@ class ShadowBlankMonitorService:
                 returncode=completed.returncode,
             ))
             parsed.update(self._run_offline_image_probe(url, config))
+            decoded_frames, media_duration = self._probe_media_progress(output)
+            media_window_complete = (
+                decoded_frames > 0
+                and media_duration + 1.0 >= float(duration)
+            )
             parsed["returncode"] = completed.returncode
             parsed["probe_elapsed_seconds"] = round(max(0.0, elapsed), 3)
             parsed["probe_expected_duration_seconds"] = duration
-            parsed["probe_incomplete"] = elapsed + 1.0 < float(duration)
+            parsed["decoded_video_frames"] = decoded_frames
+            parsed["probe_media_duration_seconds"] = round(media_duration, 3)
+            parsed["probe_media_window_complete"] = media_window_complete
+            parsed["probe_incomplete"] = not media_window_complete and elapsed + 1.0 < float(duration)
             return parsed
         except subprocess.TimeoutExpired as exc:
             raw_output = exc.stderr or ""
@@ -4038,17 +4046,7 @@ class ShadowBlankMonitorService:
                 returncode=None,
             ))
             parsed.update(self._run_offline_image_probe(url, config))
-            decoded_frames = 0
-            media_duration = 0.0
-            for line in output.splitlines():
-                progress_time = _parse_ffmpeg_progress_time(line)
-                if progress_time is not None:
-                    media_duration = max(media_duration, progress_time)
-            for match in FFMPEG_FRAME_RE.finditer(output):
-                try:
-                    decoded_frames = max(decoded_frames, int(match.group("frames")))
-                except (TypeError, ValueError):
-                    continue
+            decoded_frames, media_duration = self._probe_media_progress(output)
             media_window_complete = (
                 decoded_frames > 0
                 and media_duration + 1.0 >= float(duration)
@@ -4063,6 +4061,21 @@ class ShadowBlankMonitorService:
             parsed["probe_expected_duration_seconds"] = duration
             parsed["probe_incomplete"] = False
             return parsed
+
+    @staticmethod
+    def _probe_media_progress(output: str) -> tuple[int, float]:
+        decoded_frames = 0
+        media_duration = 0.0
+        for line in (output or "").splitlines():
+            progress_time = _parse_ffmpeg_progress_time(line)
+            if progress_time is not None:
+                media_duration = max(media_duration, progress_time)
+        for match in FFMPEG_FRAME_RE.finditer(output or ""):
+            try:
+                decoded_frames = max(decoded_frames, int(match.group("frames")))
+            except (TypeError, ValueError):
+                continue
+        return decoded_frames, media_duration
 
     def _run_blank_probe_until_viewer_left(
         self,

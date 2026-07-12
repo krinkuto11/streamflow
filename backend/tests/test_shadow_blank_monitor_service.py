@@ -598,6 +598,66 @@ def test_short_completed_probe_is_not_accepted_as_healthy(monkeypatch, tmp_path)
     assert service._pre_probe_rejection_reason(result) == "incomplete_probe"
 
 
+def test_full_media_window_is_complete_when_ffmpeg_finishes_faster_than_wall_clock(
+    monkeypatch,
+    tmp_path,
+):
+    completed = type("CompletedProbe", (), {
+        "stderr": (
+            "frame=  144 fps=14.0 q=-0.0 size=N/A time=00:00:12.00 "
+            "bitrate=N/A speed=1.2x\n"
+        ),
+        "returncode": 0,
+    })()
+    timestamps = iter([100.0, 110.2])
+    monkeypatch.setattr(shadow_module.time, "time", lambda: next(timestamps))
+    monkeypatch.setattr(shadow_module.subprocess, "run", lambda *args, **kwargs: completed)
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({
+        "probe_duration_seconds": 12,
+        "offline_image_detection_enabled": False,
+    })
+
+    result = service._run_blank_probe("http://example.test/fast-complete", config)
+
+    assert result["probe_elapsed_seconds"] == 10.2
+    assert result["probe_media_duration_seconds"] == 12.0
+    assert result["decoded_video_frames"] == 144
+    assert result["probe_media_window_complete"] is True
+    assert result["probe_incomplete"] is False
+    assert service._pre_probe_rejection_reason(result) is None
+
+
+def test_partial_media_stays_incomplete_when_ffmpeg_exits_early(monkeypatch, tmp_path):
+    completed = type("CompletedProbe", (), {
+        "stderr": (
+            "frame=    1 fps=1.0 q=-0.0 size=N/A time=00:00:01.00 "
+            "bitrate=N/A speed=1x\n"
+        ),
+        "returncode": 0,
+    })()
+    timestamps = iter([100.0, 101.0])
+    monkeypatch.setattr(shadow_module.time, "time", lambda: next(timestamps))
+    monkeypatch.setattr(shadow_module.subprocess, "run", lambda *args, **kwargs: completed)
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({
+        "probe_duration_seconds": 12,
+        "offline_image_detection_enabled": False,
+    })
+
+    result = service._run_blank_probe("http://example.test/partial", config)
+
+    assert result["probe_media_window_complete"] is False
+    assert result["probe_incomplete"] is True
+    assert service._pre_probe_rejection_reason(result) == "incomplete_probe"
+
+
 def test_full_media_window_survives_ffmpeg_teardown_timeout(monkeypatch, tmp_path):
     stderr = (
         b"frame=  144 fps=12.0 q=-0.0 size=N/A time=00:00:12.00 "
