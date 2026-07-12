@@ -5236,6 +5236,42 @@ def test_default_switch_requires_active_stream_verification(tmp_path, monkeypatc
     assert status["recent_events"][0]["details"]["observed_stream_ref"].startswith("stream-")
 
 
+def test_fmp4_switch_verification_waits_for_late_status_update(tmp_path, monkeypatch):
+    current_time = {"value": 100.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.0
+        return current_time["value"]
+
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+    udi = FakeUdi(
+        statuses=[
+            *({"uuid-1": active_status(stream_id=10)} for _ in range(25)),
+            {"uuid-1": active_status(stream_id=11)},
+        ],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "viewer_output_format": "fmp4",
+    }
+
+    success, observed_stream_id, details = service._verify_active_stream_after_switch(
+        udi,
+        target,
+        11,
+        normalize_config({}),
+    )
+
+    assert success is True
+    assert observed_stream_id == 11
+    assert details["post_switch_verification_mode"] == "status_stream_id"
+
+
 def test_default_switch_accepts_proxy_probe_when_status_lacks_stream_id(tmp_path, monkeypatch):
     switch_calls = []
     probe_urls = []

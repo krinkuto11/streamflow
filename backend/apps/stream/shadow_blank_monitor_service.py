@@ -2116,7 +2116,12 @@ class ShadowBlankMonitorService:
         *,
         require_proxy_probe: bool = False,
     ) -> tuple[bool, Optional[int], Dict[str, Any]]:
-        deadline = time.monotonic() + 20.0
+        verification_window_seconds = (
+            45.0
+            if self._normalize_proxy_output_format(target.get("viewer_output_format")) == "fmp4"
+            else 20.0
+        )
+        deadline = time.monotonic() + verification_window_seconds
         observed_stream_id: Optional[int] = None
         while time.monotonic() < deadline and not self._stop_event.is_set():
             try:
@@ -2141,6 +2146,7 @@ class ShadowBlankMonitorService:
             details: Dict[str, Any] = {
                 "post_switch_verification_mode": "status_stream_id",
                 "expected_stream_ref": _ref("stream", expected_stream_id),
+                "post_switch_verification_window_seconds": int(verification_window_seconds),
             }
             try:
                 status_matches = int(observed_stream_id) == int(expected_stream_id)
@@ -2184,7 +2190,7 @@ class ShadowBlankMonitorService:
         verify_config = dict(config)
         verify_config["probe_duration_seconds"] = max(
             3,
-            min(8, int(config.get("next_stream_pre_probe_duration_seconds", 8))),
+            min(12, self._effective_pre_probe_duration_seconds(config)),
         )
         verify_config["loop_detection_enabled"] = False
         try:
