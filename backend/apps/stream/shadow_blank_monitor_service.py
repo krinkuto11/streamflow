@@ -4378,12 +4378,17 @@ class ShadowBlankMonitorService:
 
         try:
             # Continuous probes are protecting a real viewer that is already on
-            # the channel. Freeze can appear briefly during low-motion content,
-            # so gate it by the actual analysis window ratio instead of the raw
-            # minimum segment duration. Blank/no-decodable/silent keep their own
-            # faster fault-specific gates.
-            blank_required = float(
+            # the channel. Brief broadcast fades and low-motion content are
+            # normal, so blank and freeze both have to occupy their configured
+            # share of the bounded analysis window. The absolute minimum still
+            # applies when it is stricter than the ratio gate.
+            blank_minimum = float(
                 config.get("blank_min_duration_seconds", DEFAULT_CONFIG["blank_min_duration_seconds"])
+            )
+            blank_required = max(
+                blank_minimum,
+                float(analysis_window_seconds or duration or 1)
+                * float(config.get("blank_ratio_threshold", DEFAULT_CONFIG["blank_ratio_threshold"])),
             )
             freeze_required = float(
                 config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
@@ -4720,10 +4725,18 @@ class ShadowBlankMonitorService:
                     detected_reason = "no_decodable_frames"
                     detected_duration = float(no_decodable_parsed.get("no_decodable_frames_duration_secs") or 0.0)
 
+            probe_elapsed_duration = max(0.0, time.monotonic() - probe_started_wall)
             base_probe_duration = (
-                analysis_window_duration
-                if analysis_window_elapsed and analysis_window_duration is not None
-                else float(duration)
+                float(analysis_window_seconds)
+                if detected_reason == "blank"
+                else (
+                    analysis_window_duration
+                    if analysis_window_elapsed and analysis_window_duration is not None
+                    else min(
+                        float(duration),
+                        max(probe_elapsed_duration, last_media_time, detected_duration, 0.001),
+                    )
+                )
             )
             observed_probe_duration = max(
                 base_probe_duration,
@@ -4797,7 +4810,10 @@ class ShadowBlankMonitorService:
             if detected_reason == "blank":
                 parsed["blank_detected"] = True
                 parsed["blank_duration_secs"] = round(detected_duration, 3)
-                parsed["blank_ratio"] = round(min(1.0, detected_duration / float(duration or 1)), 4)
+                parsed["blank_ratio"] = round(
+                    min(1.0, detected_duration / float(observed_probe_duration or 1)),
+                    4,
+                )
             elif detected_reason == "freeze":
                 parsed.setdefault("blank_detected", False)
                 parsed["freeze_detected"] = True

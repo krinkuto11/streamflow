@@ -2011,7 +2011,8 @@ def test_continuous_probe_detects_open_blank_after_min_duration(tmp_path, monkey
         "blank_min_duration_seconds": 2,
         "blank_ratio_threshold": 0.8,
         "freeze_detection_enabled": False,
-        "no_decodable_frames_detection_enabled": False,
+        "no_decodable_frames_detection_enabled": True,
+        "silent_audio_detection_enabled": True,
     })
 
     result = service._run_blank_probe_until_viewer_left(
@@ -2027,8 +2028,8 @@ def test_continuous_probe_detects_open_blank_after_min_duration(tmp_path, monkey
 
     assert processes
     assert result["blank_detected"] is True
-    assert result["blank_duration_secs"] < 10
-    assert result["blank_ratio"] < 0.8
+    assert result["blank_duration_secs"] >= 9.6
+    assert result["blank_ratio"] >= 0.8
 
 
 def test_shadow_probe_flushes_delayed_blackdetect_at_analysis_window(tmp_path, monkeypatch):
@@ -2125,17 +2126,17 @@ def test_shadow_probe_flushes_delayed_blackdetect_at_analysis_window(tmp_path, m
     assert result.get("viewer_left") is not True
     assert result["blank_detected"] is True
     assert result["blank_duration_secs"] == 4.0
-    assert result["blank_ratio"] < 0.8
+    assert result["blank_ratio"] >= 0.8
 
 
-def test_shadow_probe_treats_flushed_min_duration_black_segment_as_detection(tmp_path, monkeypatch):
+def test_shadow_probe_ignores_short_broadcast_black_segment_below_ratio_gate(tmp_path, monkeypatch):
     processes = []
 
     class DeferredBlackStderr:
         def __init__(self):
             self._released = threading.Event()
             self._lines = [
-                "[blackdetect @ 000] black_start:0 black_end:2.96 black_duration:2.96\n",
+                "[blackdetect @ 000] black_start:0 black_end:3.64 black_duration:3.64\n",
             ]
             self._index = 0
 
@@ -2197,8 +2198,8 @@ def test_shadow_probe_treats_flushed_min_duration_black_segment_as_detection(tmp
         "blank_min_duration_seconds": 2,
         "blank_ratio_threshold": 0.8,
         "freeze_detection_enabled": False,
-        "no_decodable_frames_detection_enabled": False,
-        "silent_audio_detection_enabled": False,
+        "no_decodable_frames_detection_enabled": True,
+        "silent_audio_detection_enabled": True,
     })
 
     result = service._run_blank_probe_until_viewer_left(
@@ -2213,8 +2214,8 @@ def test_shadow_probe_treats_flushed_min_duration_black_segment_as_detection(tmp
     )
 
     assert processes
-    assert result["blank_detected"] is True
-    assert result["blank_duration_secs"] == 2.96
+    assert result["blank_detected"] is False
+    assert result["blank_duration_secs"] == 3.64
     assert result["blank_ratio"] < 0.8
 
 
