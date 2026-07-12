@@ -655,6 +655,34 @@ def test_partial_media_does_not_survive_ffmpeg_teardown_timeout(monkeypatch, tmp
     assert service._pre_probe_rejection_reason(result) == "timeout"
 
 
+def test_post_switch_probe_uses_bounded_process_timeout(
+    monkeypatch,
+    tmp_path,
+):
+    calls = []
+
+    def timeout_probe(*args, **kwargs):
+        calls.append(kwargs)
+        raise shadow_module.subprocess.TimeoutExpired(args[0], timeout=kwargs["timeout"], stderr=b"")
+
+    monkeypatch.setattr(shadow_module.subprocess, "run", timeout_probe)
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({
+        "probe_duration_seconds": 12,
+        "offline_image_detection_enabled": False,
+    })
+    config["_shadow_probe_subprocess_timeout_seconds"] = 15
+
+    result = service._run_blank_probe("http://example.test/reconnecting", config)
+
+    assert len(calls) == 1
+    assert calls[0]["timeout"] == 15
+    assert result["timeout"] is True
+
+
 def test_offline_image_status_warns_about_missing_or_invalid_hashes(tmp_path):
     service = make_service(
         tmp_path,
@@ -3297,8 +3325,10 @@ def test_required_proxy_probe_keeps_fault_rejection_until_window_expires(tmp_pat
     current_time = {"value": 100.0}
 
     def fake_monotonic():
-        current_time["value"] += 5.0
         return current_time["value"]
+
+    def fake_sleep(seconds):
+        current_time["value"] += seconds
 
     def proxy_probe(url, config):
         proxy_probe_calls.append(url)
@@ -3307,7 +3337,7 @@ def test_required_proxy_probe_keeps_fault_rejection_until_window_expires(tmp_pat
         return {"blank_detected": False, "silent_audio_detected": True}
 
     monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(shadow_module.time, "sleep", fake_sleep)
 
     udi = FakeUdi(
         statuses=[{"uuid-1": active_status(stream_id=10)}],
@@ -3349,11 +3379,61 @@ def test_required_proxy_probe_keeps_fault_rejection_until_window_expires(tmp_pat
     event = service.get_status()["recent_events"][0]
 
     assert should_continue is False
-    assert len(proxy_probe_calls) > 2
+    assert len(proxy_probe_calls) >= 2
     assert event["type"] == "switch_failed"
     assert event["details"]["post_switch_proxy_probe_accepted"] is False
     assert event["details"]["post_switch_proxy_probe"]["rejection_reason"] == "silent_audio"
     assert event["details"]["post_switch_proxy_probe_attempts"] > 1
+
+
+def test_normal_switch_retries_proxy_content_while_status_is_stale(tmp_path, monkeypatch):
+    proxy_probe_calls = []
+    current_time = {"value": 100.0}
+
+    def fake_monotonic():
+        current_time["value"] += 1.0
+        return current_time["value"]
+
+    def proxy_probe(url, config):
+        proxy_probe_calls.append((url, dict(config)))
+        if len(proxy_probe_calls) == 1:
+            return {
+                "blank_detected": False,
+                "freeze_detected": False,
+                "probe_incomplete": True,
+            }
+        return {
+            "blank_detected": False,
+            "freeze_detected": False,
+            "probe_incomplete": False,
+        }
+
+    monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi, blank_probe=proxy_probe)
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "viewer_output_format": "mpegts",
+    }
+
+    success, observed_stream_id, details = service._verify_active_stream_after_switch(
+        udi,
+        target,
+        11,
+        normalize_config({"next_stream_pre_probe_enabled": True}),
+    )
+
+    assert success is True
+    assert observed_stream_id == 10
+    assert len(proxy_probe_calls) == 2
+    assert details["post_switch_status_mismatch"] is True
+    assert details["post_switch_proxy_probe_attempts"] == 2
+    assert details["post_switch_proxy_probe_accepted"] is True
 
 
 def test_next_stream_pre_probe_rejects_missing_audio_candidate(tmp_path):
@@ -5439,11 +5519,13 @@ def test_fmp4_switch_verification_waits_for_late_status_update(tmp_path, monkeyp
     current_time = {"value": 100.0}
 
     def fake_monotonic():
-        current_time["value"] += 1.0
         return current_time["value"]
 
+    def fake_sleep(seconds):
+        current_time["value"] += seconds
+
     monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
-    monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(shadow_module.time, "sleep", fake_sleep)
     udi = FakeUdi(
         statuses=[
             *({"uuid-1": active_status(stream_id=10)} for _ in range(25)),
@@ -5452,6 +5534,10 @@ def test_fmp4_switch_verification_waits_for_late_status_update(tmp_path, monkeyp
         channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
     )
     service = make_service(tmp_path, udi=udi)
+    service._verify_proxy_output_after_switch = lambda *args, **kwargs: {
+        "post_switch_proxy_probe_accepted": False,
+        "accepted": False,
+    }
     target = {
         "channel_uuid": "uuid-1",
         "channel_id": 1,
@@ -5617,10 +5703,6 @@ def test_default_switch_accepts_proxy_probe_when_status_reports_stale_stream(tmp
 def test_default_switch_rejects_proxy_probe_when_output_still_bad(tmp_path, monkeypatch):
     switch_calls = []
     probe_urls = []
-    probe_results = iter([
-        {"blank_detected": True},
-        {"blank_detected": True},
-    ])
     current_time = {"value": 100.0}
 
     def fake_monotonic():
@@ -5629,7 +5711,7 @@ def test_default_switch_rejects_proxy_probe_when_output_still_bad(tmp_path, monk
 
     def blank_probe(url, config):
         probe_urls.append(url)
-        return next(probe_results)
+        return {"blank_detected": True}
 
     monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(shadow_module.time, "sleep", lambda _seconds: None)
@@ -5672,10 +5754,10 @@ def test_default_switch_rejects_proxy_probe_when_output_still_bad(tmp_path, monk
 
     assert should_continue is False
     assert switch_calls == [("uuid-1", 11, None)]
-    assert probe_urls == [
+    assert len(probe_urls) > 2
+    assert set(probe_urls) == {
         "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=fmp4",
-        "http://dispatcharr.local/proxy/ts/stream/uuid-1?output_format=fmp4",
-    ]
+    }
     assert event["type"] == "switch_failed"
     assert event["details"]["switch_api_success"] is True
     assert event["details"]["post_switch_verification"] is False

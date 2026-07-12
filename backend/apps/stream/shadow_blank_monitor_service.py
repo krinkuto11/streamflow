@@ -2121,7 +2121,8 @@ class ShadowBlankMonitorService:
             if self._normalize_proxy_output_format(target.get("viewer_output_format")) == "fmp4"
             else 35.0
         )
-        deadline = time.monotonic() + verification_window_seconds
+        verification_started = time.monotonic()
+        deadline = verification_started + verification_window_seconds
         observed_stream_id: Optional[int] = None
         last_probe_details: Optional[Dict[str, Any]] = None
         proxy_probe_attempts = 0
@@ -2134,24 +2135,39 @@ class ShadowBlankMonitorService:
             stream_id = self._extract_stream_id(status)
             if stream_id is not None:
                 observed_stream_id = stream_id
+            status_matches = False
             try:
-                if stream_id is not None and int(stream_id) == int(expected_stream_id):
-                    if not require_proxy_probe:
-                        return True, observed_stream_id, {
-                            "post_switch_verification_mode": "status_stream_id",
-                        }
+                status_matches = stream_id is not None and int(stream_id) == int(expected_stream_id)
             except (TypeError, ValueError):
-                pass
+                status_matches = False
+            if status_matches and not require_proxy_probe:
+                return True, observed_stream_id, {
+                    "post_switch_verification_mode": "status_stream_id",
+                }
 
-            if require_proxy_probe:
+            # Dispatcharr can switch the owner worker before its shared proxy
+            # status exposes the new stream ID. Give that cheap status path a
+            # short settle period, then verify the actual viewer output while
+            # there is still enough time for a reconnect retry.
+            settle_elapsed = time.monotonic() - verification_started
+            should_probe_proxy = require_proxy_probe or settle_elapsed >= 3.0
+            if should_probe_proxy:
+                remaining_seconds = max(0.0, deadline - time.monotonic())
+                probe_duration = self._post_switch_probe_duration_seconds(config)
+                if remaining_seconds < probe_duration + 1.0:
+                    break
                 proxy_probe_attempts += 1
-                probe_details = self._verify_proxy_output_after_switch(target, config)
+                probe_details = self._verify_proxy_output_after_switch(
+                    target,
+                    config,
+                    max_runtime_seconds=remaining_seconds,
+                )
                 last_probe_details = self._post_switch_verification_details(
                     observed_stream_id,
                     expected_stream_id,
                     verification_window_seconds,
                     probe_details,
-                    require_proxy_probe=True,
+                    require_proxy_probe=require_proxy_probe,
                 )
                 last_probe_details["post_switch_proxy_probe_attempts"] = proxy_probe_attempts
                 if probe_details.get("accepted"):
@@ -2205,6 +2221,8 @@ class ShadowBlankMonitorService:
         self,
         target: Dict[str, Any],
         config: Dict[str, Any],
+        *,
+        max_runtime_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         channel_uuid = target.get("channel_uuid")
         if not channel_uuid:
@@ -2221,11 +2239,21 @@ class ShadowBlankMonitorService:
             }
 
         verify_config = dict(config)
-        verify_config["probe_duration_seconds"] = max(
-            3,
-            min(12, self._effective_pre_probe_duration_seconds(config)),
-        )
+        verify_config["probe_duration_seconds"] = self._post_switch_probe_duration_seconds(config)
         verify_config["loop_detection_enabled"] = False
+        if max_runtime_seconds is not None:
+            verify_config["_shadow_probe_subprocess_timeout_seconds"] = max(
+                1.0,
+                min(
+                    float(max_runtime_seconds),
+                    float(verify_config["probe_duration_seconds"]) + 3.0,
+                ),
+            )
+            # The selected target was already checked directly by the enabled
+            # next-stream pre-probe. Avoid spending another 15 seconds on an
+            # offline-frame capture when this reconnect probe received no media.
+            if config.get("next_stream_pre_probe_enabled"):
+                verify_config["offline_image_detection_enabled"] = False
         try:
             result = self.blank_probe(url, verify_config)
         except Exception as exc:
@@ -2263,6 +2291,13 @@ class ShadowBlankMonitorService:
             "post_switch_proxy_probe_accepted": rejection_reason is None,
             "accepted": rejection_reason is None,
         }
+
+    @staticmethod
+    def _post_switch_probe_duration_seconds(config: Dict[str, Any]) -> int:
+        return max(
+            3,
+            min(12, ShadowBlankMonitorService._effective_pre_probe_duration_seconds(config)),
+        )
 
     def _ordered_alternative_streams(
         self,
@@ -3922,13 +3957,16 @@ class ShadowBlankMonitorService:
 
     def _run_blank_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
         command, duration = self._blank_probe_command(url, config)
+        process_timeout = float(
+            config.get("_shadow_probe_subprocess_timeout_seconds") or (duration + 15)
+        )
         try:
             start = time.time()
             completed = subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=duration + 15,
+                timeout=process_timeout,
                 text=True,
             )
             elapsed = time.time() - start
