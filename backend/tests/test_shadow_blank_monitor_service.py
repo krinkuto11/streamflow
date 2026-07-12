@@ -3115,6 +3115,45 @@ def test_disabling_monitor_clears_watched_snapshot(tmp_path):
     assert service.get_status()["watched_channels"] == []
 
 
+def test_stopping_during_discovery_cannot_repopulate_watched_snapshot(tmp_path):
+    entered_fetch = threading.Event()
+    release_fetch = threading.Event()
+    probe_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    original_get_proxy_status = udi.get_proxy_status
+
+    def delayed_get_proxy_status():
+        entered_fetch.set()
+        assert release_fetch.wait(timeout=2)
+        return original_get_proxy_status()
+
+    udi.get_proxy_status = delayed_get_proxy_status
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: probe_calls.append(url) or {"blank_detected": False},
+    )
+    with service._lock:
+        service._config["enabled"] = True
+    service._stop_event.clear()
+
+    scan_thread = threading.Thread(target=service.run_once)
+    scan_thread.start()
+    assert entered_fetch.wait(timeout=1)
+
+    service.stop(persist=False)
+    release_fetch.set()
+    scan_thread.join(timeout=2)
+
+    assert not scan_thread.is_alive()
+    assert probe_calls == []
+    assert service.get_status()["watched_count"] == 0
+    assert service.get_status()["watched_channels"] == []
+
+
 def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
     switch_calls = []
     udi = FakeUdi(

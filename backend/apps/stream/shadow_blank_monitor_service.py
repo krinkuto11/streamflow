@@ -776,6 +776,13 @@ class ShadowBlankMonitorService:
             cancel_event.set()
         if thread and thread.is_alive():
             thread.join(timeout=5)
+        # A scan that was already inside a slow proxy-status fetch can finish
+        # after the first clear. Clear the public snapshot again after the
+        # worker had a chance to observe the stop event.
+        with self._lock:
+            self._watched = {}
+            self._watcher_absences = {}
+            self._viewer_absences = {}
         for channel_uuid in watcher_keys:
             self._stop_persistent_watcher(channel_uuid)
         return True
@@ -892,6 +899,13 @@ class ShadowBlankMonitorService:
                 include_channel_ids=include_channel_ids,
                 include_channel_uuids=include_channel_uuids,
             )
+            if not force and self._stop_event.is_set():
+                with self._lock:
+                    self._watched = {}
+                    self._last_excluded_active_targets = []
+                    self._watcher_absences = {}
+                    self._viewer_absences = {}
+                return self.get_status()
             if not force:
                 self._sync_persistent_watchers(targets, config)
             self._probe_targets(
