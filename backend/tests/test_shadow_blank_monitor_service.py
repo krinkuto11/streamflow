@@ -579,6 +579,25 @@ def test_pre_probe_duration_covers_enabled_detection_thresholds():
     assert ShadowBlankMonitorService._effective_pre_probe_duration_seconds(configured_longer) == 30
 
 
+def test_short_completed_probe_is_not_accepted_as_healthy(monkeypatch, tmp_path):
+    completed = type("CompletedProbe", (), {"stderr": "", "returncode": 1})()
+    timestamps = iter([100.0, 100.1])
+    monkeypatch.setattr(shadow_module.time, "time", lambda: next(timestamps))
+    monkeypatch.setattr(shadow_module.subprocess, "run", lambda *args, **kwargs: completed)
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = normalize_config({"probe_duration_seconds": 12})
+
+    result = service._run_blank_probe("http://example.test/ended", config)
+
+    assert result["probe_incomplete"] is True
+    assert result["probe_elapsed_seconds"] == 0.1
+    assert result["probe_expected_duration_seconds"] == 12
+    assert service._pre_probe_rejection_reason(result) == "incomplete_probe"
+
+
 def test_offline_image_status_warns_about_missing_or_invalid_hashes(tmp_path):
     service = make_service(
         tmp_path,
@@ -3015,6 +3034,50 @@ def test_next_stream_pre_probe_skips_bad_candidate(tmp_path):
     assert status["recent_events"][1]["trigger_reason"] == "blank"
     assert status["recent_events"][1]["details"]["rejection_reason"] == "blank"
     assert status["recent_events"][1]["details"]["pre_probe_metric"] == "preprobe_rejected_media_fault"
+
+
+def test_next_stream_pre_probe_skips_incomplete_candidate(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={
+            11: {"id": 11, "url": "http://candidate.local/ended"},
+            12: {"id": 12, "url": "http://candidate.local/good"},
+        },
+    )
+    service = make_service(tmp_path, udi=udi)
+    service._run_blank_probe = lambda url, config: {
+        "probe_incomplete": "ended" in url,
+        "probe_elapsed_seconds": 0.1 if "ended" in url else config["probe_duration_seconds"],
+        "probe_expected_duration_seconds": config["probe_duration_seconds"],
+    }
+    config = normalize_config({
+        "next_stream_pre_probe_enabled": True,
+        "next_stream_pre_probe_duration_seconds": 5,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    alternative, details = service._choose_preprobed_alternative_stream(
+        udi,
+        target,
+        config,
+        10,
+        reason="freeze",
+    )
+    status = service.get_status()
+
+    assert alternative == 12
+    assert details["result"] == "ok"
+    rejected = next(event for event in status["recent_events"] if event["type"] == "pre_probe_rejected")
+    assert rejected["details"]["rejection_reason"] == "incomplete_probe"
+    assert rejected["details"]["probe_incomplete"] is True
 
 
 def test_pre_probe_recovers_when_proxy_status_reports_stale_current_stream(tmp_path, monkeypatch):

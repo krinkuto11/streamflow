@@ -2205,6 +2205,9 @@ class ShadowBlankMonitorService:
                 "garbled_audio_detected",
                 "silent_audio_detected",
                 "offline_image_detected",
+                "probe_incomplete",
+                "probe_elapsed_seconds",
+                "probe_expected_duration_seconds",
                 "timeout",
             )
             if key in result
@@ -2401,6 +2404,9 @@ class ShadowBlankMonitorService:
             details.update({
                 "result": "rejected" if rejection_reason else "ok",
                 "rejection_reason": rejection_reason,
+                "probe_incomplete": bool(probe_result.get("probe_incomplete")),
+                "probe_elapsed_seconds": probe_result.get("probe_elapsed_seconds"),
+                "probe_expected_duration_seconds": probe_result.get("probe_expected_duration_seconds"),
                 "blank_detected": bool(probe_result.get("blank_detected")),
                 "freeze_detected": bool(probe_result.get("freeze_detected")),
                 "no_decodable_frames_detected": bool(probe_result.get("no_decodable_frames_detected")),
@@ -2644,6 +2650,8 @@ class ShadowBlankMonitorService:
         ):
             if result.get(f"{reason}_detected"):
                 return reason
+        if result.get("probe_incomplete"):
+            return "incomplete_probe"
         return None
 
     @staticmethod
@@ -3911,6 +3919,9 @@ class ShadowBlankMonitorService:
             ))
             parsed.update(self._run_offline_image_probe(url, config))
             parsed["returncode"] = completed.returncode
+            parsed["probe_elapsed_seconds"] = round(max(0.0, elapsed), 3)
+            parsed["probe_expected_duration_seconds"] = duration
+            parsed["probe_incomplete"] = elapsed + 1.0 < float(duration)
             return parsed
         except subprocess.TimeoutExpired as exc:
             output = exc.stderr if isinstance(exc.stderr, str) else ""
@@ -3943,6 +3954,9 @@ class ShadowBlankMonitorService:
             ))
             parsed.update(self._run_offline_image_probe(url, config))
             parsed["timeout"] = True
+            parsed["probe_elapsed_seconds"] = duration
+            parsed["probe_expected_duration_seconds"] = duration
+            parsed["probe_incomplete"] = False
             return parsed
 
     def _run_blank_probe_until_viewer_left(
