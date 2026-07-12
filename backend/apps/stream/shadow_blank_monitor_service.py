@@ -2119,11 +2119,12 @@ class ShadowBlankMonitorService:
         verification_window_seconds = (
             45.0
             if self._normalize_proxy_output_format(target.get("viewer_output_format")) == "fmp4"
-            else 20.0
+            else 35.0
         )
         deadline = time.monotonic() + verification_window_seconds
         observed_stream_id: Optional[int] = None
         last_probe_details: Optional[Dict[str, Any]] = None
+        proxy_probe_attempts = 0
         while time.monotonic() < deadline and not self._stop_event.is_set():
             try:
                 status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
@@ -2143,6 +2144,7 @@ class ShadowBlankMonitorService:
                 pass
 
             if require_proxy_probe:
+                proxy_probe_attempts += 1
                 probe_details = self._verify_proxy_output_after_switch(target, config)
                 last_probe_details = self._post_switch_verification_details(
                     observed_stream_id,
@@ -2151,6 +2153,7 @@ class ShadowBlankMonitorService:
                     probe_details,
                     require_proxy_probe=True,
                 )
+                last_probe_details["post_switch_proxy_probe_attempts"] = proxy_probe_attempts
                 if probe_details.get("accepted"):
                     return True, observed_stream_id, last_probe_details
             time.sleep(0.5)

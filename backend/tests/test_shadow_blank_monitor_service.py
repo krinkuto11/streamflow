@@ -3289,6 +3289,7 @@ def test_required_fmp4_proxy_probe_retries_incomplete_reconnect(tmp_path, monkey
     assert event["type"] == "switch_success"
     assert event["details"]["post_switch_proxy_probe_accepted"] is True
     assert event["details"]["post_switch_proxy_probe"]["probe_incomplete"] is False
+    assert event["details"]["post_switch_proxy_probe_attempts"] == 2
 
 
 def test_required_proxy_probe_keeps_fault_rejection_until_window_expires(tmp_path, monkeypatch):
@@ -3352,6 +3353,7 @@ def test_required_proxy_probe_keeps_fault_rejection_until_window_expires(tmp_pat
     assert event["type"] == "switch_failed"
     assert event["details"]["post_switch_proxy_probe_accepted"] is False
     assert event["details"]["post_switch_proxy_probe"]["rejection_reason"] == "silent_audio"
+    assert event["details"]["post_switch_proxy_probe_attempts"] > 1
 
 
 def test_next_stream_pre_probe_rejects_missing_audio_candidate(tmp_path):
