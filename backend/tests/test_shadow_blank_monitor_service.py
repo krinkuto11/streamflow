@@ -3425,10 +3425,63 @@ def test_pre_probe_recovers_when_proxy_status_reports_stale_current_stream(tmp_p
     assert switch_calls == [("uuid-1", 10, None)]
     assert len(proxy_probe_calls) == 2
     assert event["type"] == "switch_success"
+    assert event["stream_ref"] == shadow_module._ref("stream", 11)
+    assert event["details"]["origin_stream_ref"] == shadow_module._ref("stream", 11)
+    assert event["details"]["origin_stream_source"] == "content_matching_preprobe"
     assert event["details"]["pre_probe"]["reported_current_reprobe"] is True
+    assert event["details"]["pre_probe"]["reported_current_stream_ref"] == shadow_module._ref("stream", 10)
+    assert event["details"]["pre_probe"]["inferred_origin_stream_ref"] == shadow_module._ref("stream", 11)
+    assert event["details"]["pre_probe"]["origin_inference"] == (
+        "single_preprobe_candidate_reproduced_active_fault"
+    )
+    assert "_inferred_origin_stream_id" not in event["details"]["pre_probe"]
     assert event["details"]["post_switch_proxy_probe_required"] is True
     assert event["details"]["post_switch_verification_mode"] == "status_stream_id+proxy_probe"
     assert "post_switch_status_mismatch" not in event["details"]
+
+
+def test_stale_proxy_status_does_not_guess_between_multiple_fault_candidates(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11, 12]}],
+        streams={
+            10: {"id": 10, "url": "http://candidate.local/good"},
+            11: {"id": 11, "url": "http://candidate.local/bad-one"},
+            12: {"id": 12, "url": "http://candidate.local/bad-two"},
+        },
+    )
+    service = make_service(tmp_path, udi=udi)
+    service._run_blank_probe = lambda url, _config: {
+        "blank_detected": False,
+        "freeze_detected": "bad" in url,
+    }
+    config = normalize_config({
+        "next_stream_pre_probe_enabled": True,
+        "next_stream_pre_probe_duration_seconds": 1,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-test",
+        "stream_id": 10,
+        "stream_ref": "stream-test",
+        "real_client_count": 1,
+    }
+
+    alternative, details = service._choose_preprobed_alternative_stream(
+        udi,
+        target,
+        config,
+        10,
+        reason="freeze",
+    )
+
+    assert alternative == 10
+    assert details["reported_current_reprobe"] is True
+    assert details["origin_inference"] == "ambiguous_preprobe_fault_candidates"
+    assert details["matching_fault_candidate_count"] == 2
+    assert "inferred_origin_stream_ref" not in details
+    assert "_inferred_origin_stream_id" not in details
 
 
 def test_required_fmp4_proxy_probe_retries_incomplete_reconnect(tmp_path, monkeypatch):

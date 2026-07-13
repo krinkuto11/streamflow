@@ -2155,7 +2155,24 @@ class ShadowBlankMonitorService:
             self._record_event("no_alternative", target, details)
             return
 
-        switch_details = {"target_stream_ref": _ref("stream", alternative), "reason": reason}
+        event_origin_stream_id = fresh_stream_id
+        origin_stream_source = "dispatcharr_proxy_status"
+        if pre_probe_details:
+            inferred_origin_stream_id = pre_probe_details.pop(
+                "_inferred_origin_stream_id",
+                None,
+            )
+            if inferred_origin_stream_id is not None:
+                event_origin_stream_id = int(inferred_origin_stream_id)
+                origin_stream_source = "content_matching_preprobe"
+            elif pre_probe_details.get("reported_current_reprobe"):
+                origin_stream_source = "dispatcharr_proxy_status_stale_unresolved"
+
+        switch_details = {
+            "target_stream_ref": _ref("stream", alternative),
+            "reason": reason,
+            "origin_stream_source": origin_stream_source,
+        }
         if pre_probe_details:
             switch_details["pre_probe"] = pre_probe_details
         if recovery_guard_bypass:
@@ -2174,8 +2191,8 @@ class ShadowBlankMonitorService:
         # stream while post-switch verification is still running. Preserve the
         # faulting stream for an accurate switch audit trail.
         switch_event_target = dict(target)
-        switch_event_target["stream_id"] = fresh_stream_id
-        switch_event_target["stream_ref"] = _ref("stream", fresh_stream_id)
+        switch_event_target["stream_id"] = event_origin_stream_id
+        switch_event_target["stream_ref"] = _ref("stream", event_origin_stream_id)
         switch_details["origin_stream_ref"] = switch_event_target["stream_ref"]
 
         self._record_switch_attempt(channel_uuid, fresh_stream_id, alternative)
@@ -2625,6 +2642,7 @@ class ShadowBlankMonitorService:
         reason: str,
     ) -> tuple[Optional[int], Optional[Dict[str, Any]]]:
         last_details: Optional[Dict[str, Any]] = None
+        matching_fault_candidate_ids: List[int] = []
         channel_id = self._resolve_channel_id(
             udi,
             target.get("channel_id"),
@@ -2727,10 +2745,32 @@ class ShadowBlankMonitorService:
             })
             last_details = details
             if rejection_reason:
+                if (
+                    rejection_reason == str(reason or "")
+                    and current_stream_id is not None
+                    and int(candidate_id) != int(current_stream_id)
+                ):
+                    matching_fault_candidate_ids.append(int(candidate_id))
                 metric = "preprobe_timeout" if rejection_reason == "timeout" else "preprobe_rejected_media_fault"
                 self._record_pre_probe_metric(metric, target, details)
                 self._record_event("pre_probe_rejected", target, {**details, "reason": reason})
                 continue
+            if details.get("reported_current_reprobe"):
+                details["reported_current_stream_ref"] = _ref("stream", current_stream_id)
+                unique_fault_candidates = list(dict.fromkeys(matching_fault_candidate_ids))
+                if len(unique_fault_candidates) == 1:
+                    inferred_origin_stream_id = unique_fault_candidates[0]
+                    details["_inferred_origin_stream_id"] = inferred_origin_stream_id
+                    details["inferred_origin_stream_ref"] = _ref(
+                        "stream",
+                        inferred_origin_stream_id,
+                    )
+                    details["origin_inference"] = (
+                        "single_preprobe_candidate_reproduced_active_fault"
+                    )
+                elif unique_fault_candidates:
+                    details["origin_inference"] = "ambiguous_preprobe_fault_candidates"
+                    details["matching_fault_candidate_count"] = len(unique_fault_candidates)
             self._record_pre_probe_metric("preprobe_success", target, details)
             return candidate_id, details
         return None, last_details
