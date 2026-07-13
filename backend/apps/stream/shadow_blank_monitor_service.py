@@ -2170,6 +2170,14 @@ class ShadowBlankMonitorService:
             )
             return
 
+        # Proxy status can update the shared watched target to the selected
+        # stream while post-switch verification is still running. Preserve the
+        # faulting stream for an accurate switch audit trail.
+        switch_event_target = dict(target)
+        switch_event_target["stream_id"] = fresh_stream_id
+        switch_event_target["stream_ref"] = _ref("stream", fresh_stream_id)
+        switch_details["origin_stream_ref"] = switch_event_target["stream_ref"]
+
         self._record_switch_attempt(channel_uuid, fresh_stream_id, alternative)
         switch_details["switch_channel_ref"] = _ref("channel", channel_uuid)
         # Dispatcharr's change_stream route is UUID-based even though proxy
@@ -2203,7 +2211,7 @@ class ShadowBlankMonitorService:
             switch_details.update(verification_details)
         self._record_event(
             "switch_success" if success else "switch_failed",
-            target,
+            switch_event_target,
             {
                 **switch_details,
                 "post_switch_verification": bool(success),

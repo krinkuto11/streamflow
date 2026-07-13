@@ -3184,6 +3184,49 @@ def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
     assert status["switch_summary"]["prevented_false_switches"] == 0
 
 
+def test_switch_event_keeps_fault_origin_when_shared_target_updates_during_switch(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": shadow_module._ref("channel", 1),
+        "stream_id": 10,
+        "stream_ref": shadow_module._ref("stream", 10),
+        "real_client_count": 1,
+    }
+
+    def switch_stream(_channel_id, stream_id=None, url=None):
+        assert url is None
+        target["stream_id"] = stream_id
+        target["stream_ref"] = shadow_module._ref("stream", stream_id)
+        return True
+
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda url, config: {"blank_detected": True},
+    )
+    service.switch_stream = switch_stream
+    service._uses_default_switch_stream = False
+    config = normalize_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+    })
+
+    should_continue = service._probe_target_once(udi, target, config)
+    event = service.get_status()["recent_events"][0]
+
+    assert should_continue is False
+    assert event["type"] == "switch_success"
+    assert event["stream_ref"] == shadow_module._ref("stream", 10)
+    assert event["details"]["origin_stream_ref"] == shadow_module._ref("stream", 10)
+    assert event["details"]["target_stream_ref"] == shadow_module._ref("stream", 11)
+
+
 def test_next_stream_pre_probe_disabled_preserves_direct_switch(tmp_path):
     switch_calls = []
     udi = FakeUdi(
