@@ -39,4 +39,20 @@ describe('getStartupDurationDisplay', () => {
       expectation: 'About 1m 15s remaining based on the last cache refresh.',
     })
   })
+
+  it('does not turn a completed null elapsed time into a stale remaining estimate', () => {
+    expect(getStartupDurationDisplay({
+      status: 'completed',
+      percentage: 100,
+      elapsed_seconds: null,
+      last_refresh_duration_seconds: 163,
+    })).toEqual({
+      elapsedLabel: '2m 43s',
+      remainingLabel: null,
+      estimateLabel: 'Status',
+      estimateValue: 'Complete',
+      estimateHint: 'Opening the dashboard.',
+      expectation: 'Startup complete. Opening the dashboard.',
+    })
+  })
 })
