@@ -503,6 +503,7 @@ class ShadowBlankMonitorService:
         self._last_pre_probe: Optional[Dict[str, Any]] = None
         self._active_probes: set[str] = set()
         self._probe_cancel_events: Dict[str, threading.Event] = {}
+        self._service_stop_probe_events: set[threading.Event] = set()
         self._persistent_watchers: Dict[str, Dict[str, Any]] = {}
         self._last_loop_probe_started_at: Dict[str, float] = {}
         self._last_scan_at: Optional[float] = None
@@ -770,6 +771,7 @@ class ShadowBlankMonitorService:
                 self._save_config()
             self._stop_event.set()
             probe_cancel_events = list(self._probe_cancel_events.values())
+            self._service_stop_probe_events.update(probe_cancel_events)
             self._watched = {}
             self._watcher_absences = {}
             self._viewer_absences = {}
@@ -1737,15 +1739,26 @@ class ShadowBlankMonitorService:
         finally:
             with self._lock:
                 registered_event = self._probe_cancel_events.get(channel_uuid)
+                service_stopped_probe = (
+                    cancel_event is not None
+                    and cancel_event in self._service_stop_probe_events
+                )
+                if cancel_event is not None:
+                    self._service_stop_probe_events.discard(cancel_event)
                 if cancel_event is None or registered_event is cancel_event:
                     self._probe_cancel_events.pop(channel_uuid, None)
                     self._active_probes.discard(channel_uuid)
-                    watched = self._watched.get(channel_uuid)
-                    if watched is not None:
-                        watched["probe_state"] = "idle"
-                        watched["probe_active"] = False
-                        watched.pop("active_probe_started_at", None)
-                        watched.pop("next_probe_at", None)
+                    if service_stopped_probe:
+                        self._watched.pop(channel_uuid, None)
+                        self._watcher_absences.pop(channel_uuid, None)
+                        self._viewer_absences.pop(channel_uuid, None)
+                    else:
+                        watched = self._watched.get(channel_uuid)
+                        if watched is not None:
+                            watched["probe_state"] = "idle"
+                            watched["probe_active"] = False
+                            watched.pop("active_probe_started_at", None)
+                            watched.pop("next_probe_at", None)
 
     def _cancel_active_probe(self, channel_uuid: str) -> bool:
         with self._lock:

@@ -3155,6 +3155,58 @@ def test_stopping_during_discovery_cannot_repopulate_watched_snapshot(tmp_path):
     assert service.get_status()["watched_channels"] == []
 
 
+def test_stopping_during_probe_cannot_restore_viewer_grace_snapshot(tmp_path, monkeypatch):
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    service._uses_default_blank_probe = True
+    service.update_config({
+        "enabled": False,
+        "watch_mode": "continuous",
+        "viewer_left_grace_seconds": 5,
+        "watcher_api_key": "test-watcher-key",
+    })
+    config = service.get_config(include_secret=True)
+    config["_shadow_allow_viewer_left_grace"] = True
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+    }
+    with service._lock:
+        service._watched["uuid-1"] = dict(target)
+
+    def late_probe(_udi, probe_target, probe_config):
+        probe_started.set()
+        assert release_probe.wait(timeout=2)
+        service._mark_viewer_left_grace(probe_target, probe_config, {})
+        return False
+
+    monkeypatch.setattr(service, "_probe_target_once", late_probe)
+    service._stop_event.clear()
+    service._probe_targets(udi, [target], config)
+    assert probe_started.wait(timeout=1)
+
+    service.stop(persist=False)
+    release_probe.set()
+    for _ in range(40):
+        with service._lock:
+            if not service._active_probes:
+                break
+        time.sleep(0.05)
+
+    assert service.get_status()["watched_count"] == 0
+    assert service.get_status()["watched_channels"] == []
+
+
 def test_confirmed_blank_switches_to_next_stream_when_live(tmp_path):
     switch_calls = []
     udi = FakeUdi(
