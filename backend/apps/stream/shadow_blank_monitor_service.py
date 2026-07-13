@@ -1857,15 +1857,11 @@ class ShadowBlankMonitorService:
                 config.get("offline_image_detection_enabled")
                 and result.get("offline_image_detected")
             )
-            freeze_suppressed_audio_present = False
-            if (
+            freeze_audio_present = bool(
                 config.get("watch_mode") == "continuous"
                 and freeze
                 and result.get("audio_stream_present") is True
-                and not any((blank, solid_color, no_decodable_frames, garbled_audio, silent_audio, offline_image))
-            ):
-                freeze = False
-                freeze_suppressed_audio_present = True
+            )
             loop = False
             detection_reason = next(
                 (
@@ -1916,7 +1912,8 @@ class ShadowBlankMonitorService:
                 "loop_frames_processed": result.get("loop_frames_processed"),
                 "loop_probe_error": result.get("loop_probe_error"),
                 "loop_probe_sliced": bool(result.get("loop_probe_sliced")),
-                "freeze_suppressed_audio_present": freeze_suppressed_audio_present,
+                "freeze_audio_present": freeze_audio_present,
+                "freeze_suppressed_audio_present": False,
             }
             target["last_probe_thresholds"] = self._detection_thresholds(config)
 
@@ -1987,7 +1984,12 @@ class ShadowBlankMonitorService:
                 config,
                 reason=detection_reason,
             )
-            confirmations = self._required_confirmations(config, detection_reason, guard_details)
+            confirmations = self._required_confirmations(
+                config,
+                detection_reason,
+                guard_details,
+                target=target,
+            )
             recovery_guard_bypass: Optional[Dict[str, Any]] = None
             if guard_details is not None:
                 next_count = self._current_detection_count(channel_uuid, detection_reason) + 1
@@ -2050,7 +2052,12 @@ class ShadowBlankMonitorService:
         recovery_guard_bypass: Optional[Dict[str, Any]] = None
         if guard_details is not None:
             current_count = self._current_detection_count(channel_uuid, reason)
-            required_confirmations = self._required_confirmations(config, reason, guard_details)
+            required_confirmations = self._required_confirmations(
+                config,
+                reason,
+                guard_details,
+                target=target,
+            )
             recovery_guard_bypass = self._media_recovery_guard_bypass_details(
                 target,
                 fresh_status,
@@ -2068,7 +2075,12 @@ class ShadowBlankMonitorService:
             observed_guard = target.get("media_recovery_guard_observed")
             if isinstance(observed_guard, dict) and observed_guard.get("reason") == reason:
                 current_count = self._current_detection_count(channel_uuid, reason)
-                required_confirmations = self._required_confirmations(config, reason, observed_guard)
+                required_confirmations = self._required_confirmations(
+                    config,
+                    reason,
+                    observed_guard,
+                    target=target,
+                )
                 recovery_guard_bypass = self._media_recovery_guard_bypass_details(
                     target,
                     fresh_status,
@@ -3131,8 +3143,16 @@ class ShadowBlankMonitorService:
         config: Dict[str, Any],
         reason: str,
         guard_details: Optional[Dict[str, Any]] = None,
+        *,
+        target: Optional[Dict[str, Any]] = None,
     ) -> int:
         confirmations = int(config.get("confirmation_count", 2))
+        if (
+            reason == "freeze"
+            and isinstance(target, dict)
+            and (target.get("last_probe") or {}).get("audio_stream_present") is True
+        ):
+            confirmations = max(confirmations, 2)
         if guard_details is not None and reason in MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS:
             return max(confirmations, 2)
         return confirmations
@@ -3374,7 +3394,12 @@ class ShadowBlankMonitorService:
         fresh_details = self._watcher_client_details(fresh_status, config)
         if fresh_details.get("watcher_client_ref"):
             guard_details["watcher_client_ref"] = fresh_details.get("watcher_client_ref")
-        required_confirmations = self._required_confirmations(config, str(reason), guard_details)
+        required_confirmations = self._required_confirmations(
+            config,
+            str(reason),
+            guard_details,
+            target=target,
+        )
         if current_count <= 0 or current_count >= required_confirmations:
             return None
 

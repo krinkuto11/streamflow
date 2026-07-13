@@ -5189,7 +5189,7 @@ def test_continuous_freeze_fault_recovery_guard_needs_second_confirmation(tmp_pa
     assert status["recent_events"][1]["type"] == "freeze_pending"
 
 
-def test_continuous_freeze_with_audio_present_is_probe_ok(tmp_path):
+def test_continuous_freeze_with_audio_present_requires_confirmation_and_switches(tmp_path):
     switch_calls = []
     udi = FakeUdi(
         statuses=[
@@ -5232,18 +5232,28 @@ def test_continuous_freeze_with_audio_present_is_probe_ok(tmp_path):
         "real_client_count": 1,
     }
 
-    should_continue = service._probe_target_once(udi, target, config)
+    first_result = service._probe_target_once(udi, target, config)
+    first_status = service.get_status()
+
+    assert first_result is True
+    assert switch_calls == []
+    assert first_status["recent_events"][0]["type"] == "freeze_pending"
+    assert first_status["recent_events"][0]["details"]["required"] == 2
+    first_probe = first_status["recent_events"][0]["details"]["detection"]["measurements"]
+    assert first_probe["freeze_duration_secs"] == 12.0
+
+    second_result = service._probe_target_once(udi, target, config)
     status = service.get_status()
 
-    assert should_continue is True
-    assert switch_calls == []
-    assert status["recent_events"][0]["type"] == "probe_ok"
+    assert second_result is False
+    assert switch_calls == [("uuid-1", 11, None)]
+    assert status["recent_events"][0]["type"] == "switch_success"
     details = status["recent_events"][0]["details"]
-    assert details["freeze_detected"] is False
-    assert details["freeze_suppressed_audio_present"] is True
-    assert details["audio_stream_present"] is True
-    with service._lock:
-        assert service._blank_counts == {}
+    assert details["reason"] == "freeze"
+    assert target["last_probe"]["freeze_detected"] is True
+    assert target["last_probe"]["freeze_audio_present"] is True
+    assert target["last_probe"]["freeze_suppressed_audio_present"] is False
+    assert target["last_probe"]["audio_stream_present"] is True
 
 
 def test_continuous_solid_color_with_audio_present_switches(tmp_path):
