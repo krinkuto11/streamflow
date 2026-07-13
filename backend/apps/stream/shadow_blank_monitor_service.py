@@ -2746,7 +2746,10 @@ class ShadowBlankMonitorService:
             last_details = details
             if rejection_reason:
                 if (
-                    rejection_reason == str(reason or "")
+                    self._pre_probe_fault_matches_active_fault(
+                        rejection_reason,
+                        reason,
+                    )
                     and current_stream_id is not None
                     and int(candidate_id) != int(current_stream_id)
                 ):
@@ -3000,6 +3003,19 @@ class ShadowBlankMonitorService:
         if result.get("probe_incomplete"):
             return "incomplete_probe"
         return None
+
+    @staticmethod
+    def _pre_probe_fault_matches_active_fault(
+        candidate_reason: Optional[str],
+        active_reason: Optional[str],
+    ) -> bool:
+        candidate = str(candidate_reason or "")
+        active = str(active_reason or "")
+        if not candidate or not active:
+            return False
+        if candidate == active:
+            return True
+        return {candidate, active} == {"blank", "solid_color"}
 
     @staticmethod
     def _detection_count_key(channel_uuid: str, reason: str) -> str:

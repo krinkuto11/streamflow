@@ -3367,14 +3367,22 @@ def test_pre_probe_recovers_when_proxy_status_reports_stale_current_stream(tmp_p
     def proxy_probe(url, config):
         proxy_probe_calls.append(url)
         if len(proxy_probe_calls) == 1:
-            return {"blank_detected": False, "freeze_detected": True}
-        return {"blank_detected": False, "freeze_detected": False}
+            return {
+                "blank_detected": False,
+                "solid_color_detected": True,
+                "freeze_detected": False,
+            }
+        return {
+            "blank_detected": False,
+            "solid_color_detected": False,
+            "freeze_detected": False,
+        }
 
     def pre_probe(url, config):
         pre_probe_calls.append(url)
         return {
-            "blank_detected": False,
-            "freeze_detected": "bad" in url,
+            "blank_detected": "bad" in url,
+            "freeze_detected": False,
         }
 
     monkeypatch.setattr(shadow_module.time, "monotonic", fake_monotonic)
@@ -3452,8 +3460,8 @@ def test_stale_proxy_status_does_not_guess_between_multiple_fault_candidates(tmp
     )
     service = make_service(tmp_path, udi=udi)
     service._run_blank_probe = lambda url, _config: {
-        "blank_detected": False,
-        "freeze_detected": "bad" in url,
+        "blank_detected": "bad" in url,
+        "freeze_detected": False,
     }
     config = normalize_config({
         "next_stream_pre_probe_enabled": True,
@@ -3473,7 +3481,7 @@ def test_stale_proxy_status_does_not_guess_between_multiple_fault_candidates(tmp
         target,
         config,
         10,
-        reason="freeze",
+        reason="solid_color",
     )
 
     assert alternative == 10
