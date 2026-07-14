@@ -742,7 +742,41 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(events[1]["message"], "Refreshing playlist 1/2: One")
         self.assertEqual(events[-1]["message"], "Playlist 2/2 refresh accepted: Two")
 
-    def test_refresh_playlists_reports_missing_account_as_skipped(self):
+    def test_refresh_playlists_targets_only_requested_active_account(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {
+                "auto_playlist_update": True,
+                "changelog_tracking": False,
+            },
+            "enabled_m3u_accounts": [],
+        }
+        response = Mock(status_code=200)
+        scheduling_service = Mock()
+
+        with patch(
+            "apps.automation.automated_stream_manager.get_m3u_accounts",
+            return_value=[
+                {"id": 17, "name": "Target", "is_active": True},
+                {"id": 18, "name": "Other", "is_active": True},
+            ],
+        ), patch(
+            "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+            return_value=response,
+        ) as refresh_mock, patch(
+            "apps.automation.scheduling_service.get_scheduling_service",
+            return_value=scheduling_service,
+        ):
+            result = manager.refresh_playlists(
+                account_id=17,
+                skip_changelog=True,
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(result[1], [{"id": 17, "name": "Target"}])
+        refresh_mock.assert_called_once_with(account_id=17)
+
+    def test_refresh_playlists_reports_missing_account_as_failed(self):
         manager = self._manager()
         manager.config = {
             "enabled_features": {
@@ -763,17 +797,91 @@ class AutomationRunStatusTests(unittest.TestCase):
             "apps.automation.scheduling_service.get_scheduling_service",
             return_value=scheduling_service,
         ):
-            success, accounts = manager.refresh_playlists(
+            result = manager.refresh_playlists(
                 account_id=99,
                 skip_changelog=True,
                 progress_callback=events.append,
             )
+            success, accounts = result
 
-        self.assertTrue(success)
+        self.assertFalse(success)
         self.assertEqual(accounts, [])
+        self.assertEqual(result.outcome, "failed")
+        self.assertEqual(
+            result.failed_refresh_requests,
+            [{"id": 99, "reason": "account_unavailable"}],
+        )
         refresh_mock.assert_not_called()
-        self.assertEqual(events[-1]["state"], "skipped")
-        self.assertEqual(events[-1]["message"], "No active playlists matched the refresh request")
+        self.assertEqual(events[-1]["state"], "failed")
+        self.assertEqual(events[-1]["message"], "Requested playlist is unavailable")
+
+    def test_targeted_refresh_never_falls_back_when_account_list_is_unavailable(self):
+        for all_accounts in (None, []):
+            with self.subTest(all_accounts=all_accounts):
+                manager = self._manager()
+                manager.config = {
+                    "enabled_features": {
+                        "auto_playlist_update": True,
+                        "changelog_tracking": False,
+                    },
+                    "enabled_m3u_accounts": [],
+                }
+                events = []
+
+                with patch(
+                    "apps.automation.automated_stream_manager.get_m3u_accounts",
+                    return_value=all_accounts,
+                ), patch(
+                    "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+                ) as refresh_mock:
+                    result = manager.refresh_playlists(
+                        account_id=99,
+                        skip_changelog=True,
+                        progress_callback=events.append,
+                    )
+
+                self.assertFalse(result)
+                self.assertEqual(result.outcome, "failed")
+                self.assertEqual(result[1], [])
+                self.assertEqual(result.failed_refresh_request_count, 1)
+                refresh_mock.assert_not_called()
+                self.assertEqual(events[-1]["state"], "failed")
+
+    def test_targeted_refresh_rejects_inactive_and_custom_accounts(self):
+        unavailable_accounts = (
+            {"id": 99, "name": "Inactive", "is_active": False},
+            {"id": 99, "name": "custom", "is_active": True},
+        )
+
+        for account in unavailable_accounts:
+            with self.subTest(account=account):
+                manager = self._manager()
+                manager.config = {
+                    "enabled_features": {
+                        "auto_playlist_update": True,
+                        "changelog_tracking": False,
+                    },
+                    "enabled_m3u_accounts": [],
+                }
+
+                with patch(
+                    "apps.automation.automated_stream_manager.get_m3u_accounts",
+                    return_value=[account],
+                ), patch(
+                    "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+                ) as refresh_mock:
+                    result = manager.refresh_playlists(
+                        account_id=99,
+                        skip_changelog=True,
+                    )
+
+                self.assertFalse(result)
+                self.assertEqual(result.outcome, "failed")
+                self.assertEqual(
+                    result.failed_refresh_requests,
+                    [{"id": 99, "reason": "account_unavailable"}],
+                )
+                refresh_mock.assert_not_called()
 
     def test_refresh_playlists_monitors_already_running_account_without_retriggering(self):
         manager = self._manager()

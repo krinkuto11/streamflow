@@ -3497,6 +3497,28 @@ class AutomatedStreamManager:
             except Exception as callback_error:
                 logger.debug(f"M3U refresh progress callback failed: {callback_error}")
 
+        def targeted_account_unavailable_result() -> RefreshResult:
+            logger.warning(
+                "Requested playlist refresh target %s is unavailable, inactive, or custom",
+                account_id,
+            )
+            emit_refresh_progress({
+                "state": "failed",
+                "current": 0,
+                "total": 1,
+                "account_id": account_id,
+                "message": "Requested playlist is unavailable",
+            })
+            return RefreshResult(
+                False,
+                [],
+                failed_refresh_requests=[{
+                    "id": account_id,
+                    "reason": "account_unavailable",
+                }],
+                outcome="failed",
+            )
+
         try:
             if not force and not self.config.get("enabled_features", {}).get("auto_playlist_update", True):
                 if not force:  # Allow force to override feature flag
@@ -3509,6 +3531,9 @@ class AutomatedStreamManager:
             all_accounts = get_m3u_accounts()
             self._m3u_accounts_cache = all_accounts
             logger.debug(f"M3U accounts fetched from UDI cache: {len(all_accounts) if all_accounts else 0} accounts")
+
+            if account_id is not None and not all_accounts:
+                return targeted_account_unavailable_result()
             
             if all_accounts:
                 # Filter out "custom" account and non-active accounts
@@ -3526,7 +3551,7 @@ class AutomatedStreamManager:
                     if target_account:
                         accounts_to_process = [target_account]
                     else:
-                        logger.warning(f"Requested refresh for account {account_id}, but it was not found or is inactive/custom.")
+                        return targeted_account_unavailable_result()
                 else:
                     # Refresh all (or filtered by enabled_m3u_accounts config)
                     enabled_accounts = self.config.get("enabled_m3u_accounts", [])

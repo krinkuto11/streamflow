@@ -1269,8 +1269,15 @@ def discover_streams():
 @app.route('/api/refresh-playlist', methods=['POST'])
 def refresh_playlist():
     """Trigger M3U playlist refresh (manual Quick Action)."""
+    raw_body = request.get_data(cache=True)
+    payload = None
+    if raw_body:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Request body must be a valid JSON object"}), 400
+
     return refresh_playlist_response(
-        payload=request.get_json(silent=True),
+        payload=payload,
         get_automation_manager=get_automation_manager,
     )
 
