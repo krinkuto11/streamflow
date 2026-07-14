@@ -332,7 +332,8 @@ def get_stream_checker_status_response(
 
         status["parallel"] = {
             "enabled": concurrent_enabled,
-            "max_workers": global_limit,
+            "max_workers": global_limit if concurrent_enabled else 1,
+            "configured_max_workers": global_limit,
             "mode": "parallel" if concurrent_enabled else "sequential",
         }
 
@@ -509,6 +510,8 @@ def check_single_channel_now_response(
             force_check=force_check,
         )
 
+        if result.get("error") == "aborted":
+            return jsonify(result), 409
         if result.get("success") or result.get("skipped"):
             return jsonify(result), 200
 
@@ -517,6 +520,8 @@ def check_single_channel_now_response(
         # and surface a precise, actionable message rather than "Check Failed".
         if result.get("error") == "no_profile":
             return jsonify(result), 400
+        if result.get("error") == "stream_checker_active":
+            return jsonify(result), 409
 
         logger.warning(
             "Single-channel check failed; returning sanitized error response for channel %s",
@@ -604,6 +609,31 @@ def check_single_stream_now_response(
             return jsonify(result), 400
         if error_code == "connectivity_guard":
             return jsonify(result), 503
+        if error_code == "provider_capacity_unavailable":
+            # The internal provider-wait analysis contains the resolved stream
+            # URL, which may embed provider credentials. Capacity conflicts only
+            # need stable public metadata and must never echo that analysis.
+            public_keys = {
+                "success",
+                "error",
+                "reason_detail",
+                "stream_id",
+                "stream_name",
+                "run_mode",
+                "persisted",
+                "message",
+            }
+            public_result = {
+                key: value
+                for key, value in result.items()
+                if key in public_keys
+            }
+            return jsonify(public_result), 409
+        if error_code in {
+            "aborted",
+            "stream_checker_active",
+        }:
+            return jsonify(result), 409
 
         logger.warning(
             "Single-stream check failed; returning sanitized error response for stream %s",

@@ -11,6 +11,7 @@ Test to verify that single channel check enforces the opt-in model:
 import unittest
 import tempfile
 import shutil
+import threading
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 import sys
@@ -362,6 +363,41 @@ class TestSingleChannelProfileRespected(unittest.TestCase):
         self.assertNotEqual(result.get('error'), 'no_profile')
         service._check_channel.assert_called_once()
 
+    @patch('stream_checker_service.get_udi_manager')
+    @patch('stream_checker_service.StreamCheckConfig')
+    @patch('apps.stream.stream_checker_service.get_automation_config_manager')
+    @patch('apps.stream.stream_checker_service.get_session_manager')
+    def test_late_abort_during_final_progress_clear_does_not_return_success_or_sync(
+        self, mock_get_session_mgr, mock_get_acm, mock_config_class, mock_get_udi
+    ):
+        profile = _make_profile(matching_enabled=False, checking_enabled=True)
+        service, mock_streams = self._setup_service_with_profile(
+            202,
+            'Late Abort Channel',
+            profile,
+            mock_config_class,
+            mock_get_udi,
+            mock_get_acm,
+            mock_get_session_mgr,
+        )
+        mock_get_udi.return_value.is_network_ready.return_value = True
+        service.progress.clear = Mock(
+            side_effect=lambda: service.request_abort('late_finalization_test')
+        )
+
+        with (
+            patch('stream_checker_service.fetch_channel_streams', return_value=mock_streams),
+            patch('api_utils.refresh_m3u_playlists'),
+            patch.object(service, '_require_quality_check_connectivity', return_value=None),
+            patch('apps.stream.stream_checker_service.threading.Thread') as thread_class,
+        ):
+            result = service.check_single_channel(channel_id=202)
+
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error'], 'aborted')
+        self.assertTrue(result['aborted'])
+        thread_class.assert_not_called()
+
 
 class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
     """Tests that the stream_checker_handlers layer surfaces no_profile cleanly."""
@@ -680,21 +716,90 @@ class TestSingleStreamCheckHandler(unittest.TestCase):
         self.assertEqual(status_code, 404)
         self.assertEqual(response.get_json().get('error'), 'stream_not_found')
 
+    def test_handler_returns_capacity_conflict_without_sanitizing_reason(self):
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_stream_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {'checking': False, 'queue': {}, 'progress': {}}
+        mock_service.check_single_stream.return_value = {
+            'success': False,
+            'error': 'provider_capacity_unavailable',
+            'reason_detail': 'quota_consumed_by_active_viewers',
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'analysis': {
+                'stream_url': 'http://user:secret@provider.example/live',
+                'provider_limit_skipped': True,
+            },
+        }
+
+        app = Flask(__name__)
+        with app.app_context():
+            response, status_code = check_single_stream_now_response(
+                payload={'stream_id': 456},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(response.get_json()['error'], 'provider_capacity_unavailable')
+        self.assertEqual(
+            response.get_json()['reason_detail'],
+            'quota_consumed_by_active_viewers',
+        )
+        self.assertEqual(response.get_json()['stream_name'], 'Loose Stream')
+        self.assertNotIn('analysis', response.get_json())
+        self.assertNotIn('secret', response.get_data(as_text=True))
+
+    def test_handler_returns_aborted_direct_check_as_conflict(self):
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_stream_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {'checking': False, 'queue': {}, 'progress': {}}
+        mock_service.check_single_stream.return_value = {
+            'success': False,
+            'error': 'aborted',
+            'aborted': True,
+            'stream_id': 456,
+        }
+        app = Flask(__name__)
+
+        with app.app_context():
+            response, status_code = check_single_stream_now_response(
+                payload={'stream_id': 456},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        self.assertEqual(status_code, 409)
+        self.assertTrue(response.get_json()['aborted'])
+
 
 class TestSingleStreamCheckService(unittest.TestCase):
     """Service-level one-off stream check contract."""
 
-    @patch('apps.stream.stream_checker_service.analyze_stream')
-    @patch('apps.stream.stream_checker_service.get_udi_manager')
-    def test_check_single_stream_measures_unassigned_udi_stream(self, mock_get_udi, mock_analyze):
+    def _build_service(self):
         from apps.stream.stream_checker_service import StreamCheckerService
+        from apps.stream.stream_checker_components import StreamCheckQueue
 
         service = object.__new__(StreamCheckerService)
-        service.abort_current_check = Mock()
+        service.lock = threading.Lock()
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.checking = False
+        service.sync_batch_state = {'active': False}
+        service._single_stream_check_active = False
+        service._single_stream_previous_queue_paused = False
+        service._sync_batch_execution_active = False
+        service._sync_batch_execution_generation = None
+        service.progress = Mock()
+        service.abort_current_check = threading.Event()
         service._require_quality_check_connectivity = Mock(return_value=None)
         service._is_stream_dead = Mock(return_value=(False, 'none'))
         service._apply_quality_classification = (
-            lambda stream_data, result: StreamCheckerService._apply_quality_classification(stream_data, result)
+            lambda stream_data, result: StreamCheckerService._apply_quality_classification(
+                stream_data,
+                result,
+            )
         )
         service._calculate_stream_score = Mock(return_value=0.93)
         service._run_loop_probes = Mock()
@@ -706,6 +811,7 @@ class TestSingleStreamCheckService(unittest.TestCase):
             },
         })
         service._update_stream_stats = Mock(return_value=True)
+        service._run_capacity_limited_stream_probes = Mock()
 
         mock_config = Mock()
         mock_config.get.side_effect = lambda key, default=None: {
@@ -718,6 +824,9 @@ class TestSingleStreamCheckService(unittest.TestCase):
                 'stream_startup_buffer': 3,
             },
             'dead_stream_handling': {'enabled': True},
+            'concurrent_streams.enabled': True,
+            'concurrent_streams.global_limit': 4,
+            'concurrent_streams.provider_wait_timeout': 15,
         }.get(key, default)
         service.config = mock_config
 
@@ -728,6 +837,14 @@ class TestSingleStreamCheckService(unittest.TestCase):
             'url': 'http://example.invalid/live.m3u8',
             'm3u_account_id': 12,
         }
+        return service, mock_udi
+
+    @patch('apps.stream.stream_checker_service.analyze_stream')
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_check_single_stream_measures_unassigned_udi_stream(self, mock_get_udi, mock_analyze):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
         mock_get_udi.return_value = mock_udi
 
         mock_analyze.return_value = {
@@ -739,6 +856,7 @@ class TestSingleStreamCheckService(unittest.TestCase):
             'audio_codec': 'aac',
             'bitrate_kbps': 6000,
         }
+        service._run_capacity_limited_stream_probes.return_value = [mock_analyze.return_value]
 
         result = StreamCheckerService.check_single_stream(
             service,
@@ -754,12 +872,395 @@ class TestSingleStreamCheckService(unittest.TestCase):
         self.assertEqual(result['run_mode'], 'single_stream_check')
         self.assertTrue(result['persisted'])
         self.assertEqual(result['stats_payload']['resolution'], '1920x1080')
-        mock_analyze.assert_called_once()
-        analyze_kwargs = mock_analyze.call_args.kwargs
-        self.assertTrue(analyze_kwargs['blank_check_enabled'])
-        self.assertTrue(analyze_kwargs['freeze_check_enabled'])
+        mock_analyze.assert_not_called()
+        service._run_capacity_limited_stream_probes.assert_called_once()
+        probe_kwargs = service._run_capacity_limited_stream_probes.call_args.kwargs
+        self.assertTrue(probe_kwargs['blank_check_enabled'])
+        self.assertTrue(probe_kwargs['freeze_check_enabled'])
         service._run_loop_probes.assert_called_once()
         service._update_stream_stats.assert_called_once()
+
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_check_single_stream_recovers_bitrate_via_capacity_limited_recheck(self, mock_get_udi):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
+        mock_get_udi.return_value = mock_udi
+        initial = {
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'status': 'OK',
+            'resolution': '1920x1080',
+            'bitrate_kbps': None,
+            'measurement_incomplete': True,
+            'measurement_incomplete_reason': 'missing_bitrate',
+            'measurement_incomplete_context': {},
+            'bitrate_recheck_required': True,
+        }
+        recovered = {
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'status': 'OK',
+            'bitrate_kbps': 7200,
+            'bitrate_source': 'ffmpeg_progress',
+        }
+        service._run_capacity_limited_stream_probes.side_effect = [
+            [initial],
+            [recovered],
+        ]
+
+        result = StreamCheckerService.check_single_stream(service, 456, persist=True)
+
+        self.assertTrue(result['success'])
+        self.assertEqual(service._run_capacity_limited_stream_probes.call_count, 2)
+        self.assertEqual(result['analysis']['bitrate_kbps'], 7200)
+        self.assertEqual(result['analysis']['bitrate_recheck_outcome'], 'recovered')
+        self.assertFalse(result['analysis']['measurement_incomplete'])
+        self.assertEqual(result['analysis']['quality_reason_detail'], 'none')
+        service._update_stream_stats.assert_called_once_with(result['analysis'])
+
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_check_single_stream_persists_exhausted_bitrate_recheck_reason(self, mock_get_udi):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
+        mock_get_udi.return_value = mock_udi
+        initial = {
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'status': 'OK',
+            'resolution': '1920x1080',
+            'bitrate_kbps': None,
+            'measurement_incomplete': True,
+            'measurement_incomplete_reason': 'missing_bitrate',
+            'measurement_incomplete_context': {},
+            'bitrate_recheck_required': True,
+        }
+        unavailable = {
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'status': 'OK',
+            'bitrate_kbps': None,
+            'elapsed_time': 7,
+        }
+        service._run_capacity_limited_stream_probes.side_effect = [
+            [initial],
+            [unavailable],
+        ]
+
+        result = StreamCheckerService.check_single_stream(service, 456, persist=True)
+
+        self.assertTrue(result['success'])
+        self.assertFalse(result['dead'])
+        self.assertEqual(
+            result['analysis']['measurement_incomplete_reason'],
+            'missing_bitrate_after_recheck',
+        )
+        self.assertEqual(
+            result['analysis']['quality_reason_detail'],
+            'missing_bitrate_after_recheck',
+        )
+        self.assertEqual(result['analysis']['bitrate_recheck_outcome'], 'unavailable')
+        service._update_stream_stats.assert_called_once_with(result['analysis'])
+
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_check_single_stream_discards_recheck_result_when_aborted(self, mock_get_udi):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
+        mock_get_udi.return_value = mock_udi
+        initial = {
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'status': 'OK',
+            'bitrate_kbps': None,
+            'measurement_incomplete': True,
+            'measurement_incomplete_reason': 'missing_bitrate',
+            'measurement_incomplete_context': {},
+            'bitrate_recheck_required': True,
+        }
+
+        def probe_side_effect(*_args, **_kwargs):
+            if service._run_capacity_limited_stream_probes.call_count == 1:
+                return [initial]
+            service.abort_current_check.set()
+            return [{
+                'stream_id': 456,
+                'status': 'OK',
+                'bitrate_kbps': 7200,
+            }]
+
+        service._run_capacity_limited_stream_probes.side_effect = probe_side_effect
+
+        result = StreamCheckerService.check_single_stream(service, 456, persist=True)
+
+        self.assertFalse(result['success'])
+        self.assertTrue(result['aborted'])
+        self.assertNotIn('bitrate_recheck_attempted', initial)
+        self.assertIsNone(initial['bitrate_kbps'])
+        service._update_stream_stats.assert_not_called()
+
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_check_single_stream_late_abort_before_persist_is_linearized(self, mock_get_udi):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
+        mock_get_udi.return_value = mock_udi
+        analyzed = {
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'status': 'OK',
+            'resolution': '1920x1080',
+            'fps': 50,
+            'video_codec': 'h264',
+            'bitrate_kbps': 6000,
+        }
+        service._run_capacity_limited_stream_probes.return_value = [analyzed]
+
+        def prepare_then_abort(_analysis):
+            service.request_abort('late_single_stream_finalize')
+            return {
+                'stream_id': 456,
+                'stream_stats': {'ffmpeg_output_bitrate': 6000},
+            }
+
+        service._prepare_stream_stats_for_batch.side_effect = prepare_then_abort
+
+        result = StreamCheckerService.check_single_stream(service, 456, persist=True)
+
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error'], 'aborted')
+        self.assertTrue(result['aborted'])
+        self.assertFalse(result['persisted'])
+        service._update_stream_stats.assert_not_called()
+
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_check_single_stream_reports_provider_capacity_without_persisting(self, mock_get_udi):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
+        mock_get_udi.return_value = mock_udi
+        service._run_capacity_limited_stream_probes.return_value = [{
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'status': 'SKIPPED_PROVIDER_LIMIT',
+            'provider_limit_skipped': True,
+            'skipped_reason': 'quota_consumed_by_active_viewers',
+            'reason_detail': 'active_viewers',
+        }]
+
+        result = StreamCheckerService.check_single_stream(service, 456, persist=True)
+
+        self.assertFalse(result['success'])
+        self.assertEqual(result['error'], 'provider_capacity_unavailable')
+        self.assertEqual(result['reason_detail'], 'quota_consumed_by_active_viewers')
+        service._update_stream_stats.assert_not_called()
+
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_check_single_stream_persists_capacity_deferred_recheck(self, mock_get_udi):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
+        mock_get_udi.return_value = mock_udi
+        initial = {
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'status': 'OK',
+            'bitrate_kbps': None,
+            'measurement_incomplete': True,
+            'measurement_incomplete_reason': 'missing_bitrate',
+            'measurement_incomplete_context': {},
+            'bitrate_recheck_required': True,
+        }
+        capacity = {
+            'stream_id': 456,
+            'status': 'SKIPPED_PROVIDER_LIMIT',
+            'provider_limit_skipped': True,
+            'skipped_reason': 'quota_consumed_by_active_viewers',
+            'reason_detail': 'active_viewers',
+        }
+        service._run_capacity_limited_stream_probes.side_effect = [
+            [initial],
+            [capacity],
+        ]
+
+        result = StreamCheckerService.check_single_stream(service, 456, persist=True)
+
+        self.assertTrue(result['success'])
+        self.assertFalse(result['analysis']['bitrate_recheck_attempted'])
+        self.assertEqual(
+            result['analysis']['bitrate_recheck_outcome'],
+            'provider_capacity_unavailable',
+        )
+        self.assertEqual(
+            result['analysis']['measurement_incomplete_context']['bitrate_recheck_reason'],
+            'quota_consumed_by_active_viewers',
+        )
+        service._update_stream_stats.assert_called_once_with(result['analysis'])
+
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_direct_check_reservation_blocks_second_start_and_clear_aborts_first(self, mock_get_udi):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
+        mock_get_udi.return_value = mock_udi
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        thread_result = {}
+
+        def blocking_probe(*_args, **_kwargs):
+            probe_started.set()
+            self.assertTrue(release_probe.wait(5))
+            return [{
+                'stream_id': 456,
+                'stream_name': 'Loose Stream',
+                'status': 'OK',
+                'bitrate_kbps': 6000,
+            }]
+
+        service._run_capacity_limited_stream_probes.side_effect = blocking_probe
+
+        worker = threading.Thread(
+            target=lambda: thread_result.setdefault(
+                'result',
+                StreamCheckerService.check_single_stream(service, 456, persist=True),
+            )
+        )
+        worker.start()
+        self.assertTrue(probe_started.wait(5))
+        self.assertTrue(service.checking)
+        self.assertTrue(service.check_queue.paused)
+
+        conflict = StreamCheckerService.check_single_stream(service, 456, persist=True)
+        clear_result = service.clear_queue()
+        self.assertEqual(conflict['error'], 'stream_checker_active')
+        self.assertTrue(clear_result['abort_requested'])
+        self.assertTrue(service.check_queue.paused)
+
+        service.running = True
+        service.batch_start_time = None
+        service._start_batch_changelog = Mock()
+        service._finalize_batch_changelog = Mock()
+        service._check_channel = Mock()
+        with patch.object(service.check_queue, 'get_next_entry') as get_next_entry, patch(
+            'apps.stream.stream_checker_service.time.sleep',
+            side_effect=lambda _seconds: setattr(service, 'running', False),
+        ):
+            service._worker_loop()
+
+        self.assertTrue(service.abort_current_check.is_set())
+        get_next_entry.assert_not_called()
+
+        release_probe.set()
+        worker.join(timeout=5)
+        self.assertFalse(worker.is_alive())
+        self.assertTrue(thread_result['result']['aborted'])
+        self.assertFalse(service.checking)
+        self.assertFalse(service.check_queue.paused)
+        service._update_stream_stats.assert_not_called()
+
+    @patch('apps.stream.stream_checker_service.get_udi_manager')
+    def test_clear_after_direct_reservation_is_not_erased_before_probe(self, mock_get_udi):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service, mock_udi = self._build_service()
+        mock_get_udi.return_value = mock_udi
+        original_begin = service._begin_single_stream_check_operation
+        reserved = threading.Event()
+        continue_after_clear = threading.Event()
+        thread_result = {}
+        seen_abort_at_probe = []
+
+        def begin_with_barrier():
+            accepted = original_begin()
+            if accepted:
+                reserved.set()
+                self.assertTrue(continue_after_clear.wait(5))
+            return accepted
+
+        def probe(*_args, **_kwargs):
+            seen_abort_at_probe.append(service.abort_current_check.is_set())
+            return [{
+                'stream_id': 456,
+                'stream_name': 'Loose Stream',
+                'status': 'OK',
+                'bitrate_kbps': 6000,
+            }]
+
+        service._begin_single_stream_check_operation = begin_with_barrier
+        service._run_capacity_limited_stream_probes.side_effect = probe
+        worker = threading.Thread(
+            target=lambda: thread_result.setdefault(
+                'result',
+                StreamCheckerService.check_single_stream(service, 456, persist=True),
+            )
+        )
+        worker.start()
+        self.assertTrue(reserved.wait(5))
+
+        clear_result = service.clear_queue()
+        self.assertTrue(clear_result['abort_requested'])
+        self.assertTrue(service.abort_current_check.is_set())
+        continue_after_clear.set()
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(seen_abort_at_probe, [True])
+        self.assertEqual(thread_result['result']['error'], 'aborted')
+        self.assertFalse(service.checking)
+        self.assertFalse(service.check_queue.paused)
+        service._update_stream_stats.assert_not_called()
+
+    def test_capacity_limited_probe_helper_uses_shared_limiter_and_scheduler(self):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service = object.__new__(StreamCheckerService)
+        service.abort_current_check = threading.Event()
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: {
+            'concurrent_streams.enabled': True,
+            'concurrent_streams.global_limit': 4,
+            'concurrent_streams.provider_wait_timeout': 15,
+        }.get(key, default)
+        udi = Mock()
+        accounts = [{'id': 12, 'max_streams': 2}]
+        udi.get_m3u_accounts.return_value = accounts
+        limiter = Mock()
+        scheduler = Mock()
+        scheduler.check_streams_with_limits.return_value = [{'stream_id': 456, 'status': 'OK'}]
+        stream = {
+            'id': 456,
+            'name': 'Loose Stream',
+            'url': 'http://example.invalid/live.m3u8',
+            'm3u_account_id': 12,
+        }
+
+        with patch(
+            'apps.stream.concurrent_stream_limiter.get_account_limiter',
+            return_value=limiter,
+        ), patch(
+            'apps.stream.concurrent_stream_limiter.initialize_account_limits',
+        ) as initialize_limits, patch(
+            'apps.stream.concurrent_stream_limiter.get_smart_scheduler',
+            return_value=scheduler,
+        ) as get_scheduler:
+            result = StreamCheckerService._run_capacity_limited_stream_probes(
+                service,
+                [stream],
+                udi=udi,
+                ffmpeg_duration=7,
+                timeout=8,
+            )
+
+        self.assertEqual(result[0]['status'], 'OK')
+        self.assertIs(limiter.udi_manager, udi)
+        initialize_limits.assert_called_once_with(accounts)
+        get_scheduler.assert_called_once_with(global_limit=4)
+        scheduler.check_streams_with_limits.assert_called_once()
+        scheduler_kwargs = scheduler.check_streams_with_limits.call_args.kwargs
+        self.assertEqual(scheduler_kwargs['provider_wait_timeout'], 15)
+        self.assertIs(scheduler_kwargs['abort_event'], service.abort_current_check)
+        self.assertEqual(scheduler_kwargs['streams'], [stream])
 
 
 

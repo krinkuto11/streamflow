@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from apps.udi import get_udi_manager
 from apps.core.atomic_json import atomic_write_json, load_json_with_backup
@@ -571,7 +571,7 @@ class ChannelUpdateTracker:
                 return self.updates['channels'][channel_key].get('checked_stream_ids', [])
             return []
     
-    def mark_channel_for_force_check(self, channel_id: int):
+    def mark_channel_for_force_check(self, channel_id: int) -> int:
         """Mark a channel for force checking (bypasses 2-hour immunity).
         
         Args:
@@ -585,8 +585,37 @@ class ChannelUpdateTracker:
             if channel_key not in self.updates['channels']:
                 self.updates['channels'][channel_key] = {}
             
+            current_generation = int(
+                self.updates['channels'][channel_key].get(
+                    'force_check_generation',
+                    0,
+                )
+                or 0
+            )
+            generation = current_generation + 1
             self.updates['channels'][channel_key]['force_check'] = True
+            self.updates['channels'][channel_key]['force_check_generation'] = generation
             self._save_updates()
+            return generation
+
+    def get_force_check_state(self, channel_id: int) -> tuple[bool, Optional[int]]:
+        """Return the pending force flag and its ownership generation."""
+        with self.lock:
+            info = self.updates.get('channels', {}).get(str(channel_id), {})
+            enabled = bool(info.get('force_check', False))
+            generation = info.get('force_check_generation')
+            try:
+                generation = int(generation) if generation is not None else None
+            except (TypeError, ValueError):
+                generation = None
+            if enabled and generation is None:
+                # Migrate persisted pre-generation force markers at ownership
+                # snapshot time. A following requeue increments this value, so
+                # compare-and-clear cannot erase the newer request.
+                generation = 1
+                info['force_check_generation'] = generation
+                self._save_updates()
+            return enabled, generation
     
     def should_force_check(self, channel_id: int) -> bool:
         """Check if a channel should be force checked (bypassing immunity).
@@ -603,7 +632,11 @@ class ChannelUpdateTracker:
                 return self.updates['channels'][channel_key].get('force_check', False)
             return False
     
-    def clear_force_check(self, channel_id: int):
+    def clear_force_check(
+        self,
+        channel_id: int,
+        expected_generation: Optional[int] = None,
+    ) -> bool:
         """Clear the force check flag for a channel.
         
         Args:
@@ -612,8 +645,34 @@ class ChannelUpdateTracker:
         with self.lock:
             channel_key = str(channel_id)
             if channel_key in self.updates.get('channels', {}):
+                info = self.updates['channels'][channel_key]
+                if expected_generation is not None:
+                    try:
+                        current_generation = int(
+                            info.get('force_check_generation')
+                        )
+                    except (TypeError, ValueError):
+                        return False
+                    if current_generation != int(expected_generation):
+                        return False
                 self.updates['channels'][channel_key]['force_check'] = False
                 self._save_updates()
+                return True
+            return False
+
+    def clear_force_checks(self, channel_ids: List[int]) -> int:
+        """Clear multiple cancelled queue-owned force intents with one save."""
+        with self.lock:
+            cleared = 0
+            channels = self.updates.get('channels', {})
+            for channel_id in set(channel_ids or []):
+                info = channels.get(str(channel_id))
+                if isinstance(info, dict) and info.get('force_check', False):
+                    info['force_check'] = False
+                    cleared += 1
+            if cleared:
+                self._save_updates()
+            return cleared
     
     def mark_global_check(self, timestamp: str = None):
         """Mark that a global check was initiated.
@@ -667,7 +726,14 @@ class StreamCheckQueue:
             'queue_size': 0
         }
     
-    def add_channel(self, channel_id: int, priority: int = 0, stream_count: int = 1, metadata: Optional[Dict[str, Any]] = None):
+    def add_channel(
+        self,
+        channel_id: int,
+        priority: int = 0,
+        stream_count: int = 1,
+        metadata: Optional[Dict[str, Any]] = None,
+        on_accepted: Optional[Callable[[], None]] = None,
+    ):
         """Add a channel to the checking queue."""
         with self.lock:
             try:
@@ -681,9 +747,30 @@ class StreamCheckQueue:
             # protected until an explicit re-queue path removes them.
             if channel_id in self.queued:
                 existing_priority = self.queued_priorities.get(channel_id, 0)
+                existing_metadata = self.queued_metadata.get(channel_id, {}) or {}
+                specialized_sources = {'teamarr_preflight', 'auto_create'}
+                if existing_metadata.get('source') in specialized_sources:
+                    # One specialized event must map to one result callback.
+                    # Never overwrite a queued event with a second identity.
+                    return False
                 if normalized_priority <= existing_priority:
+                    if on_accepted is not None:
+                        on_accepted()
+                        if metadata:
+                            merged_metadata = dict(existing_metadata)
+                            merged_metadata.update(dict(metadata))
+                            self.queued_metadata[channel_id] = merged_metadata
+                        return True
                     return False
 
+                if self.queue.full():
+                    logger.warning(
+                        f"Queue is full, cannot promote channel {channel_id} "
+                        f"to priority {normalized_priority}"
+                    )
+                    return False
+                if on_accepted is not None:
+                    on_accepted()
                 try:
                     sequence = self._queue_sequence
                     self._queue_sequence += 1
@@ -709,6 +796,13 @@ class StreamCheckQueue:
 
             if channel_id in self.in_progress or channel_id in self.completed:
                 return False
+
+            if self.queue.full():
+                logger.warning(f"Queue is full, cannot add channel {channel_id}")
+                return False
+
+            if on_accepted is not None:
+                on_accepted()
 
             # Check if this is a new "batch" starting (queue is completely empty and no workers are active)
             if self.queue.empty() and len(self.in_progress) == 0:
@@ -743,7 +837,12 @@ class StreamCheckQueue:
                 return False
         return False
     
-    def add_channels(self, channel_ids: List[int], priority: int = 0):
+    def add_channels(
+        self,
+        channel_ids: List[int],
+        priority: int = 0,
+        on_accepted: Optional[Callable[[int], None]] = None,
+    ):
         """Add multiple channels to the queue."""
         added = 0
         udi = None
@@ -775,7 +874,15 @@ class StreamCheckQueue:
                         exc,
                     )
             stream_count = len(channel.get('streams', [])) if channel else 1
-            if self.add_channel(channel_id, priority, stream_count=stream_count):
+            accepted_callback = None
+            if on_accepted is not None:
+                accepted_callback = lambda cid=channel_id: on_accepted(cid)
+            if self.add_channel(
+                channel_id,
+                priority,
+                stream_count=stream_count,
+                on_accepted=accepted_callback,
+            ):
                 added += 1
         logger.info(f"Added {added}/{len(channel_ids)} channels to checking queue")
         return added
@@ -1023,15 +1130,20 @@ class StreamCheckQueue:
             return 'cleared'
         return 'idle'
 
-    def clear(self, reason: str = 'manual') -> Dict:
+    def clear(self, reason: str = 'manual', *, preserve_paused: bool = False) -> Dict:
         """Clear the queue and reset stats."""
         with self.lock:
+            was_paused = self.paused
+            cleared_channel_ids = sorted(
+                set(self.queued.keys()) | set(self.in_progress.keys())
+            )
             cleared = {
                 'queued': len(self.queued),
                 'in_progress': len(self.in_progress),
                 'completed': len(self.completed),
                 'failed': len(self.failed),
-                'queue_size': self.queue.qsize()
+                'queue_size': self.queue.qsize(),
+                'channel_ids': cleared_channel_ids,
             }
             while not self.queue.empty():
                 try:
@@ -1045,7 +1157,7 @@ class StreamCheckQueue:
             self.in_progress_metadata.clear()
             self.completed.clear()
             self.failed.clear()
-            self.paused = False
+            self.paused = was_paused if preserve_paused else False
             self.channel_start_times.clear()
             self.stream_processing_times.clear()
             self.channel_processing_times.clear()
@@ -1117,13 +1229,18 @@ class StreamCheckerProgress:
         for provider in grouped.values():
             counts = provider['status_counts']
             wait_reason_counts = provider['wait_reason_counts']
-            checking = counts.get('checking', 0) + counts.get('probing', 0)
+            checking = (
+                counts.get('checking', 0)
+                + counts.get('probing', 0)
+                + counts.get('rechecking_bitrate', 0)
+            )
             waiting = counts.get('waiting_provider_limit', 0)
             pending = counts.get('pending', 0)
             completed = counts.get('completed', 0)
+            incomplete = counts.get('incomplete_bitrate', 0)
             skipped = counts.get('provider_limit_wait_timeout', 0) + counts.get('viewer_preempted', 0)
             failed = sum(counts.get(status, 0) for status in failed_statuses)
-            finished = completed + skipped + failed
+            finished = completed + incomplete + skipped + failed
             dominant_wait_reason = None
             if wait_reason_counts:
                 dominant_wait_reason = sorted(
@@ -1161,6 +1278,7 @@ class StreamCheckerProgress:
                 'waiting': waiting,
                 'pending': pending,
                 'completed': completed,
+                'incomplete': incomplete,
                 'skipped': skipped,
                 'failed': failed,
                 'finished': finished,
@@ -1505,6 +1623,46 @@ class StreamCheckerProgress:
                     atomic_write_json(Path(self.progress_file), {})
                 except Exception as e:
                     logger.warning(f"Failed to clear progress file: {e}")
+
+    def clear_if_matches(self, expected: Optional[Dict]) -> bool:
+        """Atomically clear only the progress snapshot the caller observed."""
+        from apps.database.manager import get_db_manager
+
+        with self.lock:
+            db = None
+            current = None
+            try:
+                db = get_db_manager()
+                current = db.get_system_setting('stream_checker_progress', {}) or None
+            except Exception:
+                db = None
+            if current is None and self.progress_file:
+                try:
+                    current = load_json_with_backup(
+                        Path(self.progress_file),
+                        default=None,
+                        validator=lambda value: isinstance(value, dict),
+                    )
+                    if not current:
+                        current = None
+                except Exception:
+                    current = None
+
+            if current != expected:
+                return False
+
+            try:
+                if db is None:
+                    db = get_db_manager()
+                db.set_system_setting('stream_checker_progress', {})
+            except Exception as e:
+                logger.warning(f"Failed to clear matching progress in database: {e}")
+            if self.progress_file:
+                try:
+                    atomic_write_json(Path(self.progress_file), {})
+                except Exception as e:
+                    logger.warning(f"Failed to clear matching progress file: {e}")
+            return True
     
     def get(self) -> Optional[Dict]:
         """Get current progress."""

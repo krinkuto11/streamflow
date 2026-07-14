@@ -192,6 +192,37 @@ def test_progress_update_builds_provider_progress_counters():
     }
 
 
+def test_provider_progress_counts_bitrate_rechecks_and_terminal_incomplete_rows():
+    rows = [
+        {
+            'id': 1,
+            'name': 'Rechecking',
+            'm3u_account': 'Provider A',
+            'm3u_account_id': 5,
+            'status': 'rechecking_bitrate',
+        },
+        {
+            'id': 2,
+            'name': 'Incomplete',
+            'm3u_account': 'Provider A',
+            'm3u_account_id': 5,
+            'status': 'incomplete_bitrate',
+        },
+    ]
+
+    provider = StreamCheckerProgress._build_provider_progress(rows)[0]
+    assert provider['checking'] == 1
+    assert provider['incomplete'] == 1
+    assert provider['finished'] == 1
+    assert provider['state'] == 'checking'
+
+    terminal = StreamCheckerProgress._build_provider_progress(rows[1:])[0]
+    assert terminal['checking'] == 0
+    assert terminal['incomplete'] == 1
+    assert terminal['finished'] == 1
+    assert terminal['state'] == 'complete'
+
+
 def test_progress_update_persists_run_quality_and_capacity_context():
     fake_db = FakeDB()
 

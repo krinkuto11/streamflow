@@ -343,6 +343,8 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
             forced_profile_id='profile-v7',
             run_mode='single_channel_check',
             is_single_channel_check=True,
+            force_check_override=False,
+            force_check_generation=None,
         )
 
         service.changelog.add_single_channel_check_entry.assert_called_once()

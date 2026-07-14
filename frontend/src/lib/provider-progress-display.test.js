@@ -259,6 +259,15 @@ describe('getProviderWaitReasonDisplay', () => {
     })
   })
 
+  it('describes disabled parallel mode as sequential despite its configured limit', () => {
+    expect(getCheckerConcurrencyDisplay({
+      parallel: { enabled: false, max_workers: 10, configured_max_workers: 10 },
+    })).toEqual({
+      text: 'Sequential',
+      active: false,
+    })
+  })
+
   it('describes dashboard worker capacity when configured', () => {
     expect(getCheckerConcurrencyDisplay({ parallel: { max_workers: 6 } })).toEqual({
       text: '6 Workers',

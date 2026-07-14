@@ -15,6 +15,7 @@ import {
 } from '@/lib/changelog-run-summary.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { TELEMETRY_DATE_RANGES } from '@/lib/telemetry-retention.js'
+import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
 import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download, EyeOff } from 'lucide-react'
 
 function formatTimestamp(timestamp) {
@@ -104,6 +105,18 @@ function visualProbeLabel(stream) {
   return 'Pending'
 }
 
+function QualityReasonValue({ stream }) {
+  const reason = getQualityReasonDisplay(stream)
+  if (!reason) {
+    return <span className="text-muted-foreground">-</span>
+  }
+  return (
+    <span className="text-amber-700 dark:text-amber-300" title={reason.title}>
+      {reason.text}
+    </span>
+  )
+}
+
 function entryMatchesSourceFilter(entry, sourceFilter) {
   if (sourceFilter === 'all') return true
   const action = entry?.action
@@ -181,6 +194,7 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                     <TableHead>Framerate</TableHead>
                     <TableHead>Bitrate</TableHead>
                     <TableHead>Codec</TableHead>
+                    <TableHead>Reason</TableHead>
                     {hasVisualProbe && <TableHead>Visual Probe</TableHead>}
                     {hasScore && <TableHead>Score</TableHead>}
                     {hasLoopProbe && <TableHead>Loop</TableHead>}
@@ -212,6 +226,9 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                         <TableCell>{streamDetail.fps || 'N/A'}</TableCell>
                         <TableCell>{streamDetail.bitrate || 'N/A'}</TableCell>
                         <TableCell>{streamDetail.video_codec || 'N/A'}</TableCell>
+                        <TableCell className="max-w-[220px] text-xs">
+                          <QualityReasonValue stream={streamDetail} />
+                        </TableCell>
                         {hasVisualProbe && (
                           <TableCell>
                             <span
@@ -489,6 +506,7 @@ function StepContent({ step }) {
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Rate</TableHead>
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Bitrate</TableHead>
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Codec</TableHead>
+                      <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Reason</TableHead>
                       {details.checked_streams.some(s => s.visual_probe_ran) && (
                         <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Visual Probe</TableHead>
                       )}
@@ -526,6 +544,9 @@ function StepContent({ step }) {
                         </TableCell>
                         <TableCell className="py-1 text-muted-foreground">
                           {s.video_codec || '-'}
+                        </TableCell>
+                        <TableCell className="py-1 max-w-[220px] text-xs">
+                          <QualityReasonValue stream={s} />
                         </TableCell>
                         {details.checked_streams.some(stream => stream.visual_probe_ran) && (
                           <TableCell className="py-1">

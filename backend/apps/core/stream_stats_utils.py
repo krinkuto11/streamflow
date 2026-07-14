@@ -358,6 +358,23 @@ def extract_stream_stats(stream_data: Dict[str, Any]) -> Dict[str, Any]:
 
     if result['audio_bitrate'] is None and 'audio_bitrate' in stream_data:
         result['audio_bitrate'] = stream_data.get('audio_bitrate')
+
+    # A preserved Dispatcharr bitrate is historical ranking evidence only when
+    # the latest probe explicitly reports an incomplete measurement. Never
+    # surface that cached value as the current bitrate in generic readers.
+    incomplete_sources = [stream_data]
+    if isinstance(stream_stats, dict):
+        incomplete_sources.insert(0, stream_stats)
+    if any(
+        bool(source.get('measurement_incomplete'))
+        and source.get('measurement_incomplete_reason') in {
+            'missing_bitrate',
+            'missing_bitrate_after_recheck',
+        }
+        for source in incomplete_sources
+        if isinstance(source, dict)
+    ):
+        result['bitrate_kbps'] = None
     
     return result
 

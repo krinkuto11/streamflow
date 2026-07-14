@@ -239,6 +239,12 @@ export function getParallelProgressBadgeText(status = {}, providerSummary = {}) 
 }
 
 export function getCheckerConcurrencyDisplay(streamCheckerStatus = {}) {
+  if (streamCheckerStatus?.parallel?.enabled === false) {
+    return {
+      text: 'Sequential',
+      active: false,
+    }
+  }
   const workers = Number(streamCheckerStatus?.parallel?.max_workers || 0)
   if (workers > 0) {
     return {

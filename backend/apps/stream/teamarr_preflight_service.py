@@ -79,6 +79,7 @@ CONTROLLED_CHECK_DEFERRAL_REASONS = {
     "active_viewers",
     "max_streams_reached",
     "connectivity_guard",
+    "stream_checker_active",
 }
 MANUAL_FORCE_ALLOWED_STATES = {"due", "scheduled", "already_attempted", "past"}
 MANUAL_FORCE_ERROR_MESSAGES = {

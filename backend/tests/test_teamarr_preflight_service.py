@@ -1126,6 +1126,39 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["type"], "preflight_completed")
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 1)
 
+    def test_late_stream_checker_reservation_race_defers_bucket_for_retry(self):
+        checker = SequencedChecker([
+            {
+                "success": False,
+                "error": "stream_checker_active",
+                "message": "Stream Checker work is already active",
+            },
+            {
+                "success": True,
+                "stats": {"total_streams": 1, "duration_seconds": 8},
+            },
+        ])
+        service, _, _ = self.make_service([make_event()], checker=checker)
+
+        first_result = service.run_once(force=True)
+        self.assertTrue(first_result["success"])
+        self.assertEqual(first_result["launched"], 1)
+
+        deadline = time.time() + 2
+        recent = []
+        while time.time() < deadline:
+            recent = service.get_status()["recent_events"]
+            if recent and recent[0]["type"] == "preflight_deferred":
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(recent[0]["type"], "preflight_deferred")
+        self.assertEqual(recent[0]["details"]["reason"], "stream_checker_active")
+
+        second_result = service.run_once(force=True)
+        self.assertTrue(second_result["success"])
+        self.assertEqual(second_result["launched"], 1)
+
     def test_retry_offsets_do_not_fire_before_preflight_offset(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(

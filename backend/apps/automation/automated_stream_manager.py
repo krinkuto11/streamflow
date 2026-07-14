@@ -1400,6 +1400,7 @@ class AutomatedStreamManager:
         self.automation_running = False
         self.automation_wake_event = threading.Event()
         self._manual_stop_requested = threading.Event()
+        self._trigger_lock = threading.Lock()
         self.force_next_run = False
         self.forced_period_id = None
         
@@ -3272,12 +3273,13 @@ class AutomatedStreamManager:
     def _summarize_quality_check_results(check_results, expected_count: int) -> Dict[str, Any]:
         checked_count = len(check_results or {})
         expected_count = max(0, int(expected_count or 0))
+        result_values = list((check_results or {}).values())
         aborted_count = 0
         failed_count = 0
         first_abort_message = None
         connectivity_aborted = False
 
-        for result in (check_results or {}).values():
+        for result in result_values:
             if not isinstance(result, dict):
                 continue
             if result.get("aborted") or result.get("error") == "connectivity_guard":
@@ -3292,6 +3294,15 @@ class AutomatedStreamManager:
                 failed_count += 1
 
         incomplete_count = max(0, expected_count - checked_count)
+        stream_checker_busy = bool(
+            expected_count > 0
+            and checked_count == expected_count
+            and all(
+                isinstance(result, dict)
+                and result.get("error") == "stream_checker_active"
+                for result in result_values
+            )
+        )
         return {
             "ok": aborted_count == 0 and incomplete_count == 0,
             "checked_count": checked_count,
@@ -3301,7 +3312,26 @@ class AutomatedStreamManager:
             "incomplete_count": incomplete_count,
             "abort_message": first_abort_message,
             "connectivity_aborted": connectivity_aborted,
+            "stream_checker_busy": stream_checker_busy,
         }
+
+    def _preserve_forced_run_intent(
+        self,
+        *,
+        forced: bool,
+        forced_period_id: Optional[str],
+    ) -> bool:
+        """Keep a consumed manual run pending when the checker rejects it as busy."""
+        if not forced and forced_period_id is None:
+            return False
+        with self._trigger_lock:
+            # A trigger submitted after this run consumed its own intent is newer
+            # and must not be overwritten by the busy-run restoration.
+            if self.force_next_run or self.forced_period_id is not None:
+                return True
+            self.force_next_run = bool(forced)
+            self.forced_period_id = forced_period_id
+        return True
 
     def get_run_status(self) -> Dict[str, Any]:
         """Return the current or most recent automation-cycle status."""
@@ -5628,13 +5658,16 @@ class AutomatedStreamManager:
         # Check if stream checking mode is active. Full automation must not run
         # next to single-channel checks or preflight work, but the run intent
         # should remain pending so it can start when the checker becomes idle.
+        stream_checker = None
+        automation_checker_reserved = False
         try:
             stream_checker = get_stream_checker_service()
             status = stream_checker.get_status()
             if status.get('stream_checking_mode', False):
-                if forced:
-                    self.force_next_run = True
-                    self.forced_period_id = forced_period_id
+                if self._preserve_forced_run_intent(
+                    forced=forced,
+                    forced_period_id=forced_period_id,
+                ):
                     logger.info(
                         "Stream checking is active. Queuing forced automation cycle%s.",
                         f" for period {forced_period_id}" if forced_period_id else "",
@@ -5643,8 +5676,26 @@ class AutomatedStreamManager:
                     logger.info("Stream checking is active. Deferring automation cycle until checker is idle.")
                 self._queue_run_status("Stream checker is active; automation run is queued")
                 return
+            if not stream_checker.begin_automation_cycle_operation():
+                self._preserve_forced_run_intent(
+                    forced=forced,
+                    forced_period_id=forced_period_id,
+                )
+                self._queue_run_status(
+                    "Stream checker became active; automation run is queued"
+                )
+                return
+            automation_checker_reserved = True
         except Exception as e:
-            logger.debug(f"Could not check stream checking mode status: {e}")
+            logger.warning(f"Could not reserve Stream Checker for automation: {e}")
+            self._preserve_forced_run_intent(
+                forced=forced,
+                forced_period_id=forced_period_id,
+            )
+            self._queue_run_status(
+                "Stream checker reservation unavailable; automation run is queued"
+            )
+            return
         # Global setting for playlist updates is now period-driven
         # We don't early return here, we let the individual periods be checked below
 
@@ -5662,12 +5713,15 @@ class AutomatedStreamManager:
                 return
             finally:
                 self._m3u_accounts_cache = None
+                if automation_checker_reserved:
+                    stream_checker.end_automation_cycle_operation()
         
         logger.debug("Starting automation cycle...")
-        automation_busy_guard = get_udi_manager()
-        automation_busy_guard.set_automation_busy()
+        automation_busy_guard = None
 
         try:
+            automation_busy_guard = get_udi_manager()
+            automation_busy_guard.set_automation_busy()
             if self._abort_run_if_manual_stop_requested():
                 return
 
@@ -6492,7 +6546,9 @@ class AutomatedStreamManager:
                             def _quality_progress_callback(completed_count, total_count, channel_result):
                                 if self._is_manual_stop_requested():
                                     try:
-                                        stream_checker.abort_current_check.set()
+                                        stream_checker.request_abort(
+                                            "automation_manual_stop"
+                                        )
                                     except Exception:
                                         pass
                                 channel_name = ""
@@ -6521,7 +6577,9 @@ class AutomatedStreamManager:
                             selected_target_stream_ids = dict(_target_stream_ids)
                             target_stream_ids = _target_stream_ids if _target_stream_ids else None
                             if self._is_manual_stop_requested():
-                                stream_checker.abort_current_check.set()
+                                stream_checker.request_abort(
+                                    "automation_manual_stop"
+                                )
                             check_results = stream_checker.check_channels_synchronously(
                                 channel_ids=channels_to_check_sync,
                                 force_check=forced,
@@ -6551,6 +6609,11 @@ class AutomatedStreamManager:
                             check_results,
                             expected_count=len(channels_to_check_sync),
                         )
+                        if quality_summary["stream_checker_busy"]:
+                            self._preserve_forced_run_intent(
+                                forced=forced,
+                                forced_period_id=forced_period_id,
+                            )
                         if not quality_summary["ok"]:
                             cycle_abort_message = (
                                 quality_summary["abort_message"]
@@ -7009,8 +7072,13 @@ class AutomatedStreamManager:
 
         finally:
             self._m3u_accounts_cache = None
-            automation_busy_guard.clear_automation_busy()
-            self._manual_stop_requested.clear()
+            try:
+                if automation_busy_guard is not None:
+                    automation_busy_guard.clear_automation_busy()
+            finally:
+                self._manual_stop_requested.clear()
+                if automation_checker_reserved:
+                    stream_checker.end_automation_cycle_operation()
 
             # Background UDI sync — pull all writes from this cycle back into cache.
             # Only fires when the cycle actually completed matching/checking work.
@@ -7057,11 +7125,15 @@ class AutomatedStreamManager:
                    If False, respects grace periods (simulates scheduled run).
         """
         logger.info(f"Triggering manual automation cycle{' for period ' + period_id if period_id else ''} (force={force})")
-        self.force_next_run = force
-        self.forced_period_id = period_id
-        if self.automation_thread and self.automation_thread.is_alive():
-            self.automation_wake_event.set()
-        else:
+        with self._trigger_lock:
+            self.force_next_run = bool(force)
+            self.forced_period_id = period_id
+            thread_alive = bool(
+                self.automation_thread and self.automation_thread.is_alive()
+            )
+            if thread_alive:
+                self.automation_wake_event.set()
+        if not thread_alive:
             # If not running, we could potentially run it synchronously or just log warning.
             # But the requirement is likely to trigger the *service*.
             logger.warning("Automation service not running, manual trigger queueing for next run or ignored")
@@ -7141,13 +7213,14 @@ class AutomatedStreamManager:
 
                 # Run automation cycle
                 # Pass forced period info to cycle
-                forced = self.force_next_run
-                period_id = self.forced_period_id
-                
-                # Reset forced flags before running
-                self.force_next_run = False
-                self.forced_period_id = None
-                self.automation_wake_event.clear()
+                with self._trigger_lock:
+                    # Clear the wake and consume its matching payload as one
+                    # operation so a concurrent HTTP trigger cannot be torn or lost.
+                    self.automation_wake_event.clear()
+                    forced = self.force_next_run
+                    period_id = self.forced_period_id
+                    self.force_next_run = False
+                    self.forced_period_id = None
                 
                 self.run_automation_cycle(forced=forced, forced_period_id=period_id)
                 

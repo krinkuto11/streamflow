@@ -552,7 +552,10 @@ def test_mid_run_transient_outage_waits_for_recovery_before_marking_dead():
         "name": "Test Channel",
         "streams": [1001],
     }
-    mock_udi.apply_profile_url_transformation.side_effect = lambda stream: stream["url"]
+    mock_udi.get_m3u_accounts.return_value = []
+    mock_udi.apply_profile_url_transformation.side_effect = (
+        lambda stream, **_kwargs: stream["url"]
+    )
     mock_udi.get_stream_by_id.return_value = None
 
     mock_profile = {
@@ -622,7 +625,10 @@ def test_mid_run_outage_does_not_mark_dead_or_update_channel():
         "name": "Test Channel",
         "streams": [1001],
     }
-    mock_udi.apply_profile_url_transformation.side_effect = lambda stream: stream["url"]
+    mock_udi.get_m3u_accounts.return_value = []
+    mock_udi.apply_profile_url_transformation.side_effect = (
+        lambda stream, **_kwargs: stream["url"]
+    )
     mock_udi.get_stream_by_id.return_value = None
 
     mock_profile = {

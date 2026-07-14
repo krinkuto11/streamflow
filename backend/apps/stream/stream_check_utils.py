@@ -2487,6 +2487,7 @@ def analyze_stream(
     freeze_check_ratio_threshold: float = 0.80,
     hardware_acceleration: Optional[Dict[str, Any]] = None,
     preempt_check: Optional[Callable[[], bool]] = None,
+    defer_missing_bitrate_retry: bool = False,
 ) -> Dict[str, Any]:
     """
     Perform complete stream analysis including codec, resolution, FPS, bitrate, and audio.
@@ -2516,6 +2517,9 @@ def analyze_stream(
         freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
         hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
         preempt_check: Optional callback returning True when a real viewer needs capacity
+        defer_missing_bitrate_retry: Return a completed missing-bitrate result after
+            the first successful basis probe so the caller can retry it later without
+            competing with the initial parallel channel scan.
 
     Returns:
         Dictionary containing analysis results with keys:
@@ -2776,6 +2780,13 @@ def analyze_stream(
                     elapsed  = result_data.get('elapsed_time', ffmpeg_duration)
                     completed = elapsed >= ffmpeg_duration * EARLY_EXIT_THRESHOLD
                     missing_bitrate = result.get('bitrate_kbps') is None
+                    if completed and missing_bitrate and defer_missing_bitrate_retry:
+                        logger.warning(
+                            f"  {stream_audit_ref}: completed probe without bitrate "
+                            f"({elapsed:.1f}s/{ffmpeg_duration}s) - deferring retry "
+                            "until the initial channel scan is complete"
+                        )
+                        break
                     if completed and missing_bitrate and attempt < total_attempts - 1:
                         logger.warning(
                             f"  {stream_audit_ref}: completed probe without bitrate "

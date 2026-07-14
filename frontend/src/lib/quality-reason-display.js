@@ -6,6 +6,8 @@ const REASON_LABELS = {
   zero_resolution_dimension: 'Invalid video resolution',
   zero_bitrate: 'No bitrate detected',
   missing_bitrate: 'Needs bitrate recheck',
+  missing_bitrate_after_recheck: 'Bitrate unavailable after recheck',
+  bitrate_recheck_recovered: 'Bitrate recovered after recheck',
   resolution_width_below_threshold: 'Resolution width below threshold',
   resolution_height_below_threshold: 'Resolution height below threshold',
   bitrate_below_threshold: 'Bitrate below threshold',
@@ -44,7 +46,7 @@ const STATUS_REASON_FALLBACKS = {
   error: 'error',
 }
 
-const ACTIVE_STREAM_STATUSES = new Set(['checking', 'probing'])
+const ACTIVE_STREAM_STATUSES = new Set(['checking', 'probing', 'rechecking_bitrate'])
 
 const STATIC_REASON_DETAILS = {
   viewer_preempted: 'Real playback kept the profile slot; check again later',
@@ -162,12 +164,28 @@ const formatAnalysisFailureDetail = (context = {}) => {
 export function getQualityReasonDisplay(stream = {}) {
   if (ACTIVE_STREAM_STATUSES.has(stream.status)) return null
 
-  const code = stream.quality_reason_detail
+  const context = {
+    ...(stream.measurement_incomplete_context || {}),
+    ...(stream.quality_reason_context || {}),
+  }
+  const bitrateRecheckOutcome = stream.bitrate_recheck_outcome
+    || context.bitrate_recheck_outcome
+  const primaryCode = stream.quality_reason_detail
     || stream.reason_detail
     || STATUS_REASON_FALLBACKS[stream.status]
+  const capacityIsPrimary = (
+    primaryCode === 'missing_bitrate'
+    || primaryCode === 'missing_bitrate_after_recheck'
+  )
+  const code = (
+    bitrateRecheckOutcome === 'provider_capacity_unavailable' && capacityIsPrimary
+      ? 'provider_capacity_unavailable'
+      : bitrateRecheckOutcome === 'recovered' && (!primaryCode || primaryCode === 'none')
+        ? 'bitrate_recheck_recovered'
+        : primaryCode
+  )
   if (!code || code === 'none') return null
 
-  const context = stream.quality_reason_context || {}
   const label = REASON_LABELS[code] || titleizeCode(code)
   let detail = null
 
@@ -232,4 +250,21 @@ export function getQualityReasonDisplay(stream = {}) {
     text,
     title: detail ? `${code}: ${detail}` : code,
   }
+}
+
+export function getIncompleteBitrateBadgeLabel(stream = {}) {
+  const context = {
+    ...(stream.measurement_incomplete_context || {}),
+    ...(stream.quality_reason_context || {}),
+  }
+  const outcome = stream.bitrate_recheck_outcome || context.bitrate_recheck_outcome
+  const reason = stream.quality_reason_detail
+    || stream.measurement_incomplete_reason
+    || stream.reason_detail
+
+  if (outcome === 'provider_capacity_unavailable') return 'Capacity deferred'
+  if (outcome === 'unavailable' || reason === 'missing_bitrate_after_recheck') {
+    return 'Unavailable after recheck'
+  }
+  return 'Needs Recheck'
 }

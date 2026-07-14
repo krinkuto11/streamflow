@@ -26,7 +26,10 @@ import {
   getProviderCapacityExplanationDisplay,
   getProviderWaitReasonDisplay,
 } from '@/lib/provider-progress-display.js'
-import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
+import {
+  getIncompleteBitrateBadgeLabel,
+  getQualityReasonDisplay,
+} from '@/lib/quality-reason-display.js'
 import {
   Activity,
   CheckCircle2,
@@ -895,8 +898,8 @@ export default function StreamChecker() {
               // normal analysis phase floats completed streams to top by score.
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
-                ? { probing: 0, loop_detected: 1, completed: 2, incomplete_bitrate: 3, checking: 4, pending: 5, error: 6, low_quality: 7, blank: 8, freeze: 9, dead: 10 }
-                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, incomplete_bitrate: 4, viewer_preempted: 5, provider_limit_wait_timeout: 6, error: 7, low_quality: 8, blank: 9, freeze: 10, dead: 11 }
+                ? { probing: 0, loop_detected: 1, completed: 2, incomplete_bitrate: 3, rechecking_bitrate: 4, checking: 5, pending: 6, error: 7, low_quality: 8, blank: 9, freeze: 10, dead: 11 }
+                : { checking: 0, rechecking_bitrate: 1, waiting_provider_limit: 2, pending: 3, completed: 4, incomplete_bitrate: 5, viewer_preempted: 6, provider_limit_wait_timeout: 7, error: 8, low_quality: 9, blank: 10, freeze: 11, dead: 12 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -984,6 +987,7 @@ export default function StreamChecker() {
                               <td className="px-3 py-1.5 align-middle text-center">
                                 {stream.status === 'pending' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Pending</Badge>}
                                 {stream.status === 'checking' && <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">Checking</Badge>}
+                                {stream.status === 'rechecking_bitrate' && <Badge variant="outline" className="text-[10px] border-cyan-500/40 bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300 animate-pulse">Bitrate Recheck</Badge>}
                                 {stream.status === 'waiting_provider_limit' && <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Waiting</Badge>}
                                 {stream.status === 'viewer_preempted' && <Badge variant="outline" className="text-[10px] border-cyan-500/40 bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300">Preempted</Badge>}
                                 {stream.status === 'provider_limit_wait_timeout' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Skipped</Badge>}
@@ -991,7 +995,7 @@ export default function StreamChecker() {
                                 {stream.status === 'incomplete_bitrate' && (
                                   <div className="mx-auto flex max-w-[180px] flex-col items-center gap-1" title={qualityReason?.title}>
                                     <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
-                                      Needs Recheck
+                                      {getIncompleteBitrateBadgeLabel(stream)}
                                     </Badge>
                                     {qualityReason && (
                                       <span className="max-w-full truncate text-[10px] leading-tight text-amber-700 dark:text-amber-300">

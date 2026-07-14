@@ -84,6 +84,8 @@ class TestSingleChannelForceCheck(unittest.TestCase):
             skip_batch_changelog=True,
             run_mode='single_channel_check',
             is_single_channel_check=True,
+            force_check_override=False,
+            force_check_generation=None,
         )
 
     @patch('stream_checker_service.StreamCheckConfig')
@@ -91,7 +93,7 @@ class TestSingleChannelForceCheck(unittest.TestCase):
     @patch('stream_checker_service.fetch_channel_streams')
     @patch('automated_stream_manager.AutomatedStreamManager')
     @patch('api_utils.refresh_m3u_playlists')
-    def test_single_channel_force_check_marks_and_clears_immunity_bypass(
+    def test_single_channel_force_check_uses_owned_override_without_consuming_queue_intent(
         self, mock_refresh, mock_automation_class, mock_fetch_streams, mock_udi, mock_config_class
     ):
         """Explicit force_check should make the synchronous check re-analyze all streams."""
@@ -126,7 +128,12 @@ class TestSingleChannelForceCheck(unittest.TestCase):
 
         service = StreamCheckerService()
 
+        # A separately queued force intent belongs to the future worker run.
+        # This direct operation must neither rely on nor consume that marker.
+        service.update_tracker.mark_channel_for_force_check(16)
+
         def fake_check(channel_id, **kwargs):
+            assert kwargs['force_check_override'] is True
             assert service.update_tracker.should_force_check(channel_id)
             return {
                 'dead_streams_count': 0,
@@ -139,13 +146,16 @@ class TestSingleChannelForceCheck(unittest.TestCase):
         result = service.check_single_channel(channel_id=16, force_check=True)
 
         self.assertTrue(result['success'])
-        self.assertFalse(service.update_tracker.should_force_check(16))
+        self.assertTrue(service.update_tracker.should_force_check(16))
         service._check_channel.assert_called_once_with(
             16,
             skip_batch_changelog=True,
             run_mode='single_channel_check',
             is_single_channel_check=True,
+            force_check_override=True,
+            force_check_generation=None,
         )
+        service.update_tracker.clear_force_check(16)
     
     @patch('stream_checker_service.StreamCheckConfig')
     @patch('stream_checker_service.get_udi_manager')

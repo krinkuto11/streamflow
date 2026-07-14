@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import { getQualityReasonDisplay } from './quality-reason-display'
+import {
+  getIncompleteBitrateBadgeLabel,
+  getQualityReasonDisplay,
+} from './quality-reason-display'
 
 describe('getQualityReasonDisplay', () => {
   it('formats threshold comparisons with machine-readable code retained', () => {
@@ -39,6 +42,71 @@ describe('getQualityReasonDisplay', () => {
     })
   })
 
+  it('distinguishes bitrate that remains unavailable after the serial recheck', () => {
+    expect(getQualityReasonDisplay({
+      status: 'incomplete_bitrate',
+      quality_reason_detail: 'missing_bitrate_after_recheck',
+    })).toEqual({
+      code: 'missing_bitrate_after_recheck',
+      text: 'Bitrate unavailable after recheck',
+      title: 'missing_bitrate_after_recheck',
+    })
+    expect(getIncompleteBitrateBadgeLabel({
+      status: 'incomplete_bitrate',
+      quality_reason_detail: 'missing_bitrate_after_recheck',
+      bitrate_recheck_outcome: 'unavailable',
+    })).toBe('Unavailable after recheck')
+  })
+
+  it('surfaces a capacity-deferred recheck instead of claiming it ran', () => {
+    const stream = {
+      status: 'incomplete_bitrate',
+      quality_reason_detail: 'missing_bitrate',
+      measurement_incomplete_context: {
+        bitrate_recheck_outcome: 'provider_capacity_unavailable',
+      },
+    }
+    expect(getQualityReasonDisplay(stream)).toEqual({
+      code: 'provider_capacity_unavailable',
+      text: 'Provider capacity unavailable: No provider or profile check slot is free',
+      title: 'provider_capacity_unavailable: No provider or profile check slot is free',
+    })
+    expect(getIncompleteBitrateBadgeLabel(stream)).toBe('Capacity deferred')
+  })
+
+  it('does not hide a stronger visual failure behind deferred recheck capacity', () => {
+    expect(getQualityReasonDisplay({
+      status: 'blank',
+      quality_reason_detail: 'blank_detected',
+      quality_reason_context: { blank_ratio: 0.98 },
+      bitrate_recheck_outcome: 'provider_capacity_unavailable',
+    })).toEqual({
+      code: 'blank_detected',
+      text: 'Blank video detected: ratio 1.0',
+      title: 'blank_detected: ratio 1.0',
+    })
+    expect(getQualityReasonDisplay({
+      status: 'incomplete_bitrate',
+      quality_reason_detail: 'freeze_detected',
+      bitrate_recheck_outcome: 'provider_capacity_unavailable',
+    })).toMatchObject({
+      code: 'freeze_detected',
+      text: 'Frozen video detected',
+    })
+  })
+
+  it('records a successful bitrate recovery as visible completed-run evidence', () => {
+    expect(getQualityReasonDisplay({
+      status: 'completed',
+      quality_reason_detail: 'none',
+      bitrate_recheck_outcome: 'recovered',
+    })).toEqual({
+      code: 'bitrate_recheck_recovered',
+      text: 'Bitrate recovered after recheck',
+      title: 'bitrate_recheck_recovered',
+    })
+  })
+
   it('uses provider-capacity wording without leaking raw detail as primary text', () => {
     expect(getQualityReasonDisplay({
       reason_detail: 'provider_capacity_unavailable',
@@ -67,6 +135,10 @@ describe('getQualityReasonDisplay', () => {
     expect(getQualityReasonDisplay({
       status: 'probing',
       quality_reason_detail: 'global_worker_limit',
+    })).toBeNull()
+    expect(getQualityReasonDisplay({
+      status: 'rechecking_bitrate',
+      quality_reason_detail: 'missing_bitrate',
     })).toBeNull()
   })
 

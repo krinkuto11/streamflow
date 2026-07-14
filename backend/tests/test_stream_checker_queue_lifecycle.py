@@ -17,11 +17,22 @@ from apps.api.stream_checker_handlers import (  # noqa: E402
     clear_stream_checker_queue_response,
     queue_all_channels_response,
 )
-from apps.stream.stream_checker_components import StreamCheckQueue  # noqa: E402
+from apps.stream.stream_checker_components import (  # noqa: E402
+    ChannelUpdateTracker,
+    StreamCheckQueue,
+)
 from apps.stream.stream_checker_service import StreamCheckerService  # noqa: E402
 
 
 class TestStreamCheckQueueLifecycle(unittest.TestCase):
+    @staticmethod
+    def _in_memory_update_tracker():
+        tracker = ChannelUpdateTracker.__new__(ChannelUpdateTracker)
+        tracker.lock = threading.Lock()
+        tracker.updates = {'channels': {}, 'last_global_check': None}
+        tracker._save_updates = Mock()
+        return tracker
+
     def test_higher_priority_channels_are_checked_first(self):
         check_queue = StreamCheckQueue(max_size=10)
 
@@ -136,6 +147,165 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 501)
         self.assertIsNone(check_queue.get_next_channel(timeout=0.1))
         self.assertEqual(check_queue.get_status()["queued"], 0)
+
+    def test_distinct_specialized_events_cannot_overwrite_one_queue_entry(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        accepted = []
+
+        self.assertTrue(check_queue.add_channel(
+            77,
+            priority=75,
+            metadata={'source': 'teamarr_preflight', 'identity': 'event-a'},
+            on_accepted=lambda: accepted.append('event-a'),
+        ))
+        self.assertFalse(check_queue.add_channel(
+            77,
+            priority=90,
+            metadata={'source': 'teamarr_preflight', 'identity': 'event-b'},
+            on_accepted=lambda: accepted.append('event-b'),
+        ))
+
+        self.assertEqual(accepted, ['event-a'])
+        self.assertEqual(check_queue.queued_metadata[77]['identity'], 'event-a')
+        self.assertEqual(check_queue.get_status()['queue_size'], 1)
+
+    def test_force_generation_compare_clear_preserves_newer_request(self):
+        tracker = self._in_memory_update_tracker()
+
+        first_generation = tracker.mark_channel_for_force_check(77)
+        second_generation = tracker.mark_channel_for_force_check(77)
+
+        self.assertFalse(tracker.clear_force_check(
+            77,
+            expected_generation=first_generation,
+        ))
+        self.assertEqual(tracker.get_force_check_state(77), (True, second_generation))
+        self.assertTrue(tracker.clear_force_check(
+            77,
+            expected_generation=second_generation,
+        ))
+        self.assertEqual(tracker.get_force_check_state(77), (False, second_generation))
+
+    def test_specialized_drain_owns_and_clears_snapshotted_force_generation(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.abort_current_check = threading.Event()
+        service.update_tracker = self._in_memory_update_tracker()
+        service._run_specialized_queue_entry = Mock()
+
+        self.assertTrue(service.check_queue.add_channel(
+            77,
+            priority=100,
+            metadata={'source': 'teamarr_preflight'},
+        ))
+        generation = service.update_tracker.mark_channel_for_force_check(77)
+
+        drained = service._drain_specialized_queue_entries(max_entries=1)
+
+        self.assertEqual(drained, 1)
+        queue_entry = service._run_specialized_queue_entry.call_args.args[0]
+        self.assertEqual(queue_entry['channel_id'], 77)
+        self.assertEqual(
+            service._run_specialized_queue_entry.call_args.kwargs,
+            {'force_check_generation': generation},
+        )
+        self.assertEqual(
+            service.update_tracker.get_force_check_state(77),
+            (False, generation),
+        )
+
+    def test_specialized_drain_migrates_legacy_force_and_preserves_requeue(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.abort_current_check = threading.Event()
+        service.update_tracker = self._in_memory_update_tracker()
+        service.update_tracker.updates['channels']['77'] = {'force_check': True}
+        self.assertTrue(service.check_queue.add_channel(
+            77,
+            priority=100,
+            metadata={'source': 'teamarr_preflight'},
+        ))
+
+        def requeue(_entry, *, force_check_generation):
+            self.assertEqual(force_check_generation, 1)
+            self.assertEqual(
+                service.update_tracker.mark_channel_for_force_check(77),
+                2,
+            )
+
+        service._run_specialized_queue_entry = Mock(side_effect=requeue)
+
+        self.assertEqual(service._drain_specialized_queue_entries(max_entries=1), 1)
+        self.assertEqual(
+            service.update_tracker.get_force_check_state(77),
+            (True, 2),
+        )
+
+    def test_profile_disabled_queue_entry_reaches_terminal_state(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.abort_current_check = threading.Event()
+        service.checking = False
+        service.config = Mock()
+        service.config.get.side_effect = lambda _key, default=None: default
+        service._build_threshold_config_from_profile = Mock(return_value={})
+        automation_config = Mock()
+        automation_config.get_effective_configuration.return_value = {
+            'profile': {'stream_checking': {'enabled': False}},
+        }
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {
+            'id': 77,
+            'channel_group_id': 3,
+        }
+        self.assertTrue(service.check_queue.add_channel(77, priority=10))
+        self.assertEqual(service.check_queue.get_next_channel(timeout=0.1), 77)
+
+        with patch(
+            'apps.stream.stream_checker_service.get_automation_config_manager',
+            return_value=automation_config,
+        ), patch(
+            'apps.stream.stream_checker_service.get_udi_manager',
+            return_value=udi,
+        ):
+            result = service._check_channel_concurrent(77)
+
+        self.assertTrue(result['skipped'])
+        self.assertEqual(result['skip_reason'], 'profile_disabled')
+        self.assertFalse(service.checking)
+        status = service.check_queue.get_status()
+        self.assertEqual(status['in_progress'], 0)
+        self.assertEqual(status['completed'], 1)
+
+    def test_worker_finalizer_does_not_clear_newer_force_generation(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.running = True
+        service.batch_start_time = None
+        service.abort_current_check = threading.Event()
+        service.check_queue = Mock()
+        service._start_batch_changelog = Mock()
+        service._finalize_batch_changelog = Mock()
+        service.update_tracker = self._in_memory_update_tracker()
+        first_generation = service.update_tracker.mark_channel_for_force_check(77)
+
+        service.check_queue.get_next_entry.return_value = {
+            'channel_id': 77,
+            'metadata': {},
+        }
+
+        def check_channel(channel_id, **kwargs):
+            self.assertEqual(kwargs['force_check_generation'], first_generation)
+            service.update_tracker.mark_channel_for_force_check(channel_id)
+            service.running = False
+            return {'skipped': True, 'skip_reason': 'active_viewers'}
+
+        service._check_channel = check_channel
+
+        service._worker_loop()
+
+        pending, generation = service.update_tracker.get_force_check_state(77)
+        self.assertTrue(pending)
+        self.assertGreater(generation, first_generation)
 
     def test_queue_entries_preserve_metadata_with_priority_ordering(self):
         check_queue = StreamCheckQueue(max_size=10)
@@ -471,6 +641,61 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertNotIn('quality_reason_detail', stream_status)
         self.assertNotIn('quality_reason_context', stream_status)
 
+    def test_disabled_concurrency_uses_smart_scheduler_with_one_probe_slot(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.config = Mock()
+        service.config.get.side_effect = (
+            lambda key, default=None: False
+            if key == 'concurrent_streams.enabled'
+            else default
+        )
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel_concurrent = Mock(return_value={'success': True})
+        service._check_channel_sequential = Mock(side_effect=AssertionError(
+            'legacy raw sequential checker must not be used'
+        ))
+
+        result = service._check_channel(404, run_mode='test')
+
+        self.assertTrue(result['success'])
+        service._check_channel_concurrent.assert_called_once_with(
+            404,
+            skip_batch_changelog=False,
+            forced_profile_id=None,
+            provider_limit_override=False,
+            run_mode='test',
+            is_single_channel_check=False,
+            global_limit_override=1,
+            force_check_override=None,
+            force_check_generation=None,
+        )
+        service._check_channel_sequential.assert_not_called()
+
+    def test_status_reports_effective_single_worker_in_sequential_mode(self):
+        from apps.api.stream_checker_handlers import get_stream_checker_status_response
+
+        service = Mock()
+        service.get_status.return_value = {}
+        service.config.get.side_effect = lambda key, default=None: {
+            'concurrent_streams.enabled': False,
+            'concurrent_streams.global_limit': 10,
+        }.get(key, default)
+        app = Flask(__name__)
+
+        with app.app_context():
+            response = get_stream_checker_status_response(
+                get_stream_checker_service=lambda: service,
+                concurrent_streams_enabled_key='concurrent_streams.enabled',
+                concurrent_streams_global_limit_key='concurrent_streams.global_limit',
+            )
+
+        self.assertEqual(response.get_json()['parallel'], {
+            'enabled': False,
+            'max_workers': 1,
+            'configured_max_workers': 10,
+            'mode': 'sequential',
+        })
+
     def test_service_clear_queue_does_not_leave_abort_stuck_when_idle(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.check_queue = StreamCheckQueue(max_size=10)
@@ -506,6 +731,135 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(service.check_queue.get_status()['state'], 'cleared')
         service.progress.clear.assert_called_once()
 
+    def test_clear_queue_cancels_queue_owned_force_marker(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.update_tracker = self._in_memory_update_tracker()
+        service.update_tracker.mark_channel_for_force_check(77)
+        self.assertTrue(service.check_queue.add_channel(77, priority=10))
+
+        service.clear_queue()
+
+        self.assertEqual(
+            service.update_tracker.get_force_check_state(77)[0],
+            False,
+        )
+
+    def test_automation_reservation_blocks_direct_operations_and_allows_owner_sync(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service._single_stream_check_active = False
+        service._single_channel_check_active = False
+        service._sync_batch_execution_active = False
+        service._sync_batch_execution_generation = None
+        service._sync_batch_generation = 0
+        service._external_abort_generation = 0
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.update_tracker = Mock()
+        service.config = Mock()
+        service.config.get.return_value = True
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel_concurrent = Mock(return_value={'success': True})
+        service._apply_specialized_queue_deferral = Mock()
+        service._drain_specialized_queue_entries = Mock(return_value=0)
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {'streams': [{'id': 1}]}
+
+        self.assertTrue(service.begin_automation_cycle_operation())
+        self.assertFalse(service._begin_single_channel_check_operation())
+        self.assertFalse(service._begin_single_stream_check_operation())
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            result = service.check_channels_synchronously([77], force_check=True)
+
+        self.assertTrue(result[77]['success'])
+        self.assertTrue(service._automation_cycle_active)
+        self.assertTrue(service.end_automation_cycle_operation())
+        self.assertFalse(service._automation_cycle_active)
+        self.assertFalse(service.check_queue.paused)
+
+    def test_automation_owner_abort_is_not_cleared_by_nested_sync_batch(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service._single_stream_check_active = False
+        service._single_channel_check_active = False
+        service._sync_batch_execution_active = False
+        service._sync_batch_generation = 0
+        service._external_abort_generation = 0
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service._check_channel_concurrent = Mock()
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {'streams': [{'id': 1}]}
+
+        self.assertTrue(service.begin_automation_cycle_operation())
+        service.request_abort('test_manual_stop')
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            result = service.check_channels_synchronously([77], force_check=True)
+
+        self.assertTrue(result[77]['aborted'])
+        self.assertEqual(result[77]['error'], 'aborted')
+        self.assertTrue(service.abort_current_check.is_set())
+        service._check_channel_concurrent.assert_not_called()
+        self.assertTrue(service.end_automation_cycle_operation())
+
+    def test_status_progress_cleanup_excludes_new_direct_reservation(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service._single_stream_check_active = False
+        service._single_channel_check_active = False
+        service._sync_batch_execution_active = False
+        service.abort_current_check = threading.Event()
+        clear_started = threading.Event()
+        release_clear = threading.Event()
+        reservation_done = threading.Event()
+        service.progress = Mock()
+
+        def blocking_clear(expected):
+            self.assertEqual(expected, {'channel_id': 1})
+            clear_started.set()
+            self.assertTrue(release_clear.wait(2))
+            return True
+
+        service.progress.clear_if_matches.side_effect = blocking_clear
+        cleanup_thread = threading.Thread(
+            target=service._clear_progress_snapshot_if_idle,
+            args=({'channel_id': 1},),
+        )
+        cleanup_thread.start()
+        self.assertTrue(clear_started.wait(2))
+
+        def reserve_direct():
+            service._begin_single_channel_check_operation()
+            reservation_done.set()
+
+        reservation_thread = threading.Thread(target=reserve_direct)
+        reservation_thread.start()
+        self.assertFalse(reservation_done.wait(0.1))
+
+        release_clear.set()
+        cleanup_thread.join(2)
+        reservation_thread.join(2)
+        self.assertTrue(reservation_done.is_set())
+        self.assertTrue(service._single_channel_check_active)
+        service._end_single_channel_check_operation()
+
     def test_worker_keeps_abort_set_during_queue_handoff(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.running = True
@@ -520,7 +874,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             service.abort_current_check.set()
             return {'channel_id': 105, 'metadata': {}}
 
-        def check_channel(channel_id):
+        def check_channel(channel_id, **_kwargs):
             seen_abort_states.append(service.abort_current_check.is_set())
             service.running = False
 
@@ -535,6 +889,8 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.running = True
         service.batch_start_time = None
+        service.lock = threading.Lock()
+        service._external_abort_generation = 0
         service.abort_current_check = threading.Event()
         service.check_queue = Mock()
         service._start_batch_changelog = Mock()
@@ -573,6 +929,8 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             is_epg_scheduled=True,
             forced_profile_id='42',
             run_mode='teamarr_preflight',
+            _operation_already_reserved=True,
+            _queue_force_check_generation=None,
         )
         teamarr_service.record_queued_check_result.assert_called_once()
         queued_metadata, result = teamarr_service.record_queued_check_result.call_args.args
@@ -585,6 +943,8 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.running = True
         service.batch_start_time = None
+        service.lock = threading.Lock()
+        service._external_abort_generation = 0
         service.abort_current_check = threading.Event()
         service.check_queue = Mock()
         service._start_batch_changelog = Mock()
@@ -616,6 +976,8 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             program_name='Live: MLB',
             is_epg_scheduled=True,
             forced_profile_id=None,
+            _operation_already_reserved=True,
+            _queue_force_check_generation=None,
         )
         service.check_queue.mark_completed.assert_called_once_with(9441)
         service.check_queue.mark_failed.assert_not_called()
@@ -695,10 +1057,37 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.check_single_channel.assert_not_called()
         self.assertEqual(sleep_calls, [1])
 
+    def test_worker_preserves_abort_while_direct_stream_check_is_active(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.running = True
+        service.batch_start_time = None
+        service.abort_current_check = threading.Event()
+        service.abort_current_check.set()
+        service.check_queue = Mock()
+        service._start_batch_changelog = Mock()
+        service._finalize_batch_changelog = Mock()
+        service._check_channel = Mock()
+        service.lock = threading.Lock()
+        service._single_stream_check_active = True
+        service._sync_batch_generation = 0
+        service.sync_batch_state = {"active": False, "generation": 0}
+
+        def stop_after_sleep(_seconds):
+            service.running = False
+
+        with patch("apps.stream.stream_checker_service.time.sleep", side_effect=stop_after_sleep):
+            service._worker_loop()
+
+        self.assertTrue(service.abort_current_check.is_set())
+        service.check_queue.get_next_entry.assert_not_called()
+        service._check_channel.assert_not_called()
+
     def test_worker_passes_teamarr_provider_limit_override_when_requested(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.running = True
         service.batch_start_time = None
+        service.lock = threading.Lock()
+        service._external_abort_generation = 0
         service.abort_current_check = threading.Event()
         service.check_queue = Mock()
         service._start_batch_changelog = Mock()
@@ -737,6 +1126,8 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             forced_profile_id='42',
             provider_limit_override=True,
             run_mode='teamarr_preflight',
+            _operation_already_reserved=True,
+            _queue_force_check_generation=None,
         )
         service.check_queue.mark_completed.assert_called_once_with(8441)
 
@@ -878,6 +1269,17 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.update_tracker = Mock()
         service.update_tracker.get_last_global_check.return_value = None
         return service
+
+    def test_get_status_keeps_sync_execution_active_after_visible_state_clears(self):
+        service = self._service_for_idle_progress_status(None)
+        service._sync_batch_execution_active = True
+
+        status = service.get_status()
+
+        self.assertTrue(status['sync_batch_execution_active'])
+        self.assertTrue(status['stream_checking_mode'])
+        self.assertFalse(status['checking'])
+        self.assertFalse(status['queue']['queue_size'])
 
     def test_get_status_marks_stale_batch_progress_when_no_check_is_active(self):
         service = self._service_for_idle_progress_status({
@@ -1106,6 +1508,279 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(progress_events, [(1, 2, 'One'), (2, 2, 'Two')])
         self.assertEqual(sync_counts, [(2, 1, 0, 4, 1, 0, 1), (3, 1, 2, 7, 1, 1, 2)])
         self.assertFalse(service.sync_batch_state['active'])
+
+    def test_sync_batch_rejects_active_direct_stream_reservation(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service._sync_batch_execution_active = False
+        service._sync_batch_execution_generation = None
+        service.sync_batch_state = {'active': False}
+        service.checking = True
+        service._single_stream_check_active = True
+        service.abort_current_check = threading.Event()
+        service.update_tracker = Mock()
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel_concurrent = Mock()
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {'streams': [{'id': 1}]}
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            result = service.check_channels_synchronously([101], force_check=True)
+
+        self.assertEqual(result[101]['error'], 'stream_checker_active')
+        self.assertTrue(result[101]['aborted'])
+        self.assertTrue(service._single_stream_check_active)
+        self.assertFalse(service._sync_batch_execution_active)
+        service.update_tracker.mark_channel_for_force_check.assert_not_called()
+        service._check_channel_concurrent.assert_not_called()
+
+    def test_sync_batch_check_failure_releases_execution_and_restores_queue_pause(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service._sync_batch_execution_active = False
+        service._sync_batch_execution_generation = None
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service._single_stream_check_active = False
+        service.abort_current_check = threading.Event()
+        service.update_tracker = Mock()
+        service.config = Mock()
+        service.config.get.return_value = True
+        service._check_channel_concurrent = Mock(
+            side_effect=RuntimeError('quality check failed')
+        )
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {'streams': [{'id': 1}]}
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            result = service.check_channels_synchronously([101], force_check=True)
+
+        self.assertEqual(result[101]['error'], 'quality check failed')
+        service._check_channel_concurrent.assert_called_once_with(
+            101,
+            skip_batch_changelog=True,
+            target_stream_ids=None,
+            run_mode=None,
+            force_check_override=True,
+        )
+        service.update_tracker.mark_channel_for_force_check.assert_not_called()
+        service.update_tracker.clear_force_check.assert_not_called()
+        self.assertFalse(service._sync_batch_execution_active)
+        self.assertIsNone(service._sync_batch_execution_generation)
+        self.assertFalse(service.sync_batch_state['active'])
+        self.assertFalse(service.check_queue.paused)
+        self.assertFalse(service.checking)
+
+    def test_sync_batch_releases_checking_with_queued_handoff_before_worker_pickup(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service._sync_batch_execution_active = False
+        service._sync_batch_execution_generation = None
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service._single_stream_check_active = False
+        service._single_channel_check_active = False
+        service._automation_cycle_active = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.update_tracker = self._in_memory_update_tracker()
+        service.config = Mock()
+        service.config.get.side_effect = (
+            lambda key, default=None: True
+            if key == 'concurrent_streams.enabled'
+            else default
+        )
+        service._require_quality_check_connectivity = Mock(return_value=None)
+
+        def queue_handoff(_channel_id, **_kwargs):
+            self.assertTrue(service.check_queue.add_channel(202, priority=5))
+            return {'success': True}
+
+        service._check_channel_concurrent = Mock(side_effect=queue_handoff)
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {'streams': [{'id': 1}]}
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            result = service.check_channels_synchronously([101])
+
+        self.assertTrue(result[101]['success'])
+        self.assertEqual(service.check_queue.get_status()['queued'], 1)
+        self.assertFalse(service.checking)
+
+        service.clear_queue()
+        self.assertFalse(service.abort_current_check.is_set())
+        self.assertTrue(service._begin_single_channel_check_operation())
+        service._end_single_channel_check_operation()
+
+    def test_worker_preserves_clear_abort_until_sync_execution_finishes(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service._sync_batch_execution_active = False
+        service._sync_batch_execution_generation = None
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service._single_stream_check_active = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.update_tracker = Mock()
+        service.config = Mock()
+        service.config.get.side_effect = (
+            lambda key, default=None: True
+            if key == 'concurrent_streams.enabled'
+            else default
+        )
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        check_started = threading.Event()
+        release_check = threading.Event()
+        thread_result = {}
+
+        def blocking_check(channel_id, **_kwargs):
+            check_started.set()
+            self.assertTrue(release_check.wait(5))
+            return {
+                'success': False,
+                'aborted': service.abort_current_check.is_set(),
+                'channel_id': channel_id,
+            }
+
+        service._check_channel_concurrent = Mock(side_effect=blocking_check)
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {'streams': [{'id': 1}]}
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            sync_thread = threading.Thread(
+                target=lambda: thread_result.setdefault(
+                    'result',
+                    service.check_channels_synchronously([101]),
+                )
+            )
+            sync_thread.start()
+            self.assertTrue(check_started.wait(5))
+
+            clear_result = service.clear_queue()
+            self.assertTrue(clear_result['abort_requested'])
+            self.assertTrue(service.abort_current_check.is_set())
+            self.assertTrue(service._sync_batch_execution_active)
+
+            service.running = True
+            service.batch_start_time = None
+            service._start_batch_changelog = Mock()
+            service._finalize_batch_changelog = Mock()
+            service._check_channel = Mock()
+            with patch.object(service.check_queue, 'get_next_entry') as get_next_entry, patch(
+                'apps.stream.stream_checker_service.time.sleep',
+                side_effect=lambda _seconds: setattr(service, 'running', False),
+            ):
+                service._worker_loop()
+
+            self.assertTrue(service.abort_current_check.is_set())
+            get_next_entry.assert_not_called()
+            release_check.set()
+            sync_thread.join(timeout=5)
+
+        self.assertFalse(sync_thread.is_alive())
+        self.assertTrue(thread_result['result'][101]['aborted'])
+        self.assertFalse(service._sync_batch_execution_active)
+        self.assertFalse(service.check_queue.paused)
+
+    def test_sync_batch_finishes_serial_bitrate_rechecks_before_next_channel(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._sync_batch_generation = 0
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.update_tracker = Mock()
+        service.config = Mock()
+        service.config.get.side_effect = (
+            lambda key, default=None: False
+            if key == 'concurrent_streams.enabled'
+            else default
+        )
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        events = []
+
+        def check_channel(channel_id, **_kwargs):
+            events.append(('initial_scan', channel_id))
+            results = [
+                {
+                    'stream_id': channel_id * 10 + offset,
+                    'stream_name': f'{channel_id}-{offset}',
+                    'status': 'OK',
+                    'bitrate_kbps': None,
+                    'measurement_incomplete': True,
+                    'measurement_incomplete_reason': 'missing_bitrate',
+                    'measurement_incomplete_context': {},
+                    'bitrate_recheck_required': True,
+                }
+                for offset in (1, 2)
+            ]
+            streams = {
+                result['stream_id']: {
+                    'id': result['stream_id'],
+                    'name': result['stream_name'],
+                }
+                for result in results
+            }
+
+            def recheck(stream, _initial):
+                events.append(('bitrate_recheck', channel_id, stream['id']))
+                return {
+                    'status': 'OK',
+                    'bitrate_kbps': 5000 + stream['id'],
+                    'bitrate_source': 'ffmpeg_progress',
+                }
+
+            service._run_deferred_bitrate_rechecks(results, streams, recheck)
+            events.append(('channel_complete', channel_id))
+            return {
+                'success': True,
+                'channel_name': f'Channel {channel_id}',
+                'checked_streams': results,
+            }
+
+        service._check_channel_concurrent = Mock(side_effect=check_channel)
+        udi = Mock()
+        udi.get_channel_by_id.side_effect = (
+            lambda channel_id: {
+                'streams': [
+                    {'id': channel_id * 10 + 1},
+                    {'id': channel_id * 10 + 2},
+                ]
+            }
+        )
+
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            service.check_channels_synchronously([101, 102])
+
+        self.assertTrue(all(
+            call.kwargs.get('global_limit_override') == 1
+            for call in service._check_channel_concurrent.call_args_list
+        ))
+
+        self.assertEqual(
+            events,
+            [
+                ('initial_scan', 101),
+                ('bitrate_recheck', 101, 1011),
+                ('bitrate_recheck', 101, 1012),
+                ('channel_complete', 101),
+                ('initial_scan', 102),
+                ('bitrate_recheck', 102, 1021),
+                ('bitrate_recheck', 102, 1022),
+                ('channel_complete', 102),
+            ],
+        )
 
     def test_sync_batch_counts_blank_and_freeze_from_checked_streams_fallback(self):
         service = StreamCheckerService.__new__(StreamCheckerService)

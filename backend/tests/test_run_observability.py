@@ -23,6 +23,7 @@ class AutomationRunStatusTests(unittest.TestCase):
     def _manager(self):
         manager = AutomatedStreamManager.__new__(AutomatedStreamManager)
         manager._run_status_lock = threading.RLock()
+        manager._trigger_lock = threading.Lock()
         manager._run_sequence = 0
         manager._manual_stop_requested = threading.Event()
         manager.automation_thread = None
@@ -448,6 +449,32 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertTrue(summary["connectivity_aborted"])
         self.assertEqual(summary["checked_count"], 2)
         self.assertEqual(summary["incomplete_count"], 1)
+
+    def test_quality_summary_identifies_only_complete_checker_busy_rejections(self):
+        all_busy = AutomatedStreamManager._summarize_quality_check_results(
+            {
+                1: {"success": False, "aborted": True, "error": "stream_checker_active"},
+                2: {"success": False, "aborted": True, "error": "stream_checker_active"},
+            },
+            expected_count=2,
+        )
+        mixed = AutomatedStreamManager._summarize_quality_check_results(
+            {
+                1: {"success": False, "aborted": True, "error": "stream_checker_active"},
+                2: {"success": True},
+            },
+            expected_count=2,
+        )
+        incomplete = AutomatedStreamManager._summarize_quality_check_results(
+            {
+                1: {"success": False, "aborted": True, "error": "stream_checker_active"},
+            },
+            expected_count=2,
+        )
+
+        self.assertTrue(all_busy["stream_checker_busy"])
+        self.assertFalse(mixed["stream_checker_busy"])
+        self.assertFalse(incomplete["stream_checker_busy"])
 
     def test_manual_stop_aborted_cycle_advances_period_schedule_clock(self):
         manager = self._manager()

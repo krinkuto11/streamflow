@@ -596,6 +596,49 @@ class TestAnalyzeStream(unittest.TestCase):
         self.assertFalse(result['bitrate_recheck_required'])
 
     @patch('stream_check_utils.get_stream_info_and_bitrate')
+    @patch('time.sleep')
+    def test_completed_missing_bitrate_can_be_deferred_out_of_parallel_scan(
+        self,
+        mock_sleep,
+        mock_get_info_and_bitrate,
+    ):
+        """Callers can move the bitrate retry behind the initial channel scan."""
+        mock_get_info_and_bitrate.return_value = {
+            'video_codec': 'hevc',
+            'audio_codec': 'aac',
+            'resolution': '3840x2160',
+            'fps': 50.0,
+            'bitrate_kbps': None,
+            'bitrate_source': None,
+            'hdr_format': 'HLG',
+            'pixel_format': None,
+            'audio_sample_rate': None,
+            'audio_channels': None,
+            'channel_layout': None,
+            'audio_bitrate': None,
+            'status': 'OK',
+            'elapsed_time': 30.5,
+        }
+
+        result = analyze_stream(
+            stream_url='http://test.stream',
+            stream_id=123,
+            stream_name='Test Stream',
+            ffmpeg_duration=30,
+            retries=3,
+            retry_delay=5,
+            defer_missing_bitrate_retry=True,
+        )
+
+        self.assertEqual(mock_get_info_and_bitrate.call_count, 1)
+        mock_sleep.assert_not_called()
+        self.assertEqual(result['status'], 'OK')
+        self.assertIsNone(result['bitrate_kbps'])
+        self.assertTrue(result['measurement_incomplete'])
+        self.assertEqual(result['measurement_incomplete_reason'], 'missing_bitrate')
+        self.assertTrue(result['bitrate_recheck_required'])
+
+    @patch('stream_check_utils.get_stream_info_and_bitrate')
     def test_missing_bitrate_stays_alive_but_incomplete_after_last_attempt(self, mock_get_info_and_bitrate):
         """Missing bitrate must not mark a stream dead, but it is not reusable."""
         mock_get_info_and_bitrate.return_value = {

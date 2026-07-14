@@ -11,6 +11,7 @@ Write operations (PATCH, POST, DELETE) still use direct API calls.
 
 import os
 import json
+import threading
 import time
 from typing import Dict, List, Optional, Any, Tuple
 import requests
@@ -42,6 +43,12 @@ from apps.core.auth import (
 )
 
 logger = setup_logging(__name__)
+
+_stream_stats_update_lock = threading.RLock()
+_BITRATE_INCOMPLETE_REASONS = {
+    'missing_bitrate',
+    'missing_bitrate_after_recheck',
+}
 
 if env_path.exists():
     load_dotenv(dotenv_path=env_path)
@@ -753,6 +760,51 @@ def add_streams_to_channel(
         )
         return 0
 
+def _merge_stream_stats_update(
+    existing_stats: Dict[str, Any],
+    stream_stats: Dict[str, Any],
+    *,
+    recover_bitrate_state: bool = False,
+) -> Dict[str, Any]:
+    """Merge stats while conditionally clearing only current bitrate failures."""
+    incoming = dict(stream_stats)
+    if recover_bitrate_state:
+        incomplete_reason = str(
+            existing_stats.get('measurement_incomplete_reason') or ''
+        ).strip().lower()
+        quality_reason = str(
+            existing_stats.get('quality_reason_detail')
+            or existing_stats.get('quality_reason')
+            or ''
+        ).strip().lower()
+        bitrate_recheck_required = bool(
+            existing_stats.get('bitrate_recheck_required')
+        )
+        bitrate_incomplete = bool(
+            incomplete_reason in _BITRATE_INCOMPLETE_REASONS
+            or (
+                bitrate_recheck_required
+                and incomplete_reason in {'', 'none'}
+            )
+        )
+        if bitrate_incomplete:
+            incoming.update({
+                'measurement_incomplete': False,
+                'measurement_incomplete_reason': 'none',
+                'measurement_incomplete_context': {},
+                'bitrate_recheck_required': False,
+                'bitrate_recheck_attempted': False,
+                'bitrate_recheck_outcome': 'not_needed',
+            })
+        if quality_reason in _BITRATE_INCOMPLETE_REASONS:
+            incoming.update({
+                'quality_reason': 'none',
+                'quality_reason_detail': 'none',
+                'quality_reason_context': {},
+            })
+    return {**existing_stats, **incoming}
+
+
 def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_size: int = 10) -> Tuple[int, int]:
     """
     Batch update stream stats to reduce API calls during stream checking.
@@ -806,6 +858,7 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
         for item in batch:
             stream_id = item.get('stream_id')
             stream_stats = item.get('stream_stats', {})
+            recover_bitrate_state = bool(item.get('recover_bitrate_state'))
             
             if not stream_id or not stream_stats:
                 logger.warning(f"Invalid stream stats item: {item}")
@@ -815,7 +868,10 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
             # Construct URL for this stream
             stream_url = f"{base_url}/api/channels/streams/{int(stream_id)}/"
             
+            lock_acquired = False
             try:
+                _stream_stats_update_lock.acquire()
+                lock_acquired = True
                 # Fetch existing stream data from UDI cache
                 existing_stream_data = udi.get_stream_by_id(int(stream_id))
                 if not existing_stream_data:
@@ -831,8 +887,15 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
                     except json.JSONDecodeError:
                         existing_stats = {}
                 
-                # Merge existing stats with new stats
-                updated_stats = {**existing_stats, **stream_stats}
+                # Re-evaluate conditional bitrate recovery against the final
+                # cache snapshot inside the same local write transaction. This
+                # prevents an earlier monitoring snapshot from erasing newer
+                # visual-probe evidence written by Stream Checker.
+                updated_stats = _merge_stream_stats_update(
+                    existing_stats,
+                    stream_stats,
+                    recover_bitrate_state=recover_bitrate_state,
+                )
                 
                 # Send PATCH request
                 patch_payload = {"stream_stats": updated_stats}
@@ -853,6 +916,9 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
             except Exception as e:
                 logger.error(f"Error updating stream {stream_id} stats: {e}")
                 failed += 1
+            finally:
+                if lock_acquired:
+                    _stream_stats_update_lock.release()
     
     logger.debug(f"Batch stats update complete: {successful} successful, {failed} failed out of {total} total")
     return successful, failed
