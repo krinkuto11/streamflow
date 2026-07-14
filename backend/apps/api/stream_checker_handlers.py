@@ -141,6 +141,7 @@ def _validate_expected_queue_snapshot(payload: Any):
         'entries_complete',
         'admission_epoch',
         'admission_revision',
+        'paused',
         'queued_entries',
         'in_progress_entries',
         'completed_entries',
@@ -156,6 +157,10 @@ def _validate_expected_queue_snapshot(payload: Any):
         )
     if raw_snapshot.get('entries_complete') is not True:
         return None, 'expected_queue_snapshot.entries_complete must be true'
+
+    paused = raw_snapshot.get('paused')
+    if not isinstance(paused, bool):
+        return None, 'expected_queue_snapshot.paused must be a boolean'
 
     admission_epoch = raw_snapshot.get('admission_epoch')
     if (
@@ -179,6 +184,7 @@ def _validate_expected_queue_snapshot(payload: Any):
         'entries_complete': True,
         'admission_epoch': admission_epoch,
         'admission_revision': revision,
+        'paused': paused,
     }
     lifecycle_channel_ids = set()
     entry_channel_ids = {}

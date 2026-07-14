@@ -9869,6 +9869,7 @@ class StreamCheckerService:
                         'admission_revision': queue_status.get(
                             'admission_revision'
                         ),
+                        'paused': queue_status.get('paused'),
                         'queued_entries': [
                             {
                                 'channel_id': entry.get('channel_id'),
@@ -9952,13 +9953,8 @@ class StreamCheckerService:
                     expected_failed_channel_ids=expected_queue_snapshot[
                         'failed_channel_ids'
                     ],
+                    expected_paused=expected_queue_snapshot['paused'],
                     reason='manual_clear',
-                    preserve_paused=(
-                        bool(getattr(self, '_single_stream_check_active', False))
-                        or bool(getattr(self, '_single_channel_check_active', False))
-                        or bool(getattr(self, '_sync_batch_execution_active', False))
-                        or bool(getattr(self, '_automation_cycle_active', False))
-                    ),
                 )
                 guard_matched = bool(guard_result.get('guard_matched'))
                 guard_current = guard_result.get('current')

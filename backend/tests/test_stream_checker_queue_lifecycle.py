@@ -41,6 +41,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             'entries_complete': status['entries_complete'],
             'admission_epoch': status['admission_epoch'],
             'admission_revision': status['admission_revision'],
+            'paused': status['paused'],
             'queued_entries': [
                 {
                     'channel_id': entry['channel_id'],
@@ -1135,6 +1136,61 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.update_tracker.clear_force_checks.assert_not_called()
         service.progress.clear.assert_not_called()
 
+    def test_guarded_clear_rejects_pause_change_without_revision_mutation(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        self.assertTrue(check_queue.add_channel(105))
+        expected = self._guard_snapshot(check_queue.get_status())
+
+        # Direct/sync checker paths historically update paused while already
+        # holding the queue lock, without going through set_paused(). Model
+        # that exact path so the atomic guard cannot rely on revision alone.
+        with check_queue.lock:
+            check_queue.paused = True
+        self.assertEqual(
+            check_queue.get_status()['admission_revision'],
+            expected['admission_revision'],
+        )
+
+        result = check_queue.clear_if_entries_match(
+            expected_admission_epoch=expected['admission_epoch'],
+            expected_admission_revision=expected['admission_revision'],
+            expected_queued_entries=expected['queued_entries'],
+            expected_in_progress_entries=expected['in_progress_entries'],
+            expected_completed_entries=expected['completed_entries'],
+            expected_failed_entries=expected['failed_entries'],
+            expected_completed_channel_ids=expected['completed_channel_ids'],
+            expected_failed_channel_ids=expected['failed_channel_ids'],
+            expected_paused=expected['paused'],
+        )
+
+        self.assertFalse(result['guard_matched'])
+        self.assertTrue(result['current']['paused'])
+        status = check_queue.get_status()
+        self.assertTrue(status['paused'])
+        self.assertEqual(status['queued'], 1)
+        self.assertIsNone(status['last_cleared_at'])
+
+    def test_service_guarded_clear_preserves_matching_paused_state(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.update_tracker = Mock()
+        service._external_abort_generation = 2
+        self.assertTrue(service.check_queue.add_channel(105))
+        with service.check_queue.lock:
+            service.check_queue.paused = True
+        expected = self._guard_snapshot(service.check_queue.get_status())
+
+        result = service.clear_queue(expected_queue_snapshot=expected)
+
+        self.assertTrue(result['guard_matched'])
+        self.assertTrue(service.check_queue.get_status()['paused'])
+        self.assertEqual(service.check_queue.get_status()['queued'], 0)
+
     def test_service_guard_rejects_unrepresented_direct_or_tombstone_owner(self):
         for owner_state in ('direct', 'tombstone'):
             with self.subTest(owner_state=owner_state):
@@ -1557,6 +1613,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             expected_failed_entries=expected['failed_entries'],
             expected_completed_channel_ids=expected['completed_channel_ids'],
             expected_failed_channel_ids=expected['failed_channel_ids'],
+            expected_paused=expected['paused'],
             reason='guarded_test',
         )
 
@@ -1596,6 +1653,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             expected_failed_entries=expected['failed_entries'],
             expected_completed_channel_ids=expected['completed_channel_ids'],
             expected_failed_channel_ids=expected['failed_channel_ids'],
+            expected_paused=expected['paused'],
         )
 
         self.assertFalse(result['guard_matched'])
@@ -1647,6 +1705,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             expected_failed_entries=expected['failed_entries'],
             expected_completed_channel_ids=expected['completed_channel_ids'],
             expected_failed_channel_ids=expected['failed_channel_ids'],
+            expected_paused=expected['paused'],
         )
 
         self.assertFalse(result['guard_matched'])
@@ -1672,6 +1731,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             expected_failed_entries=expected['failed_entries'],
             expected_completed_channel_ids=expected['completed_channel_ids'],
             expected_failed_channel_ids=expected['failed_channel_ids'],
+            expected_paused=expected['paused'],
         )
         self.assertFalse(terminal_result['guard_matched'])
         failed_status = check_queue.get_status()
@@ -1699,6 +1759,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             expected_failed_entries=current['failed_entries'],
             expected_completed_channel_ids=current['completed_channel_ids'],
             expected_failed_channel_ids=current['failed_channel_ids'],
+            expected_paused=current['paused'],
         )
         self.assertFalse(epoch_result['guard_matched'])
         self.assertEqual(check_queue.get_status()['failed_channel_ids'], [105])
@@ -1763,6 +1824,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
                 'completed_channel_ids'
             ],
             expected_failed_channel_ids=own_terminal['failed_channel_ids'],
+            expected_paused=own_terminal['paused'],
         )
         self.assertFalse(stale_owner_clear['guard_matched'])
         self.assertEqual(
@@ -3576,6 +3638,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             'entries_complete': True,
             'admission_epoch': 'a' * 32,
             'admission_revision': 7,
+            'paused': False,
             'queued_entries': [{
                 'channel_id': 105,
                 'stream_count': 4,
@@ -3615,6 +3678,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             'expected_queue_snapshot'
         ]
         self.assertNotIn('unrelated_status_field', normalized)
+        self.assertIs(normalized['paused'], False)
         self.assertNotIn('stream_count', normalized['queued_entries'][0])
         self.assertEqual(
             normalized['queued_entries'][0]['metadata']['run_label'],
@@ -3632,6 +3696,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
                 'entries_complete': True,
                 'admission_epoch': 'b' * 32,
                 'admission_revision': 8,
+                'paused': False,
                 'queued_entries': [],
                 'in_progress_entries': [],
                 'completed_entries': [],
@@ -3644,6 +3709,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             'entries_complete': True,
             'admission_epoch': 'a' * 32,
             'admission_revision': 7,
+            'paused': False,
             'queued_entries': [],
             'in_progress_entries': [],
             'completed_entries': [],
@@ -3670,6 +3736,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             'entries_complete': False,
             'admission_epoch': 'a' * 32,
             'admission_revision': 7,
+            'paused': False,
             'queued_entries': [],
             'in_progress_entries': [],
             'completed_entries': [],
@@ -3680,6 +3747,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             'entries_complete': True,
             'admission_epoch': 'not-an-epoch',
             'admission_revision': 7,
+            'paused': False,
             'queued_entries': [],
             'in_progress_entries': [],
             'completed_entries': [],
@@ -3690,6 +3758,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             'entries_complete': True,
             'admission_epoch': 'a' * 32,
             'admission_revision': 7,
+            'paused': False,
             'queued_entries': [{
                 'channel_id': 105,
                 'entry_token': True,
@@ -3704,6 +3773,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             'entries_complete': True,
             'admission_epoch': 'a' * 32,
             'admission_revision': 7,
+            'paused': False,
             'queued_entries': [],
             'in_progress_entries': [],
             'completed_entries': [{
@@ -3718,6 +3788,30 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             'entries_complete': True,
             'admission_epoch': 'a' * 32,
             'admission_revision': 7,
+            'paused': 'false',
+            'queued_entries': [],
+            'in_progress_entries': [],
+            'completed_entries': [],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+        }, {
+            'entries_complete': True,
+            'admission_epoch': 'a' * 32,
+            'admission_revision': 7,
+            # Missing paused must fail closed even when all identities are
+            # otherwise a valid empty guarded snapshot.
+            'queued_entries': [],
+            'in_progress_entries': [],
+            'completed_entries': [],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+        }, {
+            'entries_complete': True,
+            'admission_epoch': 'a' * 32,
+            'admission_revision': 7,
+            'paused': False,
             'queued_entries': [{
                 'channel_id': 105,
                 'entry_token': 11,
@@ -3747,6 +3841,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             'entries_complete': True,
             'admission_epoch': 'a' * 32,
             'admission_revision': 7,
+            'paused': False,
             'queued_entries': [],
             'in_progress_entries': [],
             'completed_entries': [],
@@ -3852,6 +3947,7 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
                     'entries_complete': True,
                     'admission_epoch': 'a' * 32,
                     'admission_revision': 7,
+                    'paused': False,
                     'queued_entries': [{
                         'channel_id': 105,
                         'entry_token': 11,

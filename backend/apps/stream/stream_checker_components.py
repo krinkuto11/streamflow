@@ -1561,10 +1561,10 @@ class StreamCheckQueue:
         expected_failed_entries: List[Dict[str, Any]],
         expected_completed_channel_ids: List[int],
         expected_failed_channel_ids: List[int],
+        expected_paused: bool,
         reason: str = 'manual',
-        preserve_paused: bool = False,
     ) -> Dict[str, Any]:
-        """Atomically compare exact activation identities and clear on a match."""
+        """Atomically compare exact queue state and clear without changing pause."""
         with self.lock:
             queued_entries, in_progress_entries = self._entry_snapshots_locked()
             completed_entries, failed_entries = (
@@ -1580,6 +1580,7 @@ class StreamCheckQueue:
                 'entries_complete': entries_complete,
                 'admission_epoch': self.admission_epoch,
                 'admission_revision': self.admission_revision,
+                'paused': self.paused,
                 'queued_entries': self._guard_projection(queued_entries),
                 'in_progress_entries': self._guard_projection(in_progress_entries),
                 'completed_entries': self._guard_projection(completed_entries),
@@ -1591,6 +1592,7 @@ class StreamCheckQueue:
                 'entries_complete': True,
                 'admission_epoch': expected_admission_epoch,
                 'admission_revision': expected_admission_revision,
+                'paused': expected_paused,
                 'queued_entries': self._guard_projection(expected_queued_entries),
                 'in_progress_entries': self._guard_projection(
                     expected_in_progress_entries
@@ -1618,7 +1620,10 @@ class StreamCheckQueue:
                 }
             cleared = self._clear_locked(
                 reason,
-                preserve_paused=preserve_paused,
+                # A guarded clear owns only the exact queue snapshot. It must
+                # never silently resume a queue paused by a direct/sync check
+                # or by an operator while that snapshot was being prepared.
+                preserve_paused=True,
             )
         logger.info("Queue cleared after exact entry guard matched")
         return {
