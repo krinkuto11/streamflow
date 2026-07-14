@@ -97,6 +97,17 @@ The start selection setting controls the first channel of the next run. Use
 wording like "Next run starts at" when reviewing UI state because profile names
 vary between installations.
 
+If an initial playable probe cannot measure a current bitrate, StreamFlow waits
+until every initial probe for that channel has finished and then rechecks only
+the affected streams, one at a time. This second attempt is bitrate-only and
+does not replace the original blank/freeze evidence. A recovered value becomes
+the current bitrate; otherwise the current result remains `N/A`, while an older
+stored bitrate may influence ranking only and is never displayed as the current
+measurement. The automatic state is visible under
+`Stream Checker -> Current Progress -> Stream Progress Tracking -> Status` and
+in `Changelog -> Automation Runs -> Automation Period -> Quality Check ->
+Analyzed Streams -> Reason`; it is not a user setting.
+
 ## Provider Limits
 
 Per-provider or per-account limits prevent StreamFlow from opening too many
@@ -158,7 +169,8 @@ Recommended setup:
 
 1. Create a dedicated Dispatcharr user or API key for Shadow Monitor.
 2. Do not reuse the main administrator identity for watcher traffic.
-3. Configure the watcher API key in the Shadow Monitor page.
+3. Configure the watcher API key under
+   `Shadow Monitor -> Configuration -> Watcher API Key`.
 4. Under `Shadow Monitor -> Configuration -> Monitor Scope`, leave both
    `Include Only` fields empty for normal all-channel protection. Use them only
    for an intentionally isolated channel set; Exclude fields still win.
@@ -173,6 +185,8 @@ clients and which ones belong to StreamFlow.
 Configuration GET responses include `config_revision`. Configuration PUTs made
 from the UI use that revision as a compare-and-swap precondition, so a stale tab
 receives a conflict and reloads instead of overwriting a newer operator change.
+The visible path is `Shadow Monitor -> Save -> "Configuration changed" notice`;
+review the reloaded fields before saving the intended changes again.
 
 Single-stream channels cannot be switched to another stream. Shadow Monitor
 should record that decision clearly instead of retrying a switch that cannot
@@ -206,7 +220,7 @@ it on the Teamarr Preflight page and save. The selected profile controls whether
 the preflight only scores/reorders streams or also runs stricter checks such as
 dead, blank, or freeze handling.
 
-`Teamarr API Poll Interval` controls how often StreamFlow reads Teamarr managed
+`Teamarr Poll Interval` controls how often StreamFlow reads Teamarr managed
 event state. Use 30-60 seconds for normal event automation; longer intervals can
 miss narrow windows such as a 1-minute preflight offset or a short post-start
 grace.

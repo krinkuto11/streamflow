@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stream Checker ETA wording** - Provider-limited or floor-based estimates now display as `Rough ETA` with a tooltip explaining expected swings between long channel waits.
 
 ### Fixed
+- **Missing-bitrate rechecks** - Rechecks playable streams with no current bitrate serially after each channel's initial probes, keeps failed rechecks explicitly `N/A`, and treats older bitrate history as ranking-only evidence.
+- **Shadow configuration concurrency and scope** - Uses revision-guarded configuration saves, applies explicit monitor include scopes, and cancels affected probes when relevant Shadow settings change without overwriting the separately stored watcher key.
 - **V3 reliability fixes** - Preserves active batch dead/blank/freeze counters, avoids misleading DRI hardware warnings, improves Teamarr post-start checks, validates auto-create group previews across channels, and keeps real-viewer wording distinct from watcher probes.
 - **V3 final polish** - Adds safe profile-slot ID/limit tooltips, active Teamarr check runtime text, and explicit checker-capacity/global-worker quality reason wording.
 - **Stream Checker profile matrix** - Adds an expandable provider/profile matrix with safe profile ID, limit, active viewer, checking, free-slot, and status details.

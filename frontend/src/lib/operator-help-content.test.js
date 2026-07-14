@@ -176,6 +176,7 @@ describe('operatorHelpSections', () => {
     expect(teamarr.steps.join(' ')).toMatch(/priority queue during Automation or Stream Checker runs/i)
     expect(teamarr.settings.find(setting => setting.name === 'Queue Events During Active Checks').defaultValue).toBe('On')
     expect(teamarr.settings.find(setting => setting.name === 'Queue Events During Active Checks').effect).toMatch(/does not queue new event checks/i)
+    expect(teamarr.settings.find(setting => setting.name === 'Event Priority Queue').location).toBe('Teamarr Preflight -> Active Preflight Checks and Stream Checker -> Stream Checker Configuration -> Queue')
     expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override')).toBeUndefined()
     expect(teamarr.smokeChecks.join(' ')).toMatch(/queued or deferred event-check context/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/No Game Evidence/i)
@@ -212,6 +213,7 @@ describe('operatorHelpSections', () => {
     expect(shadowSettings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Continuous Monitoring',
       'Viewer Output Format',
+      'Watcher API Key',
       'Watcher User Agent',
       'Viewer Grace',
       'Dry Run',
@@ -220,6 +222,7 @@ describe('operatorHelpSections', () => {
       'Silent Audio',
       'Offline Image',
       'Next Stream Pre-Probe',
+      'Configuration revision guard',
       'Loop Detection',
       'Loop Probe Duration',
       'Probe Duration',
@@ -229,6 +232,13 @@ describe('operatorHelpSections', () => {
     expect(shadowSettings.find(setting => setting.name === 'Continuous Monitoring').defaultValue).toBe('Continuous')
     expect(shadowSettings.find(setting => setting.name === 'Continuous Monitoring').effect).toMatch(/Legacy periodic config is normalized/i)
     expect(shadowSettings.find(setting => setting.name === 'Viewer Output Format').effect).toMatch(/fMP4 or MPEGTS/i)
+    expect(shadowSettings.find(setting => setting.name === 'Viewer Output Format').location).toMatch(/backend-only/i)
+    expect(shadowSettings.find(setting => setting.name === 'Viewer Output Format').location).not.toMatch(/Watched Now/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').location).toBe('Shadow Monitor -> Configuration card -> Watcher API Key')
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').risk).toMatch(/administrator or primary account key/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').risk).toMatch(/separate ordinary playback identity/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').effect).toMatch(/never returned/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').useWhen).toMatch(/reserved for Shadow/i)
     expect(shadowSettings.find(setting => setting.name === 'Watcher User Agent').defaultValue).toMatch(/TiviMate/i)
     expect(shadowSettings.find(setting => setting.name === 'Watcher User Agent').effect).toMatch(/unique marker/i)
     expect(shadowSettings.find(setting => setting.name === 'Viewer Grace').defaultValue).toBe('5 seconds')
@@ -239,8 +249,18 @@ describe('operatorHelpSections', () => {
     expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').effect).toMatch(/Probe active.*Last probe.*Next probe/i)
     expect(shadowSettings.find(setting => setting.name === 'Dry Run').defaultValue).toBe('Off')
     expect(shadowSettings.find(setting => setting.name === 'Freeze Detection').defaultValue).toBe('On')
+    expect(shadowSettings.find(setting => setting.name === 'Garbled Audio').defaultValue).toBe('Off')
+    expect(shadowSettings.find(setting => setting.name === 'Silent Audio').defaultValue).toBe('Off')
     expect(shadowSettings.find(setting => setting.name === 'Silent Audio').effect).toMatch(/no usable audio stream/i)
+    expect(shadowSettings.find(setting => setting.name === 'Offline Image').defaultValue).toBe('Off')
+    expect(shadowSettings.find(setting => setting.name === 'Offline Image').useWhen).toMatch(/do not turn detection on/i)
+    expect(shadowSettings.find(setting => setting.name === 'Next Stream Pre-Probe').defaultValue).toBe('Off')
     expect(shadowSettings.find(setting => setting.name === 'Next Stream Pre-Probe').risk).toMatch(/loop-triggered live switches are blocked/i)
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').controlType).toBe('Status/API')
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').defaultValue).toBe('Applied by UI saves')
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').location).toBe('Shadow Monitor -> Save -> "Configuration changed" notice')
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').effect).toMatch(/cannot silently overwrite/i)
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').risk).toMatch(/operator or API client/i)
     expect(shadowSettings.find(setting => setting.name === 'Loop Detection').risk).toMatch(/real viewers/i)
     expect(shadowSettings.find(setting => setting.name === 'Loop Detection').risk).toMatch(/next-stream pre-probe/i)
     expect(shadowSettings.find(setting => setting.name === 'Loop Probe Duration').defaultValue).toBe('360 seconds')

@@ -20,6 +20,29 @@ Each stream is analyzed by spawning a short ffmpeg probe session. Extracted metr
 
 ---
 
+## Missing bitrate and recheck
+
+When an initial probe proves that a stream is playable but cannot measure its
+current bitrate, StreamFlow does not reuse an older bitrate as the current
+measurement. After all initial probes for that channel finish, the affected
+streams receive a lightweight bitrate-only recheck one at a time, in stable
+stream order, before the next channel starts.
+
+The recheck uses the configured probe timing and existing provider, profile,
+and global capacity limits. It does not repeat blank/freeze decoding, and a
+failed recheck does not turn the playable stream into a dead stream or erase
+the initial visual evidence. If the retry succeeds, the recovered value becomes
+the current bitrate. If it still cannot be measured, the current result stays
+`N/A` with `Bitrate unavailable after recheck`; any older stored bitrate remains
+ranking-only evidence.
+
+This is automatic backend behavior, not a user setting. Current activity is
+visible at `Stream Checker -> Current Progress -> Stream Progress Tracking ->
+Status`; completed evidence is under `Changelog -> Automation Runs -> Automation
+Period -> Quality Check -> Analyzed Streams -> Reason`.
+
+---
+
 ## Scoring
 
 Streams are scored 0–100 using weighted dimensions. Weights are configured per Automation Profile under `scoring_weights`.
