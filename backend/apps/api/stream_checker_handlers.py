@@ -1,5 +1,6 @@
 """Stream checker API handler functions extracted from web_api."""
 
+import math
 import re
 from typing import Any, Callable, Dict, Optional
 
@@ -14,6 +15,16 @@ from apps.stream.queue_start import (
 from apps.telemetry.last_quality_stats import get_last_quality_stats
 
 logger = setup_logging(__name__)
+
+_QUEUE_REQUEST_METADATA_KEYS = {'source', 'run_label'}
+_QUEUE_REQUEST_METADATA_VALUE_RE = re.compile(
+    r'^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$'
+)
+_RESERVED_SPECIALIZED_QUEUE_SOURCES = {'teamarr_preflight', 'auto_create'}
+_QUEUE_GUARD_MAX_ENTRIES = 2048
+_QUEUE_GUARD_MAX_METADATA_NODES = 512
+_QUEUE_GUARD_MAX_METADATA_DEPTH = 8
+_QUEUE_GUARD_MAX_METADATA_STRING_BYTES = 16384
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -31,6 +42,270 @@ def _coerce_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off", "disabled"}:
             return False
     return bool(value)
+
+
+def _validate_queue_request_metadata(payload: Dict[str, Any]):
+    """Return safe public queue metadata or a client-facing validation error."""
+    raw_metadata = payload.get('metadata')
+    if raw_metadata is None:
+        return None, None
+    if not isinstance(raw_metadata, dict):
+        return None, 'metadata must be an object'
+    unexpected = set(raw_metadata) - _QUEUE_REQUEST_METADATA_KEYS
+    if unexpected:
+        return None, (
+            'metadata contains unsupported fields: '
+            + ', '.join(sorted(str(key) for key in unexpected))
+        )
+
+    metadata = {}
+    for key in _QUEUE_REQUEST_METADATA_KEYS:
+        if key not in raw_metadata:
+            continue
+        value = raw_metadata.get(key)
+        if not isinstance(value, str) or not _QUEUE_REQUEST_METADATA_VALUE_RE.fullmatch(
+            value.strip()
+        ):
+            return None, f'metadata.{key} has an invalid value'
+        metadata[key] = value.strip()
+    source = metadata.get('source')
+    if source in _RESERVED_SPECIALIZED_QUEUE_SOURCES:
+        return None, 'metadata.source is reserved for internal queue producers'
+    if not metadata:
+        return None, 'metadata must include source or run_label'
+    return metadata, None
+
+
+def _validate_guard_metadata_complexity(metadata: Dict[str, Any]):
+    """Reject deeply nested or oversized metadata before service locking."""
+    stack = [(metadata, 1)]
+    node_count = 0
+    while stack:
+        value, depth = stack.pop()
+        node_count += 1
+        if node_count > _QUEUE_GUARD_MAX_METADATA_NODES:
+            return 'metadata contains too many values'
+        if depth > _QUEUE_GUARD_MAX_METADATA_DEPTH:
+            return 'metadata is nested too deeply'
+        if isinstance(value, dict):
+            if (
+                node_count + len(stack) + len(value)
+                > _QUEUE_GUARD_MAX_METADATA_NODES
+            ):
+                return 'metadata contains too many values'
+            for key, child in value.items():
+                if not isinstance(key, str):
+                    return 'metadata object keys must be strings'
+                try:
+                    key_size = len(key.encode('utf-8'))
+                except UnicodeEncodeError:
+                    return 'metadata contains invalid Unicode'
+                if key_size > _QUEUE_GUARD_MAX_METADATA_STRING_BYTES:
+                    return 'metadata contains an oversized key'
+                stack.append((child, depth + 1))
+        elif isinstance(value, list):
+            if (
+                node_count + len(stack) + len(value)
+                > _QUEUE_GUARD_MAX_METADATA_NODES
+            ):
+                return 'metadata contains too many values'
+            stack.extend((child, depth + 1) for child in value)
+        elif isinstance(value, str):
+            try:
+                value_size = len(value.encode('utf-8'))
+            except UnicodeEncodeError:
+                return 'metadata contains invalid Unicode'
+            if value_size > _QUEUE_GUARD_MAX_METADATA_STRING_BYTES:
+                return 'metadata contains an oversized string'
+        elif isinstance(value, float) and not math.isfinite(value):
+            return 'metadata contains a non-finite number'
+        elif value is not None and not isinstance(value, (bool, int, float)):
+            return 'metadata contains a non-JSON value'
+    return None
+
+
+def _validate_expected_queue_snapshot(payload: Any):
+    """Normalize the exact queue snapshot accepted by guarded clear."""
+    if payload is None or payload == {}:
+        return None, None
+    if not isinstance(payload, dict):
+        return None, 'clear request body must be an object'
+    if 'expected_queue_snapshot' not in payload:
+        return None, 'expected_queue_snapshot is required for a non-empty clear request'
+
+    raw_snapshot = payload.get('expected_queue_snapshot')
+    if not isinstance(raw_snapshot, dict):
+        return None, 'expected_queue_snapshot must be an object'
+
+    required_fields = {
+        'entries_complete',
+        'admission_epoch',
+        'admission_revision',
+        'queued_entries',
+        'in_progress_entries',
+        'completed_entries',
+        'failed_entries',
+        'completed_channel_ids',
+        'failed_channel_ids',
+    }
+    missing_fields = required_fields - set(raw_snapshot)
+    if missing_fields:
+        return None, (
+            'expected_queue_snapshot is missing fields: '
+            + ', '.join(sorted(missing_fields))
+        )
+    if raw_snapshot.get('entries_complete') is not True:
+        return None, 'expected_queue_snapshot.entries_complete must be true'
+
+    admission_epoch = raw_snapshot.get('admission_epoch')
+    if (
+        not isinstance(admission_epoch, str)
+        or re.fullmatch(r'[0-9a-f]{32}', admission_epoch) is None
+    ):
+        return None, (
+            'expected_queue_snapshot.admission_epoch must be a 32-character '
+            'lowercase hexadecimal string'
+        )
+
+    revision = raw_snapshot.get('admission_revision')
+    if (
+        not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 0
+    ):
+        return None, 'expected_queue_snapshot.admission_revision must be a non-negative integer'
+
+    normalized_snapshot = {
+        'entries_complete': True,
+        'admission_epoch': admission_epoch,
+        'admission_revision': revision,
+    }
+    lifecycle_channel_ids = set()
+    entry_channel_ids = {}
+    entry_field_names = (
+        'queued_entries',
+        'in_progress_entries',
+        'completed_entries',
+        'failed_entries',
+    )
+    raw_entry_lists = {
+        field_name: raw_snapshot.get(field_name)
+        for field_name in entry_field_names
+    }
+    for field_name, raw_entries in raw_entry_lists.items():
+        if not isinstance(raw_entries, list):
+            return None, f'expected_queue_snapshot.{field_name} must be an array'
+    if sum(len(entries) for entries in raw_entry_lists.values()) > _QUEUE_GUARD_MAX_ENTRIES:
+        return None, 'expected_queue_snapshot contains too many lifecycle entries'
+
+    terminal_fields = (
+        ('completed_channel_ids', 'completed_entries'),
+        ('failed_channel_ids', 'failed_entries'),
+    )
+    raw_terminal_id_lists = {
+        field_name: raw_snapshot.get(field_name)
+        for field_name, _entries_field_name in terminal_fields
+    }
+    for field_name, entries_field_name in terminal_fields:
+        raw_channel_ids = raw_terminal_id_lists[field_name]
+        if not isinstance(raw_channel_ids, list):
+            return None, f'expected_queue_snapshot.{field_name} must be an array'
+        # Reject redundant terminal-id payload amplification in O(1) before
+        # iterating it. Each id must have exactly one bounded terminal entry.
+        if len(raw_channel_ids) != len(raw_entry_lists[entries_field_name]):
+            return None, (
+                f'expected_queue_snapshot.{field_name} must exactly match '
+                f'{entries_field_name} channel ids'
+            )
+
+    for field_name in entry_field_names:
+        raw_entries = raw_snapshot.get(field_name)
+        normalized_entries = []
+        entry_identities = set()
+        for index, raw_entry in enumerate(raw_entries):
+            if not isinstance(raw_entry, dict):
+                return None, (
+                    f'expected_queue_snapshot.{field_name}[{index}] must be an object'
+                )
+            channel_id = raw_entry.get('channel_id')
+            entry_token = raw_entry.get('entry_token')
+            metadata = raw_entry.get('metadata')
+            if (
+                not isinstance(channel_id, int)
+                or isinstance(channel_id, bool)
+                or channel_id <= 0
+            ):
+                return None, (
+                    f'expected_queue_snapshot.{field_name}[{index}].channel_id '
+                    'must be a positive integer'
+                )
+            if (
+                not isinstance(entry_token, int)
+                or isinstance(entry_token, bool)
+                or entry_token < 0
+            ):
+                return None, (
+                    f'expected_queue_snapshot.{field_name}[{index}].entry_token '
+                    'must be a non-negative integer'
+                )
+            if not isinstance(metadata, dict):
+                return None, (
+                    f'expected_queue_snapshot.{field_name}[{index}].metadata '
+                    'must be an object'
+                )
+            metadata_error = _validate_guard_metadata_complexity(metadata)
+            if metadata_error:
+                return None, (
+                    f'expected_queue_snapshot.{field_name}[{index}].'
+                    + metadata_error
+                )
+            identity = (channel_id, entry_token)
+            if identity in entry_identities or channel_id in lifecycle_channel_ids:
+                return None, (
+                    f'expected_queue_snapshot.{field_name} contains duplicate '
+                    f'channel identity {channel_id}'
+                )
+            entry_identities.add(identity)
+            lifecycle_channel_ids.add(channel_id)
+            normalized_entries.append({
+                'channel_id': channel_id,
+                'entry_token': entry_token,
+                'metadata': dict(metadata),
+            })
+        normalized_snapshot[field_name] = normalized_entries
+        entry_channel_ids[field_name] = {
+            entry['channel_id'] for entry in normalized_entries
+        }
+
+    for field_name, entries_field_name in terminal_fields:
+        raw_channel_ids = raw_terminal_id_lists[field_name]
+        normalized_channel_ids = []
+        seen_channel_ids = set()
+        for index, channel_id in enumerate(raw_channel_ids):
+            if (
+                not isinstance(channel_id, int)
+                or isinstance(channel_id, bool)
+                or channel_id <= 0
+            ):
+                return None, (
+                    f'expected_queue_snapshot.{field_name}[{index}] '
+                    'must be a positive integer'
+                )
+            if channel_id in seen_channel_ids:
+                return None, (
+                    f'expected_queue_snapshot.{field_name} contains duplicate '
+                    f'channel id {channel_id}'
+                )
+            seen_channel_ids.add(channel_id)
+            normalized_channel_ids.append(channel_id)
+        if set(normalized_channel_ids) != entry_channel_ids[entries_field_name]:
+            return None, (
+                f'expected_queue_snapshot.{field_name} must exactly match '
+                f'{entries_field_name} channel ids'
+            )
+        normalized_snapshot[field_name] = normalized_channel_ids
+
+    return normalized_snapshot, None
 
 
 def _coerce_stream_id_from_payload(payload: Any) -> Optional[int]:
@@ -214,12 +489,23 @@ def add_to_stream_checker_queue_response(
             return jsonify({"error": "No data provided"}), 400
 
         service = get_stream_checker_service()
-        force_check = data.get("force_check", False)
+        force_check = _coerce_bool(data.get("force_check"), False)
+        metadata, metadata_error = _validate_queue_request_metadata(data)
+        if metadata_error:
+            return jsonify({"error": metadata_error}), 400
+        queue_kwargs = {"force_check": force_check}
+        if metadata is not None:
+            queue_kwargs["metadata"] = metadata
+            queue_kwargs["immutable_metadata_keys"] = set(metadata)
 
         if "channel_id" in data:
             channel_id = data["channel_id"]
             priority = data.get("priority", 10)
-            success = service.queue_channel(channel_id, priority, force_check=force_check)
+            success = service.queue_channel(
+                channel_id,
+                priority,
+                **queue_kwargs,
+            )
             if success:
                 return jsonify({"message": f"Channel {channel_id} queued successfully"})
             return jsonify({"error": "Failed to queue channel"}), 500
@@ -227,7 +513,11 @@ def add_to_stream_checker_queue_response(
         if "channel_ids" in data:
             channel_ids = data["channel_ids"]
             priority = data.get("priority", 10)
-            added = service.queue_channels(channel_ids, priority, force_check=force_check)
+            added = service.queue_channels(
+                channel_ids,
+                priority,
+                **queue_kwargs,
+            )
             return jsonify({"message": f"Queued {added} channels successfully", "added": added})
 
         return jsonify({"error": "Must provide channel_id or channel_ids"}), 400
@@ -236,11 +526,28 @@ def add_to_stream_checker_queue_response(
         return jsonify({"error": "Internal Server Error"}), 500
 
 
-def clear_stream_checker_queue_response(*, get_stream_checker_service: Callable[[], Any]):
+def clear_stream_checker_queue_response(
+    *,
+    get_stream_checker_service: Callable[[], Any],
+    payload: Any = None,
+):
     """Handle clearing stream checker queue."""
     try:
+        expected_snapshot, validation_error = _validate_expected_queue_snapshot(payload)
+        if validation_error:
+            return jsonify({'error': validation_error}), 400
+
         service = get_stream_checker_service()
-        result = service.clear_queue()
+        if expected_snapshot is None:
+            result = service.clear_queue()
+        else:
+            result = service.clear_queue(expected_queue_snapshot=expected_snapshot)
+        if isinstance(result, dict) and result.get('guard_matched') is False:
+            return jsonify({
+                'error': 'queue_snapshot_mismatch',
+                'message': 'Queue changed after the expected snapshot was read',
+                **result,
+            }), 409
         return jsonify({"message": "Queue cleared successfully", **(result or {})})
     except Exception as exc:
         logger.error(f"Error clearing stream checker queue: {exc}")

@@ -5,6 +5,7 @@ import heapq
 import queue
 import threading
 import time
+import uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -708,16 +709,25 @@ class StreamCheckQueue:
         self.max_size = max_size
         self.queue = queue.PriorityQueue()
         self._queue_sequence = 0
+        self.admission_epoch = uuid.uuid4().hex
+        # Monotonic semantic revision for guarded cleanup. Entry tokens alone
+        # cannot expose an accepted duplicate force-check admission because the
+        # existing activation intentionally keeps its ownership identity.
+        self.admission_revision = 0
         self.queued = {}  # Track channels already in queue dict(channel_id -> stream_count)
         self.queued_priorities = {}
         self.queued_sequences = {}
         self.queued_metadata = {}  # Optional channel_id -> metadata for specialized queue entries
+        self.queued_immutable_metadata_keys = {}
         self.in_progress = {} # dict(channel_id -> stream_count)
         self.in_progress_metadata = {}
+        self.in_progress_entry_tokens = {}
         self.deferred_metadata_sources = set()
         self.paused = False
         self.completed = set()
+        self.completed_entry_details = {}
         self.failed = {}
+        self.failed_entry_details = {}
         self.lock = threading.Lock()
         
         # ETA Tracking variables
@@ -735,6 +745,11 @@ class StreamCheckQueue:
             'current_channel': None,
             'queue_size': 0
         }
+
+    def _bump_admission_revision_locked(self) -> int:
+        """Record one accepted queue lifecycle mutation while lock is held."""
+        self.admission_revision += 1
+        return self.admission_revision
 
     def _logical_queue_full_locked(self) -> bool:
         """Return whether another distinct queued channel would exceed capacity."""
@@ -786,6 +801,7 @@ class StreamCheckQueue:
         priority: int = 0,
         stream_count: int = 1,
         metadata: Optional[Dict[str, Any]] = None,
+        immutable_metadata_keys: Optional[set] = None,
         on_accepted: Optional[Callable[[], None]] = None,
     ):
         """Add a channel to the checking queue."""
@@ -795,6 +811,7 @@ class StreamCheckQueue:
                 priority,
                 stream_count=stream_count,
                 metadata=metadata,
+                immutable_metadata_keys=immutable_metadata_keys,
                 on_accepted=on_accepted,
             )
 
@@ -804,6 +821,7 @@ class StreamCheckQueue:
         priority: int = 0,
         stream_count: int = 1,
         metadata: Optional[Dict[str, Any]] = None,
+        immutable_metadata_keys: Optional[set] = None,
         on_accepted: Optional[Callable[[], None]] = None,
     ) -> bool:
         """Add one channel while the caller holds the queue lifecycle lock."""
@@ -819,22 +837,74 @@ class StreamCheckQueue:
         if channel_id in self.queued:
             existing_priority = self.queued_priorities.get(channel_id, 0)
             existing_metadata = self.queued_metadata.get(channel_id, {}) or {}
+            incoming_metadata = copy.deepcopy(metadata or {})
+            existing_immutable_keys = set(
+                self.queued_immutable_metadata_keys.get(channel_id, set())
+            )
+            incoming_immutable_keys = set(immutable_metadata_keys or set())
             specialized_sources = {'teamarr_preflight', 'auto_create'}
             if existing_metadata.get('source') in specialized_sources:
                 # One specialized event must map to one result callback.
                 # Never overwrite a queued event with a second identity.
                 return False
+            if (
+                incoming_metadata.get('source') == 'teamarr_preflight'
+                and incoming_metadata.get('source') != existing_metadata.get('source')
+            ):
+                # A Teamarr event cannot adopt another activation because one
+                # event must map to one eventual result callback. Auto-create
+                # has no per-entry completion callback and may retain its
+                # established promotion semantics.
+                return False
+            if (
+                incoming_metadata.get('source') == 'auto_create'
+                and 'source' in existing_immutable_keys
+                and existing_metadata.get('source') != 'auto_create'
+            ):
+                # Do not report an auto-create event as queued when a public
+                # owner protects a different source. Keeping that source would
+                # make the worker miss the required specialized semantics.
+                return False
+            if existing_immutable_keys or incoming_immutable_keys:
+                # A public cleanup owner may coalesce only with the exact
+                # already-protected owner. It must never adopt an unprotected
+                # normal/internal activation, accept an unprotected intent,
+                # or mix with somebody else's run.
+                if (
+                    incoming_immutable_keys != existing_immutable_keys
+                    or any(
+                        existing_metadata.get(key) != incoming_metadata.get(key)
+                        for key in incoming_immutable_keys
+                    )
+                ):
+                    return False
+
+            def merge_non_ownership_metadata() -> None:
+                if not incoming_metadata:
+                    return
+                merged_metadata = copy.deepcopy(existing_metadata)
+                for key, value in incoming_metadata.items():
+                    # Admission provenance is immutable. A duplicate or
+                    # promotion may add force intent, but it cannot relabel
+                    # somebody else's activation as its own for cleanup.
+                    if key in existing_immutable_keys:
+                        continue
+                    merged_metadata[key] = copy.deepcopy(value)
+                if merged_metadata:
+                    self.queued_metadata[channel_id] = merged_metadata
+
             if normalized_priority <= existing_priority:
                 if on_accepted is not None:
+                    self._bump_admission_revision_locked()
                     on_accepted()
-                    if metadata:
-                        merged_metadata = dict(existing_metadata)
-                        merged_metadata.update(dict(metadata))
-                        self.queued_metadata[channel_id] = merged_metadata
+                    merge_non_ownership_metadata()
                     return True
                 return False
 
+            callback_revision_recorded = False
             if on_accepted is not None:
+                self._bump_admission_revision_locked()
+                callback_revision_recorded = True
                 on_accepted()
             sequence = self._queue_sequence
             self._queue_sequence += 1
@@ -842,11 +912,10 @@ class StreamCheckQueue:
             self.queued[channel_id] = stream_count
             self.queued_priorities[channel_id] = normalized_priority
             self.queued_sequences[channel_id] = sequence
-            if metadata:
-                merged_metadata = dict(self.queued_metadata.get(channel_id, {}))
-                merged_metadata.update(dict(metadata))
-                self.queued_metadata[channel_id] = merged_metadata
+            merge_non_ownership_metadata()
             self.stats['queue_size'] = len(self.queued)
+            if not callback_revision_recorded:
+                self._bump_admission_revision_locked()
             logger.debug(
                 f"Promoted queued channel {channel_id} "
                 f"from priority {existing_priority} to {normalized_priority}"
@@ -861,7 +930,10 @@ class StreamCheckQueue:
             logger.warning(f"Queue is full, cannot add channel {channel_id}")
             return False
 
+        callback_revision_recorded = False
         if on_accepted is not None:
+            self._bump_admission_revision_locked()
+            callback_revision_recorded = True
             on_accepted()
 
         # Use the logical queue state here. A worker removes an item from
@@ -876,7 +948,9 @@ class StreamCheckQueue:
             self.queued_priorities.clear()
             self.queued_sequences.clear()
             self.queued_metadata.clear()
+            self.queued_immutable_metadata_keys.clear()
             self.failed.clear()
+            self.failed_entry_details.clear()
             self.stream_processing_times.clear()
             self.channel_processing_times.clear()
             self.batch_started_at = datetime.now()
@@ -891,9 +965,15 @@ class StreamCheckQueue:
         self.queued_priorities[channel_id] = normalized_priority
         self.queued_sequences[channel_id] = sequence
         if metadata:
-            self.queued_metadata[channel_id] = dict(metadata)
+            self.queued_metadata[channel_id] = copy.deepcopy(metadata)
+        if immutable_metadata_keys:
+            self.queued_immutable_metadata_keys[channel_id] = set(
+                immutable_metadata_keys
+            )
         self.stats['total_queued'] += 1
         self.stats['queue_size'] = len(self.queued)
+        if not callback_revision_recorded:
+            self._bump_admission_revision_locked()
         logger.debug(f"Added channel {channel_id} to queue (priority: {priority})")
         self._maybe_compact_queue_heap_locked()
         return True
@@ -903,6 +983,8 @@ class StreamCheckQueue:
         channel_ids: List[int],
         priority: int = 0,
         on_accepted: Optional[Callable[[int], None]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        immutable_metadata_keys: Optional[set] = None,
     ):
         """Add multiple channels to the queue."""
         added = 0
@@ -950,6 +1032,8 @@ class StreamCheckQueue:
                     channel_id,
                     priority,
                     stream_count=stream_count,
+                    metadata=metadata,
+                    immutable_metadata_keys=immutable_metadata_keys,
                     on_accepted=accepted_callback,
                 ):
                     added += 1
@@ -970,7 +1054,10 @@ class StreamCheckQueue:
     def set_paused(self, paused: bool):
         """Pause or resume normal background-worker queue consumption."""
         with self.lock:
-            self.paused = bool(paused)
+            normalized_paused = bool(paused)
+            if self.paused != normalized_paused:
+                self.paused = normalized_paused
+                self._bump_admission_revision_locked()
 
     @staticmethod
     def _wait_after_deferred_entry(timeout: float) -> None:
@@ -1005,20 +1092,31 @@ class StreamCheckQueue:
         return len(item) == 2
 
     def _activate_queued_entry_locked(self, channel_id: int) -> Dict[str, Any]:
+        entry_token = self.queued_sequences.get(channel_id)
+        if entry_token is None:
+            # Legacy in-memory queue entries may not have a sequence. Give the
+            # activation a fresh identity so a clear/requeue of the same channel
+            # can never be mistaken for this older owner.
+            entry_token = self._queue_sequence
+            self._queue_sequence += 1
         stream_count = self.queued.pop(channel_id)
         self.queued_priorities.pop(channel_id, None)
         self.queued_sequences.pop(channel_id, None)
         metadata = self.queued_metadata.pop(channel_id, {})
+        self.queued_immutable_metadata_keys.pop(channel_id, None)
         self.in_progress[channel_id] = stream_count
+        self.in_progress_entry_tokens[channel_id] = entry_token
         if metadata:
-            self.in_progress_metadata[channel_id] = metadata
+            self.in_progress_metadata[channel_id] = copy.deepcopy(metadata)
         self.channel_start_times[channel_id] = datetime.now()
         self.stats['current_channel'] = channel_id
         self.stats['queue_size'] = len(self.queued)
+        self._bump_admission_revision_locked()
         self._maybe_compact_queue_heap_locked()
         return {
             'channel_id': channel_id,
-            'metadata': metadata,
+            'metadata': copy.deepcopy(metadata),
+            'queue_entry_token': entry_token,
         }
 
     def get_next_entry_for_metadata_sources(self, sources: set) -> Optional[Dict[str, Any]]:
@@ -1064,6 +1162,8 @@ class StreamCheckQueue:
         with self.lock:
             if channel_id in self.completed:
                 self.completed.discard(channel_id)
+                self.completed_entry_details.pop(channel_id, None)
+                self._bump_admission_revision_locked()
                 logger.debug(f"Removed channel {channel_id} from completed set")
                 return True
         return False
@@ -1109,7 +1209,11 @@ class StreamCheckQueue:
         entry = self.get_next_entry(timeout=timeout)
         return entry.get('channel_id') if entry else None
     
-    def mark_completed(self, channel_id: int) -> bool:
+    def mark_completed(
+        self,
+        channel_id: int,
+        entry_token: Optional[int] = None,
+    ) -> bool:
         """Mark a channel check as completed.
 
         Returns False when the channel is no longer registered as active. This
@@ -1117,6 +1221,22 @@ class StreamCheckQueue:
         exits slightly later.
         """
         with self.lock:
+            active_entry_token = self.in_progress_entry_tokens.get(channel_id)
+            active_metadata = copy.deepcopy(
+                self.in_progress_metadata.get(channel_id, {}) or {}
+            )
+            if (
+                entry_token is not None
+                and active_entry_token != entry_token
+            ):
+                logger.debug(
+                    "Ignoring completion for channel %s; queue entry token %s "
+                    "does not own the active token %s",
+                    channel_id,
+                    entry_token,
+                    self.in_progress_entry_tokens.get(channel_id),
+                )
+                return False
             if channel_id not in self.in_progress and channel_id not in self.channel_start_times:
                 logger.debug(
                     f"Ignoring completion for channel {channel_id}; no active queue entry exists"
@@ -1136,19 +1256,47 @@ class StreamCheckQueue:
             if channel_id in self.in_progress:
                 del self.in_progress[channel_id]
             self.in_progress_metadata.pop(channel_id, None)
+            self.in_progress_entry_tokens.pop(channel_id, None)
             self.completed.add(channel_id)
+            self.completed_entry_details[channel_id] = {
+                'channel_id': channel_id,
+                'entry_token': active_entry_token,
+                'metadata': active_metadata,
+            }
             self.stats['total_completed'] += 1
             if self.stats['current_channel'] == channel_id:
                 self.stats['current_channel'] = None
+            self._bump_admission_revision_locked()
             logger.debug(f"Marked channel {channel_id} as completed")
             return True
     
-    def mark_failed(self, channel_id: int, error: str) -> bool:
+    def mark_failed(
+        self,
+        channel_id: int,
+        error: str,
+        entry_token: Optional[int] = None,
+    ) -> bool:
         """Mark a channel check as failed.
 
         Returns False when the channel is no longer registered as active.
         """
         with self.lock:
+            active_entry_token = self.in_progress_entry_tokens.get(channel_id)
+            active_metadata = copy.deepcopy(
+                self.in_progress_metadata.get(channel_id, {}) or {}
+            )
+            if (
+                entry_token is not None
+                and active_entry_token != entry_token
+            ):
+                logger.debug(
+                    "Ignoring failure for channel %s; queue entry token %s "
+                    "does not own the active token %s",
+                    channel_id,
+                    entry_token,
+                    self.in_progress_entry_tokens.get(channel_id),
+                )
+                return False
             if channel_id not in self.in_progress and channel_id not in self.channel_start_times:
                 logger.debug(
                     f"Ignoring failure for channel {channel_id}; no active queue entry exists"
@@ -1163,26 +1311,153 @@ class StreamCheckQueue:
             if channel_id in self.in_progress:
                 del self.in_progress[channel_id]
             self.in_progress_metadata.pop(channel_id, None)
+            self.in_progress_entry_tokens.pop(channel_id, None)
             self.failed[channel_id] = {
                 'error': error,
                 'timestamp': datetime.now().isoformat()
             }
+            self.failed_entry_details[channel_id] = {
+                'channel_id': channel_id,
+                'entry_token': active_entry_token,
+                'metadata': active_metadata,
+            }
             self.stats['total_failed'] += 1
             if self.stats['current_channel'] == channel_id:
                 self.stats['current_channel'] = None
+            self._bump_admission_revision_locked()
             logger.warning(f"Marked channel {channel_id} as failed: {error}")
             return True
     
+    def _entry_snapshots_locked(self):
+        queued_entries = [
+                {
+                    'channel_id': channel_id,
+                    'stream_count': stream_count,
+                    'priority': self.queued_priorities.get(channel_id, 0),
+                    'metadata': copy.deepcopy(
+                        self.queued_metadata.get(channel_id, {}) or {}
+                    ),
+                    'entry_token': self.queued_sequences.get(channel_id),
+                }
+                for channel_id, stream_count in sorted(
+                    self.queued.items(),
+                    key=lambda item: (
+                        -self.queued_priorities.get(item[0], 0),
+                        self.queued_sequences.get(item[0], 0),
+                    ),
+                )
+        ]
+        in_progress_entries = [
+                {
+                    'channel_id': channel_id,
+                    'stream_count': stream_count,
+                    'metadata': copy.deepcopy(
+                        self.in_progress_metadata.get(channel_id, {}) or {}
+                    ),
+                    'entry_token': self.in_progress_entry_tokens.get(channel_id),
+                }
+                for channel_id, stream_count in sorted(
+                    self.in_progress.items(),
+                    key=lambda item: str(item[0]),
+                )
+        ]
+        return queued_entries, in_progress_entries
+
+    def _terminal_entry_snapshots_locked(self):
+        completed_entries = [
+            copy.deepcopy(
+                self.completed_entry_details.get(channel_id, {
+                    'channel_id': channel_id,
+                    'entry_token': None,
+                    'metadata': {},
+                })
+            )
+            for channel_id in sorted(self.completed, key=str)
+        ]
+        failed_entries = [
+            copy.deepcopy(
+                self.failed_entry_details.get(channel_id, {
+                    'channel_id': channel_id,
+                    'entry_token': None,
+                    'metadata': {},
+                })
+            )
+            for channel_id in sorted(self.failed, key=str)
+        ]
+        return completed_entries, failed_entries
+
+    @staticmethod
+    def _entry_identities_complete(entries: List[Dict[str, Any]]) -> bool:
+        seen_channel_ids = set()
+        seen_entry_tokens = set()
+        for entry in entries:
+            channel_id = entry.get('channel_id')
+            entry_token = entry.get('entry_token')
+            if (
+                not isinstance(channel_id, int)
+                or isinstance(channel_id, bool)
+                or channel_id <= 0
+                or not isinstance(entry_token, int)
+                or isinstance(entry_token, bool)
+                or not isinstance(entry.get('metadata'), dict)
+                or channel_id in seen_channel_ids
+                or entry_token in seen_entry_tokens
+            ):
+                return False
+            seen_channel_ids.add(channel_id)
+            seen_entry_tokens.add(entry_token)
+        return True
+
+    @staticmethod
+    def _guard_projection(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        projected = [
+            {
+                'channel_id': entry.get('channel_id'),
+                'entry_token': entry.get('entry_token'),
+                'metadata': copy.deepcopy(entry.get('metadata') or {}),
+            }
+            for entry in entries
+        ]
+        return sorted(
+            projected,
+            key=lambda entry: (
+                str(entry.get('channel_id')),
+                str(entry.get('entry_token')),
+            ),
+        )
+
     def get_status(self) -> Dict:
         """Get current queue status."""
         with self.lock:
-            return {
+            queued_entries, in_progress_entries = self._entry_snapshots_locked()
+            completed_entries, failed_entries = (
+                self._terminal_entry_snapshots_locked()
+            )
+            entries_complete = self._entry_identities_complete(
+                queued_entries
+                + in_progress_entries
+                + completed_entries
+                + failed_entries
+            )
+            status = {
                 'queue_size': len(self.queued),
                 'queued': len(self.queued),
                 'in_progress': len(self.in_progress),
                 'completed': len(self.completed),
                 'failed': len(self.failed),
-                
+                'admission_epoch': self.admission_epoch,
+                'admission_revision': self.admission_revision,
+                # This is the authoritative logical queue map, not the raw
+                # PriorityQueue heap (which may retain superseded entries).
+                # Callers may authorize cleanup only when this flag is true.
+                'entries_complete': entries_complete,
+                'queued_entries': queued_entries,
+                'in_progress_entries': in_progress_entries,
+                'completed_entries': completed_entries,
+                'failed_entries': failed_entries,
+                'completed_channel_ids': sorted(self.completed, key=str),
+                'failed_channel_ids': sorted(self.failed, key=str),
+
                 # Expose stream ETA calculations to API Response payload
                 'queued_streams_count': sum(self.queued.values()),
                 'in_progress_streams_count': sum(self.in_progress.values()),
@@ -1199,6 +1474,11 @@ class StreamCheckQueue:
                 'last_cleared_at': self.last_cleared_at,
                 'last_clear_reason': self.last_clear_reason
             }
+            if not entries_complete:
+                status['entries_unavailable_reason'] = (
+                    'lifecycle_identity_unavailable'
+                )
+            return status
 
     def _state_locked(self) -> str:
         """Return the queue lifecycle state while self.lock is held."""
@@ -1212,56 +1492,154 @@ class StreamCheckQueue:
             return 'cleared'
         return 'idle'
 
+    def _clear_locked(self, reason: str, *, preserve_paused: bool) -> Dict:
+        was_paused = self.paused
+        cleared_channel_ids = sorted(
+            set(self.queued.keys()) | set(self.in_progress.keys()),
+            key=str,
+        )
+        cleared = {
+            'queued': len(self.queued),
+            'in_progress': len(self.in_progress),
+            'completed': len(self.completed),
+            'failed': len(self.failed),
+            'queue_size': self.queue.qsize(),
+            'channel_ids': cleared_channel_ids,
+        }
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except queue.Empty:
+                break
+        self.queued.clear()
+        self.queued_priorities.clear()
+        self.queued_sequences.clear()
+        self.queued_metadata.clear()
+        self.queued_immutable_metadata_keys.clear()
+        self.in_progress.clear()
+        self.in_progress_metadata.clear()
+        self.in_progress_entry_tokens.clear()
+        self.completed.clear()
+        self.completed_entry_details.clear()
+        self.failed.clear()
+        self.failed_entry_details.clear()
+        self.paused = was_paused if preserve_paused else False
+        self.channel_start_times.clear()
+        self.stream_processing_times.clear()
+        self.channel_processing_times.clear()
+        self.batch_started_at = None
+        self.stats = {
+            'total_queued': 0,
+            'total_completed': 0,
+            'total_failed': 0,
+            'current_channel': None,
+            'queue_size': 0
+        }
+        self.last_cleared_at = datetime.now().isoformat()
+        self.last_clear_reason = reason
+        self._bump_admission_revision_locked()
+        return cleared
+
     def clear(self, reason: str = 'manual', *, preserve_paused: bool = False) -> Dict:
         """Clear the queue and reset stats."""
         with self.lock:
-            was_paused = self.paused
-            cleared_channel_ids = sorted(
-                set(self.queued.keys()) | set(self.in_progress.keys())
+            cleared = self._clear_locked(
+                reason,
+                preserve_paused=preserve_paused,
             )
-            cleared = {
-                'queued': len(self.queued),
-                'in_progress': len(self.in_progress),
-                'completed': len(self.completed),
-                'failed': len(self.failed),
-                'queue_size': self.queue.qsize(),
-                'channel_ids': cleared_channel_ids,
-            }
-            while not self.queue.empty():
-                try:
-                    self.queue.get_nowait()
-                except queue.Empty:
-                    break
-            self.queued.clear()
-            self.queued_priorities.clear()
-            self.queued_sequences.clear()
-            self.queued_metadata.clear()
-            self.in_progress.clear()
-            self.in_progress_metadata.clear()
-            self.completed.clear()
-            self.failed.clear()
-            self.paused = was_paused if preserve_paused else False
-            self.channel_start_times.clear()
-            self.stream_processing_times.clear()
-            self.channel_processing_times.clear()
-            self.batch_started_at = None
-            self.stats = {
-                'total_queued': 0,
-                'total_completed': 0,
-                'total_failed': 0,
-                'current_channel': None,
-                'queue_size': 0
-            }
-            self.last_cleared_at = datetime.now().isoformat()
-            self.last_clear_reason = reason
         logger.info("Queue cleared")
         return cleared
+
+    def clear_if_entries_match(
+        self,
+        *,
+        expected_admission_epoch: str,
+        expected_admission_revision: int,
+        expected_queued_entries: List[Dict[str, Any]],
+        expected_in_progress_entries: List[Dict[str, Any]],
+        expected_completed_entries: List[Dict[str, Any]],
+        expected_failed_entries: List[Dict[str, Any]],
+        expected_completed_channel_ids: List[int],
+        expected_failed_channel_ids: List[int],
+        reason: str = 'manual',
+        preserve_paused: bool = False,
+    ) -> Dict[str, Any]:
+        """Atomically compare exact activation identities and clear on a match."""
+        with self.lock:
+            queued_entries, in_progress_entries = self._entry_snapshots_locked()
+            completed_entries, failed_entries = (
+                self._terminal_entry_snapshots_locked()
+            )
+            entries_complete = self._entry_identities_complete(
+                queued_entries
+                + in_progress_entries
+                + completed_entries
+                + failed_entries
+            )
+            current_guard = {
+                'entries_complete': entries_complete,
+                'admission_epoch': self.admission_epoch,
+                'admission_revision': self.admission_revision,
+                'queued_entries': self._guard_projection(queued_entries),
+                'in_progress_entries': self._guard_projection(in_progress_entries),
+                'completed_entries': self._guard_projection(completed_entries),
+                'failed_entries': self._guard_projection(failed_entries),
+                'completed_channel_ids': sorted(self.completed, key=str),
+                'failed_channel_ids': sorted(self.failed, key=str),
+            }
+            expected_guard = {
+                'entries_complete': True,
+                'admission_epoch': expected_admission_epoch,
+                'admission_revision': expected_admission_revision,
+                'queued_entries': self._guard_projection(expected_queued_entries),
+                'in_progress_entries': self._guard_projection(
+                    expected_in_progress_entries
+                ),
+                'completed_entries': self._guard_projection(
+                    expected_completed_entries
+                ),
+                'failed_entries': self._guard_projection(
+                    expected_failed_entries
+                ),
+                'completed_channel_ids': sorted(
+                    expected_completed_channel_ids,
+                    key=str,
+                ),
+                'failed_channel_ids': sorted(
+                    expected_failed_channel_ids,
+                    key=str,
+                ),
+            }
+            if current_guard != expected_guard:
+                return {
+                    'guard_matched': False,
+                    'cleared': None,
+                    'current': current_guard,
+                }
+            cleared = self._clear_locked(
+                reason,
+                preserve_paused=preserve_paused,
+            )
+        logger.info("Queue cleared after exact entry guard matched")
+        return {
+            'guard_matched': True,
+            'cleared': cleared,
+            'current': None,
+        }
 
     def is_empty(self) -> bool:
         """Check if the queue is empty."""
         with self.lock:
             return not self.queued
 
+    def owns_in_progress(self, channel_id: int, entry_token: Optional[int]) -> bool:
+        """Return whether the exact popped entry still owns the active slot."""
+        with self.lock:
+            return (
+                entry_token is not None
+                and channel_id in self.in_progress
+                and self.in_progress_entry_tokens.get(channel_id) == entry_token
+            )
 
 class StreamCheckerProgress:
     """Manages progress tracking for stream checker operations."""

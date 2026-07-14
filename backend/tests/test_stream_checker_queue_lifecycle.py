@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for stream-checker queue clear/abort lifecycle."""
 
+import json
 import os
 import sys
 import threading
@@ -14,6 +15,7 @@ from flask import Flask
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.api.stream_checker_handlers import (  # noqa: E402
+    add_to_stream_checker_queue_response,
     clear_stream_checker_queue_response,
     queue_all_channels_response,
 )
@@ -32,6 +34,48 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         tracker.updates = {'channels': {}, 'last_global_check': None}
         tracker._save_updates = Mock()
         return tracker
+
+    @staticmethod
+    def _guard_snapshot(status):
+        return {
+            'entries_complete': status['entries_complete'],
+            'admission_epoch': status['admission_epoch'],
+            'admission_revision': status['admission_revision'],
+            'queued_entries': [
+                {
+                    'channel_id': entry['channel_id'],
+                    'entry_token': entry['entry_token'],
+                    'metadata': dict(entry['metadata']),
+                }
+                for entry in status['queued_entries']
+            ],
+            'in_progress_entries': [
+                {
+                    'channel_id': entry['channel_id'],
+                    'entry_token': entry['entry_token'],
+                    'metadata': dict(entry['metadata']),
+                }
+                for entry in status['in_progress_entries']
+            ],
+            'completed_entries': [
+                {
+                    'channel_id': entry['channel_id'],
+                    'entry_token': entry['entry_token'],
+                    'metadata': dict(entry['metadata']),
+                }
+                for entry in status['completed_entries']
+            ],
+            'failed_entries': [
+                {
+                    'channel_id': entry['channel_id'],
+                    'entry_token': entry['entry_token'],
+                    'metadata': dict(entry['metadata']),
+                }
+                for entry in status['failed_entries']
+            ],
+            'completed_channel_ids': list(status['completed_channel_ids']),
+            'failed_channel_ids': list(status['failed_channel_ids']),
+        }
 
     def test_higher_priority_channels_are_checked_first(self):
         check_queue = StreamCheckQueue(max_size=10)
@@ -374,8 +418,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.running = True
         service.batch_start_time = None
         service.abort_current_check = threading.Event()
+        service.progress = Mock()
         service.check_queue = Mock()
-        service._start_batch_changelog = Mock()
+        service._start_batch_changelog = Mock(return_value=41)
         service._finalize_batch_changelog = Mock()
         service.update_tracker = self._in_memory_update_tracker()
         first_generation = service.update_tracker.mark_channel_for_force_check(77)
@@ -383,10 +428,13 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service.check_queue.get_next_entry.return_value = {
             'channel_id': 77,
             'metadata': {},
+            'queue_entry_token': 51,
         }
 
         def check_channel(channel_id, **kwargs):
             self.assertEqual(kwargs['force_check_generation'], first_generation)
+            self.assertEqual(kwargs['batch_changelog_generation'], 41)
+            self.assertEqual(kwargs['queue_entry_token'], 51)
             service.update_tracker.mark_channel_for_force_check(channel_id)
             service.running = False
             return {'skipped': True, 'skip_reason': 'active_viewers'}
@@ -398,6 +446,9 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         pending, generation = service.update_tracker.get_force_check_state(77)
         self.assertTrue(pending)
         self.assertGreater(generation, first_generation)
+        service._finalize_batch_changelog.assert_called_once_with(
+            batch_generation=41,
+        )
 
     def test_queue_entries_preserve_metadata_with_priority_ordering(self):
         check_queue = StreamCheckQueue(max_size=10)
@@ -943,7 +994,12 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             'legacy raw sequential checker must not be used'
         ))
 
-        result = service._check_channel(404, run_mode='test')
+        result = service._check_channel(
+            404,
+            run_mode='test',
+            batch_changelog_generation=23,
+            queue_entry_token=29,
+        )
 
         self.assertTrue(result['success'])
         service._check_channel_concurrent.assert_called_once_with(
@@ -956,6 +1012,8 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             global_limit_override=1,
             force_check_override=None,
             force_check_generation=None,
+            batch_changelog_generation=23,
+            queue_entry_token=29,
         )
         service._check_channel_sequential.assert_not_called()
 
@@ -999,6 +1057,248 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertFalse(service.abort_current_check.is_set())
         service.progress.clear.assert_called_once()
 
+    def test_service_guarded_clear_succeeds_only_for_exact_snapshot(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.update_tracker = Mock()
+        service._external_abort_generation = 4
+        metadata = {
+            'source': 'codex_bitrate_recheck',
+            'run_label': 'bitrate-live-r9',
+        }
+        self.assertTrue(service.check_queue.add_channel(
+            105,
+            metadata=metadata,
+        ))
+        expected = self._guard_snapshot(service.check_queue.get_status())
+
+        result = service.clear_queue(expected_queue_snapshot=expected)
+
+        self.assertTrue(result['guard_matched'])
+        self.assertFalse(result['abort_requested'])
+        self.assertEqual(result['cleared']['queued'], 1)
+        self.assertIsNone(result['current'])
+        self.assertEqual(service._external_abort_generation, 5)
+        service.update_tracker.clear_force_checks.assert_called_once_with([105])
+        service.progress.clear.assert_called_once()
+
+    def test_service_guard_mismatch_has_no_abort_or_cleanup_side_effects(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.abort_current_check.set()
+        service.progress = Mock()
+        service.update_tracker = Mock()
+        service._external_abort_generation = 7
+        service._cancel_queueing = False
+        service.batch_start_time = 'unchanged-batch'
+        service.batch_changelog_entries = [{'channel_id': 105}]
+        service._active_batch_changelog_generation = 12
+        service._active_queue_entry_executions = {}
+        self.assertTrue(service.check_queue.add_channel(
+            105,
+            metadata={
+                'source': 'codex_bitrate_recheck',
+                'run_label': 'bitrate-live-r9',
+            },
+        ))
+        expected = self._guard_snapshot(service.check_queue.get_status())
+        self.assertTrue(service.check_queue.add_channel(
+            999,
+            metadata={'source': 'foreign_run'},
+        ))
+        before = self._guard_snapshot(service.check_queue.get_status())
+
+        result = service.clear_queue(expected_queue_snapshot=expected)
+
+        self.assertFalse(result['guard_matched'])
+        self.assertFalse(result['abort_requested'])
+        self.assertIsNone(result['cleared'])
+        self.assertEqual(service._external_abort_generation, 7)
+        self.assertTrue(service.abort_current_check.is_set())
+        self.assertFalse(service._cancel_queueing)
+        self.assertEqual(service.batch_start_time, 'unchanged-batch')
+        self.assertEqual(service.batch_changelog_entries, [{'channel_id': 105}])
+        self.assertEqual(service._active_batch_changelog_generation, 12)
+        self.assertEqual(
+            self._guard_snapshot(service.check_queue.get_status()),
+            before,
+        )
+        service.update_tracker.clear_force_checks.assert_not_called()
+        service.progress.clear.assert_not_called()
+
+    def test_service_guard_rejects_unrepresented_direct_or_tombstone_owner(self):
+        for owner_state in ('direct', 'tombstone'):
+            with self.subTest(owner_state=owner_state):
+                service = StreamCheckerService.__new__(StreamCheckerService)
+                service.check_queue = StreamCheckQueue(max_size=10)
+                service.lock = threading.Lock()
+                service.sync_batch_state = {'active': False}
+                service.checking = False
+                service.abort_current_check = threading.Event()
+                service.progress = Mock()
+                service._external_abort_generation = 9
+                service._single_stream_check_active = owner_state == 'direct'
+                service._active_queue_entry_executions = (
+                    {(999, 41): {'cancelled': True}}
+                    if owner_state == 'tombstone'
+                    else {}
+                )
+                self.assertTrue(service.check_queue.add_channel(105))
+                expected = self._guard_snapshot(service.check_queue.get_status())
+
+                result = service.clear_queue(expected_queue_snapshot=expected)
+
+                self.assertFalse(result['guard_matched'])
+                self.assertEqual(
+                    result['guard_failure_reason'],
+                    'active_owner_not_in_snapshot',
+                )
+                self.assertIsNone(result['cleared'])
+                self.assertEqual(service._external_abort_generation, 9)
+                self.assertEqual(service.check_queue.get_status()['queued'], 1)
+                service.progress.clear.assert_not_called()
+
+    def test_irreversible_channel_side_effect_linearizes_with_request_abort(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.lock = threading.Lock()
+        service.abort_current_check = threading.Event()
+        service.check_queue = Mock()
+        service._external_abort_generation = 3
+        service._cancel_queueing = False
+        service._active_queue_entry_executions = {
+            (105, 11): {'cancelled': False},
+        }
+        entered_action = threading.Event()
+        release_action = threading.Event()
+        abort_started = threading.Event()
+        events = []
+        commit_result = {}
+
+        def irreversible_action():
+            entered_action.set()
+            release_action.wait(timeout=10)
+            events.append('write_finished')
+            return 'written'
+
+        commit_thread = threading.Thread(
+            target=lambda: commit_result.setdefault(
+                'value',
+                service._run_channel_side_effect_if_authorized(
+                    105,
+                    11,
+                    irreversible_action,
+                ),
+            ),
+        )
+
+        def abort_request():
+            abort_started.set()
+            service.request_abort(reason='race_test')
+            events.append('abort_returned')
+
+        abort_thread = threading.Thread(target=abort_request)
+        commit_thread.start()
+        self.assertTrue(entered_action.wait(timeout=10))
+        abort_thread.start()
+        self.assertTrue(abort_started.wait(timeout=10))
+        self.assertTrue(abort_thread.is_alive())
+
+        release_action.set()
+        commit_thread.join(timeout=10)
+        abort_thread.join(timeout=10)
+
+        self.assertFalse(commit_thread.is_alive())
+        self.assertFalse(abort_thread.is_alive())
+        self.assertEqual(commit_result['value'], (True, 'written'))
+        self.assertEqual(events, ['write_finished', 'abort_returned'])
+        self.assertTrue(service.abort_current_check.is_set())
+        self.assertTrue(
+            service._active_queue_entry_executions[(105, 11)]['cancelled']
+        )
+
+        late_action = Mock()
+        self.assertEqual(
+            service._run_channel_side_effect_if_authorized(
+                105,
+                11,
+                late_action,
+            ),
+            (False, None),
+        )
+        late_action.assert_not_called()
+
+    def test_no_stream_visibility_paths_require_exact_queue_authorization(self):
+        automation_config = Mock()
+        automation_config.get_effective_configuration.return_value = {}
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {
+            'id': 105,
+            'name': 'No Streams',
+            'channel_group_id': 7,
+        }
+
+        for method_name in ('_check_channel_concurrent', '_check_channel_sequential'):
+            with self.subTest(method_name=method_name):
+                service = StreamCheckerService.__new__(StreamCheckerService)
+                service.config = Mock()
+                service.config.get.side_effect = (
+                    lambda _key, default=None: default
+                )
+                service.progress = Mock()
+                service.changelog = None
+                service.check_queue = Mock()
+                service.abort_current_check = threading.Event()
+                service._abort_channel_check_if_requested = Mock(return_value=None)
+                service._run_channel_side_effect_if_authorized = Mock(
+                    return_value=(False, None)
+                )
+                service._apply_channel_visibility_after_check = Mock()
+                service._abort_channel_check = Mock(return_value={
+                    'success': False,
+                    'aborted': True,
+                    'channel_id': 105,
+                })
+
+                with patch(
+                    'apps.stream.stream_checker_service.get_automation_config_manager',
+                    return_value=automation_config,
+                ), patch(
+                    'apps.stream.stream_checker_service.get_udi_manager',
+                    return_value=udi,
+                ), patch(
+                    'apps.stream.stream_checker_service.fetch_channel_streams',
+                    return_value=[],
+                ), patch(
+                    'apps.stream.stream_checker_service._get_base_url',
+                    return_value='http://localhost:9191',
+                ):
+                    result = getattr(service, method_name)(
+                        105,
+                        queue_entry_token=11,
+                    )
+
+                self.assertTrue(result['aborted'])
+                service._run_channel_side_effect_if_authorized.assert_called_once()
+                self.assertEqual(
+                    service._run_channel_side_effect_if_authorized.call_args.args[:2],
+                    (105, 11),
+                )
+                service._apply_channel_visibility_after_check.assert_not_called()
+                service._abort_channel_check.assert_called_once_with(
+                    105,
+                    'No Streams',
+                    queue_entry_token=11,
+                )
+
     def test_service_clear_queue_requests_abort_for_active_check(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.check_queue = StreamCheckQueue(max_size=10)
@@ -1018,6 +1318,816 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertTrue(service.abort_current_check.is_set())
         self.assertEqual(service.check_queue.get_status()['state'], 'cleared')
         service.progress.clear.assert_called_once()
+
+    def test_active_clear_discards_batch_and_late_add_cannot_leak_into_next_batch(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.batch_lock = threading.Lock()
+        service.batch_start_time = None
+        service.batch_changelog_entries = []
+        service._batch_changelog_generation = 0
+        service._active_batch_changelog_generation = None
+        service.changelog = Mock()
+        service.sync_batch_state = {'active': False}
+        service.checking = True
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+
+        first_generation = service._start_batch_changelog()
+        self.assertEqual(first_generation, 1)
+        self.assertTrue(service._add_to_batch_changelog(
+            {'channel_id': 101},
+            batch_generation=first_generation,
+        ))
+
+        self.assertTrue(service.check_queue.add_channel(101, priority=10))
+        self.assertEqual(
+            service.check_queue.get_next_entry(timeout=0.1)['channel_id'],
+            101,
+        )
+
+        result = service.clear_queue()
+
+        self.assertTrue(result['abort_requested'])
+        self.assertIsNone(service.batch_start_time)
+        self.assertEqual(service.batch_changelog_entries, [])
+        self.assertIsNone(service._active_batch_changelog_generation)
+
+        # The cleared worker may still finish its current call. Its late result
+        # must not resurrect the old batch or become part of the next one.
+        self.assertFalse(service._add_to_batch_changelog(
+            {'channel_id': 101, 'late': True},
+            batch_generation=first_generation,
+        ))
+        self.assertIsNone(service.batch_start_time)
+        self.assertEqual(service.batch_changelog_entries, [])
+
+        service.checking = False
+        service.abort_current_check.clear()
+        second_generation = service._start_batch_changelog(
+            require_not_aborted=True,
+        )
+        fresh_start_time = service.batch_start_time
+        self.assertEqual(second_generation, 2)
+        self.assertTrue(service._add_to_batch_changelog(
+            {'channel_id': 202},
+            batch_generation=second_generation,
+        ))
+
+        self.assertIsNotNone(fresh_start_time)
+        self.assertEqual(service.batch_changelog_entries, [{'channel_id': 202}])
+
+        self.assertFalse(service._add_to_batch_changelog(
+            {'channel_id': 101, 'late_again': True},
+            batch_generation=first_generation,
+        ))
+        self.assertFalse(service._finalize_batch_changelog(
+            batch_generation=first_generation,
+        ))
+        self.assertEqual(service.batch_start_time, fresh_start_time)
+        self.assertEqual(service.batch_changelog_entries, [{'channel_id': 202}])
+        service.changelog.add_entry.assert_not_called()
+
+    def test_idle_clear_finalizes_completed_batch_and_forces_fresh_claim(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.batch_lock = threading.Lock()
+        service.batch_start_time = '2000-01-01T00:00:00'
+        completed_entry = {'channel_id': 101, 'success': True}
+        service.batch_changelog_entries = [completed_entry]
+        service._batch_changelog_generation = 1
+        service._active_batch_changelog_generation = 1
+        service.changelog = Mock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+
+        result = service.clear_queue()
+
+        self.assertFalse(result['abort_requested'])
+        self.assertTrue(result['batch_changelog_finalized'])
+        self.assertTrue(result['batch_changelog_detached'])
+        service.changelog.add_entry.assert_called_once()
+        self.assertEqual(
+            service.changelog.add_entry.call_args.kwargs['timestamp'],
+            '2000-01-01T00:00:00',
+        )
+        self.assertIsNone(service.batch_start_time)
+        self.assertEqual(service.batch_changelog_entries, [])
+        self.assertIsNone(service._active_batch_changelog_generation)
+
+        next_generation = service._start_batch_changelog(
+            require_not_aborted=True,
+        )
+        self.assertEqual(next_generation, 2)
+        self.assertNotEqual(service.batch_start_time, '2000-01-01T00:00:00')
+        self.assertEqual(service.batch_changelog_entries, [])
+
+    def test_queue_entry_token_rejects_clear_requeue_same_channel_aba(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        self.assertTrue(check_queue.add_channel(105, priority=10))
+        old_entry = check_queue.get_next_entry(timeout=0.1)
+
+        self.assertTrue(check_queue.owns_in_progress(
+            105,
+            old_entry['queue_entry_token'],
+        ))
+        check_queue.clear(reason='aba_test')
+        self.assertTrue(check_queue.add_channel(105, priority=10))
+        new_entry = check_queue.get_next_entry(timeout=0.1)
+
+        self.assertNotEqual(
+            old_entry['queue_entry_token'],
+            new_entry['queue_entry_token'],
+        )
+        self.assertFalse(check_queue.owns_in_progress(
+            105,
+            old_entry['queue_entry_token'],
+        ))
+        self.assertFalse(check_queue.mark_failed(
+            105,
+            'stale owner',
+            entry_token=old_entry['queue_entry_token'],
+        ))
+        self.assertTrue(check_queue.owns_in_progress(
+            105,
+            new_entry['queue_entry_token'],
+        ))
+        self.assertTrue(check_queue.mark_completed(
+            105,
+            entry_token=new_entry['queue_entry_token'],
+        ))
+
+    def test_queue_status_exposes_complete_tokenized_entry_snapshot(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        metadata = {
+            'source': 'codex_bitrate_recheck',
+            'run_label': 'bitrate-live-r9',
+        }
+        self.assertEqual(
+            check_queue.add_channels(
+                [105, 106],
+                priority=90,
+                metadata=metadata,
+            ),
+            2,
+        )
+
+        queued_status = check_queue.get_status()
+        self.assertTrue(queued_status['entries_complete'])
+        self.assertEqual(
+            [entry['channel_id'] for entry in queued_status['queued_entries']],
+            [105, 106],
+        )
+        self.assertEqual(queued_status['in_progress_entries'], [])
+        for entry in queued_status['queued_entries']:
+            self.assertEqual(entry['metadata'], metadata)
+            self.assertIsInstance(entry['entry_token'], int)
+
+        active_entry = check_queue.get_next_entry(timeout=0.1)
+        active_status = check_queue.get_status()
+        self.assertEqual(
+            active_status['in_progress_entries'],
+            [{
+                'channel_id': 105,
+                'stream_count': 1,
+                'metadata': metadata,
+                'entry_token': active_entry['queue_entry_token'],
+            }],
+        )
+        self.assertEqual(
+            [entry['channel_id'] for entry in active_status['queued_entries']],
+            [106],
+        )
+
+    def test_queue_admission_deep_copies_nested_metadata_provenance(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        metadata = {
+            'source': 'internal_event',
+            'match_evidence': {'teams': ['Home', 'Away']},
+        }
+        self.assertTrue(check_queue.add_channel(
+            105,
+            metadata=metadata,
+        ))
+        admitted = check_queue.get_status()
+        admitted_revision = admitted['admission_revision']
+
+        metadata['match_evidence']['teams'][0] = 'Mutated'
+
+        current = check_queue.get_status()
+        self.assertEqual(current['admission_revision'], admitted_revision)
+        self.assertEqual(
+            current['queued_entries'][0]['metadata']['match_evidence'],
+            {'teams': ['Home', 'Away']},
+        )
+
+    def test_exact_snapshot_guard_atomically_clears_full_lifecycle(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        metadata = {
+            'source': 'codex_bitrate_recheck',
+            'run_label': 'bitrate-live-r9',
+        }
+        self.assertEqual(check_queue.add_channels(
+            [105, 106],
+            priority=90,
+            metadata=metadata,
+        ), 2)
+        active_entry = check_queue.get_next_entry(timeout=0.1)
+        self.assertTrue(check_queue.mark_completed(
+            active_entry['channel_id'],
+            entry_token=active_entry['queue_entry_token'],
+        ))
+        expected = self._guard_snapshot(check_queue.get_status())
+        self.assertEqual(expected['completed_entries'], [{
+            'channel_id': active_entry['channel_id'],
+            'entry_token': active_entry['queue_entry_token'],
+            'metadata': metadata,
+        }])
+
+        result = check_queue.clear_if_entries_match(
+            expected_admission_epoch=expected['admission_epoch'],
+            expected_admission_revision=expected['admission_revision'],
+            expected_queued_entries=expected['queued_entries'],
+            expected_in_progress_entries=expected['in_progress_entries'],
+            expected_completed_entries=expected['completed_entries'],
+            expected_failed_entries=expected['failed_entries'],
+            expected_completed_channel_ids=expected['completed_channel_ids'],
+            expected_failed_channel_ids=expected['failed_channel_ids'],
+            reason='guarded_test',
+        )
+
+        self.assertTrue(result['guard_matched'])
+        self.assertEqual(result['cleared']['queued'], 1)
+        self.assertEqual(result['cleared']['completed'], 1)
+        self.assertIsNone(result['current'])
+        cleared_status = check_queue.get_status()
+        self.assertEqual(cleared_status['state'], 'cleared')
+        self.assertGreater(
+            cleared_status['admission_revision'],
+            expected['admission_revision'],
+        )
+
+    def test_guard_rejects_new_foreign_entry_without_mutation(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        self.assertTrue(check_queue.add_channel(
+            105,
+            metadata={
+                'source': 'codex_bitrate_recheck',
+                'run_label': 'bitrate-live-r9',
+            },
+        ))
+        expected = self._guard_snapshot(check_queue.get_status())
+        self.assertTrue(check_queue.add_channel(
+            999,
+            metadata={'source': 'foreign_run', 'run_label': 'foreign-r1'},
+        ))
+        before_clear = check_queue.get_status()
+
+        result = check_queue.clear_if_entries_match(
+            expected_admission_epoch=expected['admission_epoch'],
+            expected_admission_revision=expected['admission_revision'],
+            expected_queued_entries=expected['queued_entries'],
+            expected_in_progress_entries=expected['in_progress_entries'],
+            expected_completed_entries=expected['completed_entries'],
+            expected_failed_entries=expected['failed_entries'],
+            expected_completed_channel_ids=expected['completed_channel_ids'],
+            expected_failed_channel_ids=expected['failed_channel_ids'],
+        )
+
+        self.assertFalse(result['guard_matched'])
+        self.assertIsNone(result['cleared'])
+        after_clear = check_queue.get_status()
+        self.assertEqual(
+            self._guard_snapshot(after_clear),
+            self._guard_snapshot(before_clear),
+        )
+        self.assertIsNone(after_clear['last_cleared_at'])
+
+    def test_guard_revision_rejects_accepted_duplicate_force_intent(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        metadata = {
+            'source': 'codex_bitrate_recheck',
+            'run_label': 'bitrate-live-r9',
+        }
+        self.assertTrue(check_queue.add_channel(
+            105,
+            priority=90,
+            metadata=metadata,
+        ))
+        expected = self._guard_snapshot(check_queue.get_status())
+        accepted_force_intent = Mock()
+
+        self.assertTrue(check_queue.add_channel(
+            105,
+            priority=80,
+            on_accepted=accepted_force_intent,
+        ))
+        current = check_queue.get_status()
+        self.assertEqual(
+            current['queued_entries'][0]['entry_token'],
+            expected['queued_entries'][0]['entry_token'],
+        )
+        self.assertEqual(current['queued_entries'][0]['metadata'], metadata)
+        self.assertGreater(
+            current['admission_revision'],
+            expected['admission_revision'],
+        )
+        accepted_force_intent.assert_called_once()
+
+        result = check_queue.clear_if_entries_match(
+            expected_admission_epoch=expected['admission_epoch'],
+            expected_admission_revision=expected['admission_revision'],
+            expected_queued_entries=expected['queued_entries'],
+            expected_in_progress_entries=expected['in_progress_entries'],
+            expected_completed_entries=expected['completed_entries'],
+            expected_failed_entries=expected['failed_entries'],
+            expected_completed_channel_ids=expected['completed_channel_ids'],
+            expected_failed_channel_ids=expected['failed_channel_ids'],
+        )
+
+        self.assertFalse(result['guard_matched'])
+        self.assertEqual(check_queue.get_status()['queued'], 1)
+
+    def test_guard_rejects_foreign_terminal_entry_and_prior_process_epoch(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        self.assertTrue(check_queue.add_channel(105))
+        expected = self._guard_snapshot(check_queue.get_status())
+        active = check_queue.get_next_entry(timeout=0.1)
+        self.assertTrue(check_queue.mark_failed(
+            105,
+            'foreign terminal result',
+            entry_token=active['queue_entry_token'],
+        ))
+
+        terminal_result = check_queue.clear_if_entries_match(
+            expected_admission_epoch=expected['admission_epoch'],
+            expected_admission_revision=expected['admission_revision'],
+            expected_queued_entries=expected['queued_entries'],
+            expected_in_progress_entries=expected['in_progress_entries'],
+            expected_completed_entries=expected['completed_entries'],
+            expected_failed_entries=expected['failed_entries'],
+            expected_completed_channel_ids=expected['completed_channel_ids'],
+            expected_failed_channel_ids=expected['failed_channel_ids'],
+        )
+        self.assertFalse(terminal_result['guard_matched'])
+        failed_status = check_queue.get_status()
+        self.assertEqual(failed_status['failed_channel_ids'], [105])
+        self.assertEqual(failed_status['failed_entries'], [{
+            'channel_id': 105,
+            'entry_token': active['queue_entry_token'],
+            'metadata': {},
+        }])
+
+        current = self._guard_snapshot(check_queue.get_status())
+        restarted_queue = StreamCheckQueue(max_size=10)
+        self.assertNotEqual(
+            restarted_queue.get_status()['admission_epoch'],
+            current['admission_epoch'],
+        )
+        epoch_result = check_queue.clear_if_entries_match(
+            expected_admission_epoch=restarted_queue.get_status()[
+                'admission_epoch'
+            ],
+            expected_admission_revision=current['admission_revision'],
+            expected_queued_entries=current['queued_entries'],
+            expected_in_progress_entries=current['in_progress_entries'],
+            expected_completed_entries=current['completed_entries'],
+            expected_failed_entries=current['failed_entries'],
+            expected_completed_channel_ids=current['completed_channel_ids'],
+            expected_failed_channel_ids=current['failed_channel_ids'],
+        )
+        self.assertFalse(epoch_result['guard_matched'])
+        self.assertEqual(check_queue.get_status()['failed_channel_ids'], [105])
+
+    def test_terminal_identity_cannot_be_reused_by_foreign_same_channel_run(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        own_metadata = {
+            'source': 'codex_bitrate_recheck',
+            'run_label': 'bitrate-live-r9',
+        }
+        self.assertTrue(check_queue.add_channel(
+            105,
+            metadata=own_metadata,
+            immutable_metadata_keys=set(own_metadata),
+        ))
+        own_active = check_queue.get_next_entry(timeout=0.1)
+        self.assertTrue(check_queue.mark_completed(
+            105,
+            entry_token=own_active['queue_entry_token'],
+        ))
+        own_terminal = self._guard_snapshot(check_queue.get_status())
+
+        self.assertTrue(check_queue.remove_from_completed(105))
+        foreign_metadata = {
+            'source': 'foreign_run',
+            'run_label': 'foreign-r1',
+        }
+        self.assertTrue(check_queue.add_channel(
+            105,
+            metadata=foreign_metadata,
+            immutable_metadata_keys=set(foreign_metadata),
+        ))
+        foreign_active = check_queue.get_next_entry(timeout=0.1)
+        self.assertTrue(check_queue.mark_completed(
+            105,
+            entry_token=foreign_active['queue_entry_token'],
+        ))
+        foreign_terminal = self._guard_snapshot(check_queue.get_status())
+
+        self.assertNotEqual(
+            foreign_terminal['completed_entries'],
+            own_terminal['completed_entries'],
+        )
+        self.assertEqual(foreign_terminal['completed_entries'], [{
+            'channel_id': 105,
+            'entry_token': foreign_active['queue_entry_token'],
+            'metadata': foreign_metadata,
+        }])
+        self.assertNotEqual(
+            foreign_active['queue_entry_token'],
+            own_active['queue_entry_token'],
+        )
+
+        stale_owner_clear = check_queue.clear_if_entries_match(
+            expected_admission_epoch=own_terminal['admission_epoch'],
+            expected_admission_revision=own_terminal['admission_revision'],
+            expected_queued_entries=own_terminal['queued_entries'],
+            expected_in_progress_entries=own_terminal['in_progress_entries'],
+            expected_completed_entries=own_terminal['completed_entries'],
+            expected_failed_entries=own_terminal['failed_entries'],
+            expected_completed_channel_ids=own_terminal[
+                'completed_channel_ids'
+            ],
+            expected_failed_channel_ids=own_terminal['failed_channel_ids'],
+        )
+        self.assertFalse(stale_owner_clear['guard_matched'])
+        self.assertEqual(
+            check_queue.get_status()['completed_entries'],
+            foreign_terminal['completed_entries'],
+        )
+
+    def test_forced_duplicate_cannot_steal_queue_admission_provenance(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        foreign_metadata = {
+            'source': 'other_run',
+            'run_label': 'foreign-r1',
+        }
+        own_metadata = {
+            'source': 'codex_bitrate_recheck',
+            'run_label': 'bitrate-live-r9',
+        }
+        self.assertTrue(check_queue.add_channel(
+            105,
+            priority=100,
+            metadata=foreign_metadata,
+            immutable_metadata_keys=set(foreign_metadata),
+        ))
+        original_entry = check_queue.get_status()['queued_entries'][0]
+        force_callback = Mock()
+
+        self.assertFalse(check_queue.add_channel(
+            105,
+            priority=90,
+            metadata=own_metadata,
+            immutable_metadata_keys=set(own_metadata),
+            on_accepted=force_callback,
+        ))
+        coalesced_entry = check_queue.get_status()['queued_entries'][0]
+        self.assertEqual(coalesced_entry['entry_token'], original_entry['entry_token'])
+        self.assertEqual(coalesced_entry['metadata'], foreign_metadata)
+
+        self.assertFalse(check_queue.add_channel(
+            105,
+            priority=110,
+            metadata=own_metadata,
+            immutable_metadata_keys=set(own_metadata),
+            on_accepted=force_callback,
+        ))
+        promoted_entry = check_queue.get_status()['queued_entries'][0]
+        self.assertEqual(promoted_entry['entry_token'], original_entry['entry_token'])
+        self.assertEqual(promoted_entry['metadata'], foreign_metadata)
+        force_callback.assert_not_called()
+
+        same_owner_callback = Mock()
+        self.assertTrue(check_queue.add_channel(
+            105,
+            priority=100,
+            metadata=foreign_metadata,
+            immutable_metadata_keys=set(foreign_metadata),
+            on_accepted=same_owner_callback,
+        ))
+        same_owner_callback.assert_called_once()
+
+    def test_protected_owner_rejects_partial_owner_and_auto_create_adoption(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        protected_metadata = {
+            'source': 'codex_bitrate_recheck',
+            'run_label': 'bitrate-live-r9',
+        }
+        self.assertTrue(check_queue.add_channel(
+            105,
+            priority=90,
+            metadata=protected_metadata,
+            immutable_metadata_keys=set(protected_metadata),
+        ))
+        baseline = check_queue.get_status()
+
+        partial_callback = Mock()
+        self.assertFalse(check_queue.add_channel(
+            105,
+            priority=90,
+            metadata={'source': protected_metadata['source']},
+            immutable_metadata_keys={'source'},
+            on_accepted=partial_callback,
+        ))
+        partial_callback.assert_not_called()
+
+        auto_create_callback = Mock()
+        self.assertFalse(check_queue.add_channel(
+            105,
+            priority=110,
+            metadata={
+                'source': 'auto_create',
+                'program_name': 'Protected Event',
+                'is_epg_scheduled': True,
+            },
+            on_accepted=auto_create_callback,
+        ))
+        auto_create_callback.assert_not_called()
+
+        current = check_queue.get_status()
+        self.assertEqual(
+            current['admission_revision'],
+            baseline['admission_revision'],
+        )
+        self.assertEqual(
+            current['queued_entries'],
+            baseline['queued_entries'],
+        )
+
+    def test_cancelled_queue_execution_fences_new_owners_until_worker_ack(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service._single_stream_check_active = False
+        service._single_channel_check_active = False
+        service._automation_cycle_active = False
+        service._sync_batch_execution_active = False
+        service._active_queue_entry_executions = {}
+        service._external_abort_generation = 0
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.progress.get.return_value = {
+            'channel_id': 105,
+            'status': 'starting',
+        }
+        service.batch_lock = threading.Lock()
+        service.batch_start_time = None
+        service.batch_changelog_entries = []
+        service._active_batch_changelog_generation = None
+        service._batch_changelog_generation = 0
+
+        self.assertTrue(service.check_queue.add_channel(105, priority=10))
+        old_entry = service.check_queue.get_next_entry(timeout=0.1)
+        old_token = old_entry['queue_entry_token']
+        self.assertTrue(service._claim_queue_entry_execution(105, old_token))
+
+        clear_result = service.clear_queue()
+
+        self.assertTrue(clear_result['abort_requested'])
+        self.assertTrue(service.abort_current_check.is_set())
+        self.assertTrue(
+            service._active_queue_entry_executions[(105, old_token)]['cancelled']
+        )
+        self.assertFalse(service._begin_single_channel_check_operation())
+        self.assertFalse(service._begin_single_stream_check_operation())
+        self.assertFalse(service.begin_automation_cycle_operation())
+
+        udi = Mock()
+        udi.get_channel_by_id.return_value = {'streams': [{'id': 1}]}
+        with patch('apps.udi.get_udi_manager', return_value=udi):
+            sync_result = service.check_channels_synchronously([105])
+        self.assertEqual(sync_result[105]['error'], 'stream_checker_active')
+
+        # Even an accidental shared-event clear cannot revive a cancelled owner.
+        service.abort_current_check.clear()
+        abort_result = service._abort_channel_check_if_requested(
+            105,
+            'Old Queue Owner',
+            queue_entry_token=old_token,
+        )
+        self.assertTrue(abort_result['aborted'])
+        service.progress.clear_if_matches.assert_called_with({
+            'channel_id': 105,
+            'status': 'starting',
+        })
+
+        service._release_queue_entry_execution(105, old_token)
+        self.assertEqual(service._active_queue_entry_executions, {})
+        self.assertTrue(service._begin_single_channel_check_operation())
+        service._end_single_channel_check_operation()
+
+    def test_queue_execution_release_is_token_exact_and_stale_cleanup_is_inert(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.lock = threading.Lock()
+        service._active_queue_entry_executions = {
+            (105, 11): {'cancelled': False},
+            (105, 12): {'cancelled': False},
+        }
+        service.progress = Mock()
+        service.progress.get.return_value = {
+            'channel_id': 105,
+            'status': 'new-owner-progress',
+        }
+
+        service._release_queue_entry_execution(105, 11)
+
+        self.assertNotIn((105, 11), service._active_queue_entry_executions)
+        self.assertIn((105, 12), service._active_queue_entry_executions)
+        self.assertFalse(service._clear_queue_entry_progress(105, 11))
+        service.progress.clear_if_matches.assert_not_called()
+
+    def test_specialized_queue_execution_releases_reservation_on_exception(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.lock = threading.Lock()
+        service.check_queue = Mock()
+        service.check_queue.owns_in_progress.return_value = True
+        service._active_queue_entry_executions = {}
+        service.progress = Mock()
+        service._run_specialized_queue_entry_owned = Mock(
+            side_effect=RuntimeError('specialized failure')
+        )
+        entry = {
+            'channel_id': 105,
+            'queue_entry_token': 81,
+            'metadata': {'source': 'teamarr_preflight'},
+        }
+
+        with self.assertRaisesRegex(RuntimeError, 'specialized failure'):
+            service._run_specialized_queue_entry(entry)
+
+        self.assertEqual(service._active_queue_entry_executions, {})
+
+    def test_request_abort_wins_before_normal_queue_completion(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._active_queue_entry_executions = {}
+        service._external_abort_generation = 0
+        service._cancel_queueing = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.progress.get.return_value = None
+        on_completed = Mock()
+
+        self.assertTrue(service.check_queue.add_channel(105, priority=10))
+        entry = service.check_queue.get_next_entry(timeout=0.1)
+        token = entry['queue_entry_token']
+        self.assertTrue(service._claim_queue_entry_execution(105, token))
+
+        service.request_abort('completion-linearization-test')
+        accepted = service._complete_channel_check(
+            105,
+            on_completed,
+            queue_entry_token=token,
+        )
+
+        self.assertFalse(accepted)
+        on_completed.assert_not_called()
+        status = service.check_queue.get_status()
+        self.assertEqual(status['completed'], 0)
+        self.assertEqual(status['failed'], 1)
+        self.assertEqual(status['total_completed'], 0)
+        self.assertEqual(status['total_failed'], 1)
+        service._release_queue_entry_execution(105, token)
+
+    def test_request_abort_wins_before_specialized_success_terminalization(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._active_queue_entry_executions = {}
+        service._external_abort_generation = 0
+        service._cancel_queueing = False
+        service._sync_batch_execution_active = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.progress.get.return_value = None
+
+        def complete_after_abort(*_args, **_kwargs):
+            service.request_abort('specialized-linearization-test')
+            return {'success': True}
+
+        service.check_single_channel = Mock(side_effect=complete_after_abort)
+        teamarr_service = Mock()
+        self.assertTrue(service.check_queue.add_channel(
+            105,
+            priority=100,
+            metadata={'source': 'teamarr_preflight'},
+        ))
+        entry = service.check_queue.get_next_entry(timeout=0.1)
+
+        with patch(
+            'apps.stream.teamarr_preflight_service.get_teamarr_preflight_service',
+            return_value=teamarr_service,
+        ):
+            service._run_specialized_queue_entry(entry)
+
+        status = service.check_queue.get_status()
+        self.assertEqual(status['completed'], 0)
+        self.assertEqual(status['failed'], 1)
+        self.assertEqual(status['total_completed'], 0)
+        self.assertEqual(status['total_failed'], 1)
+        self.assertEqual(service._active_queue_entry_executions, {})
+        teamarr_service.record_queued_check_result.assert_not_called()
+
+    def test_specialized_outer_callback_uses_exact_execution_after_same_channel_requeue(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._active_queue_entry_executions = {}
+        service.abort_current_check = threading.Event()
+        callback = Mock()
+
+        self.assertTrue(service.check_queue.add_channel(105, priority=100))
+        old_entry = service.check_queue.get_next_entry(timeout=0.1)
+        old_token = old_entry['queue_entry_token']
+        self.assertTrue(service._claim_queue_entry_execution(105, old_token))
+        self.assertTrue(service._complete_channel_check(
+            105,
+            queue_entry_token=old_token,
+        ))
+
+        # A producer can requeue the channel after the nested quality path made
+        # the visible queue terminal but before the specialized wrapper returns.
+        service.check_queue.remove_from_completed(105)
+        self.assertTrue(service.check_queue.add_channel(105, priority=100))
+        new_token = service.check_queue.get_status()['queued_entries'][0]['entry_token']
+        self.assertNotEqual(old_token, new_token)
+
+        service._complete_channel_check(
+            105,
+            callback,
+            queue_entry_token=old_token,
+            allow_already_completed_side_effects=True,
+        )
+
+        callback.assert_called_once_with()
+        queued_status = service.check_queue.get_status()
+        self.assertEqual(queued_status['queued'], 1)
+        self.assertEqual(queued_status['queued_entries'][0]['entry_token'], new_token)
+        service._release_queue_entry_execution(105, old_token)
+
+    def test_clear_wins_before_specialized_failure_callback(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service.lock = threading.Lock()
+        service._active_queue_entry_executions = {}
+        service._external_abort_generation = 0
+        service._cancel_queueing = False
+        service._sync_batch_execution_active = False
+        service.sync_batch_state = {'active': False}
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.progress.get.return_value = None
+        service.batch_lock = threading.Lock()
+        service.batch_start_time = None
+        service.batch_changelog_entries = []
+        service._active_batch_changelog_generation = None
+        service._batch_changelog_generation = 0
+        teamarr_service = Mock()
+
+        def fail_after_clear(*_args, **_kwargs):
+            service.clear_queue()
+            return {'success': False, 'error': 'probe_failure'}
+
+        service.check_single_channel = Mock(side_effect=fail_after_clear)
+        self.assertTrue(service.check_queue.add_channel(
+            105,
+            priority=100,
+            metadata={'source': 'teamarr_preflight'},
+        ))
+        entry = service.check_queue.get_next_entry(timeout=0.1)
+
+        with patch(
+            'apps.stream.teamarr_preflight_service.get_teamarr_preflight_service',
+            return_value=teamarr_service,
+        ):
+            service._run_specialized_queue_entry(entry)
+
+        status = service.check_queue.get_status()
+        self.assertEqual(status['state'], 'cleared')
+        self.assertEqual(status['completed'], 0)
+        self.assertEqual(status['failed'], 0)
+        self.assertTrue(service.abort_current_check.is_set())
+        self.assertEqual(service._active_queue_entry_executions, {})
+        teamarr_service.record_queued_check_result.assert_not_called()
 
     def test_clear_queue_cancels_queue_owned_force_marker(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
@@ -1148,23 +2258,105 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertTrue(service._single_channel_check_active)
         service._end_single_channel_check_operation()
 
-    def test_worker_keeps_abort_set_during_queue_handoff(self):
+    def test_worker_pop_claim_clear_race_fails_batch_claim_closed(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service.running = True
+        service.batch_start_time = None
+        service.batch_changelog_entries = []
+        service.batch_lock = threading.Lock()
+        service._batch_changelog_generation = 0
+        service._active_batch_changelog_generation = None
+        service.changelog = Mock()
+        service.lock = threading.Lock()
+        service.sync_batch_state = {'active': False}
+        service._sync_batch_generation = 0
+        service._specialized_queue_gates = set()
+        service._external_abort_generation = 0
+        service.checking = False
+        service.abort_current_check = threading.Event()
+        service.progress = Mock()
+        service.check_queue = StreamCheckQueue(max_size=10)
+        service._check_channel = Mock()
+        self.assertTrue(service.check_queue.add_channel(105, priority=10))
+
+        popped = threading.Event()
+        original_get_next_entry = service.check_queue.get_next_entry
+        pull_count = 0
+
+        def pull_entry(timeout):
+            nonlocal pull_count
+            pull_count += 1
+            if pull_count == 1:
+                entry = original_get_next_entry(timeout=timeout)
+                popped.set()
+                return entry
+            service.running = False
+            return None
+
+        service.check_queue.get_next_entry = Mock(side_effect=pull_entry)
+        clear_result = {}
+        service.batch_lock.acquire()
+        batch_lock_released = False
+        worker_thread = threading.Thread(target=service._worker_loop)
+        clear_thread = threading.Thread(
+            target=lambda: clear_result.setdefault('value', service.clear_queue()),
+        )
+        try:
+            worker_thread.start()
+            self.assertTrue(popped.wait(2))
+            self.assertEqual(service.check_queue.get_status()['in_progress'], 1)
+
+            clear_thread.start()
+            self.assertTrue(service.abort_current_check.wait(2))
+
+            # Both the worker claim and clear are waiting for batch_lock now.
+            # Since clear published abort first, the worker must fail closed
+            # regardless of which waiter acquires the lock next.
+            service.batch_lock.release()
+            batch_lock_released = True
+        finally:
+            if not batch_lock_released and service.batch_lock.locked():
+                service.batch_lock.release()
+
+        clear_thread.join(5)
+        worker_thread.join(5)
+
+        self.assertFalse(clear_thread.is_alive())
+        self.assertFalse(worker_thread.is_alive())
+        self.assertTrue(clear_result['value']['abort_requested'])
+        service._check_channel.assert_not_called()
+        self.assertEqual(service._batch_changelog_generation, 0)
+        self.assertIsNone(service._active_batch_changelog_generation)
+        self.assertIsNone(service.batch_start_time)
+        self.assertEqual(service.batch_changelog_entries, [])
+
+    def test_worker_preserves_external_abort_for_owned_popped_entry(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.running = True
         service.batch_start_time = None
         service.abort_current_check = threading.Event()
+        service.progress = Mock()
         service.check_queue = Mock()
+        service.check_queue.owns_in_progress.return_value = True
         service._start_batch_changelog = Mock()
         service._finalize_batch_changelog = Mock()
         seen_abort_states = []
 
         def pull_entry(timeout):
             service.abort_current_check.set()
-            return {'channel_id': 105, 'metadata': {}}
+            return {
+                'channel_id': 105,
+                'metadata': {},
+                'queue_entry_token': 73,
+            }
 
-        def check_channel(channel_id, **_kwargs):
+        def check_channel(channel_id, **kwargs):
             seen_abort_states.append(service.abort_current_check.is_set())
             service.running = False
+            return service._abort_channel_check(
+                channel_id,
+                queue_entry_token=kwargs['queue_entry_token'],
+            )
 
         service.check_queue.get_next_entry.side_effect = pull_entry
         service._check_channel = check_channel
@@ -1172,6 +2364,12 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         service._worker_loop()
 
         self.assertEqual(seen_abort_states, [True])
+        service.check_queue.mark_failed.assert_called_once_with(
+            105,
+            'aborted',
+            entry_token=73,
+        )
+        service._start_batch_changelog.assert_not_called()
 
     def test_worker_uses_single_channel_path_for_teamarr_queue_metadata(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
@@ -1191,6 +2389,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             service.running = False
             return {
                 'channel_id': 8441,
+                'queue_entry_token': 81,
                 'metadata': {
                     'source': 'teamarr_preflight',
                     'program_name': 'Home vs Away',
@@ -1219,12 +2418,16 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             run_mode='teamarr_preflight',
             _operation_already_reserved=True,
             _queue_force_check_generation=None,
+            _queue_entry_token=81,
         )
         teamarr_service.record_queued_check_result.assert_called_once()
         queued_metadata, result = teamarr_service.record_queued_check_result.call_args.args
         self.assertEqual(queued_metadata['source'], 'teamarr_preflight')
         self.assertEqual(result, {'success': True})
-        service.check_queue.mark_completed.assert_called_once_with(8441)
+        service.check_queue.mark_completed.assert_called_once_with(
+            8441,
+            entry_token=81,
+        )
         service.check_queue.mark_failed.assert_not_called()
 
     def test_worker_uses_single_channel_path_for_auto_create_queue_metadata(self):
@@ -1244,6 +2447,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             service.running = False
             return {
                 'channel_id': 9441,
+                'queue_entry_token': 91,
                 'metadata': {
                     'source': 'auto_create',
                     'program_name': 'Live: MLB',
@@ -1266,8 +2470,12 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             forced_profile_id=None,
             _operation_already_reserved=True,
             _queue_force_check_generation=None,
+            _queue_entry_token=91,
         )
-        service.check_queue.mark_completed.assert_called_once_with(9441)
+        service.check_queue.mark_completed.assert_called_once_with(
+            9441,
+            entry_token=91,
+        )
         service.check_queue.mark_failed.assert_not_called()
 
     def test_worker_defers_specialized_queue_entries_while_direct_event_gate_is_active(self):
@@ -1388,6 +2596,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             service.running = False
             return {
                 'channel_id': 8441,
+                'queue_entry_token': 101,
                 'metadata': {
                     'source': 'teamarr_preflight',
                     'program_name': 'Home vs Away',
@@ -1416,8 +2625,12 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             run_mode='teamarr_preflight',
             _operation_already_reserved=True,
             _queue_force_check_generation=None,
+            _queue_entry_token=101,
         )
-        service.check_queue.mark_completed.assert_called_once_with(8441)
+        service.check_queue.mark_completed.assert_called_once_with(
+            8441,
+            entry_token=101,
+        )
 
     def test_provider_limit_override_bypasses_capacity_and_active_viewers_are_stream_protected(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
@@ -1540,6 +2753,11 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(status['queue']['channels_ready'], 1)
         self.assertEqual(status['queue']['channel_visibility_changed'], 2)
         self.assertEqual(status['queue']['started_at'], '2026-05-29T18:03:41')
+        self.assertFalse(status['queue']['entries_complete'])
+        self.assertEqual(
+            status['queue']['entries_unavailable_reason'],
+            'sync_batch_active',
+        )
         self.assertTrue(status['stream_checking_mode'])
 
     def _service_for_idle_progress_status(self, progress_payload):
@@ -1568,6 +2786,20 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertTrue(status['stream_checking_mode'])
         self.assertFalse(status['checking'])
         self.assertFalse(status['queue']['queue_size'])
+
+    def test_get_status_keeps_cancelled_queue_execution_non_idle_until_ack(self):
+        service = self._service_for_idle_progress_status(None)
+        service._active_queue_entry_executions = {
+            (105, 81): {'cancelled': True},
+        }
+
+        status = service.get_status()
+
+        self.assertTrue(status['queue_execution_active'])
+        self.assertTrue(status['checking'])
+        self.assertTrue(status['stream_checking_mode'])
+        self.assertFalse(status['queue']['queue_size'])
+        self.assertFalse(status['queue']['in_progress'])
 
     def test_get_status_marks_stale_batch_progress_when_no_check_is_active(self):
         service = self._service_for_idle_progress_status({
@@ -2324,6 +3556,402 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
         self.assertEqual(data['message'], 'Queue cleared successfully')
         self.assertTrue(data['abort_requested'])
         self.assertEqual(data['cleared']['in_progress'], 1)
+
+    def test_guarded_clear_handler_normalizes_snapshot_and_returns_nested_clear(self):
+        service = Mock()
+        service.clear_queue.return_value = {
+            'guard_matched': True,
+            'abort_requested': False,
+            'cleared': {
+                'queued': 2,
+                'in_progress': 0,
+                'completed': 0,
+                'failed': 0,
+                'queue_size': 2,
+                'channel_ids': [105, 106],
+            },
+            'current': None,
+        }
+        snapshot = {
+            'entries_complete': True,
+            'admission_epoch': 'a' * 32,
+            'admission_revision': 7,
+            'queued_entries': [{
+                'channel_id': 105,
+                'stream_count': 4,
+                'priority': 90,
+                'entry_token': 11,
+                'metadata': {
+                    'source': 'codex_bitrate_recheck',
+                    'run_label': 'bitrate-live-r9',
+                },
+            }, {
+                'channel_id': 106,
+                'entry_token': 12,
+                'metadata': {
+                    'source': 'codex_bitrate_recheck',
+                    'run_label': 'bitrate-live-r9',
+                },
+            }],
+            'in_progress_entries': [],
+            'completed_entries': [],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+            'unrelated_status_field': 'ignored',
+        }
+
+        with self.app.app_context():
+            response = clear_stream_checker_queue_response(
+                payload={'expected_queue_snapshot': snapshot},
+                get_stream_checker_service=lambda: service,
+            )
+
+        data = response.get_json()
+        self.assertEqual(data['message'], 'Queue cleared successfully')
+        self.assertTrue(data['guard_matched'])
+        self.assertEqual(data['cleared']['channel_ids'], [105, 106])
+        normalized = service.clear_queue.call_args.kwargs[
+            'expected_queue_snapshot'
+        ]
+        self.assertNotIn('unrelated_status_field', normalized)
+        self.assertNotIn('stream_count', normalized['queued_entries'][0])
+        self.assertEqual(
+            normalized['queued_entries'][0]['metadata']['run_label'],
+            'bitrate-live-r9',
+        )
+
+    def test_guarded_clear_handler_returns_409_without_success_message(self):
+        service = Mock()
+        service.clear_queue.return_value = {
+            'guard_matched': False,
+            'guard_failure_reason': 'active_owner_not_in_snapshot',
+            'abort_requested': False,
+            'cleared': None,
+            'current': {
+                'entries_complete': True,
+                'admission_epoch': 'b' * 32,
+                'admission_revision': 8,
+                'queued_entries': [],
+                'in_progress_entries': [],
+                'completed_entries': [],
+                'failed_entries': [],
+                'completed_channel_ids': [],
+                'failed_channel_ids': [],
+            },
+        }
+        snapshot = {
+            'entries_complete': True,
+            'admission_epoch': 'a' * 32,
+            'admission_revision': 7,
+            'queued_entries': [],
+            'in_progress_entries': [],
+            'completed_entries': [],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+        }
+
+        with self.app.app_context():
+            response, status_code = clear_stream_checker_queue_response(
+                payload={'expected_queue_snapshot': snapshot},
+                get_stream_checker_service=lambda: service,
+            )
+
+        data = response.get_json()
+        self.assertEqual(status_code, 409)
+        self.assertEqual(data['error'], 'queue_snapshot_mismatch')
+        self.assertNotEqual(data['message'], 'Queue cleared successfully')
+        self.assertFalse(data['guard_matched'])
+        self.assertIsNone(data['cleared'])
+
+    def test_guarded_clear_handler_rejects_incomplete_or_invalid_identity(self):
+        invalid_snapshots = ({
+            'entries_complete': False,
+            'admission_epoch': 'a' * 32,
+            'admission_revision': 7,
+            'queued_entries': [],
+            'in_progress_entries': [],
+            'completed_entries': [],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+        }, {
+            'entries_complete': True,
+            'admission_epoch': 'not-an-epoch',
+            'admission_revision': 7,
+            'queued_entries': [],
+            'in_progress_entries': [],
+            'completed_entries': [],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+        }, {
+            'entries_complete': True,
+            'admission_epoch': 'a' * 32,
+            'admission_revision': 7,
+            'queued_entries': [{
+                'channel_id': 105,
+                'entry_token': True,
+                'metadata': {},
+            }],
+            'in_progress_entries': [],
+            'completed_entries': [],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+        }, {
+            'entries_complete': True,
+            'admission_epoch': 'a' * 32,
+            'admission_revision': 7,
+            'queued_entries': [],
+            'in_progress_entries': [],
+            'completed_entries': [{
+                'channel_id': 105,
+                'entry_token': 11,
+                'metadata': {'source': 'foreign_run'},
+            }],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+        }, {
+            'entries_complete': True,
+            'admission_epoch': 'a' * 32,
+            'admission_revision': 7,
+            'queued_entries': [{
+                'channel_id': 105,
+                'entry_token': 11,
+                'metadata': {'run_label': '\ud800'},
+            }],
+            'in_progress_entries': [],
+            'completed_entries': [],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+        })
+        for snapshot in invalid_snapshots:
+            with self.subTest(snapshot=snapshot):
+                service = Mock()
+                with self.app.app_context():
+                    response, status_code = clear_stream_checker_queue_response(
+                        payload={'expected_queue_snapshot': snapshot},
+                        get_stream_checker_service=lambda: service,
+                    )
+
+                self.assertEqual(status_code, 400)
+                self.assertIn('error', response.get_json())
+                service.clear_queue.assert_not_called()
+
+    def test_guarded_clear_handler_bounds_entry_count_and_metadata_depth(self):
+        base_snapshot = {
+            'entries_complete': True,
+            'admission_epoch': 'a' * 32,
+            'admission_revision': 7,
+            'queued_entries': [],
+            'in_progress_entries': [],
+            'completed_entries': [],
+            'failed_entries': [],
+            'completed_channel_ids': [],
+            'failed_channel_ids': [],
+        }
+        too_many_entries = dict(base_snapshot)
+        too_many_entries['queued_entries'] = [
+            {
+                'channel_id': index + 1,
+                'entry_token': index,
+                'metadata': {},
+            }
+            for index in range(2049)
+        ]
+        too_many_terminal_ids = dict(base_snapshot)
+        too_many_terminal_ids['completed_channel_ids'] = list(range(1, 2050))
+
+        too_wide_list = dict(base_snapshot)
+        too_wide_list['queued_entries'] = [{
+            'channel_id': 105,
+            'entry_token': 11,
+            'metadata': {'values': [0] * 513},
+        }]
+        too_wide_dict = dict(base_snapshot)
+        too_wide_dict['queued_entries'] = [{
+            'channel_id': 105,
+            'entry_token': 11,
+            'metadata': {
+                f'key_{index}': index
+                for index in range(512)
+            },
+        }]
+
+        nested_metadata = {}
+        cursor = nested_metadata
+        for index in range(9):
+            cursor['child'] = {}
+            cursor = cursor['child']
+        too_deep = dict(base_snapshot)
+        too_deep['queued_entries'] = [{
+            'channel_id': 105,
+            'entry_token': 11,
+            'metadata': nested_metadata,
+        }]
+
+        for snapshot in (
+            too_many_entries,
+            too_many_terminal_ids,
+            too_wide_list,
+            too_wide_dict,
+            too_deep,
+        ):
+            with self.subTest(snapshot_kind=(
+                'entry_count'
+                if snapshot is too_many_entries
+                else 'terminal_id_count'
+                if snapshot is too_many_terminal_ids
+                else 'wide_list'
+                if snapshot is too_wide_list
+                else 'wide_dict'
+                if snapshot is too_wide_dict
+                else 'depth'
+            )):
+                service = Mock()
+                with self.app.app_context():
+                    response, status_code = clear_stream_checker_queue_response(
+                        payload={'expected_queue_snapshot': snapshot},
+                        get_stream_checker_service=lambda: service,
+                    )
+
+                self.assertEqual(status_code, 400)
+                self.assertIn('error', response.get_json())
+                service.clear_queue.assert_not_called()
+
+    def test_queue_clear_route_bounds_and_strictly_parses_raw_json_body(self):
+        from apps.api import web_api
+
+        web_api.app.config['TESTING'] = True
+        with patch.object(
+            web_api,
+            'STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES',
+            6000,
+        ), patch.object(web_api, 'get_stream_checker_service') as service_getter:
+            with web_api.app.test_client() as client:
+                oversized = client.post(
+                    '/api/stream-checker/queue/clear',
+                    data=b'x' * 6001,
+                    content_type='application/json',
+                )
+                invalid_json = client.post(
+                    '/api/stream-checker/queue/clear',
+                    data=b'{invalid',
+                    content_type='application/json',
+                )
+                oversized_integer = client.post(
+                    '/api/stream-checker/queue/clear',
+                    data=b'1' * 5000,
+                    content_type='application/json',
+                )
+                non_finite_snapshot = {
+                    'entries_complete': True,
+                    'admission_epoch': 'a' * 32,
+                    'admission_revision': 7,
+                    'queued_entries': [{
+                        'channel_id': 105,
+                        'entry_token': 11,
+                        'metadata': {'value': float('nan')},
+                    }],
+                    'in_progress_entries': [],
+                    'completed_entries': [],
+                    'failed_entries': [],
+                    'completed_channel_ids': [],
+                    'failed_channel_ids': [],
+                }
+                non_finite_json = client.post(
+                    '/api/stream-checker/queue/clear',
+                    data=json.dumps({
+                        'expected_queue_snapshot': non_finite_snapshot,
+                    }).encode('utf-8'),
+                    content_type='application/json',
+                )
+                large_exponent_json = client.post(
+                    '/api/stream-checker/queue/clear',
+                    data=json.dumps({
+                        'expected_queue_snapshot': non_finite_snapshot,
+                    }).replace('NaN', '1e999').encode('utf-8'),
+                    content_type='application/json',
+                )
+
+        self.assertEqual(oversized.status_code, 413)
+        self.assertEqual(invalid_json.status_code, 400)
+        self.assertEqual(oversized_integer.status_code, 400)
+        self.assertEqual(non_finite_json.status_code, 400)
+        self.assertEqual(large_exponent_json.status_code, 400)
+        service_getter.assert_not_called()
+
+    def test_queue_response_propagates_safe_public_ownership_metadata(self):
+        service = Mock()
+        service.queue_channels.return_value = 2
+        metadata = {
+            'source': 'codex_bitrate_recheck',
+            'run_label': 'bitrate-live-r9',
+        }
+
+        with self.app.app_context():
+            response = add_to_stream_checker_queue_response(
+                payload={
+                    'channel_ids': [105, 106],
+                    'priority': 90,
+                    'force_check': True,
+                    'metadata': metadata,
+                },
+                get_stream_checker_service=lambda: service,
+            )
+
+        self.assertEqual(response.get_json()['added'], 2)
+        service.queue_channels.assert_called_once_with(
+            [105, 106],
+            90,
+            force_check=True,
+            metadata=metadata,
+            immutable_metadata_keys=set(metadata),
+        )
+
+    def test_queue_response_coerces_string_false_force_flag(self):
+        service = Mock()
+        service.queue_channels.return_value = 1
+
+        with self.app.app_context():
+            response = add_to_stream_checker_queue_response(
+                payload={
+                    'channel_ids': [105],
+                    'force_check': 'false',
+                },
+                get_stream_checker_service=lambda: service,
+            )
+
+        self.assertEqual(response.get_json()['added'], 1)
+        service.queue_channels.assert_called_once_with(
+            [105],
+            10,
+            force_check=False,
+        )
+
+    def test_queue_response_rejects_reserved_or_unbounded_metadata(self):
+        for metadata in (
+            {'source': 'teamarr_preflight', 'run_label': 'forged'},
+            {'source': 'codex_bitrate_recheck', 'unexpected': 'value'},
+            {'source': 'contains spaces'},
+        ):
+            service = Mock()
+            with self.app.app_context():
+                response, status_code = add_to_stream_checker_queue_response(
+                    payload={
+                        'channel_ids': [105, 106],
+                        'metadata': metadata,
+                    },
+                    get_stream_checker_service=lambda: service,
+                )
+
+            self.assertEqual(status_code, 400)
+            self.assertIn('error', response.get_json())
+            service.queue_channels.assert_not_called()
 
     def test_queue_all_channels_uses_service_queue_path(self):
         class UpdateTracker:

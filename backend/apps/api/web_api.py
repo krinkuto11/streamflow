@@ -37,7 +37,6 @@ from apps.background.scheduling_workers import (
     udi_refresh_processor_loop,
 )
 from apps.stream.udp_proxy import UDPProxyManager
-
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.channels.channel_order_manager import get_channel_order_manager
 from apps.channels.repository import UdiChannelRepository
@@ -288,6 +287,11 @@ except ImportError:
 from apps.core.logging_config import setup_logging, log_function_call, log_function_return, log_exception
 
 logger = setup_logging(__name__)
+STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+def _reject_non_finite_json_constant(value):
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
 # Configuration constants
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
@@ -1458,7 +1462,33 @@ def add_to_stream_checker_queue():
 @app.route('/api/stream-checker/queue/clear', methods=['POST'])
 def clear_stream_checker_queue():
     """Clear the checking queue."""
-    return clear_stream_checker_queue_response(get_stream_checker_service=get_stream_checker_service)
+    content_length = request.content_length
+    if (
+        content_length is not None
+        and content_length > STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES
+    ):
+        return jsonify({"error": "queue clear request body is too large"}), 413
+    raw_body = request.stream.read(
+        STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES + 1
+    )
+    if len(raw_body) > STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES:
+        return jsonify({"error": "queue clear request body is too large"}), 413
+    if raw_body:
+        try:
+            payload = json.loads(
+                raw_body.decode('utf-8'),
+                parse_constant=_reject_non_finite_json_constant,
+            )
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            return jsonify({"error": "queue clear request body must be valid JSON"}), 400
+        if payload is None:
+            return jsonify({"error": "queue clear request body must be an object"}), 400
+    else:
+        payload = None
+    return clear_stream_checker_queue_response(
+        payload=payload,
+        get_stream_checker_service=get_stream_checker_service,
+    )
 
 @app.route('/api/stream-checker/config', methods=['GET'])
 def get_stream_checker_config():

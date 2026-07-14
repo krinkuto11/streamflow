@@ -17,6 +17,8 @@ def _service_with_changelog():
     service.batch_lock = threading.Lock()
     service.batch_start_time = datetime.now().isoformat()
     service.batch_changelog_entries = []
+    service._batch_changelog_generation = 1
+    service._active_batch_changelog_generation = 1
     service.changelog = Mock()
     return service
 
@@ -121,6 +123,19 @@ def test_batch_finalizer_persists_complete_details_and_matching_totals():
     assert channel_stats["incomplete_bitrate_streams"] == 1
     assert service.batch_start_time is None
     assert service.batch_changelog_entries == []
+
+
+def test_batch_finalizer_resets_empty_started_batch():
+    service = _service_with_changelog()
+    stale_start_time = service.batch_start_time
+
+    service._finalize_batch_changelog(batch_generation=1)
+
+    assert stale_start_time is not None
+    assert service.batch_start_time is None
+    assert service.batch_changelog_entries == []
+    assert service._active_batch_changelog_generation is None
+    service.changelog.add_entry.assert_not_called()
 
 
 def test_batch_finalizer_serialized_json_export_keeps_every_stream_row():
