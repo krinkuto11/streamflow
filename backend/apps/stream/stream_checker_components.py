@@ -292,7 +292,6 @@ class StreamCheckConfig:
     def is_auto_quality_checking_enabled(self) -> bool:
         """Check if automatic quality checking is enabled."""
         return self.config.get('automation_controls', {}).get('auto_quality_checking', True)
-    
 
 
 class ChannelUpdateTracker:
@@ -699,7 +698,7 @@ class StreamCheckQueue:
     """Queue manager for channel stream checking."""
 
     _HEAP_COMPACTION_STALE_ALLOWANCE = 32
-    
+
     def __init__(self, max_size=1000):
         # The heap may temporarily contain stale promotion entries or an entry
         # which a worker popped before acquiring the lifecycle lock. Capacity
@@ -729,7 +728,7 @@ class StreamCheckQueue:
         self.failed = {}
         self.failed_entry_details = {}
         self.lock = threading.Lock()
-        
+
         # ETA Tracking variables
         import collections
         self.stream_processing_times = collections.deque(maxlen=100)
@@ -794,7 +793,7 @@ class StreamCheckQueue:
     def _maybe_compact_queue_heap_locked(self) -> None:
         if self.queue.qsize() > self._heap_compaction_threshold_locked():
             self._compact_queue_heap_locked()
-    
+
     def add_channel(
         self,
         channel_id: int,
@@ -977,7 +976,7 @@ class StreamCheckQueue:
         logger.debug(f"Added channel {channel_id} to queue (priority: {priority})")
         self._maybe_compact_queue_heap_locked()
         return True
-    
+
     def add_channels(
         self,
         channel_ids: List[int],
@@ -992,12 +991,12 @@ class StreamCheckQueue:
         try:
             from apps.udi import get_udi_manager
             udi = get_udi_manager()
-        except Exception as exc:
+        except Exception:
             logger.debug(
-                "Could not access UDI manager while estimating queued stream counts: %s",
-                exc,
+                "Could not access UDI manager while estimating queued stream counts",
+                exc_info=True,
             )
-        
+
         queued_channels = []
         for channel_id in channel_ids:
             channel = None
@@ -1008,14 +1007,16 @@ class StreamCheckQueue:
                         channel = None
                     else:
                         try:
-                            channel = udi.get_channel_by_id(channel_id, fetch_if_missing=False)
+                            channel = udi.get_channel_by_id(
+                                channel_id, fetch_if_missing=False
+                            )
                         except TypeError:
                             channel = udi.get_channel_by_id(channel_id)
-                except Exception as exc:
+                except Exception:
                     logger.debug(
-                        "Could not read cached channel %s for queued stream count: %s",
+                        "Could not read cached channel %s for queued stream count",
                         channel_id,
-                        exc,
+                        exc_info=True,
                     )
             stream_count = len(channel.get('streams', [])) if channel else 1
             queued_channels.append((channel_id, stream_count))
@@ -1152,7 +1153,7 @@ class StreamCheckQueue:
                 for item in deferred_items:
                     self.queue.put_nowait(item)
                 self._maybe_compact_queue_heap_locked()
-    
+
     def remove_from_completed(self, channel_id: int):
         """Remove a channel from the completed set to allow re-queueing.
         
@@ -1167,7 +1168,7 @@ class StreamCheckQueue:
                 logger.debug(f"Removed channel {channel_id} from completed set")
                 return True
         return False
-    
+
     def get_next_entry(self, timeout: float = 1.0) -> Optional[Dict[str, Any]]:
         """Get the next queue entry to check."""
         try:
@@ -1208,7 +1209,7 @@ class StreamCheckQueue:
         """Get the next channel to check."""
         entry = self.get_next_entry(timeout=timeout)
         return entry.get('channel_id') if entry else None
-    
+
     def mark_completed(
         self,
         channel_id: int,
@@ -1269,7 +1270,7 @@ class StreamCheckQueue:
             self._bump_admission_revision_locked()
             logger.debug(f"Marked channel {channel_id} as completed")
             return True
-    
+
     def mark_failed(
         self,
         channel_id: int,
@@ -1307,7 +1308,7 @@ class StreamCheckQueue:
                 duration_sec = (datetime.now() - self.channel_start_times[channel_id]).total_seconds()
                 self.channel_processing_times.append(duration_sec)
                 del self.channel_start_times[channel_id]
-                
+
             if channel_id in self.in_progress:
                 del self.in_progress[channel_id]
             self.in_progress_metadata.pop(channel_id, None)
@@ -1327,7 +1328,7 @@ class StreamCheckQueue:
             self._bump_admission_revision_locked()
             logger.warning(f"Marked channel {channel_id} as failed: {error}")
             return True
-    
+
     def _entry_snapshots_locked(self):
         queued_entries = [
                 {

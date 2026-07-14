@@ -27,6 +27,77 @@ _QUEUE_GUARD_MAX_METADATA_DEPTH = 8
 _QUEUE_GUARD_MAX_METADATA_STRING_BYTES = 16384
 
 
+def _is_strict_json_integer(value: Any, *, minimum: int = 0) -> bool:
+    """Return whether value is a JSON integer at or above the minimum."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
+
+
+def _public_cleared_queue_summary(raw_cleared: Any) -> Dict[str, Any]:
+    """Rebuild the public queue-clear summary from strictly typed fields."""
+    if not isinstance(raw_cleared, dict):
+        raise ValueError("queue clear result omitted its cleared summary")
+
+    public_cleared: Dict[str, Any] = {}
+    for field_name in ("queued", "in_progress", "completed", "failed", "queue_size"):
+        if field_name not in raw_cleared:
+            continue
+        value = raw_cleared.get(field_name)
+        if not _is_strict_json_integer(value):
+            raise ValueError("queue clear result contains an invalid count")
+        public_cleared[field_name] = int(value)
+
+    if "channel_ids" in raw_cleared:
+        channel_ids = raw_cleared.get("channel_ids")
+        if not isinstance(channel_ids, list) or any(
+            not _is_strict_json_integer(channel_id, minimum=1)
+            for channel_id in channel_ids
+        ):
+            raise ValueError("queue clear result contains invalid channel ids")
+        public_cleared["channel_ids"] = [int(channel_id) for channel_id in channel_ids]
+
+    return public_cleared
+
+
+def _public_queue_clear_success(result: Any, *, guarded: bool) -> Dict[str, Any]:
+    """Return the stable public subset of one successful service clear."""
+    if not isinstance(result, dict):
+        raise ValueError("queue clear service returned an invalid result")
+
+    guard_matched = result.get("guard_matched")
+    if guarded:
+        if guard_matched is not True:
+            raise ValueError("guarded queue clear did not report a match")
+        public_guard_matched: Optional[bool] = True
+    else:
+        if guard_matched is not None:
+            raise ValueError("unguarded queue clear returned unexpected guard state")
+        public_guard_matched = None
+
+    if result.get("current") is not None:
+        raise ValueError("successful queue clear returned a current snapshot")
+
+    public_booleans: Dict[str, bool] = {}
+    for field_name in (
+        "abort_requested",
+        "batch_changelog_finalized",
+        "batch_changelog_detached",
+    ):
+        value = result.get(field_name, False)
+        if not isinstance(value, bool):
+            raise ValueError("queue clear result contains an invalid boolean")
+        public_booleans[field_name] = True if value is True else False
+
+    return {
+        "message": "Queue cleared successfully",
+        "guard_matched": public_guard_matched,
+        "abort_requested": public_booleans["abort_requested"],
+        "cleared": _public_cleared_queue_summary(result.get("cleared")),
+        "current": None,
+        "batch_changelog_finalized": public_booleans["batch_changelog_finalized"],
+        "batch_changelog_detached": public_booleans["batch_changelog_detached"],
+    }
+
+
 def _coerce_bool(value: Any, default: bool = False) -> bool:
     """Coerce common JSON/form boolean values without treating "false" as True."""
     if value is None:
@@ -518,13 +589,34 @@ def add_to_stream_checker_queue_response(
 
         if "channel_ids" in data:
             channel_ids = data["channel_ids"]
+            if not isinstance(channel_ids, list) or any(
+                not _is_strict_json_integer(channel_id, minimum=1)
+                for channel_id in channel_ids
+            ):
+                return (
+                    jsonify(
+                        {"error": "channel_ids must be an array of positive integers"}
+                    ),
+                    400,
+                )
             priority = data.get("priority", 10)
             added = service.queue_channels(
                 channel_ids,
                 priority,
                 **queue_kwargs,
             )
-            return jsonify({"message": f"Queued {added} channels successfully", "added": added})
+            if not _is_strict_json_integer(added) or added > len(channel_ids):
+                logger.error(
+                    "Stream checker queue service returned an invalid batch count"
+                )
+                return jsonify({"error": "Internal Server Error"}), 500
+            public_added = int(added)
+            return jsonify(
+                {
+                    "message": f"Queued {public_added} channels successfully",
+                    "added": public_added,
+                }
+            )
 
         return jsonify({"error": "Must provide channel_id or channel_ids"}), 400
     except Exception as exc:
@@ -549,12 +641,25 @@ def clear_stream_checker_queue_response(
         else:
             result = service.clear_queue(expected_queue_snapshot=expected_snapshot)
         if isinstance(result, dict) and result.get('guard_matched') is False:
-            return jsonify({
-                'error': 'queue_snapshot_mismatch',
-                'message': 'Queue changed after the expected snapshot was read',
-                **result,
-            }), 409
-        return jsonify({"message": "Queue cleared successfully", **(result or {})})
+            public_mismatch = {
+                "error": "queue_snapshot_mismatch",
+                "message": "Queue changed after the expected snapshot was read",
+                "guard_matched": False,
+                "abort_requested": False,
+                "cleared": None,
+                "current": None,
+                "batch_changelog_finalized": False,
+                "batch_changelog_detached": False,
+            }
+            if result.get("guard_failure_reason") == "active_owner_not_in_snapshot":
+                public_mismatch["guard_failure_reason"] = "active_owner_not_in_snapshot"
+            return jsonify(public_mismatch), 409
+        return jsonify(
+            _public_queue_clear_success(
+                result,
+                guarded=expected_snapshot is not None,
+            )
+        )
     except Exception as exc:
         logger.error(f"Error clearing stream checker queue: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500
@@ -823,18 +928,61 @@ def check_single_channel_now_response(
             force_check=force_check,
         )
 
-        if result.get("error") == "aborted":
-            return jsonify(result), 409
-        if result.get("success") or result.get("skipped"):
-            return jsonify(result), 200
+        error_code = result.get("error")
+        if error_code == "aborted":
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "aborted",
+                        "dead_streams_count": 0,
+                        "revived_streams_count": 0,
+                        "checked_streams": [],
+                        "skipped": True,
+                        "skip_reason": "aborted",
+                        "aborted": True,
+                        "channel_id": channel_id,
+                        "message": "The channel check was aborted",
+                    }
+                ),
+                409,
+            )
 
         # no_profile: user configuration error — channel has no automation profile.
         # Return 400 so the frontend can distinguish this from a generic failure
         # and surface a precise, actionable message rather than "Check Failed".
-        if result.get("error") == "no_profile":
-            return jsonify(result), 400
-        if result.get("error") == "stream_checker_active":
-            return jsonify(result), 409
+        if error_code == "no_profile":
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "no_profile",
+                        "channel_id": channel_id,
+                        "message": (
+                            "This channel has no active automation profile assigned. "
+                            "Assign an automation period with a profile before running "
+                            "a health check."
+                        ),
+                    }
+                ),
+                400,
+            )
+        if error_code == "stream_checker_active":
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "error": "stream_checker_active",
+                        "channel_id": channel_id,
+                        "message": "Stream Checker work is already active",
+                    }
+                ),
+                409,
+            )
+        if error_code is None and (
+            result.get("success") is True or result.get("skipped") is True
+        ):
+            return jsonify(result), 200
 
         logger.warning(
             "Single-channel check failed; returning sanitized error response for channel %s",
@@ -1026,12 +1174,18 @@ def queue_all_channels_response(
 
         service.update_tracker.mark_channels_updated(channel_ids)
         added = service.queue_channels(channel_ids, priority=10)
+        if not _is_strict_json_integer(added) or added > len(channel_ids):
+            logger.error(
+                "Stream checker queue service returned an invalid queue-all count"
+            )
+            return jsonify({"error": "Internal Server Error"}), 500
+        public_added = int(added)
 
         return jsonify(
             {
-                "message": f"Queued {added} channels for checking",
+                "message": f"Queued {public_added} channels for checking",
                 "total_channels": len(channel_ids),
-                "queued": added,
+                "queued": public_added,
                 "start": start_meta,
             }
         )

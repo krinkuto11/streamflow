@@ -3604,9 +3604,11 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
 
     def test_clear_queue_response_includes_abort_details(self):
         service = Mock()
+        secret = "Traceback with /app/data/secret/path"
         service.clear_queue.return_value = {
-            'abort_requested': True,
-            'cleared': {'queued': 2, 'in_progress': 1},
+            "abort_requested": True,
+            "cleared": {"queued": 2, "in_progress": 1},
+            "diagnostics": secret,
         }
 
         with self.app.app_context():
@@ -3615,9 +3617,49 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             )
 
         data = response.get_json()
-        self.assertEqual(data['message'], 'Queue cleared successfully')
-        self.assertTrue(data['abort_requested'])
-        self.assertEqual(data['cleared']['in_progress'], 1)
+        self.assertEqual(data["message"], "Queue cleared successfully")
+        self.assertTrue(data["abort_requested"])
+        self.assertEqual(data["cleared"]["in_progress"], 1)
+        self.assertNotIn("diagnostics", data)
+        self.assertNotIn("secret", response.get_data(as_text=True))
+
+    def test_clear_queue_response_rejects_untrusted_public_fields(self):
+        secret = "Traceback with /app/data/secret/path"
+        invalid_results = (
+            {
+                "abort_requested": secret,
+                "cleared": {"queued": 1},
+            },
+            {
+                "abort_requested": False,
+                "cleared": {"queued": secret},
+            },
+            {
+                "abort_requested": False,
+                "cleared": {"channel_ids": [True]},
+            },
+            {
+                "abort_requested": False,
+                "cleared": {"channel_ids": [secret]},
+            },
+        )
+
+        for invalid_result in invalid_results:
+            with self.subTest(invalid_result=repr(invalid_result)):
+                service = Mock()
+                service.clear_queue.return_value = invalid_result
+
+                with self.app.app_context():
+                    response, status_code = clear_stream_checker_queue_response(
+                        get_stream_checker_service=lambda: service,
+                    )
+
+                self.assertEqual(status_code, 500)
+                self.assertEqual(
+                    response.get_json(),
+                    {"error": "Internal Server Error"},
+                )
+                self.assertNotIn("secret", response.get_data(as_text=True))
 
     def test_guarded_clear_handler_normalizes_snapshot_and_returns_nested_clear(self):
         service = Mock()
@@ -3730,6 +3772,68 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
         self.assertNotEqual(data['message'], 'Queue cleared successfully')
         self.assertFalse(data['guard_matched'])
         self.assertIsNone(data['cleared'])
+        self.assertEqual(
+            data["guard_failure_reason"],
+            "active_owner_not_in_snapshot",
+        )
+
+    def test_guarded_clear_handler_does_not_echo_mismatch_internals(self):
+        service = Mock()
+        secret = "Traceback with /app/data/secret/path"
+        service.clear_queue.return_value = {
+            "guard_matched": False,
+            "guard_failure_reason": secret,
+            "abort_requested": False,
+            "cleared": None,
+            "current": {
+                "entries_complete": True,
+                "admission_epoch": "b" * 32,
+                "admission_revision": 8,
+                "paused": False,
+                "queued_entries": [
+                    {
+                        "channel_id": 105,
+                        "entry_token": 11,
+                        "metadata": {"traceback": secret},
+                    }
+                ],
+            },
+            "message": secret,
+        }
+        snapshot = {
+            "entries_complete": True,
+            "admission_epoch": "a" * 32,
+            "admission_revision": 7,
+            "paused": False,
+            "queued_entries": [],
+            "in_progress_entries": [],
+            "completed_entries": [],
+            "failed_entries": [],
+            "completed_channel_ids": [],
+            "failed_channel_ids": [],
+        }
+
+        with self.app.app_context():
+            response, status_code = clear_stream_checker_queue_response(
+                payload={"expected_queue_snapshot": snapshot},
+                get_stream_checker_service=lambda: service,
+            )
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(
+            response.get_json(),
+            {
+                "error": "queue_snapshot_mismatch",
+                "message": "Queue changed after the expected snapshot was read",
+                "guard_matched": False,
+                "abort_requested": False,
+                "cleared": None,
+                "current": None,
+                "batch_changelog_finalized": False,
+                "batch_changelog_detached": False,
+            },
+        )
+        self.assertNotIn("secret", response.get_data(as_text=True))
 
     def test_guarded_clear_handler_rejects_incomplete_or_invalid_identity(self):
         invalid_snapshots = ({
@@ -4029,6 +4133,52 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
             force_check=False,
         )
 
+    def test_queue_response_rejects_untrusted_service_counts(self):
+        secret = "Traceback with /app/data/secret/path"
+        for invalid_count in (secret, {"exception": secret}, True, -1, 1.5, 3):
+            with self.subTest(invalid_count=repr(invalid_count)):
+                service = Mock()
+                service.queue_channels.return_value = invalid_count
+
+                with self.app.app_context():
+                    response, status_code = add_to_stream_checker_queue_response(
+                        payload={"channel_ids": [105, 106]},
+                        get_stream_checker_service=lambda: service,
+                    )
+
+                self.assertEqual(status_code, 500)
+                self.assertEqual(
+                    response.get_json(),
+                    {"error": "Internal Server Error"},
+                )
+                self.assertNotIn("secret", response.get_data(as_text=True))
+
+    def test_queue_response_rejects_invalid_channel_id_arrays(self):
+        for invalid_channel_ids in (
+            True,
+            "105",
+            {"channel_id": 105},
+            [True],
+            ["105"],
+            [0],
+            [-1],
+        ):
+            with self.subTest(channel_ids=repr(invalid_channel_ids)):
+                service = Mock()
+
+                with self.app.app_context():
+                    response, status_code = add_to_stream_checker_queue_response(
+                        payload={"channel_ids": invalid_channel_ids},
+                        get_stream_checker_service=lambda: service,
+                    )
+
+                self.assertEqual(status_code, 400)
+                self.assertEqual(
+                    response.get_json(),
+                    {"error": "channel_ids must be an array of positive integers"},
+                )
+                service.queue_channels.assert_not_called()
+
     def test_queue_response_rejects_reserved_or_unbounded_metadata(self):
         for metadata in (
             {'source': 'teamarr_preflight', 'run_label': 'forged'},
@@ -4088,6 +4238,35 @@ class TestStreamCheckerQueueHandlers(unittest.TestCase):
         self.assertEqual(service.queued['priority'], 10)
         self.assertFalse(service.queued['force_check'])
         self.assertEqual(data['queued'], 2)
+
+    def test_queue_all_channels_rejects_untrusted_service_counts(self):
+        secret = "Traceback with /app/data/secret/path"
+        for invalid_count in (secret, {"exception": secret}, True, -1, 1.5, 4):
+            with self.subTest(invalid_count=repr(invalid_count)):
+                service = Mock()
+                service.config = Mock()
+                service.config.get.side_effect = lambda key, default=None: default
+                service.update_tracker = Mock()
+                service.queue_channels.return_value = invalid_count
+                udi = Mock()
+                udi.get_channels.return_value = [
+                    {"id": 1},
+                    {"id": 2},
+                    {"id": 3},
+                ]
+
+                with self.app.app_context():
+                    response, status_code = queue_all_channels_response(
+                        get_stream_checker_service=lambda: service,
+                        get_udi_manager=lambda: udi,
+                    )
+
+                self.assertEqual(status_code, 500)
+                self.assertEqual(
+                    response.get_json(),
+                    {"error": "Internal Server Error"},
+                )
+                self.assertNotIn("secret", response.get_data(as_text=True))
 
 
 if __name__ == '__main__':

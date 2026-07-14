@@ -592,15 +592,16 @@ class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
 
         mock_service = Mock()
         mock_service.check_single_channel.return_value = {
-            'success': False,
-            'error': 'Traceback with /app/data/secret/path',
-            'channel_id': 1,
+            "success": "Traceback with /app/data/secret/path",
+            "skipped": {"exception": "Traceback with /app/data/secret/path"},
+            "error": "Traceback with /app/data/secret/path",
+            "channel_id": 1,
         }
 
         app = Flask(__name__)
         with app.app_context():
             result = check_single_channel_now_response(
-                payload={'channel_id': 1},
+                payload={"channel_id": 1},
                 get_stream_checker_service=lambda: mock_service,
             )
 
@@ -608,9 +609,102 @@ class TestSingleChannelHandlerNoProfileResponse(unittest.TestCase):
         self.assertEqual(status_code, 500)
 
         import json as json_mod
+
         data = json_mod.loads(response.get_data(as_text=True))
-        self.assertEqual(data.get('error'), 'Internal Server Error')
-        self.assertNotIn('secret', response.get_data(as_text=True))
+        self.assertEqual(data.get("error"), "Internal Server Error")
+        self.assertNotIn("secret", response.get_data(as_text=True))
+
+    def test_handler_rebuilds_known_service_errors_without_internal_details(self):
+        """Known status mappings must not echo arbitrary service-result fields."""
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_channel_now_response
+
+        secret = "Traceback with /app/data/secret/path"
+        cases = (
+            ("aborted", 409),
+            ("no_profile", 400),
+            ("stream_checker_active", 409),
+        )
+        app = Flask(__name__)
+
+        for error_code, expected_status in cases:
+            with self.subTest(error_code=error_code):
+                mock_service = Mock()
+                mock_service.get_status.return_value = {
+                    "checking": False,
+                    "queue": {},
+                    "progress": {},
+                }
+                mock_service.check_single_channel.return_value = {
+                    "success": secret,
+                    "skipped": {"exception": secret},
+                    "error": error_code,
+                    "message": secret,
+                    "traceback": secret,
+                    "analysis": {"exception": secret},
+                    "channel_id": 1,
+                }
+
+                with app.app_context():
+                    response, status_code = check_single_channel_now_response(
+                        payload={"channel_id": 1},
+                        get_stream_checker_service=lambda: mock_service,
+                    )
+
+                self.assertEqual(status_code, expected_status)
+                self.assertEqual(response.get_json()["error"], error_code)
+                self.assertNotIn("secret", response.get_data(as_text=True))
+                self.assertNotIn("traceback", response.get_json())
+                self.assertNotIn("analysis", response.get_json())
+                if error_code == "aborted":
+                    self.assertEqual(
+                        {
+                            key: response.get_json()[key]
+                            for key in (
+                                "dead_streams_count",
+                                "revived_streams_count",
+                                "checked_streams",
+                                "skipped",
+                                "skip_reason",
+                            )
+                        },
+                        {
+                            "dead_streams_count": 0,
+                            "revived_streams_count": 0,
+                            "checked_streams": [],
+                            "skipped": True,
+                            "skip_reason": "aborted",
+                        },
+                    )
+
+    def test_service_exception_result_uses_stable_public_error_code(self):
+        """Service failures keep exception details in logs, not return values."""
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service = object.__new__(StreamCheckerService)
+        service._begin_single_channel_check_operation = Mock(return_value=True)
+        service._end_single_channel_check_operation = Mock()
+        service._abort_channel_check_if_requested = Mock(return_value=None)
+        service.progress = Mock()
+        secret = "Traceback with /app/data/secret/path"
+
+        with patch(
+            "apps.stream.stream_checker_service.get_udi_manager",
+            side_effect=RuntimeError(secret),
+        ):
+            result = StreamCheckerService.check_single_channel(service, 1)
+
+        self.assertEqual(
+            result,
+            {
+                "success": False,
+                "error": "single_channel_check_failed",
+                "channel_id": 1,
+            },
+        )
+        self.assertNotIn("secret", repr(result))
+        service.progress.clear.assert_called_once()
+        service._end_single_channel_check_operation.assert_called_once()
 
 
 class TestSingleStreamCheckHandler(unittest.TestCase):
@@ -1263,7 +1357,6 @@ class TestSingleStreamCheckService(unittest.TestCase):
         self.assertEqual(scheduler_kwargs['streams'], [stream])
 
 
-
 class TestSingleChannelForcedProfileId(unittest.TestCase):
     """Tests for scenario 3 — multi-period channel with explicit profile selection via picker."""
 
@@ -1411,7 +1504,6 @@ class TestSingleChannelForcedProfileId(unittest.TestCase):
         self.assertEqual(result.get('error'), 'no_profile')
         # get_profile must NOT have been called (forced_profile_id is None/falsy)
         mock_acm.get_profile.assert_not_called()
-
 
 
 if __name__ == '__main__':

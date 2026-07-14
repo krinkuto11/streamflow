@@ -9382,10 +9382,18 @@ class StreamCheckerService:
                 'stats': check_stats
             }
             
-        except Exception as e:
-            logger.error(f"Error checking single channel {channel_id}: {e}", exc_info=True)
+        except Exception:
+            logger.error(
+                "Error checking single channel %s",
+                channel_id,
+                exc_info=True,
+            )
             clear_operation_progress()
-            return {'success': False, 'error': str(e)}
+            return {
+                'success': False,
+                'error': 'single_channel_check_failed',
+                'channel_id': channel_id,
+            }
         finally:
             if udi is not None:
                 udi.clear_automation_busy()
