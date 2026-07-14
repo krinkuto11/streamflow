@@ -29,11 +29,23 @@ def discover_streams_response(*, get_automation_manager: Callable[[], Any]):
 def refresh_playlist_response(*, payload: Any, get_automation_manager: Callable[[], Any]):
     """Handle manual M3U refresh quick action."""
     try:
+        if payload is not None and not isinstance(payload, dict):
+            return jsonify({"error": "Request body must be a JSON object"}), 400
+
         data = payload or {}
-        _account_id = data.get("account_id")
+        account_id = data.get("account_id")
+        if account_id is not None and (
+            isinstance(account_id, bool)
+            or not isinstance(account_id, int)
+            or account_id <= 0
+        ):
+            return jsonify({"error": "account_id must be a positive integer"}), 400
 
         manager = get_automation_manager()
-        success, _ = manager.refresh_playlists(force=True)
+        if account_id is None:
+            success, _ = manager.refresh_playlists(force=True)
+        else:
+            success, _ = manager.refresh_playlists(force=True, account_id=account_id)
 
         if success:
             return jsonify({"message": "Playlist refresh request accepted"})
