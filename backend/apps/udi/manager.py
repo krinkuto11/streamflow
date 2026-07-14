@@ -2063,6 +2063,7 @@ class UDIManager:
             return {
                 "active_streams": active_streams,
                 "real_viewers": real_viewers,
+                "real_viewer_streams": 1 if active_streams and real_viewers else 0,
                 "shadow_watchers": 0,
             }
 
@@ -2079,6 +2080,7 @@ class UDIManager:
         return {
             "active_streams": 1 if total_clients > 0 else 0,
             "real_viewers": real_viewers,
+            "real_viewer_streams": 1 if real_viewers > 0 else 0,
             "shadow_watchers": shadow_watchers,
         }
     
@@ -2416,8 +2418,9 @@ class UDIManager:
         """Get active profile capacity context for an account.
 
         ``active_streams`` preserves the historical slot-count semantics used
-        for profile capacity. ``real_viewers`` and ``shadow_watchers`` split the
-        downstream client context when Dispatcharr exposes client details.
+        for profile capacity. ``real_viewer_streams`` counts those upstream slots
+        that have at least one real client, while ``real_viewers`` and
+        ``shadow_watchers`` expose downstream client counts.
         
         Args:
             account_id: M3U account ID
@@ -2461,11 +2464,13 @@ class UDIManager:
                 {
                     "active_streams": 0,
                     "real_viewers": 0,
+                    "real_viewer_streams": 0,
                     "shadow_watchers": 0,
                 },
             )
             current["active_streams"] += usage.get("active_streams", 0)
             current["real_viewers"] += usage.get("real_viewers", 0)
+            current["real_viewer_streams"] += usage.get("real_viewer_streams", 0)
             current["shadow_watchers"] += usage.get("shadow_watchers", 0)
         
         logger.debug(f"Account {account_id} profile usage: {profile_counts}")
@@ -2546,8 +2551,8 @@ class UDIManager:
                 continue
             
             # Check if profile has available slots
-            max_streams = profile.get('max_streams', 0)
-            active_count = profile_usage.get(profile_id, 0)
+            max_streams = _safe_positive_int(profile.get('max_streams', 0))
+            active_count = _safe_positive_int(profile_usage.get(profile_id, 0))
             
             if max_streams == 0:
                 # Unlimited streams

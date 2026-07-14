@@ -139,7 +139,13 @@ describe('operatorHelpSections', () => {
           useWhen: expect.any(String),
           risk: expect.any(String),
         }))
-        expect(['Visible UI setting', 'Visible UI action', 'Container setting', 'Status/API']).toContain(setting.controlType)
+        expect([
+          'Visible UI setting',
+          'Visible UI action',
+          'Container setting',
+          'Status/API',
+          'Backend/API only',
+        ]).toContain(setting.controlType)
         if (['Visible UI setting', 'Visible UI action'].includes(setting.controlType)) {
           expect(setting.locationTo || topic.settingsLocationTo).toMatch(/^\//)
           expect(setting.location.split('->').map(part => part.trim()).filter(Boolean).length).toBeGreaterThanOrEqual(3)
@@ -200,6 +206,18 @@ describe('operatorHelpSections', () => {
     expect(streamChecker.settings.find(setting => setting.name === 'Direct Stream Check').risk).toMatch(/must be idle.*HTTP 409/i)
     expect(streamChecker.settings.find(setting => setting.name === 'Check on update').controlType).toBe('Status/API')
     expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Concurrent Checking tab -> Global Concurrent Limit')
+    const accountLimit = streamChecker.settings.find(setting => setting.name === 'M3U account Max Streams')
+    expect(accountLimit.controlType).toBe('Backend/API only')
+    expect(accountLimit.location).toMatch(/GET \/api\/m3u-accounts -> accounts\[\]\.max_streams/i)
+    expect(accountLimit.location).toMatch(/backend\/API.*not editable in the StreamFlow UI/i)
+    expect(accountLimit.location).not.toMatch(/Profile Matrix/i)
+    expect(accountLimit.defaultValue).toMatch(/0 or unset delegates the aggregate fallback to active profile limits/i)
+    expect(accountLimit.effect).toMatch(/aggregate hard cap/i)
+    expect(accountLimit.risk).toMatch(/do not automatically prove.*independent provider logins/i)
+    const profileLimits = streamChecker.settings.find(setting => setting.name === 'Provider profile limits')
+    expect(profileLimits.location).toBe('Stream Checker -> Current Progress -> Provider Progress -> Profile Matrix')
+    expect(profileLimits.effect).toMatch(/additional sublimit/i)
+    expect(profileLimits.risk).toMatch(/not an editable account Max Streams control/i)
     const bitrateRecheck = streamChecker.settings.find(setting => setting.name === 'Bitrate Recheck')
     expect(bitrateRecheck.controlType).toBe('Status/API')
     expect(bitrateRecheck.location).toBe('Stream Checker -> Current Progress -> Stream Progress Tracking -> Status')

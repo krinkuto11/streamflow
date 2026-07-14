@@ -258,18 +258,27 @@ class TestM3uAccountIdPriority(unittest.TestCase):
                 "m3u_profile_id": 70,
                 "clients": [
                     {"user_agent": "VLC", "username": "viewer"},
+                    {"user_agent": "VLC", "username": "viewer-two"},
                     {"user_agent": "StreamFlow-Shadow-Blank-Monitor/1.0"},
                 ],
-            }
+            },
+            "channel-2": {
+                "state": "active",
+                "m3u_profile_id": 70,
+                "clients": [
+                    {"user_agent": "VLC", "username": "viewer-three"},
+                ],
+            },
         }
         udi._proxy_status_last_fetch = time.time()
 
         context = udi.get_active_stream_context_per_profile(7)
 
-        self.assertEqual(context[70]["active_streams"], 1)
-        self.assertEqual(context[70]["real_viewers"], 1)
+        self.assertEqual(context[70]["active_streams"], 2)
+        self.assertEqual(context[70]["real_viewers"], 3)
+        self.assertEqual(context[70]["real_viewer_streams"], 2)
         self.assertEqual(context[70]["shadow_watchers"], 1)
-        self.assertEqual(udi.get_active_streams_count_per_profile(7), {70: 1})
+        self.assertEqual(udi.get_active_streams_count_per_profile(7), {70: 2})
 
     def test_profile_slot_snapshot_and_reservation_expose_shadow_context(self):
         from apps.stream.concurrent_stream_limiter import AccountStreamLimiter

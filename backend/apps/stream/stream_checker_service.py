@@ -6395,10 +6395,13 @@ class StreamCheckerService:
 
         Parallelism uses AccountStreamLimiter directly rather than
         SmartStreamScheduler to avoid:
-          - URL double-transformation (analyzed dicts already carry the
-            transformed URL used by quality analysis)
           - Progress/start callback conflicts with the quality analysis UI
           - Result-shape mismatch (probe returns a tuple, not a dict)
+
+        Each long-running probe reserves both its aggregate account slot and a
+        concrete profile slot. The URL is rebuilt from the raw UDI stream with
+        that reserved profile, and the probe remains preemptible when a real
+        viewer needs either capacity limit.
 
         Account ID comes from the UDI stream record ('m3u_account_id' column,
         mapped to 'm3u_account' integer expected by AccountStreamLimiter).
@@ -6432,7 +6435,10 @@ class StreamCheckerService:
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from apps.stream.stream_check_utils import _probe_stream_for_loops
-        from apps.stream.concurrent_stream_limiter import get_account_limiter
+        from apps.stream.concurrent_stream_limiter import (
+            get_account_limiter,
+            initialize_account_limits,
+        )
 
         LOOP_PROBE_SCORE_THRESHOLD = 0.5
         LOOP_PROBE_TOP_PERCENTILE  = 0.25   # top 25%
@@ -6466,12 +6472,32 @@ class StreamCheckerService:
             f"scoring >= {LOOP_PROBE_SCORE_THRESHOLD}) — running in parallel"
         )
 
-        global_limit = self.config.get('concurrent_streams.global_limit', 10)
         account_limiter = get_account_limiter()
         udi = get_udi_manager()
+        account_limiter.udi_manager = udi
+        try:
+            get_accounts = getattr(udi, 'get_m3u_accounts', None)
+            accounts = get_accounts() if callable(get_accounts) else []
+            if accounts:
+                initialize_account_limits(accounts)
+        except Exception as e:
+            logger.warning(f"[loop-probe] Could not initialize account limits: {e}")
+
+        concurrent_enabled = bool(self.config.get('concurrent_streams.enabled', True))
+        configured_global_limit = self.config.get('concurrent_streams.global_limit', 10)
+        try:
+            global_limit = max(1, int(configured_global_limit)) if concurrent_enabled else 1
+        except (TypeError, ValueError):
+            global_limit = 10 if concurrent_enabled else 1
+
         results_lock = threading.Lock()
         completed = [0]
         progress_context = dict(profile_progress_context or {})
+        abort_event = getattr(self, 'abort_current_check', None)
+
+        def abort_requested() -> bool:
+            is_set = getattr(abort_event, 'is_set', None)
+            return bool(is_set()) if callable(is_set) else False
 
         # Build probe_detail from the streams_detail snapshot passed in by the
         # calling check method. Keyed by integer stream id (same as stream_statuses).
@@ -6507,91 +6533,228 @@ class StreamCheckerService:
                 **progress_context,
             )
 
+        def finish_probe(stream: dict, completion_status: str) -> None:
+            """Finalize one eligible item so no Progress row remains probing."""
+            stream_id = stream.get('stream_id')
+            stream_name = stream.get('stream_name', 'Unknown')
+            stream_audit_ref = stream_ref(stream_id, stream.get('stream_url', ''))
+            with results_lock:
+                completed[0] += 1
+                if probe_detail and stream_id in probe_detail:
+                    loop_result = stream.get('loop_detected')
+                    probe_detail[stream_id]['status'] = (
+                        'loop_detected' if loop_result is True else completion_status
+                    )
+                if channel_id and probe_detail:
+                    self.progress.update(
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                        current=completed[0],
+                        total=total,
+                        status='analyzing',
+                        step='Loop testing',
+                        step_detail=f'Completed {completed[0]}/{total}: {stream_name}',
+                        streams_detail=list(probe_detail.values()),
+                        stream_duration=probe_duration,
+                        **progress_context,
+                    )
+                logger.info(
+                    f"[loop-probe] Completed {completed[0]}/{total}: {stream_audit_ref}"
+                )
+
+        def acquire_account_with_abort(account_id: Optional[int]) -> tuple[bool, str]:
+            """Poll account capacity for up to 60s while honoring manual abort."""
+            deadline = time.monotonic() + 60.0
+            last_reason = 'timeout'
+            while True:
+                if abort_requested():
+                    return False, 'aborted'
+                acquired, reason = account_limiter.acquire(account_id, timeout=0)
+                if acquired:
+                    return True, reason
+                last_reason = reason
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False, last_reason
+                wait_seconds = min(0.5, remaining)
+                wait_for_abort = getattr(abort_event, 'wait', None)
+                if callable(wait_for_abort):
+                    if wait_for_abort(wait_seconds):
+                        return False, 'aborted'
+                else:
+                    time.sleep(wait_seconds)
+
         def _probe_one(stream: dict) -> None:
-            """Run one loop probe with account slot acquire/release."""
+            """Run one viewer-preemptible loop probe with account/profile reservations."""
             stream_url  = stream.get('stream_url', '')
             stream_name = stream.get('stream_name', 'Unknown')
             stream_id   = stream.get('stream_id')
             score       = stream.get('score', 0)
             stream_audit_ref = stream_ref(stream_id, stream_url)
+            completion_status = 'skipped'
+
+            if abort_requested():
+                finish_probe(stream, 'aborted')
+                return
 
             # Resolve numeric account ID from UDI.
             # analyzed dicts carry stream_id from quality analysis — use that
             # to look up the raw stream record which has m3u_account_id.
             account_id = None
+            raw_stream = None
             try:
                 raw_stream = udi.get_stream_by_id(int(stream_id)) if stream_id else None
                 if raw_stream:
                     # SQL storage uses m3u_account_id; AccountStreamLimiter
                     # expects the integer under the key 'm3u_account'
                     account_id = raw_stream.get('m3u_account_id') or raw_stream.get('m3u_account')
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"[loop-probe:{stream_audit_ref}] Raw UDI lookup failed: {e}")
+
+            if not isinstance(raw_stream, dict):
+                logger.warning(
+                    f"[loop-probe:{stream_audit_ref}] Skipping stream - raw UDI record unavailable"
+                )
+                finish_probe(stream, completion_status)
+                return
 
             tag = stream_audit_ref
+
+            reservation_stream = dict(raw_stream)
+            if account_id not in (None, ''):
+                reservation_stream.setdefault('m3u_account_id', account_id)
+                reservation_stream.setdefault('m3u_account', account_id)
 
             # Acquire account slot — same mechanism used by quality analysis.
             # Timeout of 60s: if the account is saturated (e.g. live viewers
             # consuming all slots) we skip rather than block indefinitely.
-            acquired, reason = account_limiter.acquire(account_id, timeout=60)
-            if not acquired:
+            try:
+                acquired_account, reason = acquire_account_with_abort(account_id)
+            except Exception as e:
+                logger.error(f"[loop-probe:{tag}] Account reservation failed: {e}")
+                finish_probe(stream, 'error')
+                return
+            if not acquired_account:
+                completion_status = 'aborted' if reason == 'aborted' else 'skipped'
                 logger.info(
                     f"[loop-probe:{tag}] Skipping stream - "
                     f"account slot unavailable ({reason})"
                 )
+                finish_probe(stream, completion_status)
                 return
 
+            acquired_profile = None
+            preempted_for_viewer = threading.Event()
+            manual_abort_observed = threading.Event()
+            preemption_token = object()
+            preemption_claimed = False
             try:
+                if abort_requested():
+                    completion_status = 'aborted'
+                    return
+                profile_acquired, reason, acquired_profile = (
+                    account_limiter.reserve_profile_for_stream(reservation_stream)
+                )
+                if not profile_acquired:
+                    logger.info(
+                        f"[loop-probe:{tag}] Skipping stream - "
+                        f"profile slot unavailable ({reason})"
+                    )
+                    return
+
+                probe_url = reservation_stream.get('url') or stream_url
+                if acquired_profile is not None:
+                    transformer = getattr(udi, 'apply_profile_url_transformation', None)
+                    if callable(transformer):
+                        transformed_url = transformer(
+                            reservation_stream,
+                            profile=acquired_profile,
+                        )
+                        if isinstance(transformed_url, str) and transformed_url:
+                            probe_url = transformed_url
+
+                def should_abort_for_viewer() -> bool:
+                    nonlocal preemption_claimed
+                    if abort_requested():
+                        manual_abort_observed.set()
+                        return True
+                    try:
+                        should_preempt = account_limiter.should_preempt_profile_for_viewer(
+                            acquired_profile,
+                            account_id=account_id,
+                            reservation_token=preemption_token,
+                        )
+                        if should_preempt:
+                            preemption_claimed = True
+                    except Exception as e:
+                        # Fail safe: an unknown capacity state must not keep a
+                        # 60-720 second provider probe alive ahead of viewers.
+                        logger.warning(
+                            f"[loop-probe:{tag}] Viewer preemption check failed: {e}"
+                        )
+                        should_preempt = True
+                    if should_preempt:
+                        preempted_for_viewer.set()
+                    return should_preempt
+
                 logger.info(
                     f"[loop-probe:{tag}] Probing stream "
                     f"(score: {score:.2f})"
                 )
-                loop_detected, loop_duration, frames = _probe_stream_for_loops(
-                    url=stream_url,
+                loop_detected, loop_duration, _frames = _probe_stream_for_loops(
+                    url=probe_url,
                     stream_tag=tag,
                     probe_duration=probe_duration,
                     user_agent=user_agent,
                     hardware_acceleration=hardware_acceleration,
+                    should_abort=should_abort_for_viewer,
                 )
+                if manual_abort_observed.is_set() or abort_requested():
+                    completion_status = 'aborted'
+                    logger.info(f"[loop-probe:{tag}] Probe stopped by manual abort")
+                    return
+                if preempted_for_viewer.is_set():
+                    completion_status = 'viewer_preempted'
+                    logger.info(
+                        f"[loop-probe:{tag}] Probe preempted because real viewer capacity is needed"
+                    )
+                    return
                 stream['loop_detected']      = loop_detected
                 stream['loop_duration_secs'] = loop_duration
                 stream['loop_probe_ran']     = True
+                completion_status = 'completed'
 
             except Exception as e:
+                completion_status = 'error'
                 logger.error(
                     f"[loop-probe:{tag}] Probe failed: {scrub_urls(e)}"
                 )
                 # loop_detected remains None — distinguishable from clean (False)
                 # or detected (True)
             finally:
-                account_limiter.release(account_id)
-                with results_lock:
-                    completed[0] += 1
-                    # Update probe_detail entry with result for live grid
-                    if probe_detail and stream_id in probe_detail:
-                        loop_result = stream.get('loop_detected')
-                        probe_detail[stream_id]['status'] = (
-                            'loop_detected' if loop_result is True else 'completed'
-                        )
-                    if channel_id and probe_detail:
-                        self.progress.update(
-                            channel_id=channel_id,
-                            channel_name=channel_name,
-                            current=completed[0],
-                            total=total,
-                            status='analyzing',
-                            step='Loop testing',
-                            step_detail=f'Completed {completed[0]}/{total}: {stream_name}',
-                            streams_detail=list(probe_detail.values()),
-                            stream_duration=probe_duration,
-                            **progress_context,
-                        )
-                    logger.info(
-                        f"[loop-probe] Completed {completed[0]}/{total}: {stream_audit_ref}"
-                    )
+                if acquired_profile is not None:
+                    try:
+                        account_limiter.release_profile(acquired_profile)
+                    except Exception as e:
+                        logger.warning(f"[loop-probe:{tag}] Profile release failed: {e}")
+                try:
+                    account_limiter.release(account_id)
+                except Exception as e:
+                    logger.warning(f"[loop-probe:{tag}] Account release failed: {e}")
+                if preemption_claimed:
+                    try:
+                        account_limiter.release_viewer_preemption_claim(preemption_token)
+                    except Exception as e:
+                        logger.warning(f"[loop-probe:{tag}] Preemption claim release failed: {e}")
+                finish_probe(stream, completion_status)
 
         with ThreadPoolExecutor(max_workers=global_limit) as executor:
-            futures = {executor.submit(_probe_one, stream): stream for stream in eligible}
+            futures = {}
+            for stream in eligible:
+                if abort_requested():
+                    finish_probe(stream, 'aborted')
+                    continue
+                futures[executor.submit(_probe_one, stream)] = stream
             for future in as_completed(futures):
                 try:
                     future.result()
@@ -6602,7 +6765,9 @@ class StreamCheckerService:
                         f"{stream_ref(stream.get('stream_id'), stream.get('stream_url'))}: {scrub_urls(e)}"
                     )
 
-        logger.info(f"[loop-probe] Parallel probe complete — {completed[0]}/{total} streams probed")
+        logger.info(
+            f"[loop-probe] Probe phase complete — {completed[0]}/{total} eligible items finalized"
+        )
 
         # Apply score penalty to confirmed looping streams.
         # Only fires when loop_penalty is non-zero and loop_detected is True.

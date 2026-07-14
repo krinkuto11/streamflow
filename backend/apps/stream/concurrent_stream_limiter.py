@@ -70,15 +70,23 @@ def _usage_context(mapping: Dict[Any, Any], key: Any) -> Dict[str, int]:
         )
         real_viewers = _safe_int(value.get('real_viewers', value.get('real_clients', 0)))
         shadow_watchers = _safe_int(value.get('shadow_watchers', value.get('watcher_clients', 0)))
+        real_viewer_streams = _safe_int(value.get('real_viewer_streams'))
+        if 'real_viewer_streams' not in value:
+            # Legacy contexts expose client count but not the number of provider
+            # slots carrying those clients. Never count multiple clients on one
+            # proxied channel as multiple upstream streams.
+            real_viewer_streams = min(active_streams, real_viewers)
         return {
             'active_streams': active_streams,
             'real_viewers': real_viewers,
+            'real_viewer_streams': real_viewer_streams,
             'shadow_watchers': shadow_watchers,
         }
     active_streams = _safe_int(value)
     return {
         'active_streams': active_streams,
         'real_viewers': active_streams,
+        'real_viewer_streams': active_streams,
         'shadow_watchers': 0,
     }
 
@@ -119,8 +127,11 @@ class AccountStreamLimiter:
             udi_manager: Optional UDI manager instance for checking active viewers
         """
         self.account_limits: Dict[int, int] = {}
+        self.profile_limits: Dict[int, int] = {}
+        self.account_profile_ids: Dict[int, set[int]] = {}
         self.account_checking_counts: Dict[int, int] = {}  # Track streams currently being checked
         self.profile_checking_counts: Dict[int, int] = {}  # Track checker-owned profile slots
+        self.viewer_preemption_claims: Dict[Any, tuple[Optional[int], Optional[int]]] = {}
         self.lock = threading.Lock()
         self.udi_manager = udi_manager
         logger.info("AccountStreamLimiter initialized")
@@ -129,37 +140,74 @@ class AccountStreamLimiter:
         """
         Set the maximum concurrent streams for an account.
         
-        This now supports M3U account profiles. If profiles are provided, the total
-        limit is calculated by summing the max_streams of all active profiles.
+        A positive account limit is the authoritative aggregate hard cap. Active
+        profile limits remain additional per-profile sublimits and must never add
+        capacity above that account cap. When the account limit is unset/unlimited,
+        finite active profile limits provide the aggregate fallback. If any active
+        profile is unlimited, that fallback is unlimited as well.
         
         Args:
             account_id: M3U account ID
             max_streams: Maximum concurrent streams at account level (0 = unlimited)
             profiles: Optional list of profile dictionaries with 'max_streams' and 'is_active' fields
         """
+        profiles_provided = profiles is not None
         with self.lock:
-            # Calculate total limit by summing active profile limits if profiles exist
-            total_limit = max_streams
-            if profiles:
-                # Sum up limits from all active profiles using generator expression
-                profile_total = sum(
-                    p.get('max_streams', 0) 
-                    for p in profiles 
-                    if p.get('is_active', True)
+            try:
+                account_limit = max(0, int(max_streams or 0))
+            except (TypeError, ValueError):
+                account_limit = 0
+
+            active_profile_limits = []
+            active_profile_limits_by_id: Dict[int, int] = {}
+            for profile in profiles or []:
+                if not isinstance(profile, dict) or not profile.get('is_active', True):
+                    continue
+                try:
+                    profile_limit = max(0, int(profile.get('max_streams', 0) or 0))
+                except (TypeError, ValueError):
+                    profile_limit = 0
+                active_profile_limits.append(profile_limit)
+                profile_id = profile.get('id')
+                if profile_id is not None:
+                    active_profile_limits_by_id[profile_id] = profile_limit
+
+            profile_total = sum(active_profile_limits)
+            has_unlimited_profile = any(limit == 0 for limit in active_profile_limits)
+
+            if account_limit > 0:
+                total_limit = account_limit
+                capacity_source = 'account hard cap'
+            elif active_profile_limits and has_unlimited_profile:
+                total_limit = 0
+                capacity_source = 'unlimited active profile fallback'
+            elif profile_total > 0:
+                total_limit = profile_total
+                capacity_source = 'finite active profile fallback'
+            else:
+                total_limit = 0
+                capacity_source = 'unlimited account fallback'
+
+            if active_profile_limits:
+                logger.debug(
+                    "Account %s capacity uses %s: account=%s, active profiles=%s, "
+                    "finite profile sum=%s",
+                    account_id,
+                    capacity_source,
+                    account_limit,
+                    len(active_profile_limits),
+                    profile_total,
                 )
-                
-                # Use profile total if it's greater than account-level limit
-                # This handles the case where account has multiple profiles
-                if profile_total > 0:
-                    total_limit = profile_total
-                    active_profile_count = sum(1 for p in profiles if p.get('is_active', True))
-                    logger.debug(
-                        f"Account {account_id} has {active_profile_count} "
-                        f"active profile(s) with total limit: {total_limit}"
-                    )
             
             # Store the calculated limit
             self.account_limits[account_id] = total_limit
+            if profiles_provided:
+                previous_profile_ids = self.account_profile_ids.get(account_id, set())
+                current_profile_ids = set(active_profile_limits_by_id)
+                for removed_profile_id in previous_profile_ids - current_profile_ids:
+                    self.profile_limits.pop(removed_profile_id, None)
+                self.profile_limits.update(active_profile_limits_by_id)
+                self.account_profile_ids[account_id] = current_profile_ids
             
             # Initialize checking count for this account
             if account_id not in self.account_checking_counts:
@@ -209,7 +257,7 @@ class AccountStreamLimiter:
                 if not isinstance(active_count, (int, float)):
                     active_count = 0
                 else:
-                    active_count = int(active_count)
+                    active_count = _safe_int(active_count)
             except Exception as e:
                 logger.warning(f"Could not get active streams for account {account_id}: {e}")
                 active_count = 0
@@ -245,11 +293,6 @@ class AccountStreamLimiter:
             # Custom stream with no account - always allow
             return AcquireResult(True, 'acquired')
         
-        limit = self.get_account_limit(account_id)
-        if limit == 0:
-            # Unlimited - always allow
-            return AcquireResult(True, 'acquired')
-        
         # Poll for available slot with exponential backoff
         start_time = time.time()
         wait_time = 0.1  # Start with 100ms
@@ -266,25 +309,36 @@ class AccountStreamLimiter:
                     if not isinstance(active_count, (int, float)):
                         active_count = 0
                     else:
-                        active_count = int(active_count)
+                        active_count = _safe_int(active_count)
                 except Exception as e:
                     logger.warning(f"Could not get active streams for account {account_id}: {e}")
                     active_count = 0
             
             # Check if we have available slots: active_viewers + checking_streams < max_streams
-            # We need to check this atomically with acquiring the semaphore
+            # Read the current limit and reserve atomically. This linearizes live
+            # reconfiguration with acquisition instead of using a stale limit
+            # captured before the wait loop.
             with self.lock:
+                limit = _safe_int(self.account_limits.get(account_id, 0))
                 checking_count = self.account_checking_counts.get(account_id, 0)
                 total_in_use = active_count + checking_count
 
-                if total_in_use < limit:
-                    # We have a slot available, increment checking count
+                if limit == 0 or total_in_use < limit:
+                    # Track unlimited reservations too. A later 0 -> finite
+                    # reconfiguration can then release exactly the reservation
+                    # that was acquired without decrementing another checker.
                     self.account_checking_counts[account_id] = checking_count + 1
-                    logger.debug(
-                        f"Acquired stream slot for account {account_id} "
-                        f"({active_count} active + {checking_count + 1} checking = "
-                        f"{total_in_use + 1}/{limit})"
-                    )
+                    if limit == 0:
+                        logger.debug(
+                            f"Acquired unlimited stream slot for account {account_id} "
+                            f"(now {checking_count + 1} checking)"
+                        )
+                    else:
+                        logger.debug(
+                            f"Acquired stream slot for account {account_id} "
+                            f"({active_count} active + {checking_count + 1} checking = "
+                            f"{total_in_use + 1}/{limit})"
+                        )
                     return AcquireResult(True, 'acquired')
 
                 if active_count >= limit:
@@ -316,11 +370,6 @@ class AccountStreamLimiter:
         """
         if account_id is None:
             # Custom stream with no account - nothing to release
-            return
-        
-        limit = self.get_account_limit(account_id)
-        if limit == 0:
-            # Unlimited account - nothing to track or release
             return
         
         with self.lock:
@@ -380,6 +429,7 @@ class AccountStreamLimiter:
         external_block_reason = None
 
         with self.lock:
+            authoritative_profile_ids = self.account_profile_ids.get(account_id)
             for profile in profiles:
                 if not isinstance(profile, dict):
                     continue
@@ -387,22 +437,30 @@ class AccountStreamLimiter:
                 profile_id = profile.get('id')
                 if profile_id is None or not profile.get('is_active', True):
                     continue
+                if (
+                    authoritative_profile_ids is not None
+                    and profile_id not in authoritative_profile_ids
+                ):
+                    continue
 
-                max_streams = profile.get('max_streams', 0)
-                try:
-                    max_streams = int(max_streams or 0)
-                except (TypeError, ValueError):
-                    max_streams = 0
+                max_streams = _safe_int(
+                    self.profile_limits.get(
+                        profile_id,
+                        profile.get('max_streams', 0),
+                    )
+                )
+                checking_count = self.profile_checking_counts.get(profile_id, 0)
 
                 if max_streams == 0:
+                    self.profile_checking_counts[profile_id] = checking_count + 1
                     logger.debug(
-                        f"Reserved unlimited profile {profile_id} for stream {stream.get('id')}"
+                        f"Reserved unlimited profile {profile_id} for stream {stream.get('id')} "
+                        f"(now {checking_count + 1} checking)"
                     )
                     return (True, 'acquired', profile)
 
                 usage_context = _usage_context(active_usage, profile_id)
                 active_count = usage_context['active_streams']
-                checking_count = self.profile_checking_counts.get(profile_id, 0)
 
                 if active_count + checking_count < max_streams:
                     self.profile_checking_counts[profile_id] = checking_count + 1
@@ -438,14 +496,6 @@ class AccountStreamLimiter:
 
         profile_id = profile.get('id') if isinstance(profile, dict) else None
         if profile_id is None:
-            return
-
-        max_streams = profile.get('max_streams', 0) if isinstance(profile, dict) else 0
-        try:
-            max_streams = int(max_streams or 0)
-        except (TypeError, ValueError):
-            max_streams = 0
-        if max_streams == 0:
             return
 
         with self.lock:
@@ -500,6 +550,8 @@ class AccountStreamLimiter:
 
         with self.lock:
             checking_counts = dict(self.profile_checking_counts)
+            configured_profile_limits = dict(self.profile_limits)
+            configured_profile_ids = self.account_profile_ids.get(account_id)
 
         snapshots: List[Dict[str, Any]] = []
         for profile in profiles:
@@ -509,11 +561,15 @@ class AccountStreamLimiter:
             profile_id = profile.get('id')
             if profile_id is None or not profile.get('is_active', True):
                 continue
+            if configured_profile_ids is not None and profile_id not in configured_profile_ids:
+                continue
 
-            try:
-                max_streams = int(profile.get('max_streams', 0) or 0)
-            except (TypeError, ValueError):
-                max_streams = 0
+            max_streams = _safe_int(
+                configured_profile_limits.get(
+                    profile_id,
+                    profile.get('max_streams', 0),
+                )
+            )
 
             usage_context = _usage_context(active_usage, profile_id)
             active_count = usage_context['active_streams']
@@ -538,51 +594,232 @@ class AccountStreamLimiter:
 
         return sorted(snapshots, key=lambda item: str(item.get('name', '')).lower())
 
-    def should_preempt_profile_for_viewer(self, profile: Optional[Dict[str, Any]]) -> bool:
-        """Return True when a real viewer needs the reserved profile slot."""
-        if not profile or not self.udi_manager:
+    def should_preempt_profile_for_viewer(
+        self,
+        profile: Optional[Dict[str, Any]],
+        account_id: Optional[int] = None,
+        reservation_token: Optional[Any] = None,
+    ) -> bool:
+        """Return True when real viewers overcommit a reserved profile/account slot.
+
+        ``account_id`` and ``reservation_token`` are optional for API
+        compatibility. Supplying the account protects its aggregate cap even for
+        unlimited/no-profile reservations. A token atomically claims at most one
+        required preemption so simultaneous callbacks do not all abort when one
+        released reservation is sufficient.
+        """
+        if not self.udi_manager:
             return False
 
         profile_id = profile.get('id') if isinstance(profile, dict) else None
-        if profile_id is None:
-            return False
+        profile_limit = _safe_int(profile.get('max_streams', 0)) if isinstance(profile, dict) else 0
 
         try:
-            max_streams = int(profile.get('max_streams', 0) or 0)
+            resolved_account_id = int(account_id) if account_id not in (None, '') else None
         except (TypeError, ValueError):
-            max_streams = 0
-        if max_streams == 0:
-            return False
+            resolved_account_id = account_id
+        if resolved_account_id is None and isinstance(profile, dict):
+            resolved_account_id = _get_stream_m3u_account_id(
+                {'m3u_account_id': profile.get('m3u_account_id')}
+            )
+        if resolved_account_id is None and profile_id is not None:
+            finder = getattr(self.udi_manager, '_find_account_for_profile', None)
+            try:
+                resolved_account_id = finder(profile_id) if callable(finder) else None
+            except Exception as e:
+                logger.warning(f"Could not resolve account for profile {profile_id}: {e}")
+                resolved_account_id = None
+
+        current_profiles: List[Dict[str, Any]] = []
+        if resolved_account_id is not None:
+            account_getter = getattr(self.udi_manager, 'get_m3u_account_by_id', None)
+            try:
+                current_account = account_getter(resolved_account_id) if callable(account_getter) else None
+                current_profiles = (
+                    current_account.get('profiles', [])
+                    if isinstance(current_account, dict)
+                    else []
+                )
+                current_profile = next(
+                    (
+                        candidate
+                        for candidate in current_profiles
+                        if isinstance(candidate, dict)
+                        and str(candidate.get('id')) == str(profile_id)
+                    ),
+                    None,
+                )
+                if current_profile is not None and profile_id is not None:
+                    profile_limit = _safe_int(current_profile.get('max_streams', 0))
+            except Exception as e:
+                logger.warning(f"Could not refresh limit for profile {profile_id}: {e}")
 
         try:
             context_getter = getattr(self.udi_manager, 'get_active_stream_context_per_profile', None)
-            real_count = None
-            if callable(context_getter):
-                account_id = _get_stream_m3u_account_id({'m3u_account_id': profile.get('m3u_account_id')})
-                if account_id is None:
-                    finder = getattr(self.udi_manager, '_find_account_for_profile', None)
-                    account_id = finder(profile_id) if callable(finder) else None
-                if account_id is not None:
-                    context = context_getter(account_id)
-                    if isinstance(context, dict):
-                        real_count = _usage_context(context, profile_id)['real_viewers']
-            if real_count is None:
+            context = None
+            if callable(context_getter) and resolved_account_id is not None:
+                candidate_context = context_getter(resolved_account_id)
+                if isinstance(candidate_context, dict):
+                    context = candidate_context
+
+            profile_real_stream_count = None
+            account_real_stream_count = None
+            profile_active_stream_count = None
+            account_active_stream_count = None
+            if context is not None:
+                if profile_id is not None:
+                    profile_usage_context = _usage_context(context, profile_id)
+                    profile_real_stream_count = profile_usage_context['real_viewer_streams']
+                    profile_active_stream_count = profile_usage_context['active_streams']
+                account_real_stream_count = sum(
+                    _usage_context(context, context_profile_id)['real_viewer_streams']
+                    for context_profile_id in context
+                )
+                account_active_stream_count = sum(
+                    _usage_context(context, context_profile_id)['active_streams']
+                    for context_profile_id in context
+                )
+
+            if profile_real_stream_count is None and profile_id is not None:
                 active_getter = getattr(self.udi_manager, 'get_active_streams_for_profile', None)
-                if not callable(active_getter):
-                    return False
-                real_count = _safe_int(active_getter(profile_id))
+                if callable(active_getter):
+                    profile_real_stream_count = _safe_int(active_getter(profile_id))
+                    profile_active_stream_count = profile_real_stream_count
+            if profile_real_stream_count is None:
+                profile_real_stream_count = 0
+            if profile_active_stream_count is None:
+                profile_active_stream_count = profile_real_stream_count
+            if account_real_stream_count is None:
+                # Legacy UDI implementations expose only current-profile usage.
+                # This preserves existing behavior without classifying shadow
+                # watchers from the aggregate active-stream API as real viewers.
+                account_real_stream_count = profile_real_stream_count
+            if account_active_stream_count is None:
+                account_active_stream_count = profile_active_stream_count
         except Exception as e:
             logger.warning(f"Could not check active viewers for profile {profile_id}: {e}")
             return False
 
-        return real_count + 1 > max_streams
+        with self.lock:
+            if reservation_token is not None and reservation_token in self.viewer_preemption_claims:
+                return True
+
+            profile_checking_count = self.profile_checking_counts.get(profile_id, 0)
+            account_checking_count = self.account_checking_counts.get(resolved_account_id, 0)
+            account_limit = _safe_int(self.account_limits.get(resolved_account_id, 0))
+            profile_limit = _safe_int(self.profile_limits.get(profile_id, profile_limit))
+            claimed_profile_count = sum(
+                1
+                for _claimed_account_id, claimed_profile_id in self.viewer_preemption_claims.values()
+                if claimed_profile_id == profile_id and profile_id is not None
+            )
+            claimed_account_count = sum(
+                1
+                for claimed_account_id, _claimed_profile_id in self.viewer_preemption_claims.values()
+                if claimed_account_id == resolved_account_id and resolved_account_id is not None
+            )
+
+            unclaimed_profile_checks = max(
+                0,
+                profile_checking_count - claimed_profile_count,
+            )
+            unclaimed_account_checks = max(
+                0,
+                account_checking_count - claimed_account_count,
+            )
+            profile_excess = (
+                min(
+                    unclaimed_profile_checks,
+                    max(
+                        0,
+                        profile_active_stream_count
+                        + unclaimed_profile_checks
+                        - profile_limit,
+                    ),
+                )
+                if profile_id is not None
+                and profile_limit > 0
+                and profile_real_stream_count > 0
+                else 0
+            )
+            account_excess = (
+                max(
+                    0,
+                    account_active_stream_count
+                    + unclaimed_account_checks
+                    - account_limit,
+                )
+                if resolved_account_id is not None
+                and account_limit > 0
+                and account_real_stream_count > 0
+                else 0
+            )
+
+            # Prefer reservations on profiles that are locally overcommitted.
+            # Those releases also satisfy the aggregate account excess. Without
+            # this priority, a sibling callback could claim the account slot first
+            # and force an unnecessary second profile-local preemption.
+            local_profile_excess = 0
+            if context is not None:
+                for current_profile in current_profiles:
+                    if not isinstance(current_profile, dict):
+                        continue
+                    current_profile_id = current_profile.get('id')
+                    current_limit = _safe_int(
+                        self.profile_limits.get(
+                            current_profile_id,
+                            current_profile.get('max_streams', 0),
+                        )
+                    )
+                    if current_profile_id is None or current_limit == 0:
+                        continue
+                    current_usage = _usage_context(context, current_profile_id)
+                    current_real_streams = current_usage['real_viewer_streams']
+                    current_active_streams = current_usage['active_streams']
+                    if current_real_streams <= 0:
+                        continue
+                    current_checking = self.profile_checking_counts.get(current_profile_id, 0)
+                    current_claims = sum(
+                        1
+                        for _claim_account_id, claim_profile_id in self.viewer_preemption_claims.values()
+                        if claim_profile_id == current_profile_id
+                    )
+                    current_unclaimed_checks = max(0, current_checking - current_claims)
+                    local_profile_excess += min(
+                        current_unclaimed_checks,
+                        max(
+                            0,
+                            current_active_streams
+                            + current_unclaimed_checks
+                            - current_limit,
+                        ),
+                    )
+
+            account_only_excess = max(0, account_excess - local_profile_excess)
+            should_preempt = profile_excess > 0 or account_only_excess > 0
+            if should_preempt and reservation_token is not None:
+                self.viewer_preemption_claims[reservation_token] = (
+                    resolved_account_id,
+                    profile_id,
+                )
+            return should_preempt
+
+    def release_viewer_preemption_claim(self, reservation_token: Optional[Any]) -> None:
+        """Release a token claimed by ``should_preempt_profile_for_viewer``."""
+        if reservation_token is None:
+            return
+        with self.lock:
+            self.viewer_preemption_claims.pop(reservation_token, None)
     
     def clear(self):
         """Clear all account limits and checking counts."""
         with self.lock:
             self.account_limits.clear()
+            self.profile_limits.clear()
+            self.account_profile_ids.clear()
             self.account_checking_counts.clear()
             self.profile_checking_counts.clear()
+            self.viewer_preemption_claims.clear()
         logger.info("Cleared all account limits")
 
 
@@ -781,6 +1018,8 @@ class SmartStreamScheduler:
                     wait_started = time.time()
                     wait_reason = None
                     retrying_after_preempt = False
+                    preemption_token = object()
+                    preemption_claimed = False
 
                     def release_current_reservation():
                         nonlocal acquired_global, acquired_profile, acquired_account
@@ -798,6 +1037,12 @@ class SmartStreamScheduler:
                         if preempted_for_viewer and reason == 'active_viewers':
                             return 'viewer_preempted'
                         return reason
+
+                    def release_current_preemption_claim():
+                        nonlocal preemption_claimed
+                        if preemption_claimed:
+                            self.account_limiter.release_viewer_preemption_claim(preemption_token)
+                            preemption_claimed = False
 
                     try:
                         while True:
@@ -895,8 +1140,14 @@ class SmartStreamScheduler:
                         preempt_logged = False
 
                         def preempt_check() -> bool:
-                            nonlocal preempt_logged
-                            should_preempt = self.account_limiter.should_preempt_profile_for_viewer(acquired_profile)
+                            nonlocal preempt_logged, preemption_claimed
+                            should_preempt = self.account_limiter.should_preempt_profile_for_viewer(
+                                acquired_profile,
+                                account_id=account_id,
+                                reservation_token=preemption_token,
+                            )
+                            if should_preempt:
+                                preemption_claimed = True
                             if should_preempt and not preempt_logged:
                                 preempt_logged = True
                                 logger.info(
@@ -906,7 +1157,7 @@ class SmartStreamScheduler:
                             return should_preempt
 
                         runtime_params = dict(check_params)
-                        if acquired_profile:
+                        if acquired_profile or account_id is not None:
                             runtime_params['preempt_check'] = preempt_check
 
                         result = check_function(
@@ -922,6 +1173,7 @@ class SmartStreamScheduler:
                             )
                             result = None
                             release_current_reservation()
+                            release_current_preemption_claim()
                             wait_reason = 'viewer_preempted'
                             if defer_callback:
                                 try:
@@ -935,6 +1187,7 @@ class SmartStreamScheduler:
                     finally:
                         # Release account slot immediately when stream finishes
                         release_current_reservation()
+                        release_current_preemption_claim()
 
                         # Fire progress callback from the worker thread the instant the
                         # stream completes — before the submission loop has finished
@@ -1080,9 +1333,10 @@ def initialize_account_limits(accounts: List[Dict[str, Any]]):
     The limits set here are used as a fallback/global cap, but the primary
     limit enforcement is done per-profile via UDI's check_stream_can_run().
     
-    When profiles are present, the total limit is calculated by summing max_streams
-    from all active profiles to provide a global upper bound for the account.
-    However, actual stream checking uses profile-specific availability.
+    A positive account max_streams value remains the aggregate hard cap. Profile
+    limits are enforced as additional sublimits. Only an unset/unlimited account
+    limit falls back to the active profile aggregate; an unlimited active profile
+    makes that fallback unlimited.
     
     Args:
         accounts: List of M3U account dictionaries with 'id', 'max_streams', and optionally 'profiles' fields

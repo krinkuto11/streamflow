@@ -82,7 +82,9 @@ respected.
 
 ## Parallel checking
 
-Stream checking runs in a thread pool. The pool size is configurable. Checking is subject to per-M3U-account concurrent stream limits to avoid exceeding provider caps.
+Stream checking runs in a thread pool. The pool size is configurable. Checking is subject to per-M3U-account concurrent stream limits to avoid exceeding provider caps. A positive account `max_streams` value is the aggregate hard cap and is never increased by adding profiles. Active profile limits are additional per-profile sublimits. When the account limit is unset or `0`, finite active profile limits provide the fallback aggregate; if any active profile is unlimited (`max_streams: 0`), that fallback is unlimited.
+
+Long loop-detection probes use the same account and profile reservations, apply the URL transformation of the profile they actually reserve, and stop without recording a clean result when manual cancellation or real-viewer preemption occurs.
 
 Set `check_all_streams: true` in the profile to check every stream on a channel. Default is to check only the currently active (top) stream.
 

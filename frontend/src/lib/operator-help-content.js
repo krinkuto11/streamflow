@@ -43,6 +43,7 @@ export const operatorHelpSections = [
     items: [
       'Queued channels wait their turn; higher waiting priority does not interrupt a channel already running.',
       'Check slots full means the checker-side capacity for that account or profile is currently occupied.',
+      'A positive M3U account Max Streams value is the aggregate hard cap; profile limits are additional sublimits below it.',
       'A direct stream check can measure one Dispatcharr stream by stream ID or reference, even before that stream is assigned to a channel.',
       'Viewer-preempted probes are not counted as bad streams and can be checked again later.',
       'During active batches, dashboard Dead, Blank, and Frozen cards count cumulative stream results from the queue.',
@@ -399,6 +400,25 @@ export const operatorHelpDetailTopics = [
         effect: 'Controls how many stream probes can run concurrently.',
         useWhen: 'Increase only when provider/profile limits and hardware can handle it.',
         risk: 'Too high can cause provider throttling, viewer contention, or noisy failures.',
+      },
+      {
+        name: 'M3U account Max Streams',
+        controlType: 'Backend/API only',
+        defaultValue: 'Imported account max_streams; 0 or unset delegates the aggregate fallback to active profile limits',
+        location: 'GET /api/m3u-accounts -> accounts[].max_streams (backend/API only; not editable in the StreamFlow UI)',
+        effect: 'Treats a positive account Max Streams value as the aggregate hard cap across every active profile on that account.',
+        useWhen: 'Inspect the imported account data when provider-wide capacity does not match the visible profile sublimits.',
+        risk: 'Several profiles do not automatically prove several independent provider logins. Keep the account hard cap at the real shared provider limit.',
+      },
+      {
+        name: 'Provider profile limits',
+        controlType: 'Status/API',
+        defaultValue: 'Read from imported M3U account profiles',
+        location: 'Stream Checker -> Current Progress -> Provider Progress -> Profile Matrix',
+        locationTo: '/stream-checker',
+        effect: 'Shows each active profile limit as an additional sublimit; profile rows never add capacity above a positive account hard cap.',
+        useWhen: 'Check this matrix before raising Global Concurrent Limit or when probes wait for profile capacity.',
+        risk: 'The Profile Matrix shows profile sublimits and usage, not an editable account Max Streams control.',
       },
       {
         name: 'CPU Fallback',

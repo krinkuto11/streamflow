@@ -59,6 +59,535 @@ class TestAccountStreamLimiter(unittest.TestCase):
         # Releases should not fail
         for _ in range(100):
             self.limiter.release(1)
+
+        self.assertEqual(self.limiter.account_checking_counts[1], 0)
+
+    def test_account_reservations_release_across_finite_unlimited_reconfiguration(self):
+        """Finite <-> unlimited changes must not leak or release another reservation."""
+        self.limiter.set_account_limit(1, 1)
+        self.assertTrue(self._acquire(1, timeout=0))
+        self.assertEqual(self.limiter.account_checking_counts[1], 1)
+
+        self.limiter.set_account_limit(1, 0)
+        self.limiter.release(1)
+        self.assertEqual(self.limiter.account_checking_counts[1], 0)
+
+        self.assertTrue(self._acquire(1, timeout=0))
+        self.assertEqual(self.limiter.account_checking_counts[1], 1)
+        self.limiter.set_account_limit(1, 1)
+        self.limiter.release(1)
+        self.assertEqual(self.limiter.account_checking_counts[1], 0)
+
+    def test_acquire_uses_reconfigured_limit_after_waiting_for_lock(self):
+        """A 2 -> 1 update must win over an acquire that has not entered its lock."""
+        self.limiter.set_account_limit(1, 2)
+        self.assertTrue(self._acquire(1, timeout=0))
+
+        acquire_at_lock = threading.Event()
+        allow_acquire = threading.Event()
+
+        class GateLock:
+            def __init__(self):
+                self._lock = threading.Lock()
+                self._gated = False
+
+            def acquire(self, *args, **kwargs):
+                if threading.current_thread().name == 'reconfiguration-acquirer' and not self._gated:
+                    self._gated = True
+                    acquire_at_lock.set()
+                    if not allow_acquire.wait(2):
+                        raise AssertionError('Timed out waiting to linearize account reconfiguration')
+                return self._lock.acquire(*args, **kwargs)
+
+            def release(self):
+                self._lock.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                self.release()
+
+        self.limiter.lock = GateLock()
+        result = []
+
+        worker = threading.Thread(
+            name='reconfiguration-acquirer',
+            target=lambda: result.append(self.limiter.acquire(1, timeout=0)),
+        )
+        worker.start()
+        self.assertTrue(acquire_at_lock.wait(2))
+        self.limiter.set_account_limit(1, 1)
+        allow_acquire.set()
+        worker.join(2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0])
+        self.assertEqual(self.limiter.account_checking_counts[1], 1)
+        self.limiter.release(1)
+
+    def test_profile_reservations_release_across_finite_unlimited_reconfiguration(self):
+        """Profile reservations are counted and released regardless of current limit."""
+        profile = {'id': 10, 'name': 'Primary', 'max_streams': 1, 'is_active': True}
+
+        class FakeUDI:
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': [profile]} if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        stream = {'id': 100, 'url': 'http://example.test/stream', 'm3u_account_id': 1}
+
+        acquired, _reason, reserved_profile = limiter.reserve_profile_for_stream(stream)
+        self.assertTrue(acquired)
+        self.assertEqual(limiter.profile_checking_counts[10], 1)
+        profile['max_streams'] = 0
+        limiter.release_profile(reserved_profile)
+        self.assertEqual(limiter.profile_checking_counts[10], 0)
+
+        acquired, _reason, reserved_profile = limiter.reserve_profile_for_stream(stream)
+        self.assertTrue(acquired)
+        self.assertEqual(limiter.profile_checking_counts[10], 1)
+        profile['max_streams'] = 1
+        limiter.release_profile(reserved_profile)
+        self.assertEqual(limiter.profile_checking_counts[10], 0)
+
+    def test_profile_reservation_uses_reconfigured_limit_after_waiting_for_lock(self):
+        """A 0 -> 1 profile update must block a stale second unlimited reservation."""
+        original_profile = {
+            'id': 10,
+            'name': 'Primary',
+            'max_streams': 0,
+            'is_active': True,
+        }
+
+        class FakeUDI:
+            def __init__(self):
+                self.account = {'id': 1, 'profiles': [original_profile]}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 0, profiles=udi.account['profiles'])
+        stream = {'id': 100, 'url': 'http://example.test/stream', 'm3u_account_id': 1}
+        acquired, _reason, first_profile = limiter.reserve_profile_for_stream(stream)
+        self.assertTrue(acquired)
+
+        reservation_at_lock = threading.Event()
+        allow_reservation = threading.Event()
+
+        class GateLock:
+            def __init__(self):
+                self._lock = threading.Lock()
+                self._gated = False
+
+            def acquire(self, *args, **kwargs):
+                if threading.current_thread().name == 'profile-reconfiguration-reserver' and not self._gated:
+                    self._gated = True
+                    reservation_at_lock.set()
+                    if not allow_reservation.wait(2):
+                        raise AssertionError('Timed out waiting to linearize profile reconfiguration')
+                return self._lock.acquire(*args, **kwargs)
+
+            def release(self):
+                self._lock.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                self.release()
+
+        limiter.lock = GateLock()
+        result = []
+        worker = threading.Thread(
+            name='profile-reconfiguration-reserver',
+            target=lambda: result.append(limiter.reserve_profile_for_stream(stream)),
+        )
+        worker.start()
+        self.assertTrue(reservation_at_lock.wait(2))
+        reconfigured_profile = {
+            'id': 10,
+            'name': 'Primary',
+            'max_streams': 1,
+            'is_active': True,
+        }
+        udi.account = {'id': 1, 'profiles': [reconfigured_profile]}
+        limiter.set_account_limit(1, 0, profiles=udi.account['profiles'])
+        allow_reservation.set()
+        worker.join(2)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0][0])
+        self.assertEqual(result[0][1], 'checking_capacity')
+        self.assertEqual(limiter.profile_checking_counts[10], 1)
+        limiter.release_profile(first_profile)
+        self.assertEqual(limiter.profile_checking_counts[10], 0)
+
+    def test_account_preemption_protects_sibling_viewer_with_unlimited_profile(self):
+        """An account cap must preempt P10 when a real viewer arrives on sibling P11."""
+        profiles = [
+            {'id': 10, 'name': 'Unlimited alias', 'max_streams': 0, 'is_active': True},
+            {'id': 11, 'name': 'Viewer alias', 'max_streams': 1, 'is_active': True},
+        ]
+
+        class FakeUDI:
+            def __init__(self):
+                self.context = {
+                    10: {'active_streams': 0, 'real_viewers': 0, 'shadow_watchers': 0},
+                    11: {'active_streams': 0, 'real_viewers': 0, 'shadow_watchers': 0},
+                }
+
+            def get_active_streams_for_account(self, _account_id):
+                return sum(item['active_streams'] for item in self.context.values())
+
+            def get_active_stream_context_per_profile(self, _account_id):
+                return self.context
+
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': profiles} if account_id == 1 else None
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 1, profiles=profiles)
+        acquired_account, _reason = limiter.acquire(1, timeout=0)
+        acquired_profile, _reason, profile = limiter.reserve_profile_for_stream({
+            'id': 100,
+            'url': 'http://example.test/stream',
+            'm3u_account_id': 1,
+        })
+        self.assertTrue(acquired_account)
+        self.assertTrue(acquired_profile)
+        self.assertEqual(profile['id'], 10)
+        self.assertFalse(limiter.should_preempt_profile_for_viewer(profile, account_id=1))
+
+        udi.context[11] = {
+            'active_streams': 1,
+            'real_viewers': 1,
+            'shadow_watchers': 0,
+        }
+        self.assertTrue(limiter.should_preempt_profile_for_viewer(profile, account_id=1))
+
+        limiter.release_profile(profile)
+        limiter.release(1)
+
+    def test_profile_preemption_counts_all_checker_reservations(self):
+        """Two checks plus a viewer overcommit a profile with max_streams=2."""
+        profiles = [
+            {'id': 10, 'name': 'Finite', 'max_streams': 2, 'is_active': True},
+            {'id': 11, 'name': 'Unlimited fallback', 'max_streams': 0, 'is_active': True},
+        ]
+
+        class FakeUDI:
+            def __init__(self):
+                self.context = {
+                    10: {'active_streams': 0, 'real_viewers': 0, 'shadow_watchers': 0},
+                    11: {'active_streams': 0, 'real_viewers': 0, 'shadow_watchers': 0},
+                }
+
+            def get_active_streams_for_account(self, _account_id):
+                return sum(item['active_streams'] for item in self.context.values())
+
+            def get_active_stream_context_per_profile(self, _account_id):
+                return self.context
+
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': profiles} if account_id == 1 else None
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 0, profiles=profiles)
+        stream = {'id': 100, 'url': 'http://example.test/stream', 'm3u_account_id': 1}
+        reservations = []
+        for _ in range(2):
+            acquired_account, _reason = limiter.acquire(1, timeout=0)
+            acquired_profile, _reason, profile = limiter.reserve_profile_for_stream(stream)
+            self.assertTrue(acquired_account)
+            self.assertTrue(acquired_profile)
+            self.assertEqual(profile['id'], 10)
+            reservations.append(profile)
+
+        self.assertFalse(limiter.should_preempt_profile_for_viewer(profile, account_id=1))
+        udi.context[10] = {
+            'active_streams': 1,
+            'real_viewers': 1,
+            'shadow_watchers': 0,
+        }
+        self.assertTrue(limiter.should_preempt_profile_for_viewer(profile, account_id=1))
+
+        first_token = object()
+        second_token = object()
+        self.assertTrue(limiter.should_preempt_profile_for_viewer(
+            profile,
+            account_id=1,
+            reservation_token=first_token,
+        ))
+        self.assertFalse(limiter.should_preempt_profile_for_viewer(
+            profile,
+            account_id=1,
+            reservation_token=second_token,
+        ))
+        limiter.release_viewer_preemption_claim(first_token)
+
+        for reserved_profile in reservations:
+            limiter.release_profile(reserved_profile)
+            limiter.release(1)
+
+    def test_profile_local_preemption_wins_over_sibling_account_claim(self):
+        """A sibling account callback must not steal a profile-local preemption."""
+        profiles = [
+            {'id': 10, 'name': 'Viewer profile', 'max_streams': 1, 'is_active': True},
+            {'id': 11, 'name': 'Sibling profile', 'max_streams': 1, 'is_active': True},
+        ]
+
+        class FakeUDI:
+            def __init__(self):
+                self.account = {'id': 1, 'profiles': profiles}
+                self.context = {
+                    10: {
+                        'active_streams': 1,
+                        'real_viewers': 1,
+                        'real_viewer_streams': 1,
+                        'shadow_watchers': 0,
+                    },
+                    11: {
+                        'active_streams': 0,
+                        'real_viewers': 0,
+                        'real_viewer_streams': 0,
+                        'shadow_watchers': 0,
+                    },
+                }
+
+            def get_active_stream_context_per_profile(self, _account_id):
+                return self.context
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 2, profiles=profiles)
+        limiter.account_checking_counts[1] = 2
+        limiter.profile_checking_counts.update({10: 1, 11: 1})
+        sibling_token = object()
+        viewer_profile_token = object()
+
+        self.assertFalse(limiter.should_preempt_profile_for_viewer(
+            profiles[1],
+            account_id=1,
+            reservation_token=sibling_token,
+        ))
+        self.assertTrue(limiter.should_preempt_profile_for_viewer(
+            profiles[0],
+            account_id=1,
+            reservation_token=viewer_profile_token,
+        ))
+        self.assertFalse(limiter.should_preempt_profile_for_viewer(
+            profiles[1],
+            account_id=1,
+            reservation_token=sibling_token,
+        ))
+        limiter.release_viewer_preemption_claim(viewer_profile_token)
+
+    def test_external_profile_excess_without_checker_does_not_hide_account_preemption(self):
+        """External-only local excess cannot satisfy an account claim by itself."""
+        profiles = [
+            {'id': 10, 'name': 'Viewer profile', 'max_streams': 1, 'is_active': True},
+            {'id': 11, 'name': 'Checker sibling', 'max_streams': 1, 'is_active': True},
+        ]
+
+        class FakeUDI:
+            def get_active_stream_context_per_profile(self, _account_id):
+                return {
+                    10: {
+                        'active_streams': 2,
+                        'real_viewers': 2,
+                        'real_viewer_streams': 2,
+                        'shadow_watchers': 0,
+                    },
+                    11: {
+                        'active_streams': 0,
+                        'real_viewers': 0,
+                        'real_viewer_streams': 0,
+                        'shadow_watchers': 0,
+                    },
+                }
+
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': profiles} if account_id == 1 else None
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 2, profiles=profiles)
+        limiter.account_checking_counts[1] = 1
+        limiter.profile_checking_counts[11] = 1
+        token = object()
+
+        self.assertTrue(limiter.should_preempt_profile_for_viewer(
+            profiles[1],
+            account_id=1,
+            reservation_token=token,
+        ))
+        limiter.release_viewer_preemption_claim(token)
+
+    def test_multiple_clients_on_one_proxy_stream_use_one_provider_slot(self):
+        """Client fan-out on one Dispatcharr proxy stream must not over-preempt."""
+        profile = {'id': 10, 'name': 'Primary', 'max_streams': 2, 'is_active': True}
+
+        class FakeUDI:
+            def get_active_stream_context_per_profile(self, _account_id):
+                return {
+                    10: {
+                        'active_streams': 1,
+                        'real_viewers': 3,
+                        'real_viewer_streams': 1,
+                        'shadow_watchers': 0,
+                    }
+                }
+
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': [profile]} if account_id == 1 else None
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 2, profiles=[profile])
+        limiter.account_checking_counts[1] = 1
+        limiter.profile_checking_counts[10] = 1
+
+        self.assertFalse(limiter.should_preempt_profile_for_viewer(profile, account_id=1))
+
+    def test_real_viewer_preemption_counts_shadow_occupied_provider_slots(self):
+        """Viewer priority uses all upstream slots while ignoring shadow as the trigger."""
+        profile = {'id': 10, 'name': 'Primary', 'max_streams': 2, 'is_active': True}
+
+        class FakeUDI:
+            def get_active_stream_context_per_profile(self, _account_id):
+                return {
+                    10: {
+                        'active_streams': 2,
+                        'real_viewers': 1,
+                        'real_viewer_streams': 1,
+                        'shadow_watchers': 1,
+                    }
+                }
+
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': [profile]} if account_id == 1 else None
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 2, profiles=[profile])
+        limiter.account_checking_counts[1] = 1
+        limiter.profile_checking_counts[10] = 1
+
+        self.assertTrue(limiter.should_preempt_profile_for_viewer(profile, account_id=1))
+
+    def test_preemption_refreshes_profile_limit_after_udi_replacement(self):
+        """A refreshed 2 -> 1 profile limit must replace the reservation's stale dict."""
+        stale_profile = {'id': 10, 'name': 'Primary', 'max_streams': 2, 'is_active': True}
+        unlimited_sibling = {'id': 11, 'name': 'Fallback', 'max_streams': 0, 'is_active': True}
+
+        class FakeUDI:
+            def __init__(self):
+                self.account = {'id': 1, 'profiles': [stale_profile, unlimited_sibling]}
+
+            def get_active_stream_context_per_profile(self, _account_id):
+                return {
+                    10: {
+                        'active_streams': 1,
+                        'real_viewers': 1,
+                        'real_viewer_streams': 1,
+                        'shadow_watchers': 0,
+                    }
+                }
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 0, profiles=udi.account['profiles'])
+        limiter.account_checking_counts[1] = 1
+        limiter.profile_checking_counts[10] = 1
+        self.assertFalse(limiter.should_preempt_profile_for_viewer(stale_profile, account_id=1))
+
+        udi.account = {
+            'id': 1,
+            'profiles': [
+                {'id': 10, 'name': 'Primary', 'max_streams': 1, 'is_active': True},
+                unlimited_sibling,
+            ],
+        }
+        limiter.set_account_limit(1, 0, profiles=udi.account['profiles'])
+        self.assertTrue(limiter.should_preempt_profile_for_viewer(stale_profile, account_id=1))
+
+    def test_negative_account_and_profile_limits_normalize_to_unlimited(self):
+        """Negative imported limits must never surface as negative finite capacity."""
+        from apps.udi.manager import UDIManager
+
+        profile = {'id': 10, 'name': 'Invalid', 'max_streams': -3, 'is_active': True}
+
+        class FakeUDI:
+            _get_stream_m3u_account_id = staticmethod(UDIManager._get_stream_m3u_account_id)
+
+            def _ensure_initialized(self):
+                return None
+
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': [profile]} if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+            def get_active_streams_for_account(self, _account_id):
+                return 0
+
+            def find_available_profile_for_stream(self, stream):
+                return UDIManager.find_available_profile_for_stream(self, stream)
+
+            def check_stream_can_run(self, stream):
+                return UDIManager.check_stream_can_run(self, stream)
+
+            def apply_profile_url_transformation(self, stream, profile=None):
+                return stream['url']
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, -2, profiles=[profile])
+        self.assertEqual(limiter.get_account_limit(1), 0)
+
+        acquired, _reason, reserved_profile = limiter.reserve_profile_for_stream({
+            'id': 100,
+            'url': 'http://example.test/stream',
+            'm3u_account_id': 1,
+        })
+        self.assertTrue(acquired)
+        snapshot = limiter.get_profile_slot_snapshot(1)
+        self.assertEqual(snapshot[0]['limit'], 0)
+        self.assertTrue(snapshot[0]['unlimited'])
+        self.assertIsNone(snapshot[0]['available'])
+        limiter.release_profile(reserved_profile)
+
+        results = SmartStreamScheduler(limiter, global_limit=1).check_streams_with_limits(
+            streams=[{
+                'id': 100,
+                'name': 'Negative limit stream',
+                'url': 'http://example.test/stream',
+                'm3u_account_id': 1,
+            }],
+            check_function=lambda **kwargs: {
+                'stream_id': kwargs['stream_id'],
+                'status': 'OK',
+            },
+            provider_wait_timeout=0.1,
+        )
+        self.assertEqual(results[0]['status'], 'OK')
     
     def test_single_stream_limit(self):
         """Test account with max_streams=1."""
@@ -505,6 +1034,172 @@ class TestSmartStreamScheduler(unittest.TestCase):
 
         self.assertEqual(len(results), 2)
         self.assertEqual(sorted(url.rsplit('=', 1)[-1] for url in started_urls), ['10', '11'])
+
+    def test_account_hard_cap_serializes_alias_profiles_with_null_or_identical_transforms(self):
+        """Alias profiles must not raise a positive aggregate account hard cap."""
+        transform_cases = {
+            'null': (
+                [
+                    {
+                        'id': 10,
+                        'name': 'Alias 1',
+                        'max_streams': 1,
+                        'is_active': True,
+                        'search_pattern': None,
+                        'replace_pattern': None,
+                    },
+                    {
+                        'id': 11,
+                        'name': 'Alias 2',
+                        'max_streams': 1,
+                        'is_active': True,
+                        'search_pattern': None,
+                        'replace_pattern': None,
+                    },
+                ],
+                lambda url: url,
+            ),
+            'identical': (
+                [
+                    {
+                        'id': 10,
+                        'name': 'Alias 1',
+                        'max_streams': 1,
+                        'is_active': True,
+                        'search_pattern': r'example\.test',
+                        'replace_pattern': 'shared.example.test',
+                    },
+                    {
+                        'id': 11,
+                        'name': 'Alias 2',
+                        'max_streams': 1,
+                        'is_active': True,
+                        'search_pattern': r'example\.test',
+                        'replace_pattern': 'shared.example.test',
+                    },
+                ],
+                lambda url: url.replace('example.test', 'shared.example.test'),
+            ),
+        }
+
+        for case_name, (profiles, transform) in transform_cases.items():
+            with self.subTest(transform=case_name):
+                class FakeUDI:
+                    account = {
+                        'id': 1,
+                        'name': 'Provider A',
+                        'max_streams': 1,
+                        'profiles': profiles,
+                    }
+
+                    def get_active_streams_for_account(self, _account_id):
+                        return 0
+
+                    def get_active_streams_count_per_profile(self, _account_id):
+                        return {}
+
+                    def get_m3u_account_by_id(self, account_id):
+                        return self.account if account_id == 1 else None
+
+                    def check_stream_can_run(self, _stream):
+                        return (True, None)
+
+                    def apply_profile_url_transformation(self, stream, profile=None):
+                        return transform(stream['url'])
+
+                    def get_stream_by_id(self, _stream_id):
+                        return None
+
+                limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+                limiter.set_account_limit(1, 1, profiles=profiles)
+                scheduler = SmartStreamScheduler(limiter, global_limit=2)
+                active_checks = 0
+                max_active_checks = 0
+                checked_urls = []
+                active_lock = threading.Lock()
+                first_check_started = threading.Event()
+                release_first_check = threading.Event()
+                second_acquire_observed = threading.Event()
+                continue_second_acquire = threading.Event()
+                acquire_results = []
+
+                original_acquire = limiter.acquire
+                acquire_call_count = 0
+
+                def observed_acquire(account_id, timeout=None):
+                    nonlocal acquire_call_count
+                    with active_lock:
+                        acquire_call_count += 1
+                        call_number = acquire_call_count
+                    result = original_acquire(account_id, timeout=timeout)
+                    if call_number == 2:
+                        acquire_results.append(bool(result))
+                        second_acquire_observed.set()
+                        if not continue_second_acquire.wait(2):
+                            raise AssertionError('Timed out waiting to continue second acquire')
+                    return result
+
+                limiter.acquire = observed_acquire
+
+                def mock_check(**kwargs):
+                    nonlocal active_checks, max_active_checks
+                    with active_lock:
+                        active_checks += 1
+                        max_active_checks = max(max_active_checks, active_checks)
+                        checked_urls.append(kwargs['stream_url'])
+                        is_first = len(checked_urls) == 1
+                    if is_first:
+                        first_check_started.set()
+                        if not release_first_check.wait(2):
+                            raise AssertionError('Timed out waiting to release first check')
+                    with active_lock:
+                        active_checks -= 1
+                    return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+                results_holder = []
+
+                runner = threading.Thread(target=lambda: results_holder.extend(
+                    scheduler.check_streams_with_limits(
+                        streams=[
+                            {
+                                'id': 1,
+                                'name': 'Stream 1',
+                                'url': 'http://example.test/1',
+                                'm3u_account': 1,
+                            },
+                            {
+                                'id': 2,
+                                'name': 'Stream 2',
+                                'url': 'http://example.test/2',
+                                'm3u_account': 1,
+                            },
+                        ],
+                        check_function=mock_check,
+                        provider_wait_timeout=0.1,
+                    )
+                ))
+                runner.start()
+                try:
+                    self.assertTrue(first_check_started.wait(2))
+                    self.assertTrue(second_acquire_observed.wait(2))
+                    self.assertEqual(acquire_results, [False])
+                finally:
+                    continue_second_acquire.set()
+                    release_first_check.set()
+                runner.join(3)
+
+                self.assertFalse(runner.is_alive())
+                results = results_holder
+                self.assertEqual(limiter.get_account_limit(1), 1)
+                self.assertEqual(len(results), 2)
+                self.assertEqual(max_active_checks, 1)
+                self.assertEqual(
+                    sorted(checked_urls),
+                    sorted([
+                        transform('http://example.test/1'),
+                        transform('http://example.test/2'),
+                    ]),
+                )
 
     def test_active_profile_does_not_block_free_sibling_profile(self):
         """A viewer on one credential should still leave a sibling credential usable."""
@@ -959,13 +1654,11 @@ class TestInitializeAccountLimits(unittest.TestCase):
         self.assertEqual(limiter.get_account_limit(2), 2)
         self.assertEqual(limiter.get_account_limit(3), 0)
     
-    def test_initialize_account_with_profiles(self):
-        """Test initializing account with multiple profiles - should sum profile limits."""
+    def test_initialize_account_with_profiles_keeps_positive_account_hard_cap(self):
+        """Active profile limits must not raise a positive aggregate account cap."""
         limiter = get_account_limiter()
         limiter.clear()
         
-        # Account DE-00 has max_streams=1 but has 2 active profiles with 1 stream each
-        # Total should be 2 (sum of profile limits)
         accounts = [
             {
                 'id': 26,
@@ -980,8 +1673,7 @@ class TestInitializeAccountLimits(unittest.TestCase):
         
         initialize_account_limits(accounts)
         
-        # Should be 2 (sum of two profile limits), not 1 (account-level limit)
-        self.assertEqual(limiter.get_account_limit(26), 2)
+        self.assertEqual(limiter.get_account_limit(26), 1)
     
     def test_initialize_account_with_inactive_profile(self):
         """Test that inactive profiles are excluded from limit calculation."""
@@ -992,7 +1684,7 @@ class TestInitializeAccountLimits(unittest.TestCase):
             {
                 'id': 1,
                 'name': 'Test Account',
-                'max_streams': 1,
+                'max_streams': 0,
                 'profiles': [
                     {'id': 1, 'name': 'Profile 1', 'max_streams': 2, 'is_active': True},
                     {'id': 2, 'name': 'Profile 2', 'max_streams': 3, 'is_active': False}  # Inactive
@@ -1002,7 +1694,7 @@ class TestInitializeAccountLimits(unittest.TestCase):
         
         initialize_account_limits(accounts)
         
-        # Should only count the active profile (2), not the inactive one (3)
+        # With an unlimited account fallback, only the active finite profile contributes.
         self.assertEqual(limiter.get_account_limit(1), 2)
     
     def test_initialize_account_with_no_profiles(self):
@@ -1024,8 +1716,8 @@ class TestInitializeAccountLimits(unittest.TestCase):
         # Should use account-level limit
         self.assertEqual(limiter.get_account_limit(1), 5)
     
-    def test_initialize_account_profile_limit_higher_than_account(self):
-        """Test that profile limit sum is used when higher than account limit."""
+    def test_initialize_account_profile_limit_cannot_raise_account_hard_cap(self):
+        """A profile sum above the account cap must remain a subordinate limit."""
         limiter = get_account_limiter()
         limiter.clear()
         
@@ -1044,8 +1736,65 @@ class TestInitializeAccountLimits(unittest.TestCase):
         
         initialize_account_limits(accounts)
         
-        # Should use profile sum (5), not account limit (1)
-        self.assertEqual(limiter.get_account_limit(1), 5)
+        self.assertEqual(limiter.get_account_limit(1), 1)
+
+    def test_zero_or_unset_account_limit_uses_finite_active_profile_sum(self):
+        """Finite profiles provide the aggregate fallback for an unlimited account."""
+        limiter = get_account_limiter()
+
+        for case_name, account in {
+            'zero': {
+                'id': 1,
+                'max_streams': 0,
+                'profiles': [
+                    {'id': 10, 'max_streams': 1, 'is_active': True},
+                    {'id': 11, 'max_streams': 2, 'is_active': True},
+                ],
+            },
+            'unset': {
+                'id': 2,
+                'profiles': [
+                    {'id': 20, 'max_streams': 1, 'is_active': True},
+                    {'id': 21, 'max_streams': 2, 'is_active': True},
+                ],
+            },
+        }.items():
+            with self.subTest(account_limit=case_name):
+                limiter.clear()
+                initialize_account_limits([account])
+                self.assertEqual(limiter.get_account_limit(account['id']), 3)
+
+    def test_unlimited_active_profile_keeps_zero_account_fallback_unlimited(self):
+        """A mixed finite/unlimited profile set has no finite aggregate fallback."""
+        limiter = get_account_limiter()
+        limiter.clear()
+
+        initialize_account_limits([{
+            'id': 1,
+            'max_streams': 0,
+            'profiles': [
+                {'id': 10, 'max_streams': 2, 'is_active': True},
+                {'id': 11, 'max_streams': 0, 'is_active': True},
+            ],
+        }])
+
+        self.assertEqual(limiter.get_account_limit(1), 0)
+
+    def test_positive_account_hard_cap_still_applies_with_unlimited_profile(self):
+        """An unlimited profile cannot bypass a positive aggregate account cap."""
+        limiter = get_account_limiter()
+        limiter.clear()
+
+        initialize_account_limits([{
+            'id': 1,
+            'max_streams': 1,
+            'profiles': [
+                {'id': 10, 'max_streams': 2, 'is_active': True},
+                {'id': 11, 'max_streams': 0, 'is_active': True},
+            ],
+        }])
+
+        self.assertEqual(limiter.get_account_limit(1), 1)
 
 
 class TestProfileAwareStreamChecking(unittest.TestCase):

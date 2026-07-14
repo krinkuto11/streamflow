@@ -1452,7 +1452,7 @@ export default function StreamChecker() {
                     <Activity className="h-4 w-4" />
                     <AlertTitle>Check Capacity</AlertTitle>
                     <AlertDescription>
-                      `Check slots full` means the checker is waiting for global workers, provider/profile slots, or viewer-protected capacity. Viewer-preempted probes are skipped safely and can be checked again later.
+                      `Check slots full` means the checker is waiting for global workers, provider/profile slots, or viewer-protected capacity. A positive M3U account Max Streams value is the aggregate hard cap; profile limits are additional sublimits and do not add capacity above it. Viewer-preempted probes are skipped safely and can be checked again later.
                     </AlertDescription>
                   </Alert>
 
