@@ -4,6 +4,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from flask import Flask
 
 from apps.core.atomic_json import atomic_write_json
@@ -11,12 +12,14 @@ from apps.api.shadow_blank_monitor_handlers import (
     learn_shadow_offline_image_response,
     run_shadow_blank_monitor_once_response,
     start_shadow_blank_monitor_response,
+    update_shadow_blank_monitor_config_response,
 )
 from apps.stream import shadow_blank_monitor_service as shadow_module
 from apps.stream.shadow_blank_monitor_service import (
     DEFAULT_WATCHER_USER_AGENT,
     SHADOW_WATCHER_USER_AGENT_MARKER,
     SHADOW_MONITOR_SCAN_ERROR_MESSAGE,
+    ShadowConfigConflictError,
     ShadowBlankMonitorService,
     normalize_config,
 )
@@ -1663,6 +1666,8 @@ def test_learn_offline_image_from_current_frame_adds_hash(tmp_path, monkeypatch)
         tmp_path,
         udi=FakeUdi(statuses=[{}], channels=[]),
     )
+    cancel_event = threading.Event()
+    watcher_process = FakePersistentWatcherProcess()
     with service._lock:
         service._watched["uuid-1"] = {
             "channel_uuid": "uuid-1",
@@ -1672,6 +1677,9 @@ def test_learn_offline_image_from_current_frame_adds_hash(tmp_path, monkeypatch)
             "stream_ref": "stream-safe",
             "real_client_count": 1,
         }
+        service._active_probes.add("uuid-1")
+        service._probe_cancel_events["uuid-1"] = cancel_event
+        service._persistent_watchers["uuid-1"] = {"process": watcher_process}
 
     monkeypatch.setattr(
         service,
@@ -1687,6 +1695,9 @@ def test_learn_offline_image_from_current_frame_adds_hash(tmp_path, monkeypatch)
     assert result["offline_image_hash"] == "0123456789abcdef"
     assert result["config"]["offline_image_reference_hashes"] == ["0123456789abcdef"]
     assert result["status"]["recent_events"][0]["type"] == "offline_image_learned"
+    assert cancel_event.is_set() is True
+    assert watcher_process.terminated is True
+    assert service._persistent_watchers == {}
 
 
 def test_learn_offline_image_deduplicates_near_existing_hash(tmp_path, monkeypatch):
@@ -1698,6 +1709,7 @@ def test_learn_offline_image_deduplicates_near_existing_hash(tmp_path, monkeypat
         "offline_image_reference_hashes": ["0123456789abcdee"],
         "offline_image_hash_threshold": 4,
     })
+    cancel_event = threading.Event()
     with service._lock:
         service._watched["uuid-1"] = {
             "channel_uuid": "uuid-1",
@@ -1705,6 +1717,9 @@ def test_learn_offline_image_deduplicates_near_existing_hash(tmp_path, monkeypat
             "stream_ref": "stream-safe",
             "real_client_count": 1,
         }
+        service._active_probes.add("uuid-1")
+        service._probe_cancel_events["uuid-1"] = cancel_event
+    revision = service.get_config()["config_revision"]
 
     monkeypatch.setattr(
         service,
@@ -1719,6 +1734,8 @@ def test_learn_offline_image_deduplicates_near_existing_hash(tmp_path, monkeypat
     assert result["deduplicated"] is True
     assert result["offline_image_distance"] == 1
     assert result["config"]["offline_image_reference_hashes"] == ["0123456789abcdee"]
+    assert result["config"]["config_revision"] == revision
+    assert cancel_event.is_set() is False
 
 
 def test_learn_offline_image_handler_reports_missing_watched_channel():
@@ -2825,7 +2842,8 @@ def test_discovery_tracks_all_real_viewer_channels_with_excludes_only(tmp_path):
         (None, "uuid-3"),
     }
     assert all(target["real_client_count"] == 1 for target in targets)
-    assert "included_channel_ids" not in normalize_config({})
+    assert normalize_config({})["included_channel_ids"] == []
+    assert normalize_config({})["included_channel_uuids"] == []
     status = service.get_status()
     assert status["watched_count"] == 2
     assert status["excluded_active_count"] == 2
@@ -7978,3 +7996,1164 @@ def test_quality_checker_state_does_not_pause_shadow_probe(tmp_path):
     assert service.get_config()["skip_during_quality_check"] is False
     assert probe_urls == ["http://dispatcharr.local/proxy/ts/stream/uuid-1"]
     assert status["recent_events"][0]["type"] == "probe_ok"
+
+
+def test_config_revision_persists_across_restart_and_invalid_legacy_values_fall_back(tmp_path):
+    udi = FakeUdi(statuses=[{}], channels=[])
+    service = make_service(tmp_path, udi=udi, watcher_api_key=None)
+
+    assert service.get_config()["config_revision"] == 0
+    saved = service.update_config({
+        "expected_config_revision": 0,
+        "dry_run": True,
+    })
+    assert saved["config_revision"] == 1
+    assert json.loads(service.config_file.read_text(encoding="utf-8"))["config_revision"] == 1
+
+    restarted = make_service(tmp_path, udi=udi, watcher_api_key=None)
+    assert restarted.get_config()["config_revision"] == 1
+    assert restarted.get_config()["dry_run"] is True
+
+    for index, invalid_revision in enumerate((True, -1, "1")):
+        config_file = tmp_path / f"invalid-shadow-{index}.json"
+        atomic_write_json(config_file, {
+            "dry_run": True,
+            "config_revision": invalid_revision,
+        })
+        invalid_service = ShadowBlankMonitorService(
+            config_file=config_file,
+            udi_provider=lambda: udi,
+            switch_stream=lambda *_args, **_kwargs: True,
+            base_url_provider=lambda: "http://dispatcharr.local",
+            blank_probe=lambda _url, _config: {"blank_detected": False},
+            stream_checker_provider=lambda: FakeStreamChecker(),
+        )
+        assert invalid_service.get_config()["config_revision"] == 0
+        assert invalid_service.get_config()["dry_run"] is True
+
+
+def test_config_revision_compare_and_swap_allows_exactly_one_concurrent_writer(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        watcher_api_key=None,
+    )
+    barrier = threading.Barrier(3)
+    results = []
+
+    def write(value):
+        barrier.wait()
+        try:
+            result = service.update_config({
+                "expected_config_revision": 0,
+                "watch_gap_seconds": value,
+            })
+            results.append(("saved", result["watch_gap_seconds"], result["config_revision"]))
+        except ShadowConfigConflictError as exc:
+            results.append(("conflict", exc.details["current_config_revision"]))
+
+    threads = [threading.Thread(target=write, args=(value,)) for value in (2, 3)]
+    for thread in threads:
+        thread.start()
+    barrier.wait()
+    for thread in threads:
+        thread.join(timeout=2)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert [result[0] for result in results].count("saved") == 1
+    assert [result[0] for result in results].count("conflict") == 1
+    persisted = json.loads(service.config_file.read_text(encoding="utf-8"))
+    saved_result = next(result for result in results if result[0] == "saved")
+    assert persisted["watch_gap_seconds"] == saved_result[1]
+    assert persisted["config_revision"] == 1
+
+
+def test_config_roundtrip_revision_alias_and_noop_put_each_advance_revision(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        watcher_api_key=None,
+    )
+    first_payload = service.get_config()
+    first = service.update_config(first_payload)
+    second = service.update_config(first)
+
+    assert first["config_revision"] == 1
+    assert second["config_revision"] == 2
+
+
+def test_invalid_config_revision_handler_returns_400_without_mutation(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        watcher_api_key=None,
+    )
+    app = Flask(__name__)
+    with app.app_context():
+        for invalid_revision in (True, -1, "0"):
+            response, status_code = update_shadow_blank_monitor_config_response(
+                payload={"expected_config_revision": invalid_revision},
+                get_service=lambda: service,
+            )
+            payload = response.get_json()
+            assert status_code == 400
+            assert payload["code"] == "invalid_shadow_config_revision"
+        for invalid_roundtrip in (False, 0.0, "0"):
+            response, status_code = update_shadow_blank_monitor_config_response(
+                payload={
+                    "expected_config_revision": 0,
+                    "config_revision": invalid_roundtrip,
+                },
+                get_service=lambda: service,
+            )
+            payload = response.get_json()
+            assert status_code == 400
+            assert payload["code"] == "invalid_shadow_config_revision"
+    assert service.get_config()["config_revision"] == 0
+
+
+def test_config_persist_failure_has_no_state_or_cancellation_side_effect(tmp_path, monkeypatch):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        watcher_api_key=None,
+    )
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "real_client_count": 1,
+    }
+    cancel_event = threading.Event()
+    watcher_process = FakePersistentWatcherProcess()
+    with service._lock:
+        service._watched["uuid-1"] = dict(target)
+        service._active_probes.add("uuid-1")
+        service._probe_cancel_events["uuid-1"] = cancel_event
+        service._persistent_watchers["uuid-1"] = {"process": watcher_process}
+    before = service.get_config()
+
+    monkeypatch.setattr(
+        shadow_module,
+        "atomic_write_json",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    with pytest.raises(OSError, match="disk full"):
+        service.update_config({
+            "expected_config_revision": 0,
+            "excluded_channel_uuids": ["uuid-1"],
+        })
+
+    assert service.get_config() == before
+    assert service._watched["uuid-1"]["channel_id"] == 1
+    assert service._probe_cancel_events["uuid-1"] is cancel_event
+    assert cancel_event.is_set() is False
+    assert service._persistent_watchers["uuid-1"]["process"] is watcher_process
+    assert watcher_process.terminated is False
+
+
+def test_config_write_then_raise_publishes_the_durable_committed_revision(tmp_path, monkeypatch):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        watcher_api_key=None,
+    )
+
+    def write_then_raise(path, payload, **_kwargs):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        raise OSError("directory fsync failed after replace")
+
+    monkeypatch.setattr(shadow_module, "atomic_write_json", write_then_raise)
+    updated = service.update_config({
+        "expected_config_revision": 0,
+        "dry_run": True,
+    })
+
+    durable = json.loads(service.config_file.read_text(encoding="utf-8"))
+    assert updated["config_revision"] == 1
+    assert updated["dry_run"] is True
+    assert durable["config_revision"] == 1
+    assert durable["dry_run"] is True
+
+
+def test_stale_config_handler_returns_redacted_revision_conflict(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        watcher_api_key=None,
+    )
+    service.update_config({
+        "expected_config_revision": 0,
+        "watcher_api_key": "super-secret-watcher-key",
+        "dry_run": True,
+    })
+
+    app = Flask(__name__)
+    with app.app_context():
+        response, status_code = update_shadow_blank_monitor_config_response(
+            payload={"expected_config_revision": 0, "dry_run": False},
+            get_service=lambda: service,
+        )
+        payload = response.get_json()
+
+    assert status_code == 409
+    assert payload["code"] == "shadow_config_revision_conflict"
+    assert set(payload["details"]) == {
+        "expected_config_revision",
+        "current_config_revision",
+        "current_config",
+    }
+    assert payload["details"]["expected_config_revision"] == 0
+    assert payload["details"]["current_config_revision"] == 1
+    assert payload["details"]["current_config"]["config_revision"] == 1
+    assert payload["details"]["current_config"]["watcher_api_key"] == ""
+    assert payload["details"]["current_config"]["has_watcher_api_key"] is True
+    assert "super-secret-watcher-key" not in json.dumps(payload)
+
+
+def test_all_persistent_shadow_config_mutators_advance_revision(tmp_path, monkeypatch):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    assert service.get_config()["config_revision"] == 1
+
+    try:
+        assert service.start() is True
+        assert service.get_config()["config_revision"] == 2
+    finally:
+        service.stop()
+    assert service.get_config()["config_revision"] == 3
+
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+    }
+    with service._lock:
+        service._watched["uuid-1"] = dict(target)
+    monkeypatch.setattr(
+        service,
+        "_capture_offline_image_hash",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "offline_image_hash": "0123456789abcdef",
+        },
+    )
+
+    learned = service.learn_offline_image_from_current_frame(enable_detection=True)
+    assert learned["success"] is True
+    assert learned["config"]["config_revision"] == 4
+    deduplicated = service.learn_offline_image_from_current_frame(enable_detection=True)
+    assert deduplicated["deduplicated"] is True
+    assert deduplicated["config"]["config_revision"] == 4
+
+
+def test_include_scope_reports_and_skips_active_channels_outside_scope(tmp_path):
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(stream_id=10),
+            "uuid-2": {
+                "state": "active",
+                "channel_id": "uuid-2",
+                "stream_id": 20,
+                "clients": [{"user_agent": "VLC"}],
+            },
+        }],
+        channels=[
+            {"id": 1, "uuid": "uuid-1", "streams": [10, 11]},
+            {"id": 2, "uuid": "uuid-2", "streams": [20, 21]},
+        ],
+    )
+    service = make_service(tmp_path, udi=udi)
+    config = normalize_config({"included_channel_ids": [2]})
+
+    targets = service.discover_active_targets(udi, config)
+    status = service.get_status()
+
+    assert [(target["channel_id"], target["channel_uuid"]) for target in targets] == [(2, "uuid-2")]
+    assert status["excluded_active_count"] == 1
+    assert status["excluded_active_channels"][0]["channel_id"] == 1
+    assert status["excluded_active_channels"][0]["exclude_reason"] == "channel_not_included"
+
+
+def test_scope_widening_removes_stale_excluded_status_without_waiting_for_scan(tmp_path):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    narrowed = service.update_config({
+        "expected_config_revision": service.get_config()["config_revision"],
+        "included_channel_uuids": ["uuid-2"],
+    })
+    service.discover_active_targets(udi, service.get_config(include_secret=True))
+    assert service.get_status()["excluded_active_count"] == 1
+
+    widened = service.update_config({
+        "expected_config_revision": narrowed["config_revision"],
+        "included_channel_uuids": [],
+    })
+
+    assert widened["included_channel_uuids"] == []
+    assert service.get_status()["excluded_active_count"] == 0
+
+
+def test_transient_run_once_include_filter_does_not_publish_config_scope_warning(tmp_path):
+    udi = FakeUdi(
+        statuses=[{
+            "uuid-1": active_status(stream_id=10),
+            "uuid-2": {
+                "state": "active",
+                "channel_id": "uuid-2",
+                "stream_id": 20,
+                "clients": [{"user_agent": "VLC"}],
+            },
+        }],
+        channels=[
+            {"id": 1, "uuid": "uuid-1", "streams": [10, 11]},
+            {"id": 2, "uuid": "uuid-2", "streams": [20, 21]},
+        ],
+    )
+    service = make_service(tmp_path, udi=udi)
+
+    targets = service.discover_active_targets(
+        udi,
+        service.get_config(include_secret=True),
+        include_channel_uuids=["uuid-2"],
+    )
+
+    assert [target["channel_uuid"] for target in targets] == ["uuid-2"]
+    assert service.get_config()["included_channel_uuids"] == []
+    assert service.get_status()["excluded_active_count"] == 0
+
+
+def test_discovery_recomputes_scope_status_after_concurrent_config_narrowing(tmp_path, monkeypatch):
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status(stream_id=10)}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+    )
+    service = make_service(tmp_path, udi=udi)
+    stale_config = service.get_config(include_secret=True)
+    original_resolve = service._resolve_channel_id
+    narrowed = {"done": False}
+
+    def resolve_and_narrow(*args, **kwargs):
+        resolved = original_resolve(*args, **kwargs)
+        if not narrowed["done"]:
+            narrowed["done"] = True
+            service.update_config({
+                "expected_config_revision": stale_config["config_revision"],
+                "included_channel_uuids": ["uuid-2"],
+            })
+        return resolved
+
+    monkeypatch.setattr(service, "_resolve_channel_id", resolve_and_narrow)
+    targets = service.discover_active_targets(udi, stale_config)
+    status = service.get_status()
+
+    assert targets == []
+    assert status["excluded_active_count"] == 1
+    assert status["excluded_active_channels"][0]["channel_id"] == 1
+    assert status["excluded_active_channels"][0]["exclude_reason"] == "channel_not_included"
+
+
+def test_probe_admission_rechecks_current_scope_after_stale_discovery(tmp_path):
+    probe_calls = []
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        blank_probe=lambda url, _config: probe_calls.append(url) or {"blank_detected": False},
+    )
+    stale_config = service.get_config(include_secret=True)
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+    }
+    service.update_config({
+        "expected_config_revision": stale_config["config_revision"],
+        "included_channel_uuids": ["uuid-2"],
+    })
+
+    service._probe_targets(FakeUdi(statuses=[{}], channels=[]), [target], stale_config)
+
+    assert probe_calls == []
+    assert service._active_probes == set()
+    assert service._probe_cancel_events == {}
+
+
+def test_channel_id_exclusion_detaches_active_probe_and_persistent_watcher(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+
+    class AliveMonitorThread:
+        @staticmethod
+        def is_alive():
+            return True
+
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "real_client_count": 1,
+    }
+    cancel_event = threading.Event()
+    watcher_process = FakePersistentWatcherProcess()
+    with service._config_mutation_lock:
+        with service._lock:
+            candidate = normalize_config({"enabled": True}, service._config)
+            service._persist_config_candidate_locked(candidate)
+            service._thread = AliveMonitorThread()
+            service._watched["uuid-1"] = dict(target)
+            service._active_probes.add("uuid-1")
+            service._probe_cancel_events["uuid-1"] = cancel_event
+            service._persistent_watchers["uuid-1"] = {"process": watcher_process}
+    expected_revision = service.get_config()["config_revision"]
+
+    updated = service.update_config({
+        "expected_config_revision": expected_revision,
+        "excluded_channel_ids": [1],
+    })
+
+    assert updated["excluded_channel_ids"] == [1]
+    assert cancel_event.is_set() is True
+    assert watcher_process.terminated is True
+    assert "uuid-1" not in service._watched
+    assert "uuid-1" not in service._persistent_watchers
+
+
+def test_excluding_channel_cancels_blocking_custom_probe_without_late_side_effect(tmp_path):
+    probe_started = threading.Event()
+    release_probe = threading.Event()
+    switch_calls = []
+
+    def blocking_probe(_url, _config):
+        probe_started.set()
+        assert release_probe.wait(timeout=2)
+        return {"blank_detected": True, "blank_ratio": 1.0, "blank_duration_secs": 60.0}
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(
+            statuses=[{"uuid-1": active_status(stream_id=10)}],
+            channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        ),
+        blank_probe=blocking_probe,
+        switch_calls=switch_calls,
+    )
+    class AliveMonitorThread:
+        @staticmethod
+        def is_alive():
+            return True
+
+    with service._config_mutation_lock:
+        with service._lock:
+            candidate = normalize_config({
+                "enabled": True,
+                "confirmation_count": 1,
+                "dry_run": False,
+            }, service._config)
+            service._persist_config_candidate_locked(candidate)
+            service._thread = AliveMonitorThread()
+    configured = service.get_config()
+    service._stop_event.clear()
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+    }
+    with service._lock:
+        service._watched["uuid-1"] = dict(target)
+
+    probe_thread = threading.Thread(
+        target=service._probe_targets,
+        args=(service.udi_provider(), [target], service.get_config(include_secret=True)),
+        kwargs={"single_pass": True},
+    )
+    probe_thread.start()
+    assert probe_started.wait(timeout=1)
+
+    updated = service.update_config({
+        "expected_config_revision": configured["config_revision"],
+        "excluded_channel_uuids": ["uuid-1"],
+    })
+    assert updated["excluded_channel_uuids"] == ["uuid-1"]
+    release_probe.set()
+    probe_thread.join(timeout=2)
+
+    assert not probe_thread.is_alive()
+    assert switch_calls == []
+    assert service.get_status()["watched_count"] == 0
+    assert service.get_status()["recent_events"] == []
+    assert service._active_probes == set()
+
+
+def test_persistent_watcher_popen_race_rechecks_revision_and_scope(tmp_path, monkeypatch):
+    popen_entered = threading.Event()
+    release_popen = threading.Event()
+    update_finished = threading.Event()
+    processes = []
+
+    def delayed_popen(_command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        processes.append(process)
+        popen_entered.set()
+        assert release_popen.wait(timeout=2)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", delayed_popen)
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: FakeUdi(statuses=[{}], channels=[]),
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+    )
+    configured = service.update_config({
+        "expected_config_revision": service.get_config()["config_revision"],
+        "watcher_api_key": "watcher-key",
+        "persistent_watcher_enabled": True,
+    })
+    service._stop_event.clear()
+    config = service.get_config(include_secret=True)
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "real_client_count": 1,
+    }
+
+    start_thread = threading.Thread(
+        target=service._start_persistent_watcher,
+        args=("uuid-1", target, config, "http://dispatcharr.local/proxy/ts/stream/uuid-1"),
+    )
+    start_thread.start()
+    assert popen_entered.wait(timeout=1)
+    update_thread = threading.Thread(
+        target=lambda: (
+            service.update_config({
+                "expected_config_revision": configured["config_revision"],
+                "excluded_channel_uuids": ["uuid-1"],
+            }),
+            update_finished.set(),
+        ),
+    )
+    update_thread.start()
+    assert update_finished.wait(timeout=0.1) is False
+    release_popen.set()
+    start_thread.join(timeout=2)
+    update_thread.join(timeout=2)
+
+    assert not start_thread.is_alive()
+    assert not update_thread.is_alive()
+    assert update_finished.is_set() is True
+    assert len(processes) == 1
+    assert processes[0].terminated is True
+    assert service._persistent_watchers == {}
+
+
+def test_scope_update_completed_before_persistent_watcher_admission_prevents_popen(tmp_path, monkeypatch):
+    command_entered = threading.Event()
+    release_command = threading.Event()
+    popen_calls = []
+
+    class AliveThread:
+        @staticmethod
+        def is_alive():
+            return True
+
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: FakeUdi(statuses=[{}], channels=[]),
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+    )
+    with service._config_mutation_lock:
+        with service._lock:
+            configured = normalize_config({
+                "enabled": True,
+                "watcher_api_key": "watcher-key",
+                "persistent_watcher_enabled": True,
+            }, service._config)
+            service._persist_config_candidate_locked(configured)
+            service._thread = AliveThread()
+    service._stop_event.clear()
+    stale_config = service.get_config(include_secret=True)
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "real_client_count": 1,
+    }
+    original_command = service._persistent_watcher_command
+
+    def delayed_command(url, config):
+        command_entered.set()
+        assert release_command.wait(timeout=2)
+        return original_command(url, config)
+
+    monkeypatch.setattr(service, "_persistent_watcher_command", delayed_command)
+    monkeypatch.setattr(
+        shadow_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: popen_calls.append((args, kwargs)) or FakePersistentWatcherProcess(),
+    )
+
+    start_thread = threading.Thread(
+        target=service._start_persistent_watcher,
+        args=("uuid-1", target, stale_config, "http://dispatcharr.local/proxy/ts/stream/uuid-1"),
+    )
+    start_thread.start()
+    assert command_entered.wait(timeout=1)
+    updated = service.update_config({
+        "expected_config_revision": stale_config["config_revision"],
+        "excluded_channel_uuids": ["uuid-1"],
+    })
+    assert updated["excluded_channel_uuids"] == ["uuid-1"]
+    release_command.set()
+    start_thread.join(timeout=2)
+
+    assert not start_thread.is_alive()
+    assert popen_calls == []
+    assert service._persistent_watchers == {}
+
+
+def test_persistent_watcher_config_rotation_terminates_old_revision_before_put_returns(tmp_path, monkeypatch):
+    starts = []
+
+    def fake_popen(command, **_kwargs):
+        process = FakePersistentWatcherProcess()
+        starts.append((list(command), process))
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", fake_popen)
+    service = ShadowBlankMonitorService(
+        config_file=tmp_path / "shadow.json",
+        udi_provider=lambda: FakeUdi(statuses=[{}], channels=[]),
+        base_url_provider=lambda: "http://dispatcharr.local",
+        stream_checker_provider=lambda: FakeStreamChecker(),
+    )
+    configured = service.update_config({
+        "expected_config_revision": 0,
+        "watcher_api_key": "old-watcher-key",
+        "watcher_user_agent": "Old Watcher Agent",
+        "persistent_watcher_enabled": True,
+    })
+    service._stop_event.clear()
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "real_client_count": 1,
+    }
+    service._start_persistent_watcher(
+        "uuid-1",
+        target,
+        service.get_config(include_secret=True),
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+    )
+    old_process = starts[0][1]
+
+    rotated = service.update_config({
+        "expected_config_revision": configured["config_revision"],
+        "watcher_api_key": "new-watcher-key",
+        "watcher_user_agent": "New Watcher Agent",
+    })
+
+    assert old_process.terminated is True
+    assert service._persistent_watchers == {}
+    assert rotated["config_revision"] == configured["config_revision"] + 1
+    service._stop_event.clear()
+    service._start_persistent_watcher(
+        "uuid-1",
+        target,
+        service.get_config(include_secret=True),
+        "http://dispatcharr.local/proxy/ts/stream/uuid-1",
+    )
+    new_command = " ".join(starts[1][0])
+    assert "new-watcher-key" in new_command
+    assert "old-watcher-key" not in new_command
+    assert "New Watcher Agent" in new_command
+
+
+def test_stop_timeout_then_start_is_serialized_and_reports_false_until_old_worker_exits(tmp_path):
+    join_entered = threading.Event()
+    release_join = threading.Event()
+
+    class TimedOutWorker:
+        def __init__(self):
+            self.alive = True
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout=None):
+            assert timeout == 5
+            join_entered.set()
+            assert release_join.wait(timeout=2)
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    old_worker = TimedOutWorker()
+    with service._config_mutation_lock:
+        with service._lock:
+            configured = normalize_config({"enabled": True}, service._config)
+            service._persist_config_candidate_locked(configured)
+            service._thread = old_worker
+    service._stop_event.clear()
+    stop_finished = threading.Event()
+    start_result = {}
+
+    stop_thread = threading.Thread(
+        target=lambda: (service.stop(), stop_finished.set()),
+    )
+    start_thread = threading.Thread(
+        target=lambda: start_result.setdefault("value", service.start()),
+    )
+    stop_thread.start()
+    assert join_entered.wait(timeout=1)
+    start_thread.start()
+    assert "value" not in start_result
+    release_join.set()
+    stop_thread.join(timeout=2)
+    start_thread.join(timeout=2)
+
+    assert stop_finished.is_set() is True
+    assert start_result["value"] is False
+    assert service.get_config()["enabled"] is False
+    assert service._stop_event.is_set() is True
+
+    old_worker.alive = False
+    assert service.start() is True
+    assert service.get_status()["running"] is True
+    service.stop()
+
+
+def test_repeated_start_is_idempotent_and_does_not_stale_active_probe_revision(tmp_path):
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    assert service.start() is True
+    revision = service.get_config()["config_revision"]
+    cancel_event = threading.Event()
+    with service._lock:
+        service._active_probes.add("uuid-1")
+        service._probe_cancel_events["uuid-1"] = cancel_event
+
+    try:
+        assert service.start() is True
+        assert service.get_config()["config_revision"] == revision
+        assert cancel_event.is_set() is False
+    finally:
+        service.stop()
+
+
+def test_worker_thread_start_failure_durably_reconciles_enabled_state(tmp_path, monkeypatch):
+    class FailingThread:
+        def __init__(self, *args, **kwargs):
+            self.args = args
+            self.kwargs = kwargs
+
+        @staticmethod
+        def is_alive():
+            return False
+
+        @staticmethod
+        def start():
+            raise RuntimeError("thread resource exhausted")
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    initial_revision = service.get_config()["config_revision"]
+    monkeypatch.setattr(shadow_module.threading, "Thread", FailingThread)
+
+    with pytest.raises(RuntimeError, match="thread resource exhausted"):
+        service.start()
+
+    public = service.get_config()
+    durable = json.loads(service.config_file.read_text(encoding="utf-8"))
+    assert public["enabled"] is False
+    assert public["config_revision"] == initial_revision + 2
+    assert durable["enabled"] is False
+    assert durable["config_revision"] == public["config_revision"]
+    assert service._thread is None
+    assert service._stop_event.is_set() is True
+    assert service.get_status()["last_error"] == shadow_module.SHADOW_MONITOR_START_ERROR_MESSAGE
+
+
+def test_update_enabled_thread_start_failure_returns_honest_disabled_revision(tmp_path, monkeypatch):
+    class FailingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def is_alive():
+            return False
+
+        @staticmethod
+        def start():
+            raise RuntimeError("thread start failed")
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    initial_revision = service.get_config()["config_revision"]
+    monkeypatch.setattr(shadow_module.threading, "Thread", FailingThread)
+
+    with pytest.raises(RuntimeError, match="thread start failed"):
+        service.update_config({
+            "expected_config_revision": initial_revision,
+            "enabled": True,
+        })
+
+    public = service.get_config()
+    durable = json.loads(service.config_file.read_text(encoding="utf-8"))
+    assert public["enabled"] is False
+    assert public["config_revision"] == initial_revision + 2
+    assert durable["enabled"] is False
+    assert durable["config_revision"] == public["config_revision"]
+    assert service.get_status()["running"] is False
+
+
+def test_worker_thread_constructor_failure_durably_reconciles_enabled_state(tmp_path, monkeypatch):
+    class ConstructorFailure:
+        def __new__(cls, *args, **kwargs):
+            raise MemoryError("thread constructor failed")
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    initial_revision = service.get_config()["config_revision"]
+    monkeypatch.setattr(shadow_module.threading, "Thread", ConstructorFailure)
+
+    with pytest.raises(MemoryError, match="thread constructor failed"):
+        service.start()
+
+    durable = json.loads(service.config_file.read_text(encoding="utf-8"))
+    assert service.get_config()["enabled"] is False
+    assert service.get_config()["config_revision"] == initial_revision + 2
+    assert durable["enabled"] is False
+    assert durable["config_revision"] == initial_revision + 2
+    assert service._thread is None
+    assert service._stop_event.is_set() is True
+
+
+def test_probe_thread_start_failure_releases_only_its_registered_admission(tmp_path, monkeypatch):
+    class FailingThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def start():
+            raise RuntimeError("probe thread start failed")
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    config = service.get_config(include_secret=True)
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+    }
+    monkeypatch.setattr(shadow_module.threading, "Thread", FailingThread)
+
+    with pytest.raises(RuntimeError, match="probe thread start failed"):
+        service._probe_targets(
+            FakeUdi(statuses=[{}], channels=[]),
+            [target],
+            config,
+        )
+
+    assert service._active_probes == set()
+    assert service._probe_cancel_events == {}
+
+
+def test_probe_thread_constructor_failure_releases_registered_admission(tmp_path, monkeypatch):
+    class ConstructorFailure:
+        def __new__(cls, *args, **kwargs):
+            raise MemoryError("probe thread constructor failed")
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+    )
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+        "stream_ref": "stream-10",
+        "real_client_count": 1,
+        "watcher_client_count": 0,
+    }
+    monkeypatch.setattr(shadow_module.threading, "Thread", ConstructorFailure)
+
+    with pytest.raises(MemoryError, match="probe thread constructor failed"):
+        service._probe_targets(
+            FakeUdi(statuses=[{}], channels=[]),
+            [target],
+            service.get_config(include_secret=True),
+        )
+
+    assert service._active_probes == set()
+    assert service._probe_cancel_events == {}
+
+
+def test_cancelable_probe_process_terminates_promptly_on_channel_cancel(tmp_path, monkeypatch):
+    process_started = threading.Event()
+
+    class BlockingProcess:
+        def __init__(self):
+            self.returncode = None
+            self.terminated = False
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            if self.returncode is None:
+                process_started.set()
+                raise shadow_module.subprocess.TimeoutExpired(["ffmpeg"], timeout)
+            return b"", b""
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+    process = BlockingProcess()
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", lambda *_args, **_kwargs: process)
+    service = make_service(tmp_path, udi=FakeUdi(statuses=[{}], channels=[]))
+    cancel_event = threading.Event()
+    result = {}
+
+    thread = threading.Thread(
+        target=lambda: result.setdefault(
+            "completed",
+            service._run_cancelable_command(
+                ["ffmpeg"],
+                {"_shadow_probe_cancel_event": cancel_event},
+                timeout=10,
+            ),
+        ),
+    )
+    thread.start()
+    assert process_started.wait(timeout=1)
+    cancel_event.set()
+    thread.join(timeout=1)
+
+    assert not thread.is_alive()
+    assert process.terminated is True
+    assert result["completed"].returncode == 0
+
+
+def test_switch_fence_blocks_excluded_target_and_orders_update_after_inflight_switch(tmp_path):
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+    }
+    blocked_calls = []
+    (tmp_path / "blocked").mkdir()
+    blocked_service = make_service(
+        tmp_path / "blocked",
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        switch_calls=blocked_calls,
+    )
+    blocked_config = blocked_service.get_config(include_secret=True)
+    blocked_config["_shadow_probe_cancel_event"] = threading.Event()
+    with blocked_service._config_mutation_lock:
+        result = {}
+        switch_thread = threading.Thread(
+            target=lambda: result.setdefault(
+                "value",
+                blocked_service._switch_stream_with_config_fence(
+                    "uuid-1",
+                    11,
+                    channel_uuid="uuid-1",
+                    target=target,
+                    config=blocked_config,
+                    origin_stream_id=10,
+                ),
+            ),
+        )
+        switch_thread.start()
+        blocked_service.update_config({
+            "expected_config_revision": blocked_service.get_config()["config_revision"],
+            "excluded_channel_uuids": ["uuid-1"],
+        })
+    switch_thread.join(timeout=2)
+    assert result["value"] is None
+    assert blocked_calls == []
+
+    switch_entered = threading.Event()
+    release_switch = threading.Event()
+    switch_finished = threading.Event()
+    update_finished = threading.Event()
+
+    def blocking_switch(_channel_id, stream_id=None, url=None):
+        switch_entered.set()
+        assert release_switch.wait(timeout=2)
+        switch_finished.set()
+        return True
+
+    ordered_service = ShadowBlankMonitorService(
+        config_file=tmp_path / "ordered-shadow.json",
+        udi_provider=lambda: FakeUdi(statuses=[{}], channels=[]),
+        switch_stream=blocking_switch,
+        base_url_provider=lambda: "http://dispatcharr.local",
+        blank_probe=lambda _url, _config: {"blank_detected": False},
+        stream_checker_provider=lambda: FakeStreamChecker(),
+    )
+    ordered_config = ordered_service.get_config(include_secret=True)
+    ordered_config["_shadow_probe_cancel_event"] = threading.Event()
+    ordered_service._uses_default_switch_stream = True
+    with ordered_service._lock:
+        ordered_service._probe_cancel_events["uuid-1"] = ordered_config[
+            "_shadow_probe_cancel_event"
+        ]
+    switch_result = {}
+    switch_thread = threading.Thread(
+        target=lambda: switch_result.setdefault(
+            "value",
+            ordered_service._switch_stream_with_config_fence(
+                "uuid-1",
+                11,
+                channel_uuid="uuid-1",
+                target=target,
+                config=ordered_config,
+                origin_stream_id=10,
+            ),
+        ),
+    )
+    update_thread = threading.Thread(
+        target=lambda: (
+            ordered_service.update_config({
+                "expected_config_revision": 0,
+                "excluded_channel_uuids": ["uuid-1"],
+            }),
+            update_finished.set(),
+        ),
+    )
+    switch_thread.start()
+    assert switch_entered.wait(timeout=1)
+    update_thread.start()
+    assert update_finished.wait(timeout=0.1) is False
+    release_switch.set()
+    switch_thread.join(timeout=2)
+    update_thread.join(timeout=2)
+
+    assert switch_result["value"] is True
+    assert switch_finished.is_set() is True
+    assert update_finished.is_set() is True
+    assert ordered_service.get_config()["excluded_channel_uuids"] == ["uuid-1"]
+    assert ordered_config["_shadow_probe_cancel_event"].is_set() is True
+    assert len(ordered_service._switch_history["uuid-1"]) == 1
+    status = ordered_service.get_status()
+    api_event = next(
+        event
+        for event in status["recent_events"]
+        if event["type"] == "switch_api_completed"
+    )
+    assert api_event["decision_group"] == "switch"
+    assert api_event["details"]["switch_api_success"] is True
+    assert api_event["details"]["post_switch_verification_pending"] is True
+    assert status["switch_summary"]["successful_switches"] == 0
+    assert status["switch_summary"]["api_completed_switches"] == 1
+    assert status["switch_summary"]["api_successful_switch_calls"] == 1
+    assert status["switch_summary"]["pending_post_switch_verifications"] == 1
+    assert status["switch_summary"]["last_switch_result"] == "switch_api_completed"
+
+
+def test_switch_fence_rejects_stale_revision_even_when_old_snapshot_was_live_mode(tmp_path):
+    switch_calls = []
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        switch_calls=switch_calls,
+    )
+    stale_config = service.get_config(include_secret=True)
+    stale_config["_shadow_probe_cancel_event"] = threading.Event()
+    service.update_config({
+        "expected_config_revision": stale_config["config_revision"],
+        "dry_run": True,
+    })
+    target = {
+        "channel_uuid": "uuid-1",
+        "channel_id": 1,
+        "channel_ref": "channel-1",
+        "stream_id": 10,
+    }
+
+    result = service._switch_stream_with_config_fence(
+        "uuid-1",
+        11,
+        channel_uuid="uuid-1",
+        target=target,
+        config=stale_config,
+        origin_stream_id=10,
+    )
+
+    assert result is None
+    assert switch_calls == []
+
+
+def test_switch_summary_resolves_api_completion_when_final_verification_event_exists():
+    summary = ShadowBlankMonitorService._switch_summary([
+        {
+            "timestamp": 1002.0,
+            "type": "switch_success",
+            "details": {
+                "switch_attempt_ref": "switch-attempt-1",
+                "reason": "blank",
+            },
+        },
+        {
+            "timestamp": 1001.0,
+            "type": "switch_api_completed",
+            "details": {
+                "switch_attempt_ref": "switch-attempt-1",
+                "reason": "blank",
+                "switch_api_success": True,
+                "post_switch_verification_pending": True,
+            },
+        },
+    ])
+
+    assert summary["successful_switches"] == 1
+    assert summary["api_completed_switches"] == 1
+    assert summary["api_successful_switch_calls"] == 1
+    assert summary["pending_post_switch_verifications"] == 0
+    assert summary["last_switch_result"] == "switch_success"

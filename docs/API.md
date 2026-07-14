@@ -140,6 +140,14 @@ rules are being prepared. A check still consumes provider and analysis capacity.
 | POST | `/api/shadow-blank-monitor/run-once` | Run one discovery cycle |
 | POST | `/api/shadow-blank-monitor/offline-image/learn` | Learn an offline-image reference |
 
+`GET /api/shadow-blank-monitor/config` returns a persistent, monotonically
+increasing `config_revision`. Send it back as `expected_config_revision` (or as
+the unchanged `config_revision` field from the GET response) on PUT. A stale
+precondition returns HTTP `409` with code `shadow_config_revision_conflict` and
+a redacted current configuration. `included_channel_ids` and
+`included_channel_uuids` provide an explicit monitor allowlist; both empty means
+all active viewer channels, and exclusions always take precedence.
+
 ---
 
 ## Teamarr Preflight

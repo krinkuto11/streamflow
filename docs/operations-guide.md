@@ -159,13 +159,20 @@ Recommended setup:
 1. Create a dedicated Dispatcharr user or API key for Shadow Monitor.
 2. Do not reuse the main administrator identity for watcher traffic.
 3. Configure the watcher API key in the Shadow Monitor page.
-4. Start with dry run enabled.
-5. Confirm that watched channels and recent events look correct.
-6. Disable dry run only after the decisions are safe.
+4. Under `Shadow Monitor -> Configuration -> Monitor Scope`, leave both
+   `Include Only` fields empty for normal all-channel protection. Use them only
+   for an intentionally isolated channel set; Exclude fields still win.
+5. Start with dry run enabled.
+6. Confirm that watched channels, out-of-scope warnings, and recent events look correct.
+7. Disable dry run only after the decisions are safe.
 
 The watcher identity should be separate because Shadow Monitor creates its own
 viewing sessions. A dedicated identity makes it clear which connections are real
 clients and which ones belong to StreamFlow.
+
+Configuration GET responses include `config_revision`. Configuration PUTs made
+from the UI use that revision as a compare-and-swap precondition, so a stale tab
+receives a conflict and reloads instead of overwriting a newer operator change.
 
 Single-stream channels cannot be switched to another stream. Shadow Monitor
 should record that decision clearly instead of retrying a switch that cannot

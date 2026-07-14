@@ -8,6 +8,7 @@ export const shadowEventLabels = {
   offline_image_pending: 'Offline Image Pending',
   loop_pending: 'Loop Pending',
   dry_run_switch: 'Dry Run Switch',
+  switch_api_completed: 'Switch API Completed',
   switch_success: 'Switch Success',
   switch_failed: 'Switch Failed',
   external_stream_change: 'External Stream Change',
@@ -130,7 +131,7 @@ export const formatShadowPreProbeStatus = (last = null) => {
 export const getShadowEventDecisionGroup = (event = {}) => {
   if (event?.decision_group) return event.decision_group
   const type = String(event?.type || '')
-  if (['switch_success', 'switch_failed', 'dry_run_switch'].includes(type)) return 'switch'
+  if (['switch_api_completed', 'switch_success', 'switch_failed', 'dry_run_switch'].includes(type)) return 'switch'
   if (type === 'external_stream_change') return 'switch'
   if (['pre_probe_unavailable', 'pre_probe_rejected'].includes(type)) return 'pre_probe'
   if (type.endsWith('_pending') || type === 'probe_ok') return 'probe'

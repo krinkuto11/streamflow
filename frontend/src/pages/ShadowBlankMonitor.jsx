@@ -18,6 +18,10 @@ import {
   shadowMonitorNumberFields,
 } from '@/lib/shadow-monitor-config-fields.js'
 import {
+  buildShadowMonitorConfigPayload,
+  isShadowConfigRevisionConflict,
+} from '@/lib/shadow-monitor-config-payload.js'
+import {
   CUSTOM_WATCHER_USER_AGENT_TEMPLATE,
   CUSTOM_WATCHER_USER_AGENT_VALUE,
   SHADOW_WATCHER_USER_AGENT_MARKER,
@@ -52,15 +56,6 @@ import {
   StopCircle,
 } from 'lucide-react'
 
-const parseCsv = (value, numeric = false) => {
-  return String(value || '')
-    .split(',')
-    .map(item => item.trim())
-    .filter(Boolean)
-    .map(item => numeric ? Number(item) : item)
-    .filter(item => numeric ? Number.isFinite(item) : true)
-}
-
 const formatTime = (timestamp) => {
   if (!timestamp) return 'Never'
   return new Date(timestamp * 1000).toLocaleTimeString()
@@ -88,6 +83,8 @@ export default function ShadowBlankMonitor() {
   const [config, setConfig] = useState(null)
   const [editedConfig, setEditedConfig] = useState(null)
   const [status, setStatus] = useState(null)
+  const [includedIds, setIncludedIds] = useState('')
+  const [includedUuids, setIncludedUuids] = useState('')
   const [excludedIds, setExcludedIds] = useState('')
   const [excludedUuids, setExcludedUuids] = useState('')
   const [offlineImageHashes, setOfflineImageHashes] = useState('')
@@ -145,10 +142,13 @@ export default function ShadowBlankMonitor() {
       dirtyFieldsRef.current = new Set()
       setConfig(nextConfig)
       setEditedConfig(nextConfig)
+      setIncludedIds((nextConfig.included_channel_ids || []).join(', '))
+      setIncludedUuids((nextConfig.included_channel_uuids || []).join(', '))
       setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
       setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
       setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
       setStatus(statusResponse.data || {})
+      return true
     } catch (err) {
       console.error('Failed to load shadow monitor data:', err)
       toast({
@@ -156,6 +156,7 @@ export default function ShadowBlankMonitor() {
         description: 'Failed to load shadow monitor status',
         variant: 'destructive',
       })
+      return false
     } finally {
       setLoading(false)
     }
@@ -205,13 +206,16 @@ export default function ShadowBlankMonitor() {
     try {
       setActionLoading('save')
       const sourceConfig = editedConfigRef.current || editedConfig || {}
-      const payload = {
-        ...sourceConfig,
-        excluded_channel_ids: parseCsv(excludedIds, true),
-        excluded_channel_uuids: parseCsv(excludedUuids),
-        offline_image_reference_hashes: parseCsv(offlineImageHashes),
-        ...extra,
-      }
+      const payload = buildShadowMonitorConfigPayload({
+        sourceConfig,
+        configRevision: configRef.current?.config_revision,
+        includedIds,
+        includedUuids,
+        excludedIds,
+        excludedUuids,
+        offlineImageHashes,
+        extra,
+      })
       const response = await shadowBlankMonitorAPI.updateConfig(payload)
       const nextConfig = response.data || {}
       configRef.current = nextConfig
@@ -219,12 +223,25 @@ export default function ShadowBlankMonitor() {
       dirtyFieldsRef.current = new Set()
       setConfig(nextConfig)
       setEditedConfig(nextConfig)
+      setIncludedIds((nextConfig.included_channel_ids || []).join(', '))
+      setIncludedUuids((nextConfig.included_channel_uuids || []).join(', '))
       setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
       setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
       setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
       await loadStatus()
       toast({ title: 'Saved', description: 'Shadow monitor configuration updated' })
     } catch (err) {
+      if (isShadowConfigRevisionConflict(err)) {
+        const reloaded = await loadData()
+        if (reloaded) {
+          toast({
+            title: 'Configuration changed',
+            description: 'A newer Shadow Monitor configuration was loaded. Review your changes and save again.',
+            variant: 'destructive',
+          })
+        }
+        return
+      }
       toast({
         title: 'Error',
         description: err.response?.data?.error || 'Failed to save shadow monitor configuration',
@@ -248,6 +265,8 @@ export default function ShadowBlankMonitor() {
       dirtyFieldsRef.current = new Set()
       setConfig(nextConfig)
       setEditedConfig(nextConfig)
+      setIncludedIds((nextConfig.included_channel_ids || []).join(', '))
+      setIncludedUuids((nextConfig.included_channel_uuids || []).join(', '))
       setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
       setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
       setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
@@ -391,9 +410,9 @@ export default function ShadowBlankMonitor() {
         <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-100">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <div>
-            <p className="font-medium">Active viewer channels are excluded</p>
+            <p className="font-medium">Active viewer channels are outside monitor scope</p>
             <p className="mt-1">
-              {excludedActiveCount} active real-viewer {excludedActiveCount === 1 ? 'channel is' : 'channels are'} ignored by the Shadow Monitor exclude list.
+              {excludedActiveCount} active real-viewer {excludedActiveCount === 1 ? 'channel is' : 'channels are'} outside the configured Shadow Monitor scope.
             </p>
           </div>
         </div>
@@ -427,7 +446,7 @@ export default function ShadowBlankMonitor() {
           <CardContent>
             <div className="text-2xl font-bold">{status?.watched_count || watchedChannels.length}</div>
             <p className="text-xs text-muted-foreground">
-              {excludedActiveCount > 0 ? `${excludedActiveCount} active excluded` : 'Active channels with viewers'}
+              {excludedActiveCount > 0 ? `${excludedActiveCount} active out of scope` : 'Active channels with viewers'}
             </p>
           </CardContent>
         </Card>
@@ -716,6 +735,33 @@ export default function ShadowBlankMonitor() {
               ) : null}
             </div>
 
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Monitor Scope</p>
+              <p className="text-xs text-muted-foreground">
+                Leave both include fields empty to follow every active viewer channel. When either field is set, Shadow monitors only matching channels; excludes still win.
+              </p>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="included_channel_ids">Include Only Channel IDs</Label>
+                <Input
+                  id="included_channel_ids"
+                  placeholder="All channels"
+                  value={includedIds}
+                  onChange={(event) => setIncludedIds(event.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="included_channel_uuids">Include Only Channel UUIDs</Label>
+                <Input
+                  id="included_channel_uuids"
+                  placeholder="All channels"
+                  value={includedUuids}
+                  onChange={(event) => setIncludedUuids(event.target.value)}
+                />
+              </div>
+            </div>
+
             <div className="grid gap-4 md:grid-cols-2">
               <div className="space-y-2">
                 <Label htmlFor="excluded_channel_ids">Exclude Channel IDs</Label>
@@ -750,7 +796,7 @@ export default function ShadowBlankMonitor() {
                 excludedActiveCount > 0 ? (
                   <div className="space-y-3">
                     <p className="text-sm font-medium text-amber-700 dark:text-amber-200">
-                      Active viewer channels are excluded from monitoring.
+                      Active viewer channels are outside the monitor scope.
                     </p>
                     {excludedActiveChannels.map(channel => (
                       <div key={channel.channel_ref} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
@@ -764,7 +810,9 @@ export default function ShadowBlankMonitor() {
                           <Badge variant="outline">{formatViewerClientCount(channel.real_client_count)}</Badge>
                         </div>
                         <p className="mt-2 text-xs text-muted-foreground">
-                          Remove this channel from Exclude Channel IDs/UUIDs to let Shadow start its watcher.
+                          {channel.exclude_reason === 'channel_not_included'
+                            ? 'Add this channel to an Include Only field, or clear both include fields, to let Shadow start its watcher.'
+                            : 'Remove this channel from Exclude Channel IDs/UUIDs to let Shadow start its watcher.'}
                         </p>
                       </div>
                     ))}
