@@ -1,6 +1,7 @@
 """Support components used by the stream checker service."""
 
 import copy
+import heapq
 import queue
 import threading
 import time
@@ -695,12 +696,21 @@ class ChannelUpdateTracker:
 
 class StreamCheckQueue:
     """Queue manager for channel stream checking."""
+
+    _HEAP_COMPACTION_STALE_ALLOWANCE = 32
     
     def __init__(self, max_size=1000):
-        self.queue = queue.PriorityQueue(maxsize=max_size)
+        # The heap may temporarily contain stale promotion entries or an entry
+        # which a worker popped before acquiring the lifecycle lock. Capacity
+        # therefore belongs to the logical queued-channel set, not the physical
+        # heap. Keeping the heap unbounded also makes paused/deferred restores
+        # lossless when another producer filled the newly opened physical slot.
+        self.max_size = max_size
+        self.queue = queue.PriorityQueue()
         self._queue_sequence = 0
         self.queued = {}  # Track channels already in queue dict(channel_id -> stream_count)
         self.queued_priorities = {}
+        self.queued_sequences = {}
         self.queued_metadata = {}  # Optional channel_id -> metadata for specialized queue entries
         self.in_progress = {} # dict(channel_id -> stream_count)
         self.in_progress_metadata = {}
@@ -725,6 +735,50 @@ class StreamCheckQueue:
             'current_channel': None,
             'queue_size': 0
         }
+
+    def _logical_queue_full_locked(self) -> bool:
+        """Return whether another distinct queued channel would exceed capacity."""
+        return self.max_size > 0 and len(self.queued) >= self.max_size
+
+    def _heap_compaction_threshold_locked(self) -> int:
+        logical_size = len(self.queued)
+        return max(
+            logical_size * 2,
+            logical_size + self._HEAP_COMPACTION_STALE_ALLOWANCE,
+        )
+
+    def _compact_queue_heap_locked(self) -> None:
+        """Coalesce the physical heap to one current entry per queued channel."""
+        canonical_entries = []
+        for channel_id in self.queued:
+            sequence = self.queued_sequences.get(channel_id)
+            if sequence is None:
+                sequence = self._queue_sequence
+                self._queue_sequence += 1
+                self.queued_sequences[channel_id] = sequence
+            priority = self.queued_priorities.get(channel_id, 0)
+            canonical_entries.append((-priority, sequence, channel_id))
+
+        # PriorityQueue consumers pop before taking the lifecycle lock. Rebuild
+        # atomically under the queue mutex so consumers never observe a partial
+        # heap. A current entry already held by a consumer is recreated here;
+        # sequence validation prevents its replacement from activating twice.
+        with self.queue.mutex:
+            previous_size = len(self.queue.queue)
+            self.queue.queue[:] = canonical_entries
+            heapq.heapify(self.queue.queue)
+            if canonical_entries:
+                self.queue.not_empty.notify_all()
+
+        logger.debug(
+            "Compacted stream-check heap from %s to %s physical entries",
+            previous_size,
+            len(canonical_entries),
+        )
+
+    def _maybe_compact_queue_heap_locked(self) -> None:
+        if self.queue.qsize() > self._heap_compaction_threshold_locked():
+            self._compact_queue_heap_locked()
     
     def add_channel(
         self,
@@ -736,106 +790,113 @@ class StreamCheckQueue:
     ):
         """Add a channel to the checking queue."""
         with self.lock:
-            try:
-                normalized_priority = int(priority)
-            except (TypeError, ValueError):
-                normalized_priority = 0
+            return self._add_channel_locked(
+                channel_id,
+                priority,
+                stream_count=stream_count,
+                metadata=metadata,
+                on_accepted=on_accepted,
+            )
 
-            # Queued channels can be promoted by a higher-priority entry.  The
-            # old heap item stays in PriorityQueue and is ignored as stale after
-            # the promoted item is consumed.  Active/completed channels stay
-            # protected until an explicit re-queue path removes them.
-            if channel_id in self.queued:
-                existing_priority = self.queued_priorities.get(channel_id, 0)
-                existing_metadata = self.queued_metadata.get(channel_id, {}) or {}
-                specialized_sources = {'teamarr_preflight', 'auto_create'}
-                if existing_metadata.get('source') in specialized_sources:
-                    # One specialized event must map to one result callback.
-                    # Never overwrite a queued event with a second identity.
-                    return False
-                if normalized_priority <= existing_priority:
-                    if on_accepted is not None:
-                        on_accepted()
-                        if metadata:
-                            merged_metadata = dict(existing_metadata)
-                            merged_metadata.update(dict(metadata))
-                            self.queued_metadata[channel_id] = merged_metadata
-                        return True
-                    return False
+    def _add_channel_locked(
+        self,
+        channel_id: int,
+        priority: int = 0,
+        stream_count: int = 1,
+        metadata: Optional[Dict[str, Any]] = None,
+        on_accepted: Optional[Callable[[], None]] = None,
+    ) -> bool:
+        """Add one channel while the caller holds the queue lifecycle lock."""
+        try:
+            normalized_priority = int(priority)
+        except (TypeError, ValueError):
+            normalized_priority = 0
 
-                if self.queue.full():
-                    logger.warning(
-                        f"Queue is full, cannot promote channel {channel_id} "
-                        f"to priority {normalized_priority}"
-                    )
-                    return False
+        # Queued channels can be promoted by a higher-priority entry.  The
+        # old heap item stays in PriorityQueue and is ignored as stale after
+        # the promoted item is consumed.  Active/completed channels stay
+        # protected until an explicit re-queue path removes them.
+        if channel_id in self.queued:
+            existing_priority = self.queued_priorities.get(channel_id, 0)
+            existing_metadata = self.queued_metadata.get(channel_id, {}) or {}
+            specialized_sources = {'teamarr_preflight', 'auto_create'}
+            if existing_metadata.get('source') in specialized_sources:
+                # One specialized event must map to one result callback.
+                # Never overwrite a queued event with a second identity.
+                return False
+            if normalized_priority <= existing_priority:
                 if on_accepted is not None:
                     on_accepted()
-                try:
-                    sequence = self._queue_sequence
-                    self._queue_sequence += 1
-                    self.queue.put((-normalized_priority, sequence, channel_id), block=False)
-                except queue.Full:
-                    logger.warning(
-                        f"Queue is full, cannot promote channel {channel_id} "
-                        f"to priority {normalized_priority}"
-                    )
-                    return False
-                self.queued[channel_id] = stream_count
-                self.queued_priorities[channel_id] = normalized_priority
-                if metadata:
-                    merged_metadata = dict(self.queued_metadata.get(channel_id, {}))
-                    merged_metadata.update(dict(metadata))
-                    self.queued_metadata[channel_id] = merged_metadata
-                self.stats['queue_size'] = len(self.queued)
-                logger.debug(
-                    f"Promoted queued channel {channel_id} "
-                    f"from priority {existing_priority} to {normalized_priority}"
-                )
-                return True
-
-            if channel_id in self.in_progress or channel_id in self.completed:
-                return False
-
-            if self.queue.full():
-                logger.warning(f"Queue is full, cannot add channel {channel_id}")
+                    if metadata:
+                        merged_metadata = dict(existing_metadata)
+                        merged_metadata.update(dict(metadata))
+                        self.queued_metadata[channel_id] = merged_metadata
+                    return True
                 return False
 
             if on_accepted is not None:
                 on_accepted()
+            sequence = self._queue_sequence
+            self._queue_sequence += 1
+            self.queue.put_nowait((-normalized_priority, sequence, channel_id))
+            self.queued[channel_id] = stream_count
+            self.queued_priorities[channel_id] = normalized_priority
+            self.queued_sequences[channel_id] = sequence
+            if metadata:
+                merged_metadata = dict(self.queued_metadata.get(channel_id, {}))
+                merged_metadata.update(dict(metadata))
+                self.queued_metadata[channel_id] = merged_metadata
+            self.stats['queue_size'] = len(self.queued)
+            logger.debug(
+                f"Promoted queued channel {channel_id} "
+                f"from priority {existing_priority} to {normalized_priority}"
+            )
+            self._maybe_compact_queue_heap_locked()
+            return True
 
-            # Check if this is a new "batch" starting (queue is completely empty and no workers are active)
-            if self.queue.empty() and len(self.in_progress) == 0:
-                self.stats['total_queued'] = 0
-                self.stats['total_completed'] = 0
-                self.stats['total_failed'] = 0
-                self.queued.clear()
-                self.queued_priorities.clear()
-                self.queued_metadata.clear()
-                self.failed.clear()
-                self.stream_processing_times.clear()
-                self.channel_processing_times.clear()
-                self.batch_started_at = datetime.now()
-                self.last_cleared_at = None
-                self.last_clear_reason = None
+        if channel_id in self.in_progress or channel_id in self.completed:
+            return False
 
-            try:
-                sequence = self._queue_sequence
-                self._queue_sequence += 1
-                self.queue.put((-normalized_priority, sequence, channel_id), block=False)
-                # We default to 1 stream roughly if unknown, but add_channels will pass precise length
-                self.queued[channel_id] = stream_count
-                self.queued_priorities[channel_id] = normalized_priority
-                if metadata:
-                    self.queued_metadata[channel_id] = dict(metadata)
-                self.stats['total_queued'] += 1
-                self.stats['queue_size'] = len(self.queued)
-                logger.debug(f"Added channel {channel_id} to queue (priority: {priority})")
-                return True
-            except queue.Full:
-                logger.warning(f"Queue is full, cannot add channel {channel_id}")
-                return False
-        return False
+        if self._logical_queue_full_locked():
+            logger.warning(f"Queue is full, cannot add channel {channel_id}")
+            return False
+
+        if on_accepted is not None:
+            on_accepted()
+
+        # Use the logical queue state here. A worker removes an item from
+        # PriorityQueue before it can acquire this lock and move the channel
+        # from queued to in_progress, so queue.empty() can briefly be true
+        # while that channel still belongs to the active batch.
+        if not self.queued and len(self.in_progress) == 0:
+            self.stats['total_queued'] = 0
+            self.stats['total_completed'] = 0
+            self.stats['total_failed'] = 0
+            self.queued.clear()
+            self.queued_priorities.clear()
+            self.queued_sequences.clear()
+            self.queued_metadata.clear()
+            self.failed.clear()
+            self.stream_processing_times.clear()
+            self.channel_processing_times.clear()
+            self.batch_started_at = datetime.now()
+            self.last_cleared_at = None
+            self.last_clear_reason = None
+
+        sequence = self._queue_sequence
+        self._queue_sequence += 1
+        self.queue.put_nowait((-normalized_priority, sequence, channel_id))
+        # We default to 1 stream roughly if unknown, but add_channels will pass precise length
+        self.queued[channel_id] = stream_count
+        self.queued_priorities[channel_id] = normalized_priority
+        self.queued_sequences[channel_id] = sequence
+        if metadata:
+            self.queued_metadata[channel_id] = dict(metadata)
+        self.stats['total_queued'] += 1
+        self.stats['queue_size'] = len(self.queued)
+        logger.debug(f"Added channel {channel_id} to queue (priority: {priority})")
+        self._maybe_compact_queue_heap_locked()
+        return True
     
     def add_channels(
         self,
@@ -855,6 +916,7 @@ class StreamCheckQueue:
                 exc,
             )
         
+        queued_channels = []
         for channel_id in channel_ids:
             channel = None
             if udi is not None:
@@ -874,16 +936,23 @@ class StreamCheckQueue:
                         exc,
                     )
             stream_count = len(channel.get('streams', [])) if channel else 1
-            accepted_callback = None
-            if on_accepted is not None:
-                accepted_callback = lambda cid=channel_id: on_accepted(cid)
-            if self.add_channel(
-                channel_id,
-                priority,
-                stream_count=stream_count,
-                on_accepted=accepted_callback,
-            ):
-                added += 1
+            queued_channels.append((channel_id, stream_count))
+
+        # Keep registration of the logical batch atomic. PriorityQueue.get()
+        # may already have popped the first heap item, but the worker cannot
+        # activate it until every requested channel has been added or rejected.
+        with self.lock:
+            for channel_id, stream_count in queued_channels:
+                accepted_callback = None
+                if on_accepted is not None:
+                    accepted_callback = lambda cid=channel_id: on_accepted(cid)
+                if self._add_channel_locked(
+                    channel_id,
+                    priority,
+                    stream_count=stream_count,
+                    on_accepted=accepted_callback,
+                ):
+                    added += 1
         logger.info(f"Added {added}/{len(channel_ids)} channels to checking queue")
         return added
 
@@ -918,9 +987,27 @@ class StreamCheckQueue:
             return item[2]
         return item[1]
 
+    def _entry_is_current_locked(self, item, channel_id: int) -> bool:
+        """Return whether a popped heap entry still owns the logical channel."""
+        if channel_id not in self.queued:
+            return False
+
+        expected_priority = self.queued_priorities.get(channel_id, 0)
+        if not item or item[0] != -expected_priority:
+            return False
+
+        if len(item) == 3:
+            return item[1] == self.queued_sequences.get(channel_id)
+
+        # Retain compatibility with legacy two-field in-memory entries. New
+        # entries always include a sequence and therefore get strict ownership
+        # validation across promotions and multiple consumers.
+        return len(item) == 2
+
     def _activate_queued_entry_locked(self, channel_id: int) -> Dict[str, Any]:
         stream_count = self.queued.pop(channel_id)
         self.queued_priorities.pop(channel_id, None)
+        self.queued_sequences.pop(channel_id, None)
         metadata = self.queued_metadata.pop(channel_id, {})
         self.in_progress[channel_id] = stream_count
         if metadata:
@@ -928,6 +1015,7 @@ class StreamCheckQueue:
         self.channel_start_times[channel_id] = datetime.now()
         self.stats['current_channel'] = channel_id
         self.stats['queue_size'] = len(self.queued)
+        self._maybe_compact_queue_heap_locked()
         return {
             'channel_id': channel_id,
             'metadata': metadata,
@@ -949,9 +1037,10 @@ class StreamCheckQueue:
                         return None
 
                     channel_id = self._entry_channel_id(item)
-                    if channel_id not in self.queued:
+                    if not self._entry_is_current_locked(item, channel_id):
                         logger.debug(
-                            f"Ignoring stale queued channel {channel_id}; queue entry was cleared"
+                            f"Ignoring stale queued channel {channel_id}; "
+                            "queue entry was cleared or superseded"
                         )
                         self.stats['queue_size'] = len(self.queued)
                         continue
@@ -963,10 +1052,8 @@ class StreamCheckQueue:
                     deferred_items.append(item)
             finally:
                 for item in deferred_items:
-                    try:
-                        self.queue.put_nowait(item)
-                    except queue.Full:
-                        logger.warning("Queue unexpectedly full while restoring deferred entry")
+                    self.queue.put_nowait(item)
+                self._maybe_compact_queue_heap_locked()
     
     def remove_from_completed(self, channel_id: int):
         """Remove a channel from the completed set to allow re-queueing.
@@ -990,30 +1077,25 @@ class StreamCheckQueue:
             else:
                 _, channel_id = item
             with self.lock:
-                if self.paused:
-                    try:
-                        self.queue.put_nowait(item)
-                    except queue.Full:
-                        logger.warning("Queue unexpectedly full while paused entry was restored")
-                    self.stats['queue_size'] = len(self.queued)
-                    self._wait_after_deferred_entry(timeout)
-                    return None
-
-                if channel_id not in self.queued:
+                if not self._entry_is_current_locked(item, channel_id):
                     logger.debug(
-                        f"Ignoring stale queued channel {channel_id}; queue entry was cleared"
+                        f"Ignoring stale queued channel {channel_id}; "
+                        "queue entry was cleared or superseded"
                     )
                     self.stats['queue_size'] = len(self.queued)
                     return None
 
+                if self.paused:
+                    self.queue.put_nowait(item)
+                    self._maybe_compact_queue_heap_locked()
+                    self.stats['queue_size'] = len(self.queued)
+                    self._wait_after_deferred_entry(timeout)
+                    return None
+
                 metadata = self.queued_metadata.get(channel_id, {}) or {}
                 if metadata.get("source") in self.deferred_metadata_sources:
-                    try:
-                        self.queue.put_nowait(item)
-                    except queue.Full:
-                        logger.warning(
-                            f"Queue unexpectedly full while deferring channel {channel_id}"
-                        )
+                    self.queue.put_nowait(item)
+                    self._maybe_compact_queue_heap_locked()
                     self.stats['queue_size'] = len(self.queued)
                     self._wait_after_deferred_entry(timeout)
                     return None
@@ -1152,6 +1234,7 @@ class StreamCheckQueue:
                     break
             self.queued.clear()
             self.queued_priorities.clear()
+            self.queued_sequences.clear()
             self.queued_metadata.clear()
             self.in_progress.clear()
             self.in_progress_metadata.clear()

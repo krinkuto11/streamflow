@@ -148,6 +148,98 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertIsNone(check_queue.get_next_channel(timeout=0.1))
         self.assertEqual(check_queue.get_status()["queued"], 0)
 
+    def test_stale_promotion_entries_do_not_consume_logical_capacity(self):
+        check_queue = StreamCheckQueue(max_size=2)
+
+        self.assertTrue(check_queue.add_channel(601, priority=10))
+        self.assertTrue(check_queue.add_channel(601, priority=20))
+        self.assertEqual(check_queue.queue.qsize(), 2)
+        self.assertEqual(check_queue.get_status()["queued"], 1)
+
+        # The stale priority-10 heap item must not prevent the second distinct
+        # channel from using the remaining logical queue slot.
+        self.assertTrue(check_queue.add_channel(602, priority=15))
+        self.assertTrue(check_queue.add_channel(602, priority=30))
+        self.assertEqual(check_queue.queue.qsize(), 4)
+        self.assertEqual(check_queue.get_status()["queued"], 2)
+
+        # Promotions do not consume another slot, but a third distinct channel
+        # still respects the configured logical maximum.
+        self.assertFalse(check_queue.add_channel(603, priority=100))
+        self.assertEqual(check_queue.get_status()["total_queued"], 2)
+
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 602)
+        self.assertTrue(check_queue.mark_completed(602))
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 601)
+        self.assertTrue(check_queue.mark_completed(601))
+        self.assertIsNone(check_queue.get_next_channel(timeout=0.1))
+        self.assertIsNone(check_queue.get_next_channel(timeout=0.1))
+        self.assertEqual(check_queue.get_status()["queued"], 0)
+
+    def test_concurrent_consumer_cannot_activate_superseded_promotion_entry(self):
+        check_queue = StreamCheckQueue(max_size=2)
+        current_popped = threading.Event()
+        stale_popped = threading.Event()
+        stale_finished = threading.Event()
+        release_current = threading.Event()
+        popped_items = {}
+        results = {}
+        errors = []
+        original_get = check_queue.queue.get
+
+        self.assertTrue(check_queue.add_channel(611, priority=10))
+        self.assertTrue(check_queue.add_channel(611, priority=20))
+
+        def controlled_get(*args, **kwargs):
+            item = original_get(*args, **kwargs)
+            popped_items[threading.current_thread().name] = item
+            if item[0] == -20:
+                current_popped.set()
+                release_current.wait(timeout=10)
+            else:
+                stale_popped.set()
+            return item
+
+        def consume():
+            name = threading.current_thread().name
+            try:
+                results[name] = check_queue.get_next_entry(timeout=1)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+            finally:
+                item = popped_items.get(name)
+                if item and item[0] == -10:
+                    stale_finished.set()
+
+        consumers = [
+            threading.Thread(target=consume, name="queue-consumer-a"),
+            threading.Thread(target=consume, name="queue-consumer-b"),
+        ]
+        with patch.object(check_queue.queue, "get", side_effect=controlled_get):
+            for consumer in consumers:
+                consumer.start()
+            try:
+                self.assertTrue(current_popped.wait(timeout=10))
+                self.assertTrue(stale_popped.wait(timeout=10))
+                self.assertTrue(stale_finished.wait(timeout=10))
+            finally:
+                release_current.set()
+            for consumer in consumers:
+                consumer.join(timeout=10)
+
+        self.assertTrue(all(not consumer.is_alive() for consumer in consumers))
+        self.assertEqual(errors, [])
+        stale_consumer = next(
+            name for name, item in popped_items.items() if item[0] == -10
+        )
+        current_consumer = next(
+            name for name, item in popped_items.items() if item[0] == -20
+        )
+        self.assertIsNone(results[stale_consumer])
+        self.assertEqual(results[current_consumer]["channel_id"], 611)
+        self.assertEqual(check_queue.get_status()["in_progress"], 1)
+        self.assertTrue(check_queue.mark_completed(611))
+
     def test_distinct_specialized_events_cannot_overwrite_one_queue_entry(self):
         check_queue = StreamCheckQueue(max_size=10)
         accepted = []
@@ -342,6 +434,202 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 211)
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 212)
         self.assertEqual(check_queue.get_next_channel(timeout=0.1), 213)
+
+    def test_add_channels_is_atomic_when_worker_pops_first_heap_item(self):
+        check_queue = StreamCheckQueue(max_size=10)
+        first_item_popped = threading.Event()
+        release_popped_item = threading.Event()
+        accepted = []
+        worker_result = {}
+        original_put = check_queue.queue.put
+        original_get = check_queue.queue.get
+
+        def controlled_put(item, *args, **kwargs):
+            result = original_put(item, *args, **kwargs)
+            if check_queue._entry_channel_id(item) == 8726:
+                self.assertTrue(first_item_popped.wait(timeout=10))
+            return result
+
+        def controlled_get(*args, **kwargs):
+            item = original_get(*args, **kwargs)
+            if check_queue._entry_channel_id(item) == 8726:
+                first_item_popped.set()
+                self.assertTrue(release_popped_item.wait(timeout=10))
+            return item
+
+        def consume_first_channel():
+            worker_result['channel_id'] = check_queue.get_next_channel(timeout=10)
+
+        worker = threading.Thread(target=consume_first_channel)
+        with (
+            patch.object(check_queue.queue, 'put', side_effect=controlled_put),
+            patch.object(check_queue.queue, 'get', side_effect=controlled_get),
+        ):
+            worker.start()
+            try:
+                added = check_queue.add_channels(
+                    [8726, 8725],
+                    priority=10,
+                    on_accepted=accepted.append,
+                )
+            finally:
+                release_popped_item.set()
+
+            worker.join(timeout=10)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(added, 2)
+        self.assertEqual(accepted, [8726, 8725])
+        self.assertEqual(worker_result['channel_id'], 8726)
+
+        active_status = check_queue.get_status()
+        self.assertEqual(active_status['total_queued'], 2)
+        self.assertEqual(active_status['in_progress'], 1)
+        self.assertEqual(active_status['queued'], 1)
+
+        self.assertTrue(check_queue.mark_completed(8726))
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 8725)
+        self.assertTrue(check_queue.mark_completed(8725))
+
+        completed_status = check_queue.get_status()
+        self.assertEqual(completed_status['total_queued'], 2)
+        self.assertEqual(completed_status['total_completed'], 2)
+
+    def test_popped_paused_or_deferred_entry_is_restored_after_concurrent_add(self):
+        for mode in ("paused", "deferred"):
+            with self.subTest(mode=mode):
+                check_queue = StreamCheckQueue(max_size=2)
+                popped = threading.Event()
+                release = threading.Event()
+                worker_result = {}
+                worker_errors = []
+                original_get = check_queue.queue.get
+
+                self.assertTrue(check_queue.add_channel(701, priority=10))
+                self.assertTrue(check_queue.add_channel(
+                    701,
+                    priority=20,
+                    metadata={"source": "sync_gate"},
+                ))
+                if mode == "paused":
+                    check_queue.set_paused(True)
+                else:
+                    check_queue.defer_metadata_sources({"sync_gate"})
+
+                def controlled_get(*args, **kwargs):
+                    item = original_get(*args, **kwargs)
+                    popped.set()
+                    release.wait(timeout=10)
+                    return item
+
+                def pop_and_restore():
+                    try:
+                        worker_result["entry"] = check_queue.get_next_entry(timeout=0.05)
+                    except BaseException as exc:  # pragma: no cover - asserted below
+                        worker_errors.append(exc)
+
+                worker = threading.Thread(target=pop_and_restore)
+                with patch.object(check_queue.queue, "get", side_effect=controlled_get):
+                    worker.start()
+                    try:
+                        self.assertTrue(popped.wait(timeout=10))
+                        self.assertTrue(worker.is_alive())
+
+                        # The worker has opened one physical heap slot without
+                        # releasing its logical ownership. A concurrent producer
+                        # fills the remaining logical slot and, in the formerly
+                        # bounded heap, also filled the slot needed for restore.
+                        self.assertTrue(check_queue.add_channel(702, priority=15))
+                        self.assertEqual(check_queue.queue.qsize(), 2)
+                    finally:
+                        release.set()
+                    worker.join(timeout=10)
+
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(worker_errors, [])
+                self.assertIsNone(worker_result["entry"])
+                self.assertEqual(check_queue.queue.qsize(), 3)
+                self.assertEqual(check_queue.get_status()["queued"], 2)
+
+                if mode == "paused":
+                    check_queue.set_paused(False)
+                else:
+                    check_queue.defer_metadata_sources(set())
+
+                self.assertEqual(check_queue.get_next_channel(timeout=0.1), 701)
+                self.assertTrue(check_queue.mark_completed(701))
+                self.assertEqual(check_queue.get_next_channel(timeout=0.1), 702)
+                self.assertTrue(check_queue.mark_completed(702))
+                self.assertIsNone(check_queue.get_next_channel(timeout=0.1))
+                self.assertEqual(check_queue.get_status()["queued"], 0)
+
+    def test_promotion_flood_is_compacted_and_current_entry_restores_and_drains(self):
+        check_queue = StreamCheckQueue(max_size=2)
+        popped = threading.Event()
+        release = threading.Event()
+        worker_result = {}
+        worker_errors = []
+
+        self.assertTrue(check_queue.add_channel(801, priority=0))
+        for priority in range(1, 501):
+            self.assertTrue(check_queue.add_channel(801, priority=priority))
+
+        with check_queue.lock:
+            compaction_threshold = check_queue._heap_compaction_threshold_locked()
+        self.assertLessEqual(check_queue.queue.qsize(), compaction_threshold)
+        self.assertEqual(check_queue.get_status()["queued"], 1)
+
+        check_queue.set_paused(True)
+        original_get = check_queue.queue.get
+
+        def controlled_get(*args, **kwargs):
+            item = original_get(*args, **kwargs)
+            popped.set()
+            release.wait(timeout=10)
+            return item
+
+        def pop_and_restore():
+            try:
+                worker_result["entry"] = check_queue.get_next_entry(timeout=0.05)
+            except BaseException as exc:  # pragma: no cover - asserted below
+                worker_errors.append(exc)
+
+        worker = threading.Thread(target=pop_and_restore)
+        with patch.object(check_queue.queue, "get", side_effect=controlled_get):
+            worker.start()
+            try:
+                self.assertTrue(popped.wait(timeout=10))
+                self.assertTrue(check_queue.add_channel(802, priority=-1))
+            finally:
+                release.set()
+            worker.join(timeout=10)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(worker_errors, [])
+        self.assertIsNone(worker_result["entry"])
+        self.assertEqual(check_queue.get_status()["queued"], 2)
+
+        check_queue.set_paused(False)
+        self.assertEqual(check_queue.get_next_channel(timeout=0.1), 801)
+        self.assertTrue(check_queue.mark_completed(801))
+
+        stale_entries_drained = 0
+        second_channel = None
+        while check_queue.queue.qsize():
+            channel_id = check_queue.get_next_channel(timeout=0.1)
+            if channel_id is None:
+                stale_entries_drained += 1
+                continue
+            second_channel = channel_id
+            self.assertTrue(check_queue.mark_completed(channel_id))
+
+        self.assertGreater(stale_entries_drained, 0)
+        self.assertEqual(second_channel, 802)
+        self.assertEqual(check_queue.queue.qsize(), 0)
+        completed_status = check_queue.get_status()
+        self.assertEqual(completed_status["queued"], 0)
+        self.assertEqual(completed_status["total_queued"], 2)
+        self.assertEqual(completed_status["total_completed"], 2)
 
     def test_clear_prevents_late_completion_from_repopulating_status(self):
         check_queue = StreamCheckQueue(max_size=10)
