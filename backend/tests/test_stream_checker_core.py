@@ -268,6 +268,42 @@ class TestProgressTracking(unittest.TestCase):
                             raise
 
 
+class TestLegacySequentialDelegation(unittest.TestCase):
+    def test_legacy_sequential_entry_uses_exact_profile_scheduler(self):
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        service._check_channel_concurrent = Mock(return_value={'success': True})
+
+        result = service._check_channel_sequential(
+            77,
+            skip_batch_changelog=True,
+            target_stream_ids=['101'],
+            forced_profile_id='profile-a',
+            provider_limit_override=True,
+            run_mode='quality',
+            is_single_channel_check=True,
+            force_check_override=True,
+            force_check_generation=9,
+            batch_changelog_generation=10,
+            queue_entry_token=11,
+        )
+
+        self.assertEqual(result, {'success': True})
+        service._check_channel_concurrent.assert_called_once_with(
+            77,
+            skip_batch_changelog=True,
+            target_stream_ids=['101'],
+            forced_profile_id='profile-a',
+            provider_limit_override=True,
+            run_mode='quality',
+            is_single_channel_check=True,
+            global_limit_override=1,
+            force_check_override=True,
+            force_check_generation=9,
+            batch_changelog_generation=10,
+            queue_entry_token=11,
+        )
+
+
 class TestLoopProbeCapacity(unittest.TestCase):
     """Regression coverage for long loop-probe capacity and abort behavior."""
 
@@ -310,7 +346,12 @@ class TestLoopProbeCapacity(unittest.TestCase):
         udi.apply_profile_url_transformation.return_value = 'http://reserved-profile.example/stream'
         limiter = Mock()
         limiter.acquire.return_value = (True, 'acquired')
-        limiter.reserve_profile_for_stream.return_value = (True, 'acquired', profile)
+        limiter.reserve_profile_for_stream_with_url.return_value = (
+            True,
+            'acquired',
+            profile,
+            'http://reserved-profile.example/stream',
+        )
         limiter.should_preempt_profile_for_viewer.return_value = False
         return udi, limiter, account, profile, raw_stream
 
@@ -345,20 +386,56 @@ class TestLoopProbeCapacity(unittest.TestCase):
         initialize_limits.assert_called_once_with([account])
         self.assertEqual(worker_limits, [1])
         limiter.acquire.assert_called_once_with(7, timeout=0)
-        reservation_stream = limiter.reserve_profile_for_stream.call_args.args[0]
+        reservation_stream = limiter.reserve_profile_for_stream_with_url.call_args.args[0]
         self.assertEqual(reservation_stream['url'], raw_stream['url'])
         self.assertEqual(reservation_stream['m3u_account_id'], 7)
         self.assertEqual(reservation_stream['m3u_account'], 7)
-        udi.apply_profile_url_transformation.assert_called_once_with(
-            reservation_stream,
-            profile=profile,
-        )
+        udi.apply_profile_url_transformation.assert_not_called()
         self.assertEqual(loop_probe.call_args.kwargs['url'], 'http://reserved-profile.example/stream')
         self.assertNotEqual(loop_probe.call_args.kwargs['url'], stream['stream_url'])
         limiter.release_profile.assert_called_once_with(profile)
         limiter.release.assert_called_once_with(7)
         self.assertTrue(stream['loop_probe_ran'])
         self.assertFalse(stream['loop_detected'])
+
+    def test_loop_probe_honors_legacy_global_limit_override(self):
+        service = self._service(concurrent_enabled=True, global_limit=8)
+        streams = [
+            {
+                **self._analyzed_stream(),
+                'stream_id': stream_id,
+                'stream_name': f'Candidate {stream_id}',
+                'score': 1.0 - (stream_id / 100),
+            }
+            for stream_id in range(1, 9)
+        ]
+        udi, limiter, _account, _profile, raw_stream = self._udi_and_limiter()
+        udi.get_stream_by_id.side_effect = lambda stream_id: {
+            **raw_stream,
+            'id': stream_id,
+        }
+        worker_limits = []
+        real_executor = concurrent.futures.ThreadPoolExecutor
+
+        def executor_factory(*args, **kwargs):
+            max_workers = kwargs.get('max_workers', args[0] if args else None)
+            worker_limits.append(max_workers)
+            return real_executor(*args, **kwargs)
+
+        with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi), patch(
+            'apps.stream.concurrent_stream_limiter.get_account_limiter', return_value=limiter
+        ), patch(
+            'apps.stream.concurrent_stream_limiter.initialize_account_limits'
+        ), patch(
+            'apps.stream.stream_check_utils._probe_stream_for_loops',
+            return_value=(False, None, 60),
+        ), patch(
+            'concurrent.futures.ThreadPoolExecutor', side_effect=executor_factory
+        ):
+            service._run_loop_probes(streams, global_limit_override=1)
+
+        self.assertEqual(worker_limits, [1])
+        self.assertEqual(limiter.reserve_profile_for_stream_with_url.call_count, 2)
 
     def test_loop_probe_viewer_preemption_keeps_result_unstamped_and_releases_both_slots(self):
         service = self._service()
@@ -450,7 +527,7 @@ class TestLoopProbeCapacity(unittest.TestCase):
             )
 
         self.assertEqual(limiter.acquire.call_count, 1)
-        limiter.reserve_profile_for_stream.assert_not_called()
+        limiter.reserve_profile_for_stream_with_url.assert_not_called()
         limiter.release.assert_not_called()
         loop_probe.assert_not_called()
         self.assertEqual(service.progress.update.call_args.kwargs['current'], 1)
@@ -479,7 +556,7 @@ class TestLoopProbeCapacity(unittest.TestCase):
             )
 
         limiter.acquire.assert_called_once_with(7, timeout=0)
-        limiter.reserve_profile_for_stream.assert_not_called()
+        limiter.reserve_profile_for_stream_with_url.assert_not_called()
         limiter.release.assert_not_called()
         loop_probe.assert_not_called()
         self.assertEqual(service.progress.update.call_args.kwargs['current'], 1)
@@ -497,10 +574,11 @@ class TestLoopProbeCapacity(unittest.TestCase):
                 if case_name == 'raw_missing':
                     udi.get_stream_by_id.return_value = None
                 else:
-                    limiter.reserve_profile_for_stream.return_value = (
+                    limiter.reserve_profile_for_stream_with_url.return_value = (
                         False,
                         'checking_capacity',
                         None,
+                        '',
                     )
 
                 with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi), patch(

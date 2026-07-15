@@ -43,7 +43,7 @@ export const operatorHelpSections = [
     items: [
       'Queued channels wait their turn; higher waiting priority does not interrupt a channel already running.',
       'Check slots full means the checker-side capacity for that account or profile is currently occupied.',
-      'A positive M3U account Max Streams value is the aggregate hard cap; profile limits are additional sublimits below it.',
+      'Distinct usable provider profiles are independent credentials: finite route limits add to the aggregate, profiles with the same credential target (including default aliases) share capacity, and M3U account Max Streams is only the no-active-profile fallback. Active profiles without a usable route fail closed.',
       'A direct stream check can measure one Dispatcharr stream by stream ID or reference, even before that stream is assigned to a channel.',
       'Viewer-preempted probes are not counted as bad streams and can be checked again later.',
       'During active batches, dashboard Dead, Blank, and Frozen cards count cumulative stream results from the queue.',
@@ -404,11 +404,11 @@ export const operatorHelpDetailTopics = [
       {
         name: 'M3U account Max Streams',
         controlType: 'Backend/API only',
-        defaultValue: 'Imported account max_streams; 0 or unset delegates the aggregate fallback to active profile limits',
+        defaultValue: 'Imported account max_streams; used only as the fallback when no active provider profile credentials exist',
         location: 'GET /api/m3u-accounts -> accounts[].max_streams (backend/API only; not editable in the StreamFlow UI)',
-        effect: 'Treats a positive account Max Streams value as the aggregate hard cap across every active profile on that account.',
-        useWhen: 'Inspect the imported account data when provider-wide capacity does not match the visible profile sublimits.',
-        risk: 'Several profiles do not automatically prove several independent provider logins. Keep the account hard cap at the real shared provider limit.',
+        effect: 'Defines fallback account capacity only when no active provider profiles exist; it does not cap the aggregate while usable profiles are active.',
+        useWhen: 'Inspect the imported account data when an account has no active provider profiles and its fallback capacity is unexpected.',
+        risk: 'Do not use this fallback to model active profile capacity. If active profiles exist but none can resolve a usable route for a stream, that check fails closed instead of using the stored URL.',
       },
       {
         name: 'Provider profile limits',
@@ -416,9 +416,9 @@ export const operatorHelpDetailTopics = [
         defaultValue: 'Read from imported M3U account profiles',
         location: 'Stream Checker -> Current Progress -> Provider Progress -> Profile Matrix',
         locationTo: '/stream-checker',
-        effect: 'Shows each active profile limit as an additional sublimit; profile rows never add capacity above a positive account hard cap.',
+        effect: 'Treats distinct usable profile routes as independent provider credentials. Finite route limits sum to the account aggregate; an unlimited distinct route makes the aggregate unlimited, while profiles with the same credential target (including default aliases) share capacity.',
         useWhen: 'Check this matrix before raising Global Concurrent Limit or when probes wait for profile capacity.',
-        risk: 'The Profile Matrix shows profile sublimits and usage, not an editable account Max Streams control.',
+        risk: 'Each probe URL must remain bound to the profile actually reserved. A default profile may use the stored URL; a non-default profile must produce its own valid credential rewrite or fail closed. The Profile Matrix is read-only status/API information, not an editable limits or credentials control.',
       },
       {
         name: 'CPU Fallback',

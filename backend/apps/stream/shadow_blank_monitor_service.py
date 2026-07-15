@@ -2251,11 +2251,37 @@ class ShadowBlankMonitorService:
 
     def _probe_cancelled(self, config: Dict[str, Any]) -> bool:
         cancel_event = config.get("_shadow_probe_cancel_event")
-        if cancel_event is None:
+        if cancel_event is not None and (
+            self._stop_event.is_set()
+            or bool(hasattr(cancel_event, "is_set") and cancel_event.is_set())
+        ):
+            return True
+        return self._provider_preemption_requested(config)
+
+    @staticmethod
+    def _provider_viewer_preempted(config: Dict[str, Any]) -> bool:
+        state = config.get("_shadow_provider_preemption_state")
+        return bool(isinstance(state, dict) and state.get("viewer_preempted"))
+
+    def _provider_preemption_requested(self, config: Dict[str, Any]) -> bool:
+        if self._provider_viewer_preempted(config):
+            return True
+        preempt_check = config.get("_shadow_provider_preempt_check")
+        if not callable(preempt_check):
             return False
-        return self._stop_event.is_set() or bool(
-            hasattr(cancel_event, "is_set") and cancel_event.is_set()
-        )
+        try:
+            should_preempt = bool(preempt_check())
+        except Exception as exc:
+            logger.warning(
+                "Shadow provider viewer-preemption check failed (%s)",
+                type(exc).__name__,
+            )
+            return False
+        if should_preempt:
+            state = config.get("_shadow_provider_preemption_state")
+            if isinstance(state, dict):
+                state["viewer_preempted"] = True
+        return should_preempt
 
     def _set_probe_state(
         self,
@@ -3343,10 +3369,17 @@ class ShadowBlankMonitorService:
 
             self._record_pre_probe_metric("preprobe_attempted", target, details)
             probe_started = time.monotonic()
+            probe_config = dict(config)
+            provider_preempt_check = provider_slot.get("provider_preempt_check")
+            if callable(provider_preempt_check):
+                probe_config["_shadow_provider_preempt_check"] = provider_preempt_check
+            provider_preemption_state = provider_slot.get("preemption_state")
+            if isinstance(provider_preemption_state, dict):
+                probe_config["_shadow_provider_preemption_state"] = provider_preemption_state
             try:
                 probe_result = self._run_next_stream_pre_probe(
                     str(provider_slot.get("url") or candidate_url),
-                    config,
+                    probe_config,
                     reason=reason,
                 )
             finally:
@@ -3371,11 +3404,25 @@ class ShadowBlankMonitorService:
                 "loop_probe_ran": bool(probe_result.get("loop_probe_ran")),
                 "loop_detected": bool(probe_result.get("loop_detected")),
                 "loop_duration_secs": probe_result.get("loop_duration_secs"),
+                "viewer_preempted": bool(probe_result.get("viewer_preempted")),
             })
             last_details = details
             if rejection_reason:
                 if self._probe_cancelled(config):
                     return None, last_details
+                if rejection_reason == "viewer_preempted":
+                    details["slot_scope"] = self._pre_probe_slot_scope(rejection_reason)
+                    self._record_pre_probe_metric(
+                        self._pre_probe_slot_metric(rejection_reason),
+                        target,
+                        details,
+                    )
+                    self._record_event(
+                        "pre_probe_rejected",
+                        target,
+                        {**details, "reason": reason},
+                    )
+                    continue
                 if (
                     self._pre_probe_fault_matches_active_fault(
                         rejection_reason,
@@ -3489,7 +3536,9 @@ class ShadowBlankMonitorService:
             profile_acquired = False
             profile = None
             try:
-                profile_acquired, profile_reason, profile = limiter.reserve_profile_for_stream(stream or {})
+                profile_acquired, profile_reason, profile, url = (
+                    limiter.reserve_profile_for_stream_with_url(stream or {})
+                )
                 if not profile_acquired:
                     details["provider_limit_reason"] = profile_reason
                     limiter.release(account_id)
@@ -3499,15 +3548,50 @@ class ShadowBlankMonitorService:
                         "details": details,
                     }
 
-                url = self._stream_url(stream)
-                if profile and hasattr(udi, "apply_profile_url_transformation"):
-                    transformed_url = udi.apply_profile_url_transformation(stream or {}, profile=profile)
-                    if transformed_url:
-                        url = str(transformed_url)
-                        details["profile_url_transformed"] = True
+                if not isinstance(url, str) or not url:
+                    limiter.release_profile(profile)
+                    limiter.release(account_id)
+                    return {
+                        "acquired": False,
+                        "reason": "profile_url_incompatible",
+                        "details": details,
+                    }
+                if profile:
+                    details["profile_url_transformed"] = (
+                        url != self._stream_url(stream)
+                    )
                 if profile:
                     details["m3u_profile_ref"] = _ref("m3u_profile", profile.get("id"))
                 details["provider_slot_acquired"] = True
+                preemption_token = object()
+                preemption_state = {"viewer_preempted": False}
+
+                def provider_preempt_check() -> bool:
+                    if preemption_state["viewer_preempted"]:
+                        return True
+                    should_preempt_profile = getattr(
+                        limiter,
+                        "should_preempt_profile_for_viewer",
+                        None,
+                    )
+                    if not callable(should_preempt_profile):
+                        return False
+                    try:
+                        should_preempt = bool(should_preempt_profile(
+                            profile,
+                            account_id=account_id,
+                            reservation_token=preemption_token,
+                        ))
+                    except Exception as exc:
+                        logger.warning(
+                            "Shadow provider viewer-preemption poll failed (%s)",
+                            type(exc).__name__,
+                        )
+                        return False
+                    if should_preempt:
+                        preemption_state["viewer_preempted"] = True
+                    return should_preempt
+
                 return {
                     "acquired": True,
                     "reason": "acquired",
@@ -3515,6 +3599,9 @@ class ShadowBlankMonitorService:
                     "account_id": account_id,
                     "profile": profile,
                     "url": url,
+                    "preemption_token": preemption_token,
+                    "preemption_state": preemption_state,
+                    "provider_preempt_check": provider_preempt_check,
                     "details": details,
                 }
             except Exception:
@@ -3523,7 +3610,10 @@ class ShadowBlankMonitorService:
                 limiter.release(account_id)
                 raise
         except Exception as exc:
-            logger.warning("Shadow next-stream pre-probe provider limit check failed: %s", exc)
+            logger.warning(
+                "Shadow next-stream pre-probe provider limit check failed (%s)",
+                type(exc).__name__,
+            )
             details["provider_limit_reason"] = type(exc).__name__
             return {
                 "acquired": False,
@@ -3537,9 +3627,14 @@ class ShadowBlankMonitorService:
         if limiter is None:
             return
         try:
-            limiter.release_profile(slot.get("profile"))
+            try:
+                limiter.release_profile(slot.get("profile"))
+            finally:
+                limiter.release(slot.get("account_id"))
         finally:
-            limiter.release(slot.get("account_id"))
+            release_claim = getattr(limiter, "release_viewer_preemption_claim", None)
+            if callable(release_claim):
+                release_claim(slot.get("preemption_token"))
 
     @staticmethod
     def _pre_probe_slot_scope(reason: Any) -> str:
@@ -3608,10 +3703,14 @@ class ShadowBlankMonitorService:
             pre_probe_config["loop_detection_enabled"] = False
         result = self._run_blank_probe(url, pre_probe_config)
         if self._probe_cancelled(pre_probe_config):
+            if self._provider_viewer_preempted(pre_probe_config):
+                return {"stopped": True, "viewer_preempted": True}
             return {"stopped": True}
         if self._pre_probe_rejection_reason(result):
             return result
         result.update(self._run_loop_probe_if_enabled(url, {"channel_ref": "pre_probe"}, pre_probe_config))
+        if self._provider_viewer_preempted(pre_probe_config):
+            return {"stopped": True, "viewer_preempted": True}
         return result
 
     @staticmethod
@@ -3630,6 +3729,8 @@ class ShadowBlankMonitorService:
 
     @staticmethod
     def _pre_probe_rejection_reason(result: Dict[str, Any]) -> Optional[str]:
+        if result.get("viewer_preempted"):
+            return "viewer_preempted"
         if result.get("stopped"):
             return "cancelled"
         if result.get("timeout"):
@@ -4682,7 +4783,8 @@ class ShadowBlankMonitorService:
     ) -> subprocess.CompletedProcess:
         """Run a probe command with prompt per-channel cancellation when active."""
         cancel_event = config.get("_shadow_probe_cancel_event")
-        if cancel_event is None:
+        provider_preempt_check = config.get("_shadow_provider_preempt_check")
+        if cancel_event is None and not callable(provider_preempt_check):
             return subprocess.run(
                 command,
                 stdout=subprocess.PIPE,
@@ -4757,7 +4859,12 @@ class ShadowBlankMonitorService:
                 timeout=15,
             )
             if self._probe_cancelled(config):
-                return {"success": False, "reason": "probe_cancelled"}
+                reason = (
+                    "viewer_preempted"
+                    if self._provider_viewer_preempted(config)
+                    else "probe_cancelled"
+                )
+                return {"success": False, "reason": reason}
             if completed.returncode != 0 or not completed.stdout:
                 return {
                     "success": False,
@@ -4801,6 +4908,9 @@ class ShadowBlankMonitorService:
         capture = self._capture_offline_image_hash(url, config)
         if not capture.get("success"):
             result["offline_image_error"] = capture.get("reason")
+            if capture.get("reason") == "viewer_preempted":
+                result["stopped"] = True
+                result["viewer_preempted"] = True
             return result
 
         phash = str(capture.get("offline_image_hash") or "").lower()
@@ -4939,6 +5049,10 @@ class ShadowBlankMonitorService:
             result = dict(self.loop_probe(url, loop_config) or {})
             result.setdefault("loop_probe_ran", True)
             result["loop_detected"] = bool(result.get("loop_detected"))
+            if self._provider_viewer_preempted(config):
+                result["loop_detected"] = False
+                result["stopped"] = True
+                result["viewer_preempted"] = True
             if abort_state.get("viewer_left"):
                 result["viewer_left"] = True
             if abort_state.get("time_sliced") and not result.get("loop_detected"):
@@ -5051,7 +5165,10 @@ class ShadowBlankMonitorService:
                 text=True,
             )
             if self._probe_cancelled(config):
-                return {"blank_detected": False, "stopped": True}
+                result = {"blank_detected": False, "stopped": True}
+                if self._provider_viewer_preempted(config):
+                    result["viewer_preempted"] = True
+                return result
             elapsed = time.time() - start
             output = completed.stderr or ""
             parsed = _parse_blank_detection(
@@ -5081,7 +5198,14 @@ class ShadowBlankMonitorService:
                 observed_duration=elapsed,
                 returncode=completed.returncode,
             ))
-            parsed.update(self._run_offline_image_probe(url, config))
+            offline_result = self._run_offline_image_probe(url, config)
+            if offline_result.get("viewer_preempted"):
+                return {
+                    "blank_detected": False,
+                    "stopped": True,
+                    "viewer_preempted": True,
+                }
+            parsed.update(offline_result)
             decoded_frames, media_duration = self._probe_media_progress(output)
             media_window_complete = (
                 decoded_frames > 0
@@ -5096,6 +5220,11 @@ class ShadowBlankMonitorService:
             parsed["probe_incomplete"] = not media_window_complete and elapsed + 1.0 < float(duration)
             return parsed
         except subprocess.TimeoutExpired as exc:
+            if self._probe_cancelled(config):
+                result = {"blank_detected": False, "stopped": True}
+                if self._provider_viewer_preempted(config):
+                    result["viewer_preempted"] = True
+                return result
             raw_output = exc.stderr or ""
             if isinstance(raw_output, bytes):
                 output = raw_output.decode("utf-8", errors="replace")
@@ -5128,7 +5257,14 @@ class ShadowBlankMonitorService:
                 observed_duration=duration,
                 returncode=None,
             ))
-            parsed.update(self._run_offline_image_probe(url, config))
+            offline_result = self._run_offline_image_probe(url, config)
+            if offline_result.get("viewer_preempted"):
+                return {
+                    "blank_detected": False,
+                    "stopped": True,
+                    "viewer_preempted": True,
+                }
+            parsed.update(offline_result)
             decoded_frames, media_duration = self._probe_media_progress(output)
             media_window_complete = (
                 decoded_frames > 0

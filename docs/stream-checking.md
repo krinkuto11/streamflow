@@ -82,7 +82,9 @@ respected.
 
 ## Parallel checking
 
-Stream checking runs in a thread pool. The pool size is configurable. Checking is subject to per-M3U-account concurrent stream limits to avoid exceeding provider caps. A positive account `max_streams` value is the aggregate hard cap and is never increased by adding profiles. Active profile limits are additional per-profile sublimits. When the account limit is unset or `0`, finite active profile limits provide the fallback aggregate; if any active profile is unlimited (`max_streams: 0`), that fallback is unlimited.
+Stream checking runs in a thread pool. The pool size is configurable. Distinct usable profile routes represent independent provider credentials, and each profile's `max_streams` limit is enforced separately. Finite route limits are summed for the account aggregate; if any distinct route is unlimited (`max_streams: 0`), the aggregate is unlimited. Profiles that rewrite to the same credential target, including default aliases, share capacity instead of multiplying it. The M3U account `max_streams` value is used only as a fallback when the account has no active provider profile credentials. If active profiles exist but none can provide a usable route for a stream, that check fails closed instead of falling back to the stored URL.
+
+Every probe URL is resolved while reserving its exact profile and remains bound to that reservation. A default profile may use the stored provider URL; every non-default profile must produce its own valid credential rewrite or the probe fails closed. The Profile Matrix is read-only status/API information; profile limits and credential rewrites are not editable there.
 
 Long loop-detection probes use the same account and profile reservations, apply the URL transformation of the profile they actually reserve, and stop without recording a clean result when manual cancellation or real-viewer preemption occurs.
 

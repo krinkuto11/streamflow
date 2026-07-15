@@ -4026,6 +4026,172 @@ def test_next_stream_pre_probe_reports_profile_slot_capacity(tmp_path):
     assert status["recent_events"][1]["details"]["slot_scope"] == "profile"
 
 
+def test_pre_probe_provider_slot_polls_viewer_preemption_and_releases_claim(
+    tmp_path,
+    monkeypatch,
+):
+    from apps.stream import concurrent_stream_limiter as limiter_module
+
+    profile = {"id": 71, "name": "Alternate", "max_streams": 1}
+
+    class FakeLimiter:
+        def __init__(self):
+            self.udi_manager = None
+            self.preempt = False
+            self.preempt_calls = []
+            self.released_profiles = []
+            self.released_accounts = []
+            self.released_claims = []
+
+        def acquire(self, account_id, timeout=0):
+            assert timeout == 0
+            return True, None
+
+        def reserve_profile_for_stream_with_url(self, stream):
+            assert stream["m3u_account_id"] == 7
+            return True, "acquired", profile, "https://profile.invalid/live/channel"
+
+        def should_preempt_profile_for_viewer(
+            self,
+            reserved_profile,
+            *,
+            account_id,
+            reservation_token,
+        ):
+            self.preempt_calls.append((reserved_profile, account_id, reservation_token))
+            return self.preempt
+
+        def release_profile(self, reserved_profile):
+            self.released_profiles.append(reserved_profile)
+
+        def release(self, account_id):
+            self.released_accounts.append(account_id)
+
+        def release_viewer_preemption_claim(self, reservation_token):
+            self.released_claims.append(reservation_token)
+
+    limiter = FakeLimiter()
+    monkeypatch.setattr(limiter_module, "get_account_limiter", lambda: limiter)
+    monkeypatch.setattr(limiter_module, "initialize_account_limits", lambda _accounts: None)
+    udi = FakeUdi(statuses=[{}], channels=[])
+    udi.get_m3u_accounts = lambda: [{"id": 7}]
+    service = make_service(tmp_path, udi=udi)
+
+    slot = service._acquire_pre_probe_provider_slot(
+        udi,
+        {
+            "id": 11,
+            "m3u_account_id": 7,
+            "url": "https://default.invalid/live/channel",
+        },
+    )
+
+    assert slot["acquired"] is True
+    assert slot["preemption_state"] == {"viewer_preempted": False}
+    assert slot["provider_preempt_check"]() is False
+    limiter.preempt = True
+    assert slot["provider_preempt_check"]() is True
+    assert slot["preemption_state"] == {"viewer_preempted": True}
+    assert limiter.preempt_calls[-1][0] is profile
+    assert limiter.preempt_calls[-1][1] == 7
+    assert limiter.preempt_calls[-1][2] is slot["preemption_token"]
+
+    service._release_pre_probe_provider_slot(slot)
+
+    assert limiter.released_profiles == [profile]
+    assert limiter.released_accounts == [7]
+    assert limiter.released_claims == [slot["preemption_token"]]
+
+
+@pytest.mark.parametrize("failure_stage", ["profile", "account"])
+def test_pre_probe_provider_slot_releases_claim_when_slot_release_fails(failure_stage):
+    token = object()
+
+    class FailingReleaseLimiter:
+        def __init__(self):
+            self.released_profiles = []
+            self.released_accounts = []
+            self.released_claims = []
+
+        def release_profile(self, profile):
+            self.released_profiles.append(profile)
+            if failure_stage == "profile":
+                raise RuntimeError("profile release failed")
+
+        def release(self, account_id):
+            self.released_accounts.append(account_id)
+            if failure_stage == "account":
+                raise RuntimeError("account release failed")
+
+        def release_viewer_preemption_claim(self, reservation_token):
+            self.released_claims.append(reservation_token)
+
+    limiter = FailingReleaseLimiter()
+    profile = {"id": 71}
+    with pytest.raises(RuntimeError, match=f"{failure_stage} release failed"):
+        ShadowBlankMonitorService._release_pre_probe_provider_slot({
+            "limiter": limiter,
+            "profile": profile,
+            "account_id": 7,
+            "preemption_token": token,
+        })
+
+    assert limiter.released_profiles == [profile]
+    assert limiter.released_accounts == [7]
+    assert limiter.released_claims == [token]
+
+
+def test_next_stream_pre_probe_viewer_preemption_is_not_a_media_fault(tmp_path):
+    switch_calls = []
+    udi = FakeUdi(
+        statuses=[{"uuid-1": active_status()}],
+        channels=[{"id": 1, "uuid": "uuid-1", "streams": [10, 11]}],
+        streams={
+            11: {
+                "id": 11,
+                "url": "https://candidate.invalid/live/channel",
+                "m3u_account_id": 7,
+            },
+        },
+    )
+    service = make_service(
+        tmp_path,
+        udi=udi,
+        blank_probe=lambda _url, _config: {"blank_detected": True},
+        switch_calls=switch_calls,
+    )
+    preemption_state = {"viewer_preempted": False}
+    released = []
+
+    service._acquire_pre_probe_provider_slot = lambda _udi, stream: {
+        "acquired": True,
+        "reason": "acquired",
+        "url": stream["url"],
+        "preemption_state": preemption_state,
+        "provider_preempt_check": lambda: True,
+        "details": {"provider_limited": True, "provider_slot_acquired": True},
+    }
+    service._release_pre_probe_provider_slot = lambda slot: released.append(slot)
+    service._run_blank_probe = lambda _url, _config: {"blank_detected": False}
+    service.update_config({
+        "enabled": False,
+        "dry_run": False,
+        "confirmation_count": 1,
+        "next_stream_pre_probe_enabled": True,
+    })
+
+    status = service.run_once(force=True)
+
+    assert switch_calls == []
+    assert len(released) == 1
+    assert status["recent_events"][1]["type"] == "pre_probe_rejected"
+    assert status["recent_events"][1]["details"]["rejection_reason"] == "viewer_preempted"
+    assert status["recent_events"][1]["details"]["viewer_preempted"] is True
+    assert status["recent_events"][1]["details"]["slot_scope"] == "provider"
+    assert status["pre_probe"]["metrics"].get("preprobe_rejected_media_fault", 0) == 0
+    assert status["pre_probe"]["metrics"]["preprobe_skipped_provider_limit"] == 1
+
+
 def test_next_stream_pre_probe_timeout_prevents_switch(tmp_path):
     switch_calls = []
     udi = FakeUdi(
@@ -8976,6 +9142,115 @@ def test_cancelable_probe_process_terminates_promptly_on_channel_cancel(tmp_path
     assert not thread.is_alive()
     assert process.terminated is True
     assert result["completed"].returncode == 0
+
+
+def test_provider_viewer_preemption_cancels_blank_and_offline_image_polls(
+    tmp_path,
+    monkeypatch,
+):
+    class BlockingProcess:
+        def __init__(self, *, text=False):
+            self.returncode = None
+            self.terminated = False
+            self.text = text
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            if self.text:
+                return "", ""
+            return b"", b""
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+    processes = []
+
+    def popen(*_args, **kwargs):
+        process = BlockingProcess(text=bool(kwargs.get("text")))
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(shadow_module.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        shadow_module.subprocess,
+        "run",
+        lambda *_args, **_kwargs: pytest.fail("provider-aware probes must use polling"),
+    )
+    service = make_service(tmp_path, udi=FakeUdi(statuses=[{}], channels=[]))
+
+    blank_state = {"viewer_preempted": False}
+    blank_config = normalize_config({})
+    blank_config.update({
+        "_shadow_provider_preempt_check": lambda: True,
+        "_shadow_provider_preemption_state": blank_state,
+    })
+    blank_result = service._run_blank_probe(
+        "https://provider.invalid/live/blank",
+        blank_config,
+    )
+
+    offline_state = {"viewer_preempted": False}
+    offline_config = normalize_config({})
+    offline_config.update({
+        "_shadow_provider_preempt_check": lambda: True,
+        "_shadow_provider_preemption_state": offline_state,
+    })
+    offline_result = service._capture_offline_image_hash(
+        "https://provider.invalid/live/offline",
+        offline_config,
+    )
+
+    assert blank_result == {
+        "blank_detected": False,
+        "stopped": True,
+        "viewer_preempted": True,
+    }
+    assert offline_result == {"success": False, "reason": "viewer_preempted"}
+    assert len(processes) == 2
+    assert all(process.terminated for process in processes)
+
+
+def test_provider_viewer_preemption_aborts_loop_probe_poll(tmp_path):
+    preemption_state = {"viewer_preempted": False}
+    loop_phase = {"active": False}
+    loop_calls = []
+
+    def provider_preempt_check():
+        return loop_phase["active"]
+
+    def loop_probe(_url, config):
+        loop_calls.append(config)
+        loop_phase["active"] = True
+        assert config["_shadow_loop_abort_check"]() is True
+        return {"loop_probe_ran": True, "loop_detected": True}
+
+    service = make_service(
+        tmp_path,
+        udi=FakeUdi(statuses=[{}], channels=[]),
+        loop_probe=loop_probe,
+    )
+    service._run_blank_probe = lambda _url, _config: {"blank_detected": False}
+    config = normalize_config({"loop_detection_enabled": True})
+    config.update({
+        "_shadow_provider_preempt_check": provider_preempt_check,
+        "_shadow_provider_preemption_state": preemption_state,
+    })
+
+    result = service._run_next_stream_pre_probe(
+        "https://provider.invalid/live/loop",
+        config,
+        reason="loop",
+    )
+
+    assert len(loop_calls) == 1
+    assert result == {"stopped": True, "viewer_preempted": True}
+    assert preemption_state == {"viewer_preempted": True}
 
 
 def test_switch_fence_blocks_excluded_target_and_orders_update_after_inflight_switch(tmp_path):

@@ -2725,6 +2725,32 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
 
         self.assertIsNone(active_skip)
 
+    def test_account_without_profiles_reaches_atomic_account_fallback(self):
+        from apps.udi.manager import UDIManager
+
+        service = StreamCheckerService.__new__(StreamCheckerService)
+        stream = {
+            'id': 1,
+            'name': 'Fallback stream',
+            'url': 'http://provider.invalid/live/1',
+            'm3u_account_id': 7,
+        }
+        udi = UDIManager()
+        udi._m3u_accounts_cache = [{
+            'id': 7,
+            'name': 'Provider fallback',
+            'max_streams': 1,
+            'profiles': [],
+        }]
+        udi._streams_cache = [stream]
+        udi._initialized = True
+        udi._build_indexes()
+
+        with patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi):
+            result = service._check_channel_limits(77, 'Fallback Channel', [stream])
+
+        self.assertIsNone(result)
+
     def test_clear_queue_resets_active_sync_batch_state(self):
         service = StreamCheckerService.__new__(StreamCheckerService)
         service.check_queue = StreamCheckQueue(max_size=10)

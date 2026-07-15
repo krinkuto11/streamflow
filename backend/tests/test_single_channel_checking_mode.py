@@ -845,6 +845,49 @@ class TestSingleStreamCheckHandler(unittest.TestCase):
         self.assertNotIn('analysis', response.get_json())
         self.assertNotIn('secret', response.get_data(as_text=True))
 
+    def test_handler_strips_provider_routes_from_successful_direct_check(self):
+        from flask import Flask
+        from apps.api.stream_checker_handlers import check_single_stream_now_response
+
+        mock_service = Mock()
+        mock_service.get_status.return_value = {
+            'checking': False,
+            'queue': {},
+            'progress': {},
+        }
+        mock_service.check_single_stream.return_value = {
+            'success': True,
+            'stream_id': 456,
+            'stream_name': 'Loose Stream',
+            'persisted': True,
+            'analysis': {
+                'stream_url': 'http://alternate-user:alternate-secret@provider.invalid/live',
+                'bitrate_kbps': 6123,
+                'quality_reason_context': {
+                    'probe_url': 'http://main-user:main-secret@provider.invalid/live',
+                    'stage': 'stream analysis',
+                },
+            },
+            'stats_payload': {'resolution': '1920x1080'},
+        }
+
+        app = Flask(__name__)
+        with app.app_context():
+            response, status_code = check_single_stream_now_response(
+                payload={'stream_id': 456},
+                get_stream_checker_service=lambda: mock_service,
+            )
+
+        body = response.get_json()
+        response_text = response.get_data(as_text=True)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(body['analysis']['bitrate_kbps'], 6123)
+        self.assertEqual(body['analysis']['quality_reason_context']['stage'], 'stream analysis')
+        self.assertNotIn('stream_url', body['analysis'])
+        self.assertNotIn('probe_url', body['analysis']['quality_reason_context'])
+        self.assertNotIn('alternate-secret', response_text)
+        self.assertNotIn('main-secret', response_text)
+
     def test_handler_returns_aborted_direct_check_as_conflict(self):
         from flask import Flask
         from apps.api.stream_checker_handlers import check_single_stream_now_response

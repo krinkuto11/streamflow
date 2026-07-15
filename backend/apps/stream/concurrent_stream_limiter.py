@@ -18,14 +18,21 @@ Example:
     - When B1 or B2 completes, B3 can start
 """
 
+import hashlib
+import inspect
+import re
 import threading
 import time
+import uuid
 from collections import defaultdict
 from typing import Dict, List, Optional, Any, Callable
 from concurrent.futures import ThreadPoolExecutor, Future
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
+
+
+_RESERVATION_TOKEN_KEY = '__streamflow_internal_reservation_token__'
 
 
 def _get_stream_m3u_account_id(stream: Dict[str, Any]) -> Optional[Any]:
@@ -91,6 +98,94 @@ def _usage_context(mapping: Dict[Any, Any], key: Any) -> Dict[str, int]:
     }
 
 
+def _profile_route_key(profile: Dict[str, Any]) -> Optional[str]:
+    """Return a secret-safe identity for one configured credential route.
+
+    Profiles with no search/replace pair all represent the stored/default URL.
+    Rewrites with the same normalized target template represent the same
+    credential route and must share capacity instead of multiplying it. The
+    source regex is deliberately excluded: two syntactically different searches
+    can still select the same provider login. Incomplete or invalid pairs are
+    not usable routes.
+    """
+    if not isinstance(profile, dict):
+        return None
+
+    raw_search = profile.get('search_pattern')
+    raw_replace = profile.get('replace_pattern')
+    search_present = raw_search not in (None, '')
+    replace_present = raw_replace not in (None, '')
+
+    if search_present or replace_present:
+        # An explicit rewrite is part of the route contract even for a default
+        # profile.  Validate it before assigning any capacity: the strict URL
+        # resolver rejects incomplete, empty, non-string, and invalid-regex
+        # pairs, so the aggregate route map must reject them too.
+        if not search_present or not replace_present:
+            return None
+        if not isinstance(raw_search, str) or not isinstance(raw_replace, str):
+            return None
+        search_pattern = raw_search.strip()
+        replace_pattern = raw_replace.strip()
+        if not search_pattern or not replace_pattern:
+            return None
+        try:
+            re.compile(search_pattern)
+        except re.error:
+            return None
+
+        if profile.get('is_default') is True:
+            route_material = b'default-profile-route'
+        else:
+            route_material = (
+                'profile-transform-target\0' + replace_pattern
+            ).encode('utf-8')
+    else:
+        if profile.get('is_default') is False:
+            return None
+        route_material = b'default-profile-route'
+
+    return hashlib.sha256(route_material).hexdigest()
+
+
+def _profile_resolution_key(profile: Dict[str, Any]) -> Optional[str]:
+    """Return a secret-safe fingerprint of URL-resolution semantics.
+
+    The route key intentionally groups profiles by credential target. This
+    separate key preserves the exact normalized inputs that decide whether and
+    how one profile can resolve a stream, so a search-only refresh cannot commit
+    a URL that was resolved from a stale profile payload.
+    """
+    if not isinstance(profile, dict):
+        return None
+
+    is_default = profile.get('is_default')
+    if is_default is True:
+        default_state = 'true'
+    elif is_default is False:
+        default_state = 'false'
+    else:
+        default_state = 'unset'
+
+    def normalized_pattern(value: Any) -> str:
+        if value in (None, ''):
+            return 'absent'
+        if isinstance(value, str):
+            # Leading/trailing whitespace is discarded by the resolver too.
+            # A whitespace-only string remains distinct from an absent value:
+            # it is configured but invalid rather than a default-route noop.
+            return f'string:{value.strip()}'
+        return f'{type(value).__name__}:{str(value).strip()}'
+
+    resolution_material = '\0'.join((
+        'profile-resolution-v1',
+        default_state,
+        normalized_pattern(profile.get('search_pattern')),
+        normalized_pattern(profile.get('replace_pattern')),
+    )).encode('utf-8')
+    return hashlib.sha256(resolution_material).hexdigest()
+
+
 class AcquireResult(tuple):
     """Tuple-compatible acquire result that remains truthy/falsey by success."""
 
@@ -107,6 +202,24 @@ class AcquireResult(tuple):
 
     def __bool__(self) -> bool:
         return bool(self[0])
+
+
+class ReservedProfile(dict):
+    """Dictionary-compatible profile carrying one exact reservation identity."""
+
+    def __init__(
+        self,
+        profile: Dict[str, Any],
+        account_id: int,
+        route_key: str,
+        reservation_token: str,
+    ):
+        super().__init__(profile)
+        # This UUID contains no profile or credential material and intentionally
+        # survives ``dict(reserved_profile)`` so copied releases stay exact.
+        self[_RESERVATION_TOKEN_KEY] = reservation_token
+        self.account_id = account_id
+        self.route_key = route_key
 
 
 class AccountStreamLimiter:
@@ -129,8 +242,27 @@ class AccountStreamLimiter:
         self.account_limits: Dict[int, int] = {}
         self.profile_limits: Dict[int, int] = {}
         self.account_profile_ids: Dict[int, set[int]] = {}
+        self.profile_route_keys: Dict[int, str] = {}
+        self.profile_resolution_keys: Dict[int, str] = {}
+        self.account_route_keys: Dict[int, set[str]] = {}
+        self.route_limits: Dict[tuple[int, str], int] = {}
+        # Capacity comes only from active profiles, but a proxy session can
+        # outlive a profile being disabled, removed, or rewritten.  Retain the
+        # secret-safe route history needed to charge such observed usage to an
+        # identical still-active credential route.  Account scoping avoids any
+        # dependency on profile IDs being globally unique.
+        self.account_profile_usage_route_keys: Dict[
+            int,
+            Dict[Any, set[str]],
+        ] = {}
         self.account_checking_counts: Dict[int, int] = {}  # Track streams currently being checked
         self.profile_checking_counts: Dict[int, int] = {}  # Track checker-owned profile slots
+        self.route_checking_counts: Dict[tuple[int, str], int] = {}
+        self.profile_reservation_routes: Dict[Any, List[tuple[Any, str]]] = defaultdict(list)
+        self.profile_reservations_by_token: Dict[
+            str,
+            tuple[Any, tuple[Any, str]],
+        ] = {}
         self.viewer_preemption_claims: Dict[Any, tuple[Optional[int], Optional[int]]] = {}
         self.lock = threading.Lock()
         self.udi_manager = udi_manager
@@ -140,11 +272,16 @@ class AccountStreamLimiter:
         """
         Set the maximum concurrent streams for an account.
         
-        A positive account limit is the authoritative aggregate hard cap. Active
-        profile limits remain additional per-profile sublimits and must never add
-        capacity above that account cap. When the account limit is unset/unlimited,
-        finite active profile limits provide the aggregate fallback. If any active
-        profile is unlimited, that fallback is unlimited as well.
+        Distinct active profile routes represent independent provider
+        credentials. Their limits therefore define the aggregate account
+        capacity: finite route limits are summed, while any unlimited route makes
+        the aggregate unlimited. Profiles with the same target rewrite,
+        including default aliases, share one route and use the strictest finite
+        configured limit instead of multiplying capacity. The account-level
+        value supplies aggregate fallback capacity only when there are no usable
+        active profile routes. Reservation still fails closed when active
+        profiles exist but none can resolve the current stream; it never falls
+        back to the stored URL in that case.
         
         Args:
             account_id: M3U account ID
@@ -158,44 +295,103 @@ class AccountStreamLimiter:
             except (TypeError, ValueError):
                 account_limit = 0
 
-            active_profile_limits = []
-            active_profile_limits_by_id: Dict[int, int] = {}
-            for profile in profiles or []:
-                if not isinstance(profile, dict) or not profile.get('is_active', True):
-                    continue
-                try:
-                    profile_limit = max(0, int(profile.get('max_streams', 0) or 0))
-                except (TypeError, ValueError):
-                    profile_limit = 0
-                active_profile_limits.append(profile_limit)
-                profile_id = profile.get('id')
-                if profile_id is not None:
-                    active_profile_limits_by_id[profile_id] = profile_limit
+            if profiles_provided:
+                active_profile_limits_by_id: Dict[int, int] = {}
+                active_profile_routes_by_id: Dict[int, str] = {}
+                active_profile_resolution_keys_by_id: Dict[int, str] = {}
+                route_limits_by_key: Dict[str, int] = {}
+                current_profile_usage_routes_by_id: Dict[Any, set[str]] = {}
+                for profile in profiles or []:
+                    if not isinstance(profile, dict):
+                        continue
+                    profile_id = profile.get('id')
+                    route_key = _profile_route_key(profile)
+                    if profile_id is not None and route_key is not None:
+                        current_profile_usage_routes_by_id.setdefault(
+                            profile_id,
+                            set(),
+                        ).add(route_key)
 
-            profile_total = sum(active_profile_limits)
-            has_unlimited_profile = any(limit == 0 for limit in active_profile_limits)
+                    if not profile.get('is_active', True):
+                        # Inactive profiles add no capacity.  Their route is kept
+                        # above solely so an already-running proxy session can
+                        # still consume a matching active credential route.
+                        continue
+                    try:
+                        profile_limit = max(0, int(profile.get('max_streams', 0) or 0))
+                    except (TypeError, ValueError):
+                        profile_limit = 0
+                    if profile_id is not None:
+                        active_profile_limits_by_id[profile_id] = profile_limit
+                        resolution_key = _profile_resolution_key(profile)
+                        if resolution_key is not None:
+                            active_profile_resolution_keys_by_id[profile_id] = resolution_key
+                        if route_key is not None:
+                            active_profile_routes_by_id[profile_id] = route_key
+                            previous_route_limit = route_limits_by_key.get(route_key)
+                            if previous_route_limit is None:
+                                route_limits_by_key[route_key] = profile_limit
+                            elif previous_route_limit == 0:
+                                route_limits_by_key[route_key] = profile_limit
+                            elif profile_limit == 0:
+                                route_limits_by_key[route_key] = previous_route_limit
+                            else:
+                                route_limits_by_key[route_key] = min(
+                                    previous_route_limit,
+                                    profile_limit,
+                                )
+            else:
+                # Omitting profiles updates only the account fallback. Existing
+                # imported profile routes remain authoritative and internally
+                # consistent instead of leaving stale maps behind a new cap.
+                existing_profile_ids = self.account_profile_ids.get(account_id, set())
+                active_profile_limits_by_id = {
+                    profile_id: self.profile_limits.get(profile_id, 0)
+                    for profile_id in existing_profile_ids
+                }
+                active_profile_routes_by_id = {
+                    profile_id: route_key
+                    for profile_id in existing_profile_ids
+                    if (route_key := self.profile_route_keys.get(profile_id)) is not None
+                }
+                active_profile_resolution_keys_by_id = {
+                    profile_id: resolution_key
+                    for profile_id in existing_profile_ids
+                    if (
+                        resolution_key := self.profile_resolution_keys.get(profile_id)
+                    ) is not None
+                }
+                route_limits_by_key = {
+                    route_key: self.route_limits.get((account_id, route_key), 0)
+                    for route_key in self.account_route_keys.get(account_id, set())
+                }
 
-            if account_limit > 0:
-                total_limit = account_limit
-                capacity_source = 'account hard cap'
-            elif active_profile_limits and has_unlimited_profile:
+            route_limits = list(route_limits_by_key.values())
+            profile_total = sum(route_limits)
+            has_unlimited_profile = any(limit == 0 for limit in route_limits)
+
+            if route_limits and has_unlimited_profile:
                 total_limit = 0
-                capacity_source = 'unlimited active profile fallback'
+                capacity_source = 'unlimited active credential-route aggregate'
             elif profile_total > 0:
                 total_limit = profile_total
-                capacity_source = 'finite active profile fallback'
+                capacity_source = 'finite active credential-route aggregate'
+            elif account_limit > 0:
+                total_limit = account_limit
+                capacity_source = 'account fallback'
             else:
                 total_limit = 0
                 capacity_source = 'unlimited account fallback'
 
-            if active_profile_limits:
+            if route_limits:
                 logger.debug(
                     "Account %s capacity uses %s: account=%s, active profiles=%s, "
-                    "finite profile sum=%s",
+                    "distinct routes=%s, finite route sum=%s",
                     account_id,
                     capacity_source,
                     account_limit,
-                    len(active_profile_limits),
+                    len(active_profile_limits_by_id),
+                    len(route_limits_by_key),
                     profile_total,
                 )
             
@@ -206,8 +402,37 @@ class AccountStreamLimiter:
                 current_profile_ids = set(active_profile_limits_by_id)
                 for removed_profile_id in previous_profile_ids - current_profile_ids:
                     self.profile_limits.pop(removed_profile_id, None)
+                    self.profile_route_keys.pop(removed_profile_id, None)
+                    self.profile_resolution_keys.pop(removed_profile_id, None)
                 self.profile_limits.update(active_profile_limits_by_id)
+                self.profile_route_keys.update(active_profile_routes_by_id)
+                self.profile_resolution_keys.update(active_profile_resolution_keys_by_id)
+                for invalid_profile_id in current_profile_ids - set(active_profile_routes_by_id):
+                    self.profile_route_keys.pop(invalid_profile_id, None)
+                for invalid_profile_id in (
+                    current_profile_ids - set(active_profile_resolution_keys_by_id)
+                ):
+                    self.profile_resolution_keys.pop(invalid_profile_id, None)
                 self.account_profile_ids[account_id] = current_profile_ids
+
+                previous_route_keys = self.account_route_keys.get(account_id, set())
+                current_route_keys = set(route_limits_by_key)
+                for removed_route_key in previous_route_keys - current_route_keys:
+                    self.route_limits.pop((account_id, removed_route_key), None)
+                for route_key, route_limit in route_limits_by_key.items():
+                    self.route_limits[(account_id, route_key)] = route_limit
+                self.account_route_keys[account_id] = current_route_keys
+
+                retained_usage_routes = {
+                    profile_id: set(route_keys)
+                    for profile_id, route_keys in self.account_profile_usage_route_keys.get(
+                        account_id,
+                        {},
+                    ).items()
+                }
+                for profile_id, route_keys in current_profile_usage_routes_by_id.items():
+                    retained_usage_routes.setdefault(profile_id, set()).update(route_keys)
+                self.account_profile_usage_route_keys[account_id] = retained_usage_routes
             
             # Initialize checking count for this account
             if account_id not in self.account_checking_counts:
@@ -386,28 +611,155 @@ class AccountStreamLimiter:
                     f"but checking count is already 0"
                 )
 
-    def reserve_profile_for_stream(self, stream: Dict[str, Any]) -> tuple[bool, str, Optional[Dict[str, Any]]]:
-        """
-        Reserve a concrete M3U account profile for a checker probe.
+    def _resolve_profile_stream_url(
+        self,
+        stream: Dict[str, Any],
+        profile: Dict[str, Any],
+    ) -> tuple[bool, str, str]:
+        """Resolve an explicit profile without permitting implicit reselection."""
+        original_url = stream.get('url', '') if isinstance(stream, dict) else ''
+        try:
+            inspect.getattr_static(self.udi_manager, 'resolve_profile_stream_url')
+        except AttributeError:
+            resolver = None
+        else:
+            resolver = getattr(self.udi_manager, 'resolve_profile_stream_url', None)
+        if callable(resolver):
+            try:
+                resolved = resolver(stream, profile)
+            except Exception as exc:
+                logger.warning(
+                    "Profile URL resolution failed for profile %s: %s",
+                    profile.get('id'),
+                    type(exc).__name__,
+                )
+                return (False, '', 'profile_url_resolution_failed')
+            if isinstance(resolved, tuple) and len(resolved) >= 3:
+                eligible, resolved_url, reason = resolved[:3]
+                if eligible and isinstance(resolved_url, str) and resolved_url:
+                    return (True, resolved_url, str(reason or 'profile_url_resolved'))
+                return (False, '', str(reason or 'profile_url_incompatible'))
+            return (False, '', 'invalid_profile_url_resolution')
 
-        Account limits protect the provider as a whole. Profile reservations
-        protect individual credentials so concurrent checks do not all reuse the
-        first free profile while another profile is available.
-        """
+        # Compatibility for UDI doubles and older embedders. The explicit
+        # profile is always passed; a transformer must never choose a sibling.
+        raw_search = profile.get('search_pattern') if isinstance(profile, dict) else None
+        raw_replace = profile.get('replace_pattern') if isinstance(profile, dict) else None
+        search_present = raw_search not in (None, '')
+        replace_present = raw_replace not in (None, '')
+        if search_present != replace_present:
+            return (False, '', 'incomplete_profile_url_transformation')
+        if not search_present and not replace_present:
+            if profile.get('is_default') is False:
+                return (False, '', 'nondefault_profile_missing_url_transformation')
+            return (
+                (True, original_url, 'default_profile_url')
+                if isinstance(original_url, str) and original_url
+                else (False, '', 'missing_stream_url')
+            )
+
+        transformer = getattr(self.udi_manager, 'apply_profile_url_transformation', None)
+        if callable(transformer):
+            try:
+                resolved_url = transformer(stream, profile=profile)
+            except Exception as exc:
+                logger.warning(
+                    "Profile URL transformation failed for profile %s: %s",
+                    profile.get('id'),
+                    type(exc).__name__,
+                )
+                return (False, '', 'profile_url_transformation_failed')
+        else:
+            return (False, '', 'profile_url_transformer_unavailable')
+
+        if not isinstance(resolved_url, str) or not resolved_url:
+            return (False, '', 'invalid_profile_url')
+        if search_present and resolved_url == original_url:
+            if profile.get('is_default') is True:
+                return (True, original_url, 'default_profile_url')
+            return (False, '', 'profile_url_unchanged')
+        return (True, resolved_url, 'profile_url_resolved')
+
+    def reserve_profile_for_stream_with_url(
+        self,
+        stream: Dict[str, Any],
+    ) -> tuple[bool, str, Optional[Dict[str, Any]], str]:
+        """Reserve one profile and return the URL resolved for that reservation."""
         account_id = _get_stream_m3u_account_id(stream)
         if not account_id or not self.udi_manager:
-            return (True, 'acquired', None)
+            return (True, 'acquired', None, stream.get('url', ''))
 
         try:
             account_getter = getattr(self.udi_manager, 'get_m3u_account_by_id', None)
             account = account_getter(account_id) if callable(account_getter) else None
         except Exception as e:
             logger.warning(f"Could not get account {account_id} while reserving profile: {e}")
-            return (True, 'acquired', None)
+            return (False, 'provider_profile_unavailable', None, '')
+
+        with self.lock:
+            configured_profile_ids = self.account_profile_ids.get(account_id)
+
+        if callable(account_getter) and not isinstance(account, dict):
+            if configured_profile_ids is None:
+                # Legacy/no-profile callers only configured an account limit.
+                return (True, 'acquired', None, stream.get('url', ''))
+            logger.warning("Account %s unavailable while reserving a profile", account_id)
+            return (False, 'provider_profile_unavailable', None, '')
 
         profiles = account.get('profiles', []) if isinstance(account, dict) else []
-        if not profiles:
-            return (True, 'acquired', None)
+        if not isinstance(profiles, list):
+            profiles = []
+        current_active_profiles = [
+            profile
+            for profile in profiles
+            if isinstance(profile, dict)
+            and profile.get('id') is not None
+            and profile.get('is_active', True)
+        ]
+        current_active_profile_ids = {
+            profile.get('id') for profile in current_active_profiles
+        }
+        current_route_keys = {
+            profile.get('id'): _profile_route_key(profile)
+            for profile in current_active_profiles
+        }
+        current_resolution_keys = {
+            profile.get('id'): _profile_resolution_key(profile)
+            for profile in current_active_profiles
+        }
+
+        def authoritative_snapshot_matches_locked(
+            authoritative_profile_ids: Optional[set[Any]],
+        ) -> bool:
+            if authoritative_profile_ids is None:
+                return True
+            if set(authoritative_profile_ids) != current_active_profile_ids:
+                return False
+            return all(
+                self.profile_route_keys.get(profile_id)
+                == current_route_keys.get(profile_id)
+                and self.profile_resolution_keys.get(profile_id)
+                == current_resolution_keys.get(profile_id)
+                for profile_id in current_active_profile_ids
+            )
+
+        # The raw account URL is a legitimate fallback only when the imported
+        # limiter snapshot and the current UDI account snapshot agree that no
+        # active provider profiles exist.  Empty/non-empty transitions are a
+        # refresh race, not permission to probe with the main credentials.
+        with self.lock:
+            configured_profile_ids = self.account_profile_ids.get(account_id)
+            snapshots_match = authoritative_snapshot_matches_locked(
+                configured_profile_ids
+            )
+        if not snapshots_match:
+            logger.warning(
+                "Provider profile snapshot changed while reserving account %s",
+                account_id,
+            )
+            return (False, 'provider_profile_unavailable', None, '')
+        if not current_active_profile_ids:
+            return (True, 'acquired', None, stream.get('url', ''))
 
         try:
             active_usage = {}
@@ -427,21 +779,117 @@ class AccountStreamLimiter:
         checker_blocked = False
         external_blocked = False
         external_block_reason = None
+        compatible_profile_seen = False
+        authoritative_candidate_seen = False
+
+        candidates = []
+        for profile in current_active_profiles:
+            profile_id = profile.get('id')
+            # Resolve against the account payload first. The authoritative map is
+            # checked again under the reservation lock below so a concurrent
+            # profile refresh cannot commit a stale credential route.
+            route_key = _profile_route_key(profile)
+            if route_key is None:
+                continue
+            route_eligible, resolved_url, _route_reason = self._resolve_profile_stream_url(
+                stream,
+                profile,
+            )
+            if not route_eligible:
+                continue
+            compatible_profile_seen = True
+            resolution_key = _profile_resolution_key(profile)
+            candidates.append((
+                profile,
+                profile_id,
+                route_key,
+                resolution_key,
+                resolved_url,
+            ))
 
         with self.lock:
             authoritative_profile_ids = self.account_profile_ids.get(account_id)
-            for profile in profiles:
-                if not isinstance(profile, dict):
-                    continue
+            if not authoritative_snapshot_matches_locked(authoritative_profile_ids):
+                return (False, 'provider_profile_unavailable', None, '')
 
-                profile_id = profile.get('id')
-                if profile_id is None or not profile.get('is_active', True):
+            authoritative_route_profile_ids: Dict[str, set[Any]] = defaultdict(set)
+            if authoritative_profile_ids is not None:
+                for member_profile_id in authoritative_profile_ids:
+                    member_route_key = self.profile_route_keys.get(member_profile_id)
+                    if member_route_key is not None:
+                        authoritative_route_profile_ids[member_route_key].add(
+                            member_profile_id
+                        )
+            else:
+                for member_profile in profiles:
+                    if (
+                        not isinstance(member_profile, dict)
+                        or not member_profile.get('is_active', True)
+                    ):
+                        continue
+                    member_profile_id = member_profile.get('id')
+                    member_route_key = _profile_route_key(member_profile)
+                    if member_profile_id is not None and member_route_key is not None:
+                        authoritative_route_profile_ids[member_route_key].add(
+                            member_profile_id
+                        )
+
+            usage_route_keys_by_profile = {
+                profile_id: set(route_keys)
+                for profile_id, route_keys in self.account_profile_usage_route_keys.get(
+                    account_id,
+                    {},
+                ).items()
+            }
+            # Legacy callers may not have imported a profile snapshot.  The
+            # current account payload still supplies enough route identity to
+            # attribute inactive-profile usage conservatively.
+            for member_profile in profiles:
+                if not isinstance(member_profile, dict):
                     continue
+                member_profile_id = member_profile.get('id')
+                member_route_key = _profile_route_key(member_profile)
+                if member_profile_id is not None and member_route_key is not None:
+                    usage_route_keys_by_profile.setdefault(
+                        member_profile_id,
+                        set(),
+                    ).add(member_route_key)
+
+            # Inactive or just-removed profiles add no route capacity, but an
+            # observed live session on one must consume an identical active
+            # credential route until that upstream session disappears.
+            active_route_keys = set(authoritative_route_profile_ids)
+            for usage_profile_id, usage_route_keys in usage_route_keys_by_profile.items():
+                if _usage_context(active_usage, usage_profile_id)['active_streams'] <= 0:
+                    continue
+                for usage_route_key in usage_route_keys & active_route_keys:
+                    authoritative_route_profile_ids[usage_route_key].add(
+                        usage_profile_id
+                    )
+
+            for (
+                profile,
+                profile_id,
+                route_key,
+                resolution_key,
+                resolved_url,
+            ) in candidates:
                 if (
                     authoritative_profile_ids is not None
                     and profile_id not in authoritative_profile_ids
                 ):
                     continue
+                if (
+                    authoritative_profile_ids is not None
+                    and self.profile_route_keys.get(profile_id) != route_key
+                ):
+                    continue
+                if (
+                    authoritative_profile_ids is not None
+                    and self.profile_resolution_keys.get(profile_id) != resolution_key
+                ):
+                    continue
+                authoritative_candidate_seen = True
 
                 max_streams = _safe_int(
                     self.profile_limits.get(
@@ -450,44 +898,91 @@ class AccountStreamLimiter:
                     )
                 )
                 checking_count = self.profile_checking_counts.get(profile_id, 0)
-
-                if max_streams == 0:
-                    self.profile_checking_counts[profile_id] = checking_count + 1
-                    logger.debug(
-                        f"Reserved unlimited profile {profile_id} for stream {stream.get('id')} "
-                        f"(now {checking_count + 1} checking)"
-                    )
-                    return (True, 'acquired', profile)
-
                 usage_context = _usage_context(active_usage, profile_id)
                 active_count = usage_context['active_streams']
+                profile_available = (
+                    max_streams == 0
+                    or active_count + checking_count < max_streams
+                )
 
-                if active_count + checking_count < max_streams:
+                route_identity = (account_id, route_key)
+                route_limit = _safe_int(
+                    self.route_limits.get(route_identity, max_streams)
+                )
+                route_checking_count = self.route_checking_counts.get(route_identity, 0)
+                route_usage_contexts = [
+                    _usage_context(active_usage, route_profile_id)
+                    for route_profile_id in authoritative_route_profile_ids.get(
+                        route_key,
+                        {profile_id},
+                    )
+                ]
+                route_active_count = sum(
+                    context['active_streams'] for context in route_usage_contexts
+                )
+                route_available = (
+                    route_limit == 0
+                    or route_active_count + route_checking_count < route_limit
+                )
+
+                if profile_available and route_available:
+                    reservation_token = uuid.uuid4().hex
+                    while reservation_token in self.profile_reservations_by_token:
+                        reservation_token = uuid.uuid4().hex
                     self.profile_checking_counts[profile_id] = checking_count + 1
+                    self.route_checking_counts[route_identity] = route_checking_count + 1
+                    self.profile_reservation_routes[profile_id].append(route_identity)
+                    self.profile_reservations_by_token[reservation_token] = (
+                        profile_id,
+                        route_identity,
+                    )
                     logger.debug(
                         f"Reserved profile {profile_id} for stream {stream.get('id')} "
                         f"({active_count} active + {checking_count + 1} checking = "
-                        f"{active_count + checking_count + 1}/{max_streams})"
+                        f"{active_count + checking_count + 1}/"
+                        f"{'unlimited' if max_streams == 0 else max_streams})"
                     )
-                    return (True, 'acquired', profile)
+                    reserved_profile = ReservedProfile(
+                        profile,
+                        account_id,
+                        route_key,
+                        reservation_token,
+                    )
+                    return (True, 'acquired', reserved_profile, resolved_url)
 
-                if checking_count > 0:
+                if checking_count > 0 or route_checking_count > 0:
                     checker_blocked = True
-                if active_count >= max_streams:
+                profile_external_blocked = max_streams > 0 and active_count >= max_streams
+                route_external_blocked = (
+                    route_limit > 0 and route_active_count >= route_limit
+                )
+                if profile_external_blocked or route_external_blocked:
                     external_blocked = True
-                    if usage_context.get('real_viewers', 0) > 0:
+                    if any(context.get('real_viewers', 0) > 0 for context in route_usage_contexts):
                         external_block_reason = 'active_viewers'
                     elif (
-                        usage_context.get('shadow_watchers', 0) > 0
+                        any(
+                            context.get('shadow_watchers', 0) > 0
+                            for context in route_usage_contexts
+                        )
                         and external_block_reason != 'active_viewers'
                     ):
                         external_block_reason = 'shadow_watchers'
 
         if checker_blocked:
-            return (False, 'checking_capacity', None)
+            return (False, 'checking_capacity', None, '')
         if external_blocked:
-            return (False, external_block_reason or 'active_viewers', None)
-        return (False, 'provider_capacity', None)
+            return (False, external_block_reason or 'active_viewers', None, '')
+        if compatible_profile_seen:
+            if not authoritative_candidate_seen:
+                return (False, 'provider_profile_unavailable', None, '')
+            return (False, 'provider_capacity', None, '')
+        return (False, 'profile_url_incompatible', None, '')
+
+    def reserve_profile_for_stream(self, stream: Dict[str, Any]) -> tuple[bool, str, Optional[Dict[str, Any]]]:
+        """Reserve a concrete profile, preserving the legacy three-tuple API."""
+        acquired, reason, profile, _resolved_url = self.reserve_profile_for_stream_with_url(stream)
+        return (acquired, reason, profile)
 
     def release_profile(self, profile: Optional[Dict[str, Any]]):
         """Release a checker-owned profile reservation."""
@@ -498,7 +993,77 @@ class AccountStreamLimiter:
         if profile_id is None:
             return
 
+        token_present = _RESERVATION_TOKEN_KEY in profile
+        reservation_token = profile.get(_RESERVATION_TOKEN_KEY)
+        route_key = getattr(profile, 'route_key', None)
+        route_account_id = getattr(profile, 'account_id', None)
+
         with self.lock:
+            reservation_routes = self.profile_reservation_routes.get(profile_id, [])
+            token_to_release = None
+            if token_present:
+                tracked_reservation = (
+                    self.profile_reservations_by_token.get(reservation_token)
+                    if isinstance(reservation_token, str)
+                    else None
+                )
+                if tracked_reservation is None:
+                    logger.warning(
+                        "Refusing unknown or stale profile reservation token for "
+                        "profile %s",
+                        profile_id,
+                    )
+                    return
+                tracked_profile_id, route_identity = tracked_reservation
+                if (
+                    tracked_profile_id != profile_id
+                    or route_identity not in reservation_routes
+                ):
+                    logger.warning(
+                        "Refusing mismatched profile reservation token for profile %s",
+                        profile_id,
+                    )
+                    return
+                token_to_release = reservation_token
+            else:
+                route_identity = (
+                    (route_account_id, route_key)
+                    if route_key is not None and route_account_id is not None
+                    else None
+                )
+                if route_identity is not None and (
+                    route_identity not in reservation_routes and reservation_routes
+                ):
+                    logger.warning(
+                        "Refusing profile slot release for profile %s because its "
+                        "reservation route is no longer pending",
+                        profile_id,
+                    )
+                    return
+                if route_identity is None and reservation_routes:
+                    distinct_routes = set(reservation_routes)
+                    if len(distinct_routes) > 1:
+                        # A legacy copied profile without a token cannot identify
+                        # which credential route it owns. Guessing could release a
+                        # newer route and allow it to exceed provider capacity.
+                        logger.warning(
+                            "Refusing ambiguous copied profile release for profile %s "
+                            "across multiple pending credential routes",
+                            profile_id,
+                        )
+                        return
+                    route_identity = next(iter(distinct_routes))
+
+                # Preserve legacy unambiguous releases while retiring one token
+                # that owns the selected route. Otherwise that token could later
+                # be mistaken for a live reservation.
+                if route_identity is not None:
+                    token_to_release = next((
+                        token
+                        for token, tracked in self.profile_reservations_by_token.items()
+                        if tracked == (profile_id, route_identity)
+                    ), None)
+
             checking_count = self.profile_checking_counts.get(profile_id, 0)
             if checking_count > 0:
                 self.profile_checking_counts[profile_id] = checking_count - 1
@@ -511,6 +1076,27 @@ class AccountStreamLimiter:
                     f"Attempted to release profile slot {profile_id} "
                     f"but checking count is already 0"
                 )
+
+            if route_identity is not None:
+                if route_identity in reservation_routes:
+                    reservation_routes.remove(route_identity)
+                else:
+                    route_identity = None
+            if token_to_release is not None:
+                self.profile_reservations_by_token.pop(token_to_release, None)
+            if not reservation_routes:
+                self.profile_reservation_routes.pop(profile_id, None)
+
+            if route_identity is not None:
+                route_checking_count = self.route_checking_counts.get(route_identity, 0)
+                if route_checking_count > 0:
+                    self.route_checking_counts[route_identity] = route_checking_count - 1
+                else:
+                    logger.warning(
+                        "Attempted to release credential-route slot for profile %s "
+                        "but its checking count is already 0",
+                        profile_id,
+                    )
 
     def get_profile_slot_snapshot(self, account_id: Optional[int]) -> List[Dict[str, Any]]:
         """Return a compact slot snapshot for active profiles on an account."""
@@ -551,19 +1137,85 @@ class AccountStreamLimiter:
         with self.lock:
             checking_counts = dict(self.profile_checking_counts)
             configured_profile_limits = dict(self.profile_limits)
-            configured_profile_ids = self.account_profile_ids.get(account_id)
+            configured_profile_ids_value = self.account_profile_ids.get(account_id)
+            configured_profile_ids = (
+                set(configured_profile_ids_value)
+                if configured_profile_ids_value is not None
+                else None
+            )
+            configured_route_keys = dict(self.profile_route_keys)
+            configured_route_limits = dict(self.route_limits)
+            route_checking_counts = dict(self.route_checking_counts)
+            usage_route_keys_by_profile = {
+                profile_id: set(route_keys)
+                for profile_id, route_keys in self.account_profile_usage_route_keys.get(
+                    account_id,
+                    {},
+                ).items()
+            }
 
-        snapshots: List[Dict[str, Any]] = []
+        profile_records: List[tuple[Dict[str, Any], Any, Optional[str]]] = []
+        route_profile_ids: Dict[str, set[Any]] = defaultdict(set)
         for profile in profiles:
             if not isinstance(profile, dict):
                 continue
-
             profile_id = profile.get('id')
             if profile_id is None or not profile.get('is_active', True):
                 continue
             if configured_profile_ids is not None and profile_id not in configured_profile_ids:
                 continue
+            route_key = (
+                configured_route_keys.get(profile_id)
+                if configured_profile_ids is not None
+                else _profile_route_key(profile)
+            )
+            profile_records.append((profile, profile_id, route_key))
+            if route_key is not None:
+                route_profile_ids[route_key].add(profile_id)
 
+        route_usage: Dict[str, Dict[str, int]] = {}
+        route_capacity_representatives = {
+            route_key: min(
+                profile_ids,
+                key=lambda profile_id: (str(profile_id), type(profile_id).__name__),
+            )
+            for route_key, profile_ids in route_profile_ids.items()
+            if profile_ids
+        }
+
+        for profile in profiles:
+            if not isinstance(profile, dict):
+                continue
+            profile_id = profile.get('id')
+            route_key = _profile_route_key(profile)
+            if profile_id is not None and route_key is not None:
+                usage_route_keys_by_profile.setdefault(profile_id, set()).add(route_key)
+
+        active_route_keys = set(route_profile_ids)
+        for usage_profile_id, usage_route_keys in usage_route_keys_by_profile.items():
+            if _usage_context(active_usage, usage_profile_id)['active_streams'] <= 0:
+                continue
+            for usage_route_key in usage_route_keys & active_route_keys:
+                route_profile_ids[usage_route_key].add(usage_profile_id)
+
+        for route_key, profile_ids in route_profile_ids.items():
+            contexts = [_usage_context(active_usage, profile_id) for profile_id in profile_ids]
+            route_identity = (account_id, route_key)
+            route_checking = route_checking_counts.get(route_identity)
+            if route_checking is None:
+                route_checking = sum(
+                    _safe_int(_mapping_value(checking_counts, profile_id))
+                    for profile_id in profile_ids
+                )
+            route_usage[route_key] = {
+                'active_streams': sum(context['active_streams'] for context in contexts),
+                'real_viewers': sum(context['real_viewers'] for context in contexts),
+                'shadow_watchers': sum(context['shadow_watchers'] for context in contexts),
+                'checking': _safe_int(route_checking),
+            }
+
+        snapshots: List[Dict[str, Any]] = []
+        for profile, profile_id, route_key in profile_records:
             max_streams = _safe_int(
                 configured_profile_limits.get(
                     profile_id,
@@ -571,17 +1223,30 @@ class AccountStreamLimiter:
                 )
             )
 
-            usage_context = _usage_context(active_usage, profile_id)
-            active_count = usage_context['active_streams']
-            checking_count = _safe_int(_mapping_value(checking_counts, profile_id))
-            used = active_count + checking_count
-            unlimited = max_streams == 0
-            available = None if unlimited else max(0, max_streams - used)
+            if route_key is not None:
+                usage_context = route_usage[route_key]
+                active_count = usage_context['active_streams']
+                checking_count = usage_context['checking']
+                effective_limit = _safe_int(
+                    configured_route_limits.get(
+                        (account_id, route_key),
+                        max_streams,
+                    )
+                )
+            else:
+                usage_context = _usage_context(active_usage, profile_id)
+                active_count = usage_context['active_streams']
+                checking_count = _safe_int(_mapping_value(checking_counts, profile_id))
+                effective_limit = max_streams
 
-            snapshots.append({
+            used = active_count + checking_count
+            unlimited = effective_limit == 0
+            available = None if unlimited else max(0, effective_limit - used)
+
+            snapshot = {
                 'id': profile_id,
                 'name': profile.get('name') or f'Profile {profile_id}',
-                'limit': max_streams,
+                'limit': effective_limit,
                 'unlimited': unlimited,
                 'active_viewers': active_count,
                 'real_viewers': usage_context['real_viewers'],
@@ -589,8 +1254,17 @@ class AccountStreamLimiter:
                 'checking': checking_count,
                 'used': used,
                 'available': available,
-                'full': False if unlimited else used >= max_streams,
-            })
+                'full': False if unlimited else used >= effective_limit,
+                'capacity_counted': (
+                    route_key is not None
+                    and route_capacity_representatives.get(route_key) == profile_id
+                ),
+            }
+            if route_key is None:
+                snapshot['route_usable'] = False
+            if route_key is not None and len(route_profile_ids[route_key]) > 1:
+                snapshot['shared_route'] = True
+            snapshots.append(snapshot)
 
         return sorted(snapshots, key=lambda item: str(item.get('name', '')).lower())
 
@@ -613,6 +1287,7 @@ class AccountStreamLimiter:
 
         profile_id = profile.get('id') if isinstance(profile, dict) else None
         profile_limit = _safe_int(profile.get('max_streams', 0)) if isinstance(profile, dict) else 0
+        reservation_route_key = getattr(profile, 'route_key', None)
 
         try:
             resolved_account_id = int(account_id) if account_id not in (None, '') else None
@@ -708,6 +1383,8 @@ class AccountStreamLimiter:
             account_checking_count = self.account_checking_counts.get(resolved_account_id, 0)
             account_limit = _safe_int(self.account_limits.get(resolved_account_id, 0))
             profile_limit = _safe_int(self.profile_limits.get(profile_id, profile_limit))
+            if reservation_route_key is None and profile_id is not None:
+                reservation_route_key = self.profile_route_keys.get(profile_id)
             claimed_profile_count = sum(
                 1
                 for _claimed_account_id, claimed_profile_id in self.viewer_preemption_claims.values()
@@ -755,6 +1432,54 @@ class AccountStreamLimiter:
                 else 0
             )
 
+            def route_excess_for(route_key: Optional[str]) -> int:
+                if (
+                    route_key is None
+                    or resolved_account_id is None
+                    or context is None
+                ):
+                    return 0
+                route_identity = (resolved_account_id, route_key)
+                route_limit = _safe_int(self.route_limits.get(route_identity, 0))
+                if route_limit == 0:
+                    return 0
+                route_profile_ids = {
+                    candidate.get('id')
+                    for candidate in current_profiles
+                    if isinstance(candidate, dict)
+                    and self.profile_route_keys.get(candidate.get('id')) == route_key
+                }
+                route_profile_ids.discard(None)
+                route_real_streams = sum(
+                    _usage_context(context, route_profile_id)['real_viewer_streams']
+                    for route_profile_id in route_profile_ids
+                )
+                if route_real_streams <= 0:
+                    return 0
+                route_active_streams = sum(
+                    _usage_context(context, route_profile_id)['active_streams']
+                    for route_profile_id in route_profile_ids
+                )
+                route_checking = self.route_checking_counts.get(route_identity, 0)
+                route_claims = sum(
+                    1
+                    for claim_account_id, claim_profile_id in self.viewer_preemption_claims.values()
+                    if claim_account_id == resolved_account_id
+                    and self.profile_route_keys.get(claim_profile_id) == route_key
+                )
+                unclaimed_route_checks = max(0, route_checking - route_claims)
+                return min(
+                    unclaimed_route_checks,
+                    max(
+                        0,
+                        route_active_streams
+                        + unclaimed_route_checks
+                        - route_limit,
+                    ),
+                )
+
+            reservation_route_excess = route_excess_for(reservation_route_key)
+
             # Prefer reservations on profiles that are locally overcommitted.
             # Those releases also satisfy the aggregate account excess. Without
             # this priority, a sibling callback could claim the account slot first
@@ -795,8 +1520,17 @@ class AccountStreamLimiter:
                         ),
                     )
 
-            account_only_excess = max(0, account_excess - local_profile_excess)
-            should_preempt = profile_excess > 0 or account_only_excess > 0
+            local_route_excess = sum(
+                route_excess_for(route_key)
+                for route_key in self.account_route_keys.get(resolved_account_id, set())
+            )
+            local_capacity_excess = max(local_profile_excess, local_route_excess)
+            account_only_excess = max(0, account_excess - local_capacity_excess)
+            should_preempt = (
+                profile_excess > 0
+                or reservation_route_excess > 0
+                or account_only_excess > 0
+            )
             if should_preempt and reservation_token is not None:
                 self.viewer_preemption_claims[reservation_token] = (
                     resolved_account_id,
@@ -817,8 +1551,16 @@ class AccountStreamLimiter:
             self.account_limits.clear()
             self.profile_limits.clear()
             self.account_profile_ids.clear()
+            self.profile_route_keys.clear()
+            self.profile_resolution_keys.clear()
+            self.account_route_keys.clear()
+            self.route_limits.clear()
+            self.account_profile_usage_route_keys.clear()
             self.account_checking_counts.clear()
             self.profile_checking_counts.clear()
+            self.route_checking_counts.clear()
+            self.profile_reservation_routes.clear()
+            self.profile_reservations_by_token.clear()
             self.viewer_preemption_claims.clear()
         logger.info("Cleared all account limits")
 
@@ -977,6 +1719,8 @@ class SmartStreamScheduler:
                         'active_viewers': 'quota_consumed_by_active_viewers',
                         'shadow_watchers': 'shadow_watcher_capacity',
                         'viewer_preempted': 'viewer_preempted',
+                        'profile_url_incompatible': 'profile_url_incompatible',
+                        'provider_profile_unavailable': 'provider_profile_unavailable',
                     }.get(reason_detail, 'provider_capacity_unavailable')
                     return {
                         'stream_id': stream['id'],
@@ -1014,6 +1758,7 @@ class SmartStreamScheduler:
                     result = None
                     acquired_account = False
                     acquired_profile = None
+                    acquired_stream_url = None
                     acquired_global = False
                     wait_started = time.time()
                     wait_reason = None
@@ -1022,13 +1767,14 @@ class SmartStreamScheduler:
                     preemption_claimed = False
 
                     def release_current_reservation():
-                        nonlocal acquired_global, acquired_profile, acquired_account
+                        nonlocal acquired_global, acquired_profile, acquired_stream_url, acquired_account
                         if acquired_global:
                             global_probe_slots.release()
                             acquired_global = False
                         if acquired_profile:
                             self.account_limiter.release_profile(acquired_profile)
                             acquired_profile = None
+                        acquired_stream_url = None
                         if acquired_account:
                             self.account_limiter.release(account_id)
                             acquired_account = False
@@ -1050,18 +1796,23 @@ class SmartStreamScheduler:
                                 logger.info("Abort requested while waiting for provider capacity")
                                 return None
 
-                            can_run, reason = check_stream_can_run()
+                            # reserve_profile_for_stream_with_url is the
+                            # authoritative capacity and route check. Calling the
+                            # older UDI pre-check first can hide an incompatible
+                            # rewrite behind a generic capacity response.
+                            can_run, reason = (True, None)
 
                             if can_run:
                                 acquired_account, reason = self.account_limiter.acquire(account_id, timeout=0)
                                 if acquired_account:
-                                    profile_acquired, reason, acquired_profile = (
-                                        self.account_limiter.reserve_profile_for_stream(stream)
+                                    profile_acquired, reason, acquired_profile, acquired_stream_url = (
+                                        self.account_limiter.reserve_profile_for_stream_with_url(stream)
                                     )
                                     if not profile_acquired:
                                         self.account_limiter.release(account_id)
                                         acquired_account = False
                                         acquired_profile = None
+                                        acquired_stream_url = None
                                         wait_reason = self._normalize_wait_reason(reason)
                                         if defer_callback:
                                             try:
@@ -1069,6 +1820,13 @@ class SmartStreamScheduler:
                                                     defer_callback(stream, wait_reason)
                                             except Exception as e:
                                                 logger.error(f"Error in defer_callback for stream {stream['id']}: {e}")
+
+                                        if wait_reason in {
+                                            'profile_url_incompatible',
+                                            'provider_profile_unavailable',
+                                        }:
+                                            result = provider_wait_result(wait_reason)
+                                            return result
 
                                         if (
                                             provider_wait_timeout is not None
@@ -1091,6 +1849,7 @@ class SmartStreamScheduler:
                                         break
                                     self.account_limiter.release_profile(acquired_profile)
                                     acquired_profile = None
+                                    acquired_stream_url = None
                                     self.account_limiter.release(account_id)
                                     acquired_account = False
                                     reason = 'global_worker_limit'
@@ -1118,15 +1877,17 @@ class SmartStreamScheduler:
 
                             time.sleep(0.5)
 
-                        # Apply URL transformation if using M3U profile with search/replace patterns
-                        stream_url = stream.get('url', '')
-                        if self.account_limiter.udi_manager:
-                            transformed_url = self.account_limiter.udi_manager.apply_profile_url_transformation(
-                                stream,
-                                profile=acquired_profile,
+                        # The URL was resolved while reserving this exact profile.
+                        # Never transform again here: doing so could reselect or
+                        # fall back to another credential after capacity was taken.
+                        stream_url = acquired_stream_url
+                        if not isinstance(stream_url, str) or not stream_url:
+                            logger.error(
+                                "Reserved profile for stream %s without a usable URL",
+                                stream.get('id'),
                             )
-                            if isinstance(transformed_url, str):
-                                stream_url = transformed_url
+                            result = provider_wait_result('profile_url_incompatible')
+                            return result
 
                         # Notify that this stream has acquired a slot and is starting.
                         # Lock protects stream_statuses which is shared across worker threads.
@@ -1166,6 +1927,11 @@ class SmartStreamScheduler:
                             stream_name=stream.get('name', 'Unknown'),
                             **runtime_params
                         )
+                        if isinstance(result, dict):
+                            # Credential-rewritten URLs are probe-only. Persisted,
+                            # returned, and callback-visible results must retain
+                            # the canonical raw URL associated with the stream.
+                            result['stream_url'] = stream.get('url', '')
                         if isinstance(result, dict) and result.get('preempted'):
                             logger.info(
                                 "Retrying stream check for stream %s after viewer preemption",
@@ -1333,10 +2099,13 @@ def initialize_account_limits(accounts: List[Dict[str, Any]]):
     The limits set here are used as a fallback/global cap, but the primary
     limit enforcement is done per-profile via UDI's check_stream_can_run().
     
-    A positive account max_streams value remains the aggregate hard cap. Profile
-    limits are enforced as additional sublimits. Only an unset/unlimited account
-    limit falls back to the active profile aggregate; an unlimited active profile
-    makes that fallback unlimited.
+    Distinct usable profile routes represent independent provider credentials,
+    so their limits form the aggregate account capacity and remain individually
+    enforced. Profiles with the same credential target, including default
+    aliases, do not multiply capacity. The account-level max_streams value is
+    the aggregate fallback only when no usable active profile routes are
+    available. A stream with active profiles but no resolvable route still fails
+    closed instead of using the stored URL.
     
     Args:
         accounts: List of M3U account dictionaries with 'id', 'max_streams', and optionally 'profiles' fields

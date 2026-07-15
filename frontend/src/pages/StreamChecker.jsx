@@ -846,17 +846,27 @@ export default function StreamChecker() {
                                     <td className="max-w-[12rem] truncate px-2 py-2" title={slot.accountName}>
                                       {slot.accountName}
                                     </td>
-                                    <td className="max-w-[14rem] truncate px-2 py-2 font-medium" title={slot.name}>
-                                      {slot.name}
+                                    <td className="max-w-[18rem] px-2 py-2 font-medium" title={slot.title}>
+                                      <div className="flex min-w-0 items-center gap-1.5">
+                                        <span className="truncate">{slot.name}</span>
+                                        {slot.sharedRoute && (
+                                          <Badge
+                                            variant="outline"
+                                            className="shrink-0 text-[9px] font-normal text-muted-foreground"
+                                          >
+                                            {slot.sharedRouteLabel}
+                                          </Badge>
+                                        )}
+                                      </div>
                                     </td>
                                     <td className="px-2 py-2 text-right font-mono tabular-nums text-muted-foreground">
                                       {slot.id ?? 'N/A'}
                                     </td>
                                     <td className="px-2 py-2 text-right font-mono tabular-nums">
-                                      {slot.used}/{slot.limitText}
+                                      {slot.usageText}
                                     </td>
                                     <td className="px-2 py-2 text-right font-mono tabular-nums">
-                                      {slot.activeViewers}
+                                      {slot.realViewers}
                                     </td>
                                     <td className="px-2 py-2 text-right font-mono tabular-nums">
                                       {slot.checking}
@@ -868,13 +878,15 @@ export default function StreamChecker() {
                                       <Badge
                                         variant="outline"
                                         className={`text-[10px] ${
-                                          slot.full
+                                          slot.routeUnavailable
+                                            ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                                            : slot.full
                                             ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
                                             : slot.checking > 0
                                               ? 'border-blue-500/30 bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
                                               : 'text-muted-foreground'
                                         }`}
-                                        title={slot.title}
+                                        title={slot.routeUnavailableHint || slot.title}
                                       >
                                         {slot.status}
                                       </Badge>
@@ -1452,7 +1464,7 @@ export default function StreamChecker() {
                     <Activity className="h-4 w-4" />
                     <AlertTitle>Check Capacity</AlertTitle>
                     <AlertDescription>
-                      `Check slots full` means the checker is waiting for global workers, provider/profile slots, or viewer-protected capacity. A positive M3U account Max Streams value is the aggregate hard cap; profile limits are additional sublimits and do not add capacity above it. Viewer-preempted probes are skipped safely and can be checked again later.
+                      `Check slots full` means the checker is waiting for global workers, provider/profile slots, or viewer-protected capacity. Distinct usable profiles are independent provider credentials: finite route limits add to the account aggregate, while profiles with the same credential target (including default aliases) share capacity. M3U account Max Streams is only the no-active-profile fallback; active profiles without a usable route fail closed. Each probe URL is bound to its exact reserved profile; non-default profiles must produce their own valid credential rewrite. The Profile Matrix is read-only status/API information, not an editor. Viewer-preempted probes are skipped safely and can be checked again later.
                     </AlertDescription>
                   </Alert>
 

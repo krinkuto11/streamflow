@@ -163,6 +163,43 @@ class TestM3uAccountIdPriority(unittest.TestCase):
         self.assertEqual(profile["id"], 51)
         self.assertEqual(udi._stream_account_id[100], 5)
 
+    def test_udi_account_without_active_profiles_defers_to_account_limiter(self):
+        from apps.udi.manager import UDIManager
+
+        udi = UDIManager()
+        udi._m3u_accounts_cache = [
+            {
+                "id": 5,
+                "name": "Provider",
+                "max_streams": 1,
+                "profiles": [],
+            }
+        ]
+        udi._streams_cache = [
+            {"id": 100, "m3u_account_id": 5, "url": "http://example/100"}
+        ]
+        udi._initialized = True
+        udi._build_indexes()
+
+        can_run, reason = udi.check_stream_can_run(udi._streams_cache[0])
+
+        self.assertTrue(can_run)
+        self.assertIsNone(reason)
+
+        udi._m3u_accounts_cache[0]["profiles"] = [
+            {
+                "id": 51,
+                "name": "Broken alternate",
+                "is_active": True,
+                "is_default": False,
+                "max_streams": 1,
+            }
+        ]
+        can_run, reason = udi.check_stream_can_run(udi._streams_cache[0])
+
+        self.assertFalse(can_run)
+        self.assertIn("at capacity", reason)
+
     def test_profile_reservation_accepts_m3u_account_id(self):
         from apps.stream.concurrent_stream_limiter import AccountStreamLimiter
 
@@ -178,7 +215,7 @@ class TestM3uAccountIdPriority(unittest.TestCase):
         limiter = AccountStreamLimiter(udi_manager=udi)
 
         acquired, reason, profile = limiter.reserve_profile_for_stream(
-            {"id": 200, "m3u_account_id": "7"}
+            {"id": 200, "url": "http://provider.test/live/200", "m3u_account_id": "7"}
         )
 
         self.assertTrue(acquired)
@@ -194,8 +231,22 @@ class TestM3uAccountIdPriority(unittest.TestCase):
             "id": 7,
             "name": "Provider",
             "profiles": [
-                {"id": 70, "name": "Primary", "max_streams": 2, "is_active": True},
-                {"id": 71, "name": "Sibling", "max_streams": 1, "is_active": True},
+                {
+                    "id": 70,
+                    "name": "Primary",
+                    "max_streams": 2,
+                    "is_active": True,
+                    "is_default": True,
+                },
+                {
+                    "id": 71,
+                    "name": "Sibling",
+                    "max_streams": 1,
+                    "is_active": True,
+                    "is_default": False,
+                    "search_pattern": "primary-user",
+                    "replace_pattern": "sibling-user",
+                },
                 {"id": 72, "name": "Inactive", "max_streams": 1, "is_active": False},
             ],
         }
@@ -220,6 +271,7 @@ class TestM3uAccountIdPriority(unittest.TestCase):
                     "used": 2,
                     "available": 0,
                     "full": True,
+                    "capacity_counted": True,
                 },
                 {
                     "id": 71,
@@ -233,6 +285,7 @@ class TestM3uAccountIdPriority(unittest.TestCase):
                     "used": 0,
                     "available": 1,
                     "full": False,
+                    "capacity_counted": True,
                 },
             ],
         )
@@ -280,6 +333,198 @@ class TestM3uAccountIdPriority(unittest.TestCase):
         self.assertEqual(context[70]["shadow_watchers"], 1)
         self.assertEqual(udi.get_active_streams_count_per_profile(7), {70: 2})
 
+    def test_udi_retains_removed_profile_owner_for_open_proxy_session(self):
+        """A refresh must not hide usage from a just-removed provider profile."""
+        from apps.udi.manager import UDIManager
+
+        udi = UDIManager()
+        udi._m3u_accounts_cache = [
+            {
+                "id": 7,
+                "name": "Provider",
+                "profiles": [
+                    {"id": 70, "name": "Primary", "is_active": True},
+                    {"id": 71, "name": "Removed later", "is_active": True},
+                ],
+            }
+        ]
+        udi._initialized = True
+        udi._build_indexes()
+
+        # Simulate the account refresh completing while Dispatcharr still has an
+        # upstream session on profile 71. The current account payload no longer
+        # contains that profile, but its last-known owner remains authoritative
+        # for capacity accounting until the process/session ends.
+        udi._m3u_accounts_cache = [
+            {
+                "id": 7,
+                "name": "Provider",
+                "profiles": [{"id": 70, "name": "Primary", "is_active": True}],
+            }
+        ]
+        udi._build_indexes()
+        udi._proxy_status_cache = {
+            "channel-removed-profile": {
+                "state": "active",
+                "m3u_profile_id": "71",
+                "clients": [{"user_agent": "VLC", "username": "viewer"}],
+            }
+        }
+        udi._proxy_status_last_fetch = time.time()
+
+        context = udi.get_active_stream_context_per_profile(7)
+
+        self.assertEqual(context[71]["active_streams"], 1)
+        self.assertEqual(context[71]["real_viewer_streams"], 1)
+        self.assertEqual(udi.get_active_streams_for_account(7), 1)
+
+        # Fetcher failures are represented by an empty mapping, the same shape
+        # as a valid idle status. They must not erase the retained owner and
+        # make a later still-running removed-profile session invisible.
+        udi._proxy_status_cache = {}
+        udi._proxy_status_last_fetch = 0
+        udi.fetcher.fetch_proxy_status = Mock(return_value={})
+        self.assertEqual(udi.get_active_stream_context_per_profile(7), {})
+        self.assertEqual(udi._profile_account_id_candidates[71], {7})
+
+        udi._proxy_status_cache = {
+            "channel-removed-profile": {
+                "state": "active",
+                "m3u_profile_id": "71",
+                "clients": [{"user_agent": "VLC", "username": "viewer"}],
+            }
+        }
+        udi._proxy_status_last_fetch = time.time()
+        self.assertEqual(
+            udi.get_active_stream_context_per_profile(7)[71]["active_streams"],
+            1,
+        )
+
+        # If the numeric ID is reused, proxy status cannot identify its account
+        # generation. Charge every observed owner for this process; an empty
+        # status is also the fetcher's error fallback and cannot safely prune.
+        udi._m3u_accounts_cache = [
+            {"id": 7, "name": "Provider", "profiles": []},
+            {
+                "id": 8,
+                "name": "New owner",
+                "profiles": [{"id": 71, "name": "Reused ID", "is_active": True}],
+            },
+        ]
+        udi._build_indexes()
+
+        self.assertEqual(
+            udi.get_active_stream_context_per_profile(7)[71]["active_streams"],
+            1,
+        )
+        self.assertEqual(
+            udi.get_active_stream_context_per_profile(8)[71]["active_streams"],
+            1,
+        )
+
+        udi._proxy_status_cache = {
+            "channel-idle": {"state": "idle", "m3u_profile_id": "71"}
+        }
+        udi._proxy_status_last_fetch = time.time()
+        self.assertEqual(udi.get_active_stream_context_per_profile(7), {})
+        self.assertEqual(udi.get_active_stream_context_per_profile(8), {})
+
+        udi._proxy_status_cache = {
+            "channel-reused-profile": {
+                "state": "active",
+                "m3u_profile_id": "71",
+                "clients": [{"user_agent": "VLC", "username": "new-viewer"}],
+            }
+        }
+        udi._proxy_status_last_fetch = time.time()
+        self.assertEqual(
+            udi.get_active_stream_context_per_profile(7)[71]["active_streams"],
+            1,
+        )
+        self.assertEqual(
+            udi.get_active_stream_context_per_profile(8)[71]["active_streams"],
+            1,
+        )
+
+    def test_removed_profile_session_blocks_identical_active_route_end_to_end(self):
+        """UDI history and limiter route history jointly prevent overbooking."""
+        from apps.stream.concurrent_stream_limiter import AccountStreamLimiter
+        from apps.udi.manager import UDIManager
+
+        active_shared = {
+            "id": 70,
+            "name": "Active shared",
+            "max_streams": 1,
+            "is_active": True,
+            "is_default": False,
+            "search_pattern": r"^http://provider[.]test/a/(.+)$",
+            "replace_pattern": r"http://shared.test/live/$1",
+        }
+        removed_shared = {
+            "id": 71,
+            "name": "Removed shared",
+            "max_streams": 1,
+            "is_active": True,
+            "is_default": False,
+            "search_pattern": r"^http://provider[.]test/b/(.+)$",
+            "replace_pattern": r"http://shared.test/live/$1",
+        }
+        independent = {
+            "id": 72,
+            "name": "Independent",
+            "max_streams": 1,
+            "is_active": True,
+            "is_default": False,
+            "search_pattern": r"^http://provider[.]test/c/(.+)$",
+            "replace_pattern": r"http://other.test/live/$1",
+        }
+
+        udi = UDIManager()
+        original_profiles = [active_shared, removed_shared, independent]
+        udi._m3u_accounts_cache = [
+            {"id": 7, "name": "Provider", "max_streams": 1, "profiles": original_profiles}
+        ]
+        udi._initialized = True
+        udi._build_indexes()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(7, 1, profiles=original_profiles)
+
+        current_profiles = [active_shared, independent]
+        udi._m3u_accounts_cache = [
+            {"id": 7, "name": "Provider", "max_streams": 1, "profiles": current_profiles}
+        ]
+        udi._build_indexes()
+        limiter.set_account_limit(7, 1, profiles=current_profiles)
+        udi._proxy_status_cache = {
+            "channel-removed-profile": {
+                "state": "active",
+                "m3u_profile_id": "71",
+                "clients": [{"user_agent": "VLC", "username": "viewer"}],
+            }
+        }
+        udi._proxy_status_last_fetch = time.time()
+
+        acquired, reason, reserved, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url(
+                {
+                    "id": 100,
+                    "url": "http://provider.test/a/100",
+                    "m3u_account_id": 7,
+                }
+            )
+        )
+
+        self.assertFalse(acquired)
+        self.assertEqual(reason, "active_viewers")
+        self.assertIsNone(reserved)
+        self.assertEqual(resolved_url, "")
+        snapshot = {
+            item["id"]: item for item in limiter.get_profile_slot_snapshot(7)
+        }
+        self.assertEqual(snapshot[70]["active_viewers"], 1)
+        self.assertTrue(snapshot[70]["full"])
+        self.assertEqual(snapshot[72]["active_viewers"], 0)
+
     def test_profile_slot_snapshot_and_reservation_expose_shadow_context(self):
         from apps.stream.concurrent_stream_limiter import AccountStreamLimiter
 
@@ -304,7 +549,7 @@ class TestM3uAccountIdPriority(unittest.TestCase):
 
         snapshot = limiter.get_profile_slot_snapshot(7)
         acquired, reason, profile = limiter.reserve_profile_for_stream(
-            {"id": 200, "m3u_account_id": "7"}
+            {"id": 200, "url": "http://provider.test/live/200", "m3u_account_id": "7"}
         )
 
         self.assertEqual(snapshot[0]["active_viewers"], 1)

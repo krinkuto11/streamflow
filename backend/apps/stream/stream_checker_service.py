@@ -4626,6 +4626,7 @@ class StreamCheckerService:
                     channel_name=channel_name,
                     streams_detail=list(stream_statuses.values()),
                     profile_progress_context=profile_progress_context,
+                    global_limit_override=global_limit_override,
                 )
             else:
                 logger.debug("[loop-probe] Loop checking disabled by profile — skipping")
@@ -5112,6 +5113,26 @@ class StreamCheckerService:
             queue_entry_token: Exact queue activation identity used to reject
                                   stale terminal writes after clear/requeue.
         """
+        # Keep this legacy entry point fail-closed by routing it through the same
+        # profile reservation and exact-URL scheduler as normal checks. The
+        # single global worker preserves sequential behavior without reviving the
+        # historical auto-profile transform paths retained below for compatibility
+        # archaeology.
+        return self._check_channel_concurrent(
+            channel_id,
+            skip_batch_changelog=skip_batch_changelog,
+            target_stream_ids=target_stream_ids,
+            forced_profile_id=forced_profile_id,
+            provider_limit_override=provider_limit_override,
+            run_mode=run_mode,
+            is_single_channel_check=is_single_channel_check,
+            global_limit_override=1,
+            force_check_override=force_check_override,
+            force_check_generation=force_check_generation,
+            batch_changelog_generation=batch_changelog_generation,
+            queue_entry_token=queue_entry_token,
+        )
+
         import time as time_module
         start_time = time_module.time()
         log_function_call(logger, "_check_channel_sequential", channel_id=channel_id)
@@ -6381,7 +6402,8 @@ class StreamCheckerService:
                          probe_duration: int = 360, hardware_acceleration: Optional[dict] = None,
                          channel_id: int = 0, channel_name: str = '',
                          streams_detail: Optional[list] = None,
-                         profile_progress_context: Optional[Dict[str, Any]] = None) -> None:
+                         profile_progress_context: Optional[Dict[str, Any]] = None,
+                         global_limit_override: Optional[int] = None) -> None:
         """
         Run loop detection probes on eligible streams in parallel with
         per-account concurrent limits, then write results back into each
@@ -6431,6 +6453,9 @@ class StreamCheckerService:
                               stream_statuses is not available.
             profile_progress_context: Optional Current Progress context to
                               preserve across loop-probe UI updates.
+            global_limit_override: Optional per-channel worker limit inherited
+                              from the quality-analysis path. Legacy sequential
+                              checks pass one; normal concurrent checks pass None.
         """
         import threading
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -6483,12 +6508,15 @@ class StreamCheckerService:
         except Exception as e:
             logger.warning(f"[loop-probe] Could not initialize account limits: {e}")
 
-        concurrent_enabled = bool(self.config.get('concurrent_streams.enabled', True))
-        configured_global_limit = self.config.get('concurrent_streams.global_limit', 10)
-        try:
-            global_limit = max(1, int(configured_global_limit)) if concurrent_enabled else 1
-        except (TypeError, ValueError):
-            global_limit = 10 if concurrent_enabled else 1
+        if global_limit_override is not None:
+            global_limit = max(1, int(global_limit_override))
+        else:
+            concurrent_enabled = bool(self.config.get('concurrent_streams.enabled', True))
+            configured_global_limit = self.config.get('concurrent_streams.global_limit', 10)
+            try:
+                global_limit = max(1, int(configured_global_limit)) if concurrent_enabled else 1
+            except (TypeError, ValueError):
+                global_limit = 10 if concurrent_enabled else 1
 
         results_lock = threading.Lock()
         completed = [0]
@@ -6652,8 +6680,8 @@ class StreamCheckerService:
                 if abort_requested():
                     completion_status = 'aborted'
                     return
-                profile_acquired, reason, acquired_profile = (
-                    account_limiter.reserve_profile_for_stream(reservation_stream)
+                profile_acquired, reason, acquired_profile, probe_url = (
+                    account_limiter.reserve_profile_for_stream_with_url(reservation_stream)
                 )
                 if not profile_acquired:
                     logger.info(
@@ -6662,16 +6690,11 @@ class StreamCheckerService:
                     )
                     return
 
-                probe_url = reservation_stream.get('url') or stream_url
-                if acquired_profile is not None:
-                    transformer = getattr(udi, 'apply_profile_url_transformation', None)
-                    if callable(transformer):
-                        transformed_url = transformer(
-                            reservation_stream,
-                            profile=acquired_profile,
-                        )
-                        if isinstance(transformed_url, str) and transformed_url:
-                            probe_url = transformed_url
+                if not isinstance(probe_url, str) or not probe_url:
+                    logger.warning(
+                        f"[loop-probe:{tag}] Skipping stream - reserved profile has no usable URL"
+                    )
+                    return
 
                 def should_abort_for_viewer() -> bool:
                     nonlocal preemption_claimed

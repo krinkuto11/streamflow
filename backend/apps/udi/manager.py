@@ -70,6 +70,16 @@ def _safe_positive_int(value: Any) -> int:
     return max(0, parsed)
 
 
+def _normalize_udi_identifier(value: Any) -> Optional[Any]:
+    """Normalize numeric Dispatcharr identifiers without rejecting legacy IDs."""
+    if value in (None, ''):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
     """Evaluate whether a FetchResult looks complete.
 
@@ -202,8 +212,13 @@ class UDIManager:
         self._channels_by_group_id: Dict[int, List[Dict[str, Any]]] = {}
         # stream_id -> account_id (derived from stream['m3u_account'])
         self._stream_account_id: Dict[int, int] = {}
-        # profile_id -> account_id (derived from M3UAccount.profiles nesting)
+        # profile_id -> preferred current/last-known account_id. Candidate owner
+        # sets below preserve both old and new accounts during an ID-reuse race:
+        # one proxy status profile ID cannot reveal which generation owns an
+        # already-open session, so capacity is charged conservatively to every
+        # observed owner for the remainder of this process.
         self._profile_to_account_id: Dict[int, int] = {}
+        self._profile_account_id_candidates: Dict[int, Set[int]] = {}
         # account_id -> list of stream dicts
         self._streams_by_account_id: Dict[int, List[Dict[str, Any]]] = {}
         # maintained flag so has_custom_streams() is O(1)
@@ -365,6 +380,43 @@ class UDIManager:
             logger.warning("Failed to load legacy UDI storage snapshot: %s", exc)
             return False
     
+    def _remember_profile_account_mappings(
+        self,
+        current_mapping: Dict[Any, Any],
+    ) -> None:
+        """Atomically record current owners while retaining ambiguous history.
+
+        A profile can be removed or its numeric ID can be reused while an older
+        proxy session is still open. Proxy status exposes only the profile ID,
+        not its account generation, so every observed owner remains a capacity
+        candidate for the remainder of this process. Proxy-status failures and
+        valid empty snapshots are indistinguishable, so absence can never be a
+        safe signal for pruning capacity history.
+        Callers already holding ``self._lock`` may use this helper; it performs
+        only in-memory assignments and deliberately does not acquire the lock.
+        """
+        normalized_current: Dict[Any, Any] = {}
+        for raw_profile_id, raw_account_id in current_mapping.items():
+            profile_id = _normalize_udi_identifier(raw_profile_id)
+            account_id = _normalize_udi_identifier(raw_account_id)
+            if profile_id is None or account_id is None:
+                continue
+            normalized_current[profile_id] = account_id
+
+        retained_preferred = dict(self._profile_to_account_id)
+        owner_candidates = {
+            profile_id: set(account_ids)
+            for profile_id, account_ids in self._profile_account_id_candidates.items()
+        }
+        for profile_id, account_id in retained_preferred.items():
+            owner_candidates.setdefault(profile_id, set()).add(account_id)
+        for profile_id, account_id in normalized_current.items():
+            retained_preferred[profile_id] = account_id
+            owner_candidates.setdefault(profile_id, set()).add(account_id)
+
+        self._profile_to_account_id = retained_preferred
+        self._profile_account_id_candidates = owner_candidates
+
     def _build_indexes(self) -> None:
         """Build index caches for fast lookups."""
         self._channels_by_id = {ch.get('id'): ch for ch in self._channels_cache if ch.get('id') is not None}
@@ -385,17 +437,18 @@ class UDIManager:
                 self._stream_account_id[sid] = aid
                 self._streams_by_account_id.setdefault(aid, []).append(st)
 
-        # profile_id -> account_id (profiles are nested inside m3u_accounts)
-        self._profile_to_account_id = {}
+        # profile_id -> account_id (profiles are nested inside m3u_accounts).
+        current_profile_to_account_id = {}
         for account in self._m3u_accounts_cache:
-            aid = account.get('id')
+            aid = _normalize_udi_identifier(account.get('id'))
             if aid is None:
                 continue
             for profile in account.get('profiles', []):
                 if isinstance(profile, dict):
-                    pid = profile.get('id')
+                    pid = _normalize_udi_identifier(profile.get('id'))
                     if pid is not None:
-                        self._profile_to_account_id[pid] = aid
+                        current_profile_to_account_id[pid] = aid
+        self._remember_profile_account_mappings(current_profile_to_account_id)
 
         self._has_custom_streams = any(st.get('is_custom', False) for st in self._streams_cache)
 
@@ -1354,7 +1407,7 @@ class UDIManager:
                 self._channels_by_group_id    = new_channels_by_group
                 self._streams_by_account_id   = new_streams_by_account
                 self._stream_account_id       = new_stream_account_id
-                self._profile_to_account_id   = new_profile_to_account
+                self._remember_profile_account_mappings(new_profile_to_account)
                 self._has_custom_streams      = new_has_custom
                 self._initialized             = True
 
@@ -1766,17 +1819,21 @@ class UDIManager:
                 self._m3u_accounts_by_id = {
                     a.get('id'): a for a in accounts if a.get('id') is not None
                 }
-                # Rebuild profile->account mapping since profiles nest inside accounts
-                self._profile_to_account_id = {}
+                # Refresh current owners while retaining ambiguous prior owners
+                # conservatively for this process.
+                current_profile_to_account_id = {}
                 for account in accounts:
-                    aid = account.get('id')
+                    aid = _normalize_udi_identifier(account.get('id'))
                     if aid is None:
                         continue
                     for profile in account.get('profiles', []):
                         if isinstance(profile, dict):
-                            pid = profile.get('id')
+                            pid = _normalize_udi_identifier(profile.get('id'))
                             if pid is not None:
-                                self._profile_to_account_id[pid] = aid
+                                current_profile_to_account_id[pid] = aid
+                self._remember_profile_account_mappings(
+                    current_profile_to_account_id
+                )
             self.cache.mark_refreshed('m3u_accounts')
             return True
         except Exception as e:
@@ -1970,15 +2027,31 @@ class UDIManager:
         return self.cache.get_last_refresh(entity_type)
     
     def _find_account_for_profile(self, profile_id: int) -> Optional[int]:
-        """Find the M3U account ID that contains a specific profile.
+        """Find the current or last-known M3U account for a profile.
 
         Args:
             profile_id: M3U account profile ID
 
         Returns:
-            M3U account ID or None if profile not found
+            M3U account ID or None if the profile has never been observed
         """
-        return self._profile_to_account_id.get(profile_id)
+        normalized_profile_id = _normalize_udi_identifier(profile_id)
+        return self._profile_to_account_id.get(normalized_profile_id)
+
+    def _profile_account_owners(self) -> Dict[Any, Set[Any]]:
+        """Return conservative current and last-known capacity owners.
+
+        ``fetch_proxy_status`` returns an empty mapping for both a valid idle
+        state and transport/parse failures, so status absence is not an
+        authoritative session-end signal. Retaining candidates in memory can
+        make an extremely rare profile-ID reuse wait on both accounts, but it
+        cannot hide an upstream session and overbook provider credentials.
+        """
+        with self._lock:
+            return {
+                profile_id: set(account_ids)
+                for profile_id, account_ids in self._profile_account_id_candidates.items()
+            }
     
     def _is_channel_status_active(self, status: Dict[str, Any]) -> bool:
         """Check if a channel status indicates it's active.
@@ -2129,6 +2202,8 @@ class UDIManager:
         """
         # Get real-time proxy status
         proxy_status = self._get_proxy_status()
+        profile_account_owners = self._profile_account_owners()
+        normalized_account_id = _normalize_udi_identifier(account_id)
         
         # Count active channels that are using profiles from this account
         active_count = 0
@@ -2139,19 +2214,20 @@ class UDIManager:
                 continue
             
             # Get the m3u_profile_id from the proxy status
-            profile_id = status.get('m3u_profile_id')
-            if not profile_id:
+            profile_id = _normalize_udi_identifier(status.get('m3u_profile_id'))
+            if profile_id is None:
                 logger.debug(f"Channel {channel_id_str} has no m3u_profile_id in proxy status")
                 continue
-            
-            # Find which account owns this profile
-            profile_account_id = self._find_account_for_profile(profile_id)
-            if profile_account_id is None:
+
+            # During profile removal or ID reuse, one status can conservatively
+            # consume capacity from more than one observed owner.
+            profile_account_ids = profile_account_owners.get(profile_id, set())
+            if not profile_account_ids:
                 logger.debug(f"Profile {profile_id} not found in any M3U account")
                 continue
-            
+
             # If this profile belongs to the account we're checking, count it
-            if profile_account_id == account_id:
+            if normalized_account_id in profile_account_ids:
                 active_count += 1
                 active_profiles.add(profile_id)
                 profile_name = status.get('m3u_profile_name', f'Profile {profile_id}')
@@ -2432,6 +2508,8 @@ class UDIManager:
         
         # Get real-time proxy status
         proxy_status = self._get_proxy_status()
+        profile_account_owners = self._profile_account_owners()
+        normalized_account_id = _normalize_udi_identifier(account_id)
         watcher_marker = self._shadow_watcher_user_agent()
         
         # Count active streams per profile
@@ -2442,17 +2520,14 @@ class UDIManager:
                 continue
             
             # Get the m3u_profile_id from the proxy status
-            profile_id = status.get('m3u_profile_id')
-            if not profile_id:
+            profile_id = _normalize_udi_identifier(status.get('m3u_profile_id'))
+            if profile_id is None:
                 continue
-            try:
-                profile_id = int(profile_id)
-            except (TypeError, ValueError):
-                continue
-            
-            # Find which account owns this profile
-            profile_account_id = self._find_account_for_profile(profile_id)
-            if profile_account_id != account_id:
+
+            if normalized_account_id not in profile_account_owners.get(
+                profile_id,
+                set(),
+            ):
                 continue
 
             usage = self._split_status_profile_usage(status, watcher_marker)
@@ -2549,6 +2624,19 @@ class UDIManager:
             if not profile.get('is_active', True):
                 logger.debug(f"Profile {profile_id} ({profile_name}) is inactive, skipping")
                 continue
+
+            route_eligible, _resolved_url, route_reason = self.resolve_profile_stream_url(
+                stream,
+                profile,
+            )
+            if not route_eligible:
+                logger.debug(
+                    "Profile %s cannot serve stream %s (%s), skipping",
+                    profile_id,
+                    stream_id,
+                    route_reason,
+                )
+                continue
             
             # Check if profile has available slots
             max_streams = _safe_positive_int(profile.get('max_streams', 0))
@@ -2595,6 +2683,19 @@ class UDIManager:
         if not account_id:
             # Custom stream without M3U account - can always run
             return (True, None)
+
+        account = self.get_m3u_account_by_id(account_id)
+        active_profiles = [
+            profile
+            for profile in (account.get('profiles', []) if isinstance(account, dict) else [])
+            if isinstance(profile, dict) and profile.get('is_active', True)
+        ]
+        if not active_profiles:
+            # Accounts without active profile credentials use their account-level
+            # max_streams fallback. The AccountStreamLimiter performs that atomic
+            # admission check together with current viewer/checker usage; this
+            # legacy preflight must not reject the stream before it gets there.
+            return (True, None)
         
         # Try to find an available profile
         available_profile = self.find_available_profile_for_stream(stream)
@@ -2602,10 +2703,107 @@ class UDIManager:
         if available_profile:
             return (True, None)
         else:
-            account = self.get_m3u_account_by_id(account_id)
             account_name = account.get('name', f'Account {account_id}') if account else f'Account {account_id}'
             return (False, f"All profiles in {account_name} are at capacity")
     
+    def resolve_profile_stream_url(
+        self,
+        stream: Dict[str, Any],
+        profile: Dict[str, Any],
+    ) -> Tuple[bool, str, str]:
+        """Resolve one explicit profile to the exact URL it can serve.
+
+        This is the fail-closed counterpart to
+        :meth:`apply_profile_url_transformation`. A profile with no rewrite is
+        the default credential route and may use the stored URL. A non-default
+        profile is eligible only when both patterns are usable, the search
+        pattern matches this stream, and the rewrite produces a changed, valid
+        URL. Dispatcharr default profiles may explicitly rewrite to the unchanged
+        stored URL. Pattern values and URLs are deliberately never logged.
+
+        Returns:
+            ``(eligible, url, reason)``. ``url`` is empty when the profile is
+            ineligible.
+        """
+        import re
+
+        original_url = stream.get('url', '') if isinstance(stream, dict) else ''
+        if not isinstance(original_url, str) or not original_url:
+            return (False, '', 'missing_stream_url')
+        if not isinstance(profile, dict):
+            return (False, '', 'missing_profile')
+
+        raw_search_pattern = profile.get('search_pattern')
+        raw_replace_pattern = profile.get('replace_pattern')
+        search_present = raw_search_pattern not in (None, '')
+        replace_present = raw_replace_pattern not in (None, '')
+
+        if not search_present and not replace_present:
+            if profile.get('is_default') is False:
+                return (False, '', 'nondefault_profile_missing_url_transformation')
+            return (True, original_url, 'default_profile_url')
+        if not search_present or not replace_present:
+            logger.warning(
+                "Profile %s has an incomplete URL transformation",
+                profile.get('id'),
+            )
+            return (False, '', 'incomplete_profile_url_transformation')
+        if not isinstance(raw_search_pattern, str) or not isinstance(raw_replace_pattern, str):
+            logger.warning(
+                "Profile %s has non-string URL transformation values",
+                profile.get('id'),
+            )
+            return (False, '', 'invalid_profile_url_transformation_type')
+
+        search_pattern = raw_search_pattern.strip()
+        replace_pattern = raw_replace_pattern.strip()
+        if not search_pattern or not replace_pattern:
+            logger.warning(
+                "Profile %s has an empty URL transformation",
+                profile.get('id'),
+            )
+            return (False, '', 'empty_profile_url_transformation')
+
+        try:
+            if not re.search(search_pattern, original_url):
+                return (False, '', 'profile_url_pattern_mismatch')
+
+            python_replace_pattern = replace_pattern
+            for i in range(99, 0, -1):
+                python_replace_pattern = python_replace_pattern.replace(f'${i}', f'\\{i}')
+
+            transformed_url = re.sub(search_pattern, python_replace_pattern, original_url)
+        except re.error:
+            logger.error(
+                "Invalid URL transformation regex for profile %s",
+                profile.get('id'),
+            )
+            return (False, '', 'invalid_profile_url_regex')
+        except Exception as exc:
+            logger.error(
+                "URL transformation failed for profile %s: %s",
+                profile.get('id'),
+                type(exc).__name__,
+            )
+            return (False, '', 'profile_url_transformation_failed')
+
+        if not transformed_url.startswith(('http://', 'https://', 'rtmp://', 'rtmps://')):
+            logger.error(
+                "Profile %s URL transformation produced an invalid protocol",
+                profile.get('id'),
+            )
+            return (False, '', 'invalid_profile_url_protocol')
+        if transformed_url == original_url:
+            if profile.get('is_default') is True:
+                return (True, original_url, 'default_profile_url')
+            logger.warning(
+                "Profile %s URL transformation did not change the route",
+                profile.get('id'),
+            )
+            return (False, '', 'profile_url_unchanged')
+
+        return (True, transformed_url, 'profile_url_transformed')
+
     def apply_profile_url_transformation(self, stream: Dict[str, Any], profile: Optional[Dict[str, Any]] = None) -> str:
         """Apply search/replace pattern transformation to a stream URL.
         
@@ -2621,8 +2819,6 @@ class UDIManager:
         Returns:
             Transformed URL string. If no transformation is needed, returns original URL.
         """
-        import re
-        
         original_url = stream.get('url', '')
         if not original_url:
             return original_url
@@ -2631,64 +2827,14 @@ class UDIManager:
         if profile is None:
             profile = self.find_available_profile_for_stream(stream)
         
-        # If still no profile, return original URL
+        # If still no profile, return original URL. Capacity-controlled callers
+        # must pass their explicit reservation and use resolve_profile_stream_url
+        # so they can fail closed rather than auto-selecting another credential.
         if not profile:
             return original_url
-        
-        # Get search and replace patterns
-        search_pattern = profile.get('search_pattern')
-        replace_pattern = profile.get('replace_pattern')
-        
-        # If patterns are not configured, return original URL
-        # Check explicitly for None or empty strings (including whitespace-only strings)
-        if not search_pattern or not replace_pattern:
-            return original_url
-        
-        # Strip whitespace and check again
-        search_pattern = search_pattern.strip()
-        replace_pattern = replace_pattern.strip()
-        
-        if not search_pattern or not replace_pattern:
-            logger.debug(f"Profile {profile.get('id')} has empty search_pattern or replace_pattern after stripping whitespace")
-            return original_url
-        
-        try:
-            # First, test if the pattern matches the URL
-            # If it doesn't match, don't apply any transformation
-            if not re.search(search_pattern, original_url):
-                logger.debug(f"Search pattern '{search_pattern}' does not match URL for stream {stream.get('id')}, skipping transformation")
-                return original_url
-            
-            # Convert $1, $2 style backreferences to \1, \2 for Python's re.sub()
-            # This handles patterns from other regex engines (e.g., JavaScript, Perl)
-            # Maximum supported backreference number (Python regex supports up to 99 groups)
-            MAX_BACKREFERENCE_COUNT = 99
-            python_replace_pattern = replace_pattern
-            # Replace $1, $2, ... $99 with \1, \2, ... \99
-            # Start from highest to avoid replacing $10 as $1 + 0
-            for i in range(MAX_BACKREFERENCE_COUNT, 0, -1):
-                python_replace_pattern = python_replace_pattern.replace(f'${i}', f'\\{i}')
-            
-            # Apply regex transformation
-            transformed_url = re.sub(search_pattern, python_replace_pattern, original_url)
-            
-            # Validate the transformed URL has a valid protocol
-            if not transformed_url.startswith(('http://', 'https://', 'rtmp://', 'rtmps://')):
-                logger.error(f"Profile {profile.get('id')} transformation resulted in invalid URL protocol. "
-                           f"Original URL preserved. Check search_pattern and replace_pattern configuration.")
-                return original_url
-            
-            if transformed_url != original_url:
-                # Log transformation without exposing sensitive URL details
-                logger.debug(f"Applied URL transformation for stream {stream.get('id')} using profile {profile.get('id')}")
-            
-            return transformed_url
-        except re.error as e:
-            logger.error(f"Invalid regex pattern in profile {profile.get('id')}: {e}")
-            return original_url
-        except Exception as e:
-            logger.error(f"Error applying URL transformation for stream {stream.get('id')}: {e}")
-            return original_url
+
+        eligible, resolved_url, _reason = self.resolve_profile_stream_url(stream, profile)
+        return resolved_url if eligible else original_url
     
     def _ensure_initialized(self) -> None:
         """Ensure UDI Manager is initialized before data access.

@@ -1812,6 +1812,19 @@ class StreamCheckerProgress:
     ) -> Dict[str, Any]:
         """Build a compact operator-facing capacity explanation without private stream data."""
         slots = profile_slots or []
+        # Shared credential routes deliberately retain one row per configured
+        # profile so operators can still identify every alias.  Capacity,
+        # however, belongs to the route and must only be summarized once.  The
+        # limiter marks one deterministic representative; unusable routes are
+        # also retained for diagnosis but never describe usable capacity.
+        # Older snapshots that predate both markers keep their historical
+        # one-row-one-slot behavior.
+        capacity_slots = [
+            slot
+            for slot in slots
+            if slot.get('capacity_counted', True) is not False
+            and slot.get('route_usable', True) is not False
+        ]
 
         def safe_count(value: Any) -> int:
             try:
@@ -1822,7 +1835,7 @@ class StreamCheckerProgress:
         explicit_viewer_context = any(
             isinstance(slot, dict)
             and ('real_viewers' in slot or 'shadow_watchers' in slot)
-            for slot in slots
+            for slot in capacity_slots
         )
 
         def slot_real_viewer_count(slot: Dict[str, Any]) -> int:
@@ -1830,25 +1843,35 @@ class StreamCheckerProgress:
                 return safe_count(slot.get('real_viewers'))
             return safe_count(slot.get('active_viewers'))
 
-        total_slots = len(slots)
-        full_slots = sum(1 for slot in slots if slot.get('full'))
-        checking_slots = sum(1 for slot in slots if safe_count(slot.get('checking')) > 0)
+        total_slots = len(capacity_slots)
+        full_slots = sum(1 for slot in capacity_slots if slot.get('full'))
+        checking_slots = sum(
+            1 for slot in capacity_slots if safe_count(slot.get('checking')) > 0
+        )
         real_viewer_slots = sum(
             1
-            for slot in slots
+            for slot in capacity_slots
             if slot_real_viewer_count(slot) > 0
         )
-        shadow_watcher_slots = sum(1 for slot in slots if safe_count(slot.get('shadow_watchers')) > 0)
-        teamarr_preflight_slots = sum(1 for slot in slots if safe_count(slot.get('teamarr_preflight')) > 0)
+        shadow_watcher_slots = sum(
+            1
+            for slot in capacity_slots
+            if safe_count(slot.get('shadow_watchers')) > 0
+        )
+        teamarr_preflight_slots = sum(
+            1
+            for slot in capacity_slots
+            if safe_count(slot.get('teamarr_preflight')) > 0
+        )
         quality_check_slots = sum(
             1
-            for slot in slots
+            for slot in capacity_slots
             if safe_count(slot.get('quality_checks', slot.get('quality_checking'))) > 0
         )
-        unlimited_slots = sum(1 for slot in slots if slot.get('unlimited'))
+        unlimited_slots = sum(1 for slot in capacity_slots if slot.get('unlimited'))
         open_slots = sum(
             1
-            for slot in slots
+            for slot in capacity_slots
             if slot.get('unlimited') or int(slot.get('available') or 0) > 0
         )
         limited_slots = max(0, total_slots - unlimited_slots)

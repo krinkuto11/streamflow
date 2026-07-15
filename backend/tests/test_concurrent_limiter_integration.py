@@ -130,10 +130,16 @@ class TestConcurrentLimiterIntegration(unittest.TestCase):
         }
         
         # Mock M3U accounts with different limits
-        udi_mock.get_m3u_accounts.return_value = [
-            {'id': 1, 'name': 'Account A', 'max_streams': 1},  # Max 1 concurrent
-            {'id': 2, 'name': 'Account B', 'max_streams': 2},  # Max 2 concurrent
+        accounts = [
+            {'id': 1, 'name': 'Account A', 'max_streams': 1, 'profiles': []},  # Max 1 concurrent
+            {'id': 2, 'name': 'Account B', 'max_streams': 2, 'profiles': []},  # Max 2 concurrent
         ]
+        udi_mock.get_m3u_accounts.return_value = accounts
+        accounts_by_id = {account['id']: account for account in accounts}
+        udi_mock.get_m3u_account_by_id.side_effect = accounts_by_id.get
+        udi_mock.get_active_streams_for_account.return_value = 0
+        udi_mock.get_active_stream_context_per_profile.return_value = {}
+        udi_mock.get_active_streams_count_per_profile.return_value = {}
         
         udi_mock.get_stream_by_id.return_value = None  # No cached data
         udi_mock.refresh_channel_by_id.return_value = True
@@ -167,7 +173,12 @@ class TestConcurrentLimiterIntegration(unittest.TestCase):
         
         # Create service and check channel
         from apps.stream.stream_checker_service import StreamCheckerService
+        from apps.stream.concurrent_stream_limiter import get_account_limiter
         service = StreamCheckerService()
+        # The limiter is a process singleton and owns its own UDI reference.
+        # Point it at the same authoritative no-profile account snapshot instead
+        # of relying on the former fail-open behavior for an unknown account.
+        get_account_limiter().udi_manager = udi_mock
         
         # Enable concurrent checking
         service.config.config['concurrent_streams'] = {

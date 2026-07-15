@@ -146,28 +146,53 @@ export function getProfileSlotDisplay(slot = {}) {
   const teamarrPreflight = Number(slot.teamarr_preflight || 0)
   const qualityChecks = Number(slot.quality_checks ?? slot.quality_checking ?? 0)
   const used = Number(slot.used ?? (activeViewers + checking))
-  const unlimited = Boolean(slot.unlimited)
+  const routeUsable = slot.route_usable !== false
+  const routeUnavailable = !routeUsable
+  const routeUnavailableHint = routeUnavailable
+    ? 'This profile cannot provide a usable credential route for StreamFlow checks.'
+    : null
+  const unlimited = routeUsable && Boolean(slot.unlimited)
   const limit = Number(slot.limit || 0)
   const available = slot.available == null ? null : Number(slot.available)
+  const sharedRoute = routeUsable && Boolean(slot.shared_route)
+  // Compatibility with older servers: only an explicit false marks an alias;
+  // a missing marker keeps the historical capacity-row interpretation. An
+  // explicitly unusable route always fails closed regardless of that marker.
+  const capacityCounted = routeUsable && slot.capacity_counted !== false
+  const sharedRouteLabel = sharedRoute
+    ? capacityCounted
+      ? 'Shared credential route'
+      : 'Shared credential route alias'
+    : null
 
-  const capacityText = unlimited ? 'open' : `${used}/${limit}`
-  const availableValue = Number.isFinite(available) ? available : 0
-  const freeText = unlimited
-    ? 'unlimited capacity'
-    : `${availableValue} free`
-  const status = slot.full
-    ? 'Full'
-    : teamarrPreflight > 0
-      ? 'Teamarr Preflight'
-      : qualityChecks > 0
-        ? 'Quality check'
-        : checking > 0
-          ? 'Checking'
-          : realViewers > 0
-            ? 'Viewer active'
-            : shadowWatchers > 0
-              ? 'Shadow watcher'
-              : 'Available'
+  const capacityText = routeUnavailable
+    ? 'N/A'
+    : unlimited
+      ? 'open'
+      : `${used}/${limit}`
+  const availableValue = routeUnavailable
+    ? null
+    : Number.isFinite(available) ? available : 0
+  const freeText = routeUnavailable
+    ? 'capacity N/A'
+    : unlimited
+      ? 'unlimited capacity'
+      : `${availableValue} free`
+  const status = routeUnavailable
+    ? 'Route unavailable'
+    : slot.full
+      ? 'Full'
+      : teamarrPreflight > 0
+        ? 'Teamarr Preflight'
+        : qualityChecks > 0
+          ? 'Quality check'
+          : checking > 0
+            ? 'Checking'
+            : realViewers > 0
+              ? 'Viewer active'
+              : shadowWatchers > 0
+                ? 'Shadow watcher'
+                : 'Available'
   const viewerTitle = hasExplicitViewerContext
     ? `${realViewers} real viewer`
     : `${activeViewers} viewer`
@@ -178,6 +203,8 @@ export function getProfileSlotDisplay(slot = {}) {
     qualityChecks > 0 ? `${qualityChecks} quality check` : null,
     `${checking} checking`,
     freeText,
+    sharedRouteLabel,
+    routeUnavailableHint,
   ]
 
   return {
@@ -187,7 +214,7 @@ export function getProfileSlotDisplay(slot = {}) {
     title: [name, idText, ...contextParts]
       .filter(Boolean)
       .join(', '),
-    full: Boolean(slot.full),
+    full: routeUsable && Boolean(slot.full),
     checking,
     activeViewers,
     realViewers,
@@ -201,6 +228,13 @@ export function getProfileSlotDisplay(slot = {}) {
     capacityText,
     freeText,
     status,
+    sharedRoute,
+    capacityCounted,
+    isSharedRouteAlias: sharedRoute && !capacityCounted,
+    sharedRouteLabel,
+    routeUsable,
+    routeUnavailable,
+    routeUnavailableHint,
   }
 }
 
@@ -215,8 +249,15 @@ export function getProfileSlotMatrixRows(providers = []) {
         accountName,
         accountId,
         key: `${accountId ?? accountName}:${display.id ?? display.name}`,
-        limitText: display.unlimited ? 'unlimited' : String(display.limit),
-        availableText: display.unlimited ? 'open' : String(display.available),
+        limitText: display.routeUnavailable
+          ? 'N/A'
+          : display.unlimited ? 'unlimited' : String(display.limit),
+        usageText: display.routeUnavailable
+          ? 'N/A'
+          : `${display.used}/${display.unlimited ? 'unlimited' : display.limit}`,
+        availableText: display.routeUnavailable
+          ? 'N/A'
+          : display.unlimited ? 'open' : String(display.available),
       }
     })
   })

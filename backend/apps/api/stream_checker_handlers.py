@@ -27,6 +27,38 @@ _QUEUE_GUARD_MAX_METADATA_DEPTH = 8
 _QUEUE_GUARD_MAX_METADATA_STRING_BYTES = 16384
 
 
+def _public_single_stream_check_result(value: Any) -> Any:
+    """Copy a direct-check result without provider URL or rewrite fields.
+
+    Successful analysis payloads contain useful measurement detail, but their
+    internal ``stream_url`` is the exact provider route used by FFmpeg and can
+    therefore contain account credentials. Keep the measurement contract while
+    recursively dropping URL/rewrite fields before JSON serialization.
+    """
+    if isinstance(value, dict):
+        public_value = {}
+        for key, item in value.items():
+            key_text = str(key).casefold()
+            if (
+                key_text == 'url'
+                or key_text.endswith('_url')
+                or key_text in {
+                    'search_pattern',
+                    'replace_pattern',
+                    'username',
+                    'password',
+                }
+            ):
+                continue
+            public_value[key] = _public_single_stream_check_result(item)
+        return public_value
+    if isinstance(value, list):
+        return [_public_single_stream_check_result(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_public_single_stream_check_result(item) for item in value)
+    return value
+
+
 def _is_strict_json_integer(value: Any, *, minimum: int = 0) -> bool:
     """Return whether value is a JSON integer at or above the minimum."""
     return isinstance(value, int) and not isinstance(value, bool) and value >= minimum
@@ -1061,7 +1093,7 @@ def check_single_stream_now_response(
         )
 
         if result.get("success"):
-            return jsonify(result), 200
+            return jsonify(_public_single_stream_check_result(result)), 200
 
         error_code = result.get("error")
         if error_code == "stream_not_found":

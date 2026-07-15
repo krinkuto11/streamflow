@@ -21,11 +21,33 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from apps.stream.concurrent_stream_limiter import (
     AccountStreamLimiter,
     SmartStreamScheduler,
+    _RESERVATION_TOKEN_KEY,
+    _profile_resolution_key,
     get_account_limiter,
     get_smart_scheduler,
     initialize_account_limits
 )
 from apps.stream.stream_checker_components import StreamCheckConfig
+from apps.udi.manager import UDIManager
+
+
+def _credential_profile(profile_id, name=None, max_streams=1, is_active=True):
+    """Build one valid, distinct synthetic credential route for scheduler tests."""
+    return {
+        'id': profile_id,
+        'name': name or f'Credential {profile_id}',
+        'max_streams': max_streams,
+        'is_active': is_active,
+        'search_pattern': r'^(https?://.+)$',
+        'replace_pattern': f'$1?profile={profile_id}',
+    }
+
+
+class _RealProfileRouteResolverMixin:
+    """Resolve synthetic profiles with the same strict API used in production."""
+
+    def resolve_profile_stream_url(self, stream, profile):
+        return UDIManager.resolve_profile_stream_url(self, stream, profile)
 
 
 class TestAccountStreamLimiter(unittest.TestCase):
@@ -155,6 +177,850 @@ class TestAccountStreamLimiter(unittest.TestCase):
         profile['max_streams'] = 1
         limiter.release_profile(reserved_profile)
         self.assertEqual(limiter.profile_checking_counts[10], 0)
+
+    def test_plain_dict_profile_release_clears_shared_route_reservation(self):
+        """Legacy callers may copy the returned dict before releasing it."""
+        profiles = [
+            {
+                'id': 10,
+                'name': 'Default',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': True,
+            },
+            {
+                'id': 11,
+                'name': 'Default alias',
+                'max_streams': 1,
+                'is_active': True,
+            },
+        ]
+
+        class FakeUDI:
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': profiles} if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 1, profiles=profiles)
+        acquired, _reason, reserved_profile = limiter.reserve_profile_for_stream({
+            'id': 100,
+            'url': 'http://example.test/stream',
+            'm3u_account_id': 1,
+        })
+
+        self.assertTrue(acquired)
+        route_identity = next(iter(limiter.route_checking_counts))
+        self.assertEqual(limiter.route_checking_counts[route_identity], 1)
+        full_snapshot = limiter.get_profile_slot_snapshot(1)
+        self.assertTrue(all(item['full'] for item in full_snapshot))
+        self.assertTrue(all(item['shared_route'] for item in full_snapshot))
+        self.assertTrue(all(item['used'] == 1 for item in full_snapshot))
+        self.assertEqual(
+            [item['id'] for item in full_snapshot if item['capacity_counted']],
+            [10],
+        )
+
+        limiter.release_profile(dict(reserved_profile))
+
+        self.assertEqual(limiter.profile_checking_counts[10], 0)
+        self.assertEqual(limiter.route_checking_counts[route_identity], 0)
+        self.assertNotIn(10, limiter.profile_reservation_routes)
+        open_snapshot = limiter.get_profile_slot_snapshot(1)
+        self.assertTrue(all(not item['full'] for item in open_snapshot))
+        self.assertTrue(all(item['available'] == 1 for item in open_snapshot))
+
+    def test_legacy_plain_dict_profile_release_refuses_ambiguous_routes_after_refresh(self):
+        """A tokenless legacy copy must not guess between old and new routes."""
+        old_profile = {
+            'id': 10,
+            'name': 'Credential',
+            'max_streams': 2,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': r'^http://provider[.]test/old/(.+)$',
+            'replace_pattern': r'http://old-user:old-pass@provider.test/live/$1',
+        }
+        new_profile = {
+            **old_profile,
+            'search_pattern': r'^http://provider[.]test/new/(.+)$',
+            'replace_pattern': r'http://new-user:new-pass@provider.test/live/$1',
+        }
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            def __init__(self):
+                self.account = {'id': 1, 'profiles': [old_profile]}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 1, profiles=[old_profile])
+        first_acquired, _reason, first, _url = (
+            limiter.reserve_profile_for_stream_with_url({
+                'id': 100,
+                'url': 'http://provider.test/old/100',
+                'm3u_account_id': 1,
+            })
+        )
+        self.assertTrue(first_acquired)
+
+        udi.account = {'id': 1, 'profiles': [new_profile]}
+        limiter.set_account_limit(1, 1, profiles=[new_profile])
+        second_acquired, _reason, second, _url = (
+            limiter.reserve_profile_for_stream_with_url({
+                'id': 101,
+                'url': 'http://provider.test/new/101',
+                'm3u_account_id': 1,
+            })
+        )
+        self.assertTrue(second_acquired)
+
+        old_route = (1, first.route_key)
+        new_route = (1, second.route_key)
+        self.assertNotEqual(old_route, new_route)
+        self.assertEqual(limiter.profile_checking_counts[10], 2)
+        self.assertEqual(limiter.route_checking_counts[old_route], 1)
+        self.assertEqual(limiter.route_checking_counts[new_route], 1)
+
+        legacy_copy = dict(first)
+        legacy_copy.pop(_RESERVATION_TOKEN_KEY)
+        limiter.release_profile(legacy_copy)
+
+        self.assertEqual(limiter.profile_checking_counts[10], 2)
+        self.assertEqual(limiter.route_checking_counts[old_route], 1)
+        self.assertEqual(limiter.route_checking_counts[new_route], 1)
+        self.assertEqual(
+            limiter.profile_reservation_routes[10],
+            [old_route, new_route],
+        )
+
+        limiter.release_profile(first)
+        self.assertEqual(limiter.profile_checking_counts[10], 1)
+        self.assertEqual(limiter.route_checking_counts[old_route], 0)
+        self.assertEqual(limiter.route_checking_counts[new_route], 1)
+        limiter.release_profile(second)
+        self.assertEqual(limiter.profile_checking_counts[10], 0)
+        self.assertEqual(limiter.route_checking_counts[new_route], 0)
+        self.assertNotIn(10, limiter.profile_reservation_routes)
+
+    def test_stale_copied_reservation_token_cannot_release_reconfigured_route(self):
+        """A released A token must never release a later B reservation."""
+        old_profile = {
+            'id': 10,
+            'name': 'Credential',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': r'^http://provider[.]test/old/(.+)$',
+            'replace_pattern': r'http://old-user:old-pass@provider.test/live/$1',
+        }
+        new_profile = {
+            **old_profile,
+            'search_pattern': r'^http://provider[.]test/new/(.+)$',
+            'replace_pattern': r'http://new-user:new-pass@provider.test/live/$1',
+        }
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            def __init__(self):
+                self.account = {'id': 1, 'profiles': [old_profile]}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 1, profiles=[old_profile])
+        acquired, _reason, first, _url = (
+            limiter.reserve_profile_for_stream_with_url({
+                'id': 100,
+                'url': 'http://provider.test/old/100',
+                'm3u_account_id': 1,
+            })
+        )
+        self.assertTrue(acquired)
+        old_copy = dict(first)
+        old_token = old_copy[_RESERVATION_TOKEN_KEY]
+        old_route = (1, first.route_key)
+        self.assertIsInstance(old_token, str)
+        self.assertEqual(len(old_token), 32)
+        self.assertNotIn('old-user', old_token)
+        self.assertIn(old_token, limiter.profile_reservations_by_token)
+
+        limiter.release_profile(first)
+        self.assertEqual(limiter.profile_checking_counts[10], 0)
+        self.assertEqual(limiter.route_checking_counts[old_route], 0)
+        self.assertNotIn(old_token, limiter.profile_reservations_by_token)
+
+        udi.account = {'id': 1, 'profiles': [new_profile]}
+        limiter.set_account_limit(1, 1, profiles=[new_profile])
+        acquired, _reason, second, _url = (
+            limiter.reserve_profile_for_stream_with_url({
+                'id': 101,
+                'url': 'http://provider.test/new/101',
+                'm3u_account_id': 1,
+            })
+        )
+        self.assertTrue(acquired)
+        new_token = second[_RESERVATION_TOKEN_KEY]
+        new_route = (1, second.route_key)
+        self.assertNotEqual(new_token, old_token)
+
+        limiter.release_profile(old_copy)
+
+        self.assertEqual(limiter.profile_checking_counts[10], 1)
+        self.assertEqual(limiter.route_checking_counts[new_route], 1)
+        self.assertEqual(limiter.profile_reservation_routes[10], [new_route])
+        self.assertIn(new_token, limiter.profile_reservations_by_token)
+
+        limiter.clear()
+        self.assertEqual(limiter.profile_reservations_by_token, {})
+        self.assertEqual(limiter.profile_reservation_routes, {})
+        self.assertEqual(limiter.profile_checking_counts, {})
+        self.assertEqual(limiter.route_checking_counts, {})
+
+    def test_profile_snapshot_empty_transitions_fail_closed_before_raw_fallback(self):
+        """A refresh race must never turn an active profile into a raw-URL probe."""
+        alternate = {
+            'id': 10,
+            'name': 'Alternate',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': r'/main/',
+            'replace_pattern': '/alternate/',
+        }
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            def __init__(self):
+                self.account = {'id': 1, 'profiles': [alternate]}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        stream = {
+            'id': 100,
+            'url': 'http://provider.test/main/100',
+            'm3u_account_id': 1,
+        }
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+
+        limiter.set_account_limit(1, 1, profiles=[])
+        acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url(stream)
+        )
+        self.assertFalse(acquired)
+        self.assertEqual(reason, 'provider_profile_unavailable')
+        self.assertIsNone(profile)
+        self.assertEqual(resolved_url, '')
+
+        udi.account = {'id': 1, 'profiles': []}
+        acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url(stream)
+        )
+        self.assertTrue(acquired)
+        self.assertEqual(reason, 'acquired')
+        self.assertIsNone(profile)
+        self.assertEqual(resolved_url, stream['url'])
+
+        limiter.set_account_limit(1, 1, profiles=[alternate])
+        acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url(stream)
+        )
+        self.assertFalse(acquired)
+        self.assertEqual(reason, 'provider_profile_unavailable')
+        self.assertIsNone(profile)
+        self.assertEqual(resolved_url, '')
+
+    def test_provider_reservation_token_uses_noncolliding_internal_dict_key(self):
+        """A future/provider reservation_token field must survive untouched."""
+        profile = {
+            'id': 10,
+            'name': 'Default',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': True,
+            'reservation_token': 'provider-owned-value',
+        }
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': [profile]} if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 1, profiles=[profile])
+
+        acquired, _reason, reserved = limiter.reserve_profile_for_stream({
+            'id': 100,
+            'url': 'http://provider.test/live/100',
+            'm3u_account_id': 1,
+        })
+
+        self.assertTrue(acquired)
+        self.assertEqual(reserved['reservation_token'], 'provider-owned-value')
+        self.assertIn(_RESERVATION_TOKEN_KEY, reserved)
+        self.assertNotEqual(
+            reserved[_RESERVATION_TOKEN_KEY],
+            reserved['reservation_token'],
+        )
+        limiter.release_profile(dict(reserved))
+        self.assertEqual(limiter.profile_checking_counts[10], 0)
+
+    def test_account_only_update_preserves_existing_profile_route_aggregate(self):
+        """profiles=None changes fallback metadata without corrupting route maps."""
+        profiles = [
+            _credential_profile(10, max_streams=1),
+            _credential_profile(11, max_streams=1),
+        ]
+        limiter = AccountStreamLimiter()
+        limiter.set_account_limit(1, 1, profiles=profiles)
+        route_keys_before = dict(limiter.profile_route_keys)
+        resolution_keys_before = dict(limiter.profile_resolution_keys)
+        route_limits_before = dict(limiter.route_limits)
+
+        limiter.set_account_limit(1, 99)
+
+        self.assertEqual(limiter.get_account_limit(1), 2)
+        self.assertEqual(limiter.profile_route_keys, route_keys_before)
+        self.assertEqual(limiter.profile_resolution_keys, resolution_keys_before)
+        self.assertEqual(limiter.route_limits, route_limits_before)
+
+    def test_profile_resolution_keys_are_normalized_secret_safe_and_refreshed(self):
+        """Resolution fingerprints track exact semantics without retaining secrets."""
+        original = {
+            'id': 10,
+            'name': 'Credential',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': r'^http://provider[.]test/old/(.+)$',
+            'replace_pattern': r'http://secret-user:secret-pass@provider.test/live/$1',
+        }
+        whitespace_variant = {
+            **original,
+            'search_pattern': f"  {original['search_pattern']}  ",
+            'replace_pattern': f"  {original['replace_pattern']}  ",
+        }
+
+        original_key = _profile_resolution_key(original)
+        self.assertEqual(original_key, _profile_resolution_key(whitespace_variant))
+        self.assertEqual(len(original_key), 64)
+        self.assertNotIn('secret-user', original_key)
+        self.assertNotIn('secret-pass', original_key)
+        self.assertNotEqual(
+            original_key,
+            _profile_resolution_key({**original, 'is_default': None}),
+        )
+
+        limiter = AccountStreamLimiter()
+        limiter.set_account_limit(1, 1, profiles=[original])
+        self.assertEqual(limiter.profile_resolution_keys[10], original_key)
+        original_route_key = limiter.profile_route_keys[10]
+
+        search_only_refresh = {
+            **original,
+            'search_pattern': r'^http://provider[.]test/new/(.+)$',
+        }
+        limiter.set_account_limit(1, 1, profiles=[search_only_refresh])
+        refreshed_key = limiter.profile_resolution_keys[10]
+        self.assertNotEqual(refreshed_key, original_key)
+        self.assertEqual(limiter.profile_route_keys[10], original_route_key)
+
+        replacement_profile = {
+            **original,
+            'id': 11,
+            'name': 'Replacement credential',
+        }
+        limiter.set_account_limit(1, 1, profiles=[replacement_profile])
+        self.assertNotIn(10, limiter.profile_resolution_keys)
+        self.assertIn(11, limiter.profile_resolution_keys)
+
+        limiter.clear()
+        self.assertEqual(limiter.profile_resolution_keys, {})
+
+    def test_snapshot_counts_each_shared_route_once_and_non_routes_individually(self):
+        """Snapshot capacity rows must not multiply aliases of one route."""
+        profiles = [
+            {
+                'id': 20,
+                'name': 'Alias B',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': True,
+            },
+            {
+                'id': 10,
+                'name': 'Alias A',
+                'max_streams': 1,
+                'is_active': True,
+            },
+            {
+                'id': 30,
+                'name': 'Invalid non-route',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': False,
+            },
+        ]
+
+        class FakeUDI:
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': profiles} if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 1, profiles=profiles)
+
+        snapshot_by_id = {
+            item['id']: item for item in limiter.get_profile_slot_snapshot(1)
+        }
+
+        self.assertTrue(snapshot_by_id[10]['capacity_counted'])
+        self.assertFalse(snapshot_by_id[20]['capacity_counted'])
+        self.assertTrue(snapshot_by_id[10]['shared_route'])
+        self.assertTrue(snapshot_by_id[20]['shared_route'])
+        self.assertFalse(snapshot_by_id[30]['capacity_counted'])
+        self.assertFalse(snapshot_by_id[30]['route_usable'])
+        self.assertNotIn('shared_route', snapshot_by_id[30])
+
+    def test_snapshot_keeps_only_invalid_profile_visible_without_counting_capacity(self):
+        """An unusable-only profile set must expose no synthetic route capacity."""
+        profiles = [{
+            'id': 30,
+            'name': 'Invalid only',
+            'max_streams': 4,
+            'is_active': True,
+            'is_default': False,
+        }]
+
+        class FakeUDI:
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': profiles} if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 2, profiles=profiles)
+
+        snapshot = limiter.get_profile_slot_snapshot(1)
+
+        self.assertEqual(len(snapshot), 1)
+        self.assertEqual(snapshot[0]['id'], 30)
+        self.assertFalse(snapshot[0]['capacity_counted'])
+        self.assertFalse(snapshot[0]['route_usable'])
+        self.assertEqual(
+            [item for item in snapshot if item['capacity_counted']],
+            [],
+        )
+
+    def test_explicit_malformed_default_rewrites_add_no_route_capacity(self):
+        """Default status cannot make an unusable explicit rewrite a route."""
+        malformed_pairs = {
+            'incomplete': (r'/main/', None),
+            'non_string': (123, '/alternate/'),
+            'whitespace': ('   ', '   '),
+            'invalid_regex': ('(', '/alternate/'),
+        }
+
+        for case_name, (search_pattern, replace_pattern) in malformed_pairs.items():
+            with self.subTest(case=case_name):
+                profile = {
+                    'id': 30,
+                    'name': f'Malformed default {case_name}',
+                    'max_streams': 4,
+                    'is_active': True,
+                    'is_default': True,
+                    'search_pattern': search_pattern,
+                    'replace_pattern': replace_pattern,
+                }
+
+                class FakeUDI(_RealProfileRouteResolverMixin):
+                    def get_m3u_account_by_id(self, account_id):
+                        return (
+                            {'id': 1, 'profiles': [profile]}
+                            if account_id == 1
+                            else None
+                        )
+
+                    def get_active_streams_count_per_profile(self, _account_id):
+                        return {}
+
+                limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+                limiter.set_account_limit(1, 1, profiles=[profile])
+
+                self.assertEqual(limiter.get_account_limit(1), 1)
+                snapshot = limiter.get_profile_slot_snapshot(1)
+                self.assertEqual(len(snapshot), 1)
+                self.assertFalse(snapshot[0]['route_usable'])
+                self.assertFalse(snapshot[0]['capacity_counted'])
+
+                acquired, reason, reserved, resolved_url = (
+                    limiter.reserve_profile_for_stream_with_url({
+                        'id': 100,
+                        'url': 'http://provider.test/main/100',
+                        'm3u_account_id': 1,
+                    })
+                )
+                self.assertFalse(acquired)
+                self.assertEqual(reason, 'profile_url_incompatible')
+                self.assertIsNone(reserved)
+                self.assertEqual(resolved_url, '')
+
+    def test_inactive_shared_profile_usage_consumes_active_route_without_capacity(self):
+        """A disabled alias viewer still fills its identical active credential."""
+        profiles = [
+            {
+                'id': 10,
+                'name': 'Active shared',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': False,
+                'search_pattern': r'^http://provider[.]test/a/(.+)$',
+                'replace_pattern': r'http://shared.test/live/$1',
+            },
+            {
+                'id': 11,
+                'name': 'Inactive shared',
+                'max_streams': 1,
+                'is_active': False,
+                'is_default': False,
+                'search_pattern': r'^http://provider[.]test/b/(.+)$',
+                'replace_pattern': r'http://shared.test/live/$1',
+            },
+            {
+                'id': 12,
+                'name': 'Independent',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': False,
+                'search_pattern': r'^http://provider[.]test/c/(.+)$',
+                'replace_pattern': r'http://other.test/live/$1',
+            },
+        ]
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': profiles} if account_id == 1 else None
+
+            def get_active_stream_context_per_profile(self, _account_id):
+                return {
+                    11: {
+                        'active_streams': 1,
+                        'real_viewers': 1,
+                        'real_viewer_streams': 1,
+                        'shadow_watchers': 0,
+                    },
+                }
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 1, profiles=profiles)
+
+        self.assertEqual(limiter.get_account_limit(1), 2)
+        acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url({
+                'id': 100,
+                'url': 'http://provider.test/a/100',
+                'm3u_account_id': 1,
+            })
+        )
+        self.assertFalse(acquired)
+        self.assertEqual(reason, 'active_viewers')
+        self.assertIsNone(profile)
+        self.assertEqual(resolved_url, '')
+
+        snapshot_by_id = {
+            item['id']: item for item in limiter.get_profile_slot_snapshot(1)
+        }
+        self.assertEqual(set(snapshot_by_id), {10, 12})
+        self.assertEqual(snapshot_by_id[10]['active_viewers'], 1)
+        self.assertTrue(snapshot_by_id[10]['full'])
+        self.assertEqual(snapshot_by_id[12]['active_viewers'], 0)
+        self.assertFalse(snapshot_by_id[12]['full'])
+
+    def test_removed_shared_profile_usage_retains_route_capacity_charge(self):
+        """A removed profile's observed session remains charged to its old route."""
+        shared_active = {
+            'id': 10,
+            'name': 'Active shared',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': r'^http://provider[.]test/a/(.+)$',
+            'replace_pattern': r'http://shared.test/live/$1',
+        }
+        removed_shared = {
+            'id': 11,
+            'name': 'Removed shared',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': r'^http://provider[.]test/b/(.+)$',
+            'replace_pattern': r'http://shared.test/live/$1',
+        }
+        independent = {
+            'id': 12,
+            'name': 'Independent',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': r'^http://provider[.]test/c/(.+)$',
+            'replace_pattern': r'http://other.test/live/$1',
+        }
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            def __init__(self):
+                self.account = {
+                    'id': 1,
+                    'profiles': [shared_active, removed_shared, independent],
+                }
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def get_active_stream_context_per_profile(self, _account_id):
+                return {
+                    11: {
+                        'active_streams': 1,
+                        'real_viewers': 1,
+                        'real_viewer_streams': 1,
+                        'shadow_watchers': 0,
+                    },
+                }
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 1, profiles=udi.account['profiles'])
+
+        udi.account = {'id': 1, 'profiles': [shared_active, independent]}
+        limiter.set_account_limit(1, 1, profiles=udi.account['profiles'])
+
+        acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url({
+                'id': 100,
+                'url': 'http://provider.test/a/100',
+                'm3u_account_id': 1,
+            })
+        )
+        self.assertFalse(acquired)
+        self.assertEqual(reason, 'active_viewers')
+        self.assertIsNone(profile)
+        self.assertEqual(resolved_url, '')
+
+        snapshot_by_id = {
+            item['id']: item for item in limiter.get_profile_slot_snapshot(1)
+        }
+        self.assertEqual(set(snapshot_by_id), {10, 12})
+        self.assertEqual(snapshot_by_id[10]['active_viewers'], 1)
+        self.assertTrue(snapshot_by_id[10]['full'])
+        self.assertEqual(snapshot_by_id[12]['active_viewers'], 0)
+
+    def test_shared_route_usage_includes_all_authoritative_profile_members(self):
+        """An incompatible alias viewer still consumes its shared credential route."""
+        profiles = [
+            {
+                'id': 10,
+                'name': 'Shared A',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': False,
+                'search_pattern': r'^http://provider[.]test/a/(.+)$',
+                'replace_pattern': r'http://shared-user:shared-pass@provider.test/live/$1',
+            },
+            {
+                'id': 11,
+                'name': 'Shared B',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': False,
+                'search_pattern': r'^http://provider[.]test/b/(.+)$',
+                'replace_pattern': r'http://shared-user:shared-pass@provider.test/live/$1',
+            },
+            {
+                'id': 12,
+                'name': 'Independent C',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': False,
+                'search_pattern': r'^http://provider[.]test/c/(.+)$',
+                'replace_pattern': r'http://other-user:other-pass@provider.test/live/$1',
+            },
+        ]
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            def get_m3u_account_by_id(self, account_id):
+                return {'id': 1, 'profiles': profiles} if account_id == 1 else None
+
+            def get_active_streams_for_account(self, _account_id):
+                return 1
+
+            def get_active_stream_context_per_profile(self, _account_id):
+                return {
+                    11: {
+                        'active_streams': 1,
+                        'real_viewers': 1,
+                        'real_viewer_streams': 1,
+                        'shadow_watchers': 0,
+                    },
+                }
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 1, profiles=profiles)
+        self.assertEqual(limiter.get_account_limit(1), 2)
+        self.assertEqual(limiter.profile_route_keys[10], limiter.profile_route_keys[11])
+        self.assertNotEqual(limiter.profile_route_keys[10], limiter.profile_route_keys[12])
+
+        account_acquired, reason = limiter.acquire(1, timeout=0)
+        self.assertTrue(account_acquired, reason)
+        profile_acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url({
+                'id': 100,
+                'url': 'http://provider.test/a/100',
+                'm3u_account_id': 1,
+            })
+        )
+
+        self.assertFalse(profile_acquired)
+        self.assertEqual(reason, 'active_viewers')
+        self.assertIsNone(profile)
+        self.assertEqual(resolved_url, '')
+        self.assertEqual(limiter.profile_checking_counts.get(10, 0), 0)
+        self.assertTrue(all(count == 0 for count in limiter.route_checking_counts.values()))
+        limiter.release(1)
+
+    def test_stale_udi_profile_route_cannot_commit_after_reconfiguration(self):
+        """The route map is rechecked atomically before taking capacity."""
+        old_profile = {
+            'id': 10,
+            'name': 'Credential',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': r'^http://provider[.]test/old/(.+)$',
+            'replace_pattern': r'http://provider.test/credential-a/$1',
+        }
+        new_profile = {
+            **old_profile,
+            'replace_pattern': r'http://provider.test/credential-b/$1',
+        }
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            def __init__(self):
+                self.account = {'id': 1, 'profiles': [old_profile]}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 1, profiles=[new_profile])
+        stream = {
+            'id': 100,
+            'url': 'http://provider.test/old/100',
+            'm3u_account_id': 1,
+        }
+
+        acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url(stream)
+        )
+
+        self.assertFalse(acquired)
+        self.assertEqual(reason, 'provider_profile_unavailable')
+        self.assertIsNone(profile)
+        self.assertEqual(resolved_url, '')
+        self.assertEqual(limiter.profile_checking_counts.get(10, 0), 0)
+        self.assertTrue(all(count == 0 for count in limiter.route_checking_counts.values()))
+
+        udi.account = {'id': 1, 'profiles': [new_profile]}
+        acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url(stream)
+        )
+        self.assertTrue(acquired)
+        self.assertEqual(reason, 'acquired')
+        self.assertEqual(resolved_url, 'http://provider.test/credential-b/100')
+        limiter.release_profile(profile)
+
+    def test_stale_udi_profile_search_cannot_commit_to_same_route_target(self):
+        """A search-only refresh must invalidate an old resolved URL candidate."""
+        old_profile = {
+            'id': 10,
+            'name': 'Credential',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': r'^http://provider[.]test/old/(.+)$',
+            'replace_pattern': r'http://profile-user:profile-pass@provider.test/live/$1',
+        }
+        new_profile = {
+            **old_profile,
+            'search_pattern': r'^http://provider[.]test/new/(.+)$',
+        }
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            def __init__(self):
+                self.account = {'id': 1, 'profiles': [old_profile]}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 1, profiles=[new_profile])
+        old_stream = {
+            'id': 100,
+            'url': 'http://provider.test/old/100',
+            'm3u_account_id': 1,
+        }
+
+        acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url(old_stream)
+        )
+
+        self.assertFalse(acquired)
+        self.assertEqual(reason, 'provider_profile_unavailable')
+        self.assertIsNone(profile)
+        self.assertEqual(resolved_url, '')
+        self.assertEqual(limiter.profile_checking_counts.get(10, 0), 0)
+        self.assertTrue(all(count == 0 for count in limiter.route_checking_counts.values()))
+
+        udi.account = {'id': 1, 'profiles': [new_profile]}
+        acquired, reason, profile, resolved_url = (
+            limiter.reserve_profile_for_stream_with_url({
+                **old_stream,
+                'url': 'http://provider.test/new/100',
+            })
+        )
+        self.assertTrue(acquired)
+        self.assertEqual(reason, 'acquired')
+        self.assertEqual(
+            resolved_url,
+            'http://profile-user:profile-pass@provider.test/live/100',
+        )
+        limiter.release_profile(profile)
 
     def test_profile_reservation_uses_reconfigured_limit_after_waiting_for_lock(self):
         """A 0 -> 1 profile update must block a stale second unlimited reservation."""
@@ -347,8 +1213,8 @@ class TestAccountStreamLimiter(unittest.TestCase):
     def test_profile_local_preemption_wins_over_sibling_account_claim(self):
         """A sibling account callback must not steal a profile-local preemption."""
         profiles = [
-            {'id': 10, 'name': 'Viewer profile', 'max_streams': 1, 'is_active': True},
-            {'id': 11, 'name': 'Sibling profile', 'max_streams': 1, 'is_active': True},
+            _credential_profile(10, 'Viewer profile'),
+            _credential_profile(11, 'Sibling profile'),
         ]
 
         class FakeUDI:
@@ -895,13 +1761,10 @@ class TestSmartStreamScheduler(unittest.TestCase):
         self.limiter.set_account_limit(1, 1)
         self.limiter.set_account_limit(2, 1)
         mock_udi = Mock()
-        mock_udi.get_active_streams_for_account.return_value = 0
-        mock_udi.get_stream_by_id.return_value = None
-        mock_udi.check_stream_can_run.side_effect = (
-            lambda stream: (False, 'active_viewers')
-            if stream.get('m3u_account') == 1
-            else (True, None)
+        mock_udi.get_active_streams_for_account.side_effect = (
+            lambda account_id: 1 if account_id == 1 else 0
         )
+        mock_udi.get_stream_by_id.return_value = None
         self.limiter.udi_manager = mock_udi
 
         checked_ids = []
@@ -937,13 +1800,10 @@ class TestSmartStreamScheduler(unittest.TestCase):
         self.limiter.set_account_limit(1, 1)
         self.limiter.set_account_limit(2, 1)
         mock_udi = Mock()
-        mock_udi.get_active_streams_for_account.return_value = 0
-        mock_udi.get_stream_by_id.return_value = None
-        mock_udi.check_stream_can_run.side_effect = (
-            lambda stream: (False, 'active_viewers')
-            if stream.get('m3u_account') == 1
-            else (True, None)
+        mock_udi.get_active_streams_for_account.side_effect = (
+            lambda account_id: 1 if account_id == 1 else 0
         )
+        mock_udi.get_stream_by_id.return_value = None
         self.limiter.udi_manager = mock_udi
 
         checked_ids = []
@@ -971,14 +1831,16 @@ class TestSmartStreamScheduler(unittest.TestCase):
 
     def test_parallel_checks_reserve_distinct_profiles(self):
         """Concurrent checks for one account should not reuse the same credential."""
-        class FakeUDI:
+        profiles = [
+            _credential_profile(10, 'Credential 1'),
+            _credential_profile(11, 'Credential 2'),
+        ]
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
             account = {
                 'id': 1,
                 'name': 'Provider A',
-                'profiles': [
-                    {'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True},
-                    {'id': 11, 'name': 'Credential 2', 'max_streams': 1, 'is_active': True},
-                ],
+                'profiles': profiles,
             }
 
             def get_active_streams_for_account(self, _account_id):
@@ -990,13 +1852,6 @@ class TestSmartStreamScheduler(unittest.TestCase):
             def get_m3u_account_by_id(self, account_id):
                 return self.account if account_id == 1 else None
 
-            def check_stream_can_run(self, _stream):
-                return (True, None)
-
-            def apply_profile_url_transformation(self, stream, profile=None):
-                profile_id = profile.get('id') if profile else 'none'
-                return f"{stream['url']}?profile={profile_id}"
-
             def get_stream_by_id(self, _stream_id):
                 return None
 
@@ -1004,10 +1859,7 @@ class TestSmartStreamScheduler(unittest.TestCase):
         limiter.set_account_limit(
             1,
             0,
-            profiles=[
-                {'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True},
-                {'id': 11, 'name': 'Credential 2', 'max_streams': 1, 'is_active': True},
-            ],
+            profiles=profiles,
         )
         scheduler = SmartStreamScheduler(limiter, global_limit=2)
 
@@ -1035,8 +1887,399 @@ class TestSmartStreamScheduler(unittest.TestCase):
         self.assertEqual(len(results), 2)
         self.assertEqual(sorted(url.rsplit('=', 1)[-1] for url in started_urls), ['10', '11'])
 
-    def test_account_hard_cap_serializes_alias_profiles_with_null_or_identical_transforms(self):
-        """Alias profiles must not raise a positive aggregate account hard cap."""
+    def test_transformed_probe_url_is_rebound_to_canonical_result_url(self):
+        """Alternate credentials are probe-only and must not escape in results."""
+        raw_url = 'http://provider.example/live/source-user/source-pass/101.ts'
+        alternate_url = 'http://provider.example/live/alternate-user/alternate-pass/101.ts'
+        profile = {
+            'id': 10,
+            'name': 'Alternate Credential',
+            'max_streams': 1,
+            'is_active': True,
+            'is_default': False,
+            'search_pattern': (
+                r'^http://provider[.]example/live/source-user/source-pass/(.+)$'
+            ),
+            'replace_pattern': (
+                r'http://provider.example/live/alternate-user/alternate-pass/$1'
+            ),
+        }
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            account = {'id': 1, 'profiles': [profile]}
+
+            def get_active_streams_for_account(self, _account_id):
+                return 0
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def get_stream_by_id(self, _stream_id):
+                return None
+
+        limiter = AccountStreamLimiter(udi_manager=FakeUDI())
+        limiter.set_account_limit(1, 1, profiles=[profile])
+        scheduler = SmartStreamScheduler(limiter, global_limit=1)
+        probed_urls = []
+
+        def mock_check(**kwargs):
+            probed_urls.append(kwargs['stream_url'])
+            return {
+                'stream_id': kwargs['stream_id'],
+                'stream_url': kwargs['stream_url'],
+                'status': 'OK',
+            }
+
+        results = scheduler.check_streams_with_limits(
+            streams=[{
+                'id': 101,
+                'name': 'Credential-bound stream',
+                'url': raw_url,
+                'm3u_account_id': 1,
+            }],
+            check_function=mock_check,
+            provider_wait_timeout=0.1,
+        )
+
+        self.assertEqual(probed_urls, [alternate_url])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['stream_url'], raw_url)
+        self.assertNotIn(alternate_url, repr(results[0]))
+
+    def test_distinct_profile_routes_raise_capacity_and_bind_each_probe_to_its_reservation(self):
+        """Independent credential routes must overlap without crossing profile URLs."""
+        raw_url_template = (
+            'http://provider.example/live/source-user/source-token/{stream_id}.ts'
+        )
+        profiles = [
+            {
+                'id': 10,
+                'name': 'Default Credential',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': True,
+                'search_pattern': (
+                    r'^http://provider\.example/live/source-user/source-token/(.+)$'
+                ),
+                'replace_pattern': (
+                    r'http://provider.example/live/source-user/source-token/$1'
+                ),
+            },
+            {
+                'id': 11,
+                'name': 'Credential B',
+                'max_streams': 1,
+                'is_active': True,
+                'is_default': False,
+                'search_pattern': (
+                    r'^http://provider\.example/live/source-user/source-token/(.+)$'
+                ),
+                'replace_pattern': (
+                    r'http://provider.example/live/profile-b-user/profile-b-token/$1'
+                ),
+            },
+        ]
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
+            account = {
+                'id': 1,
+                'name': 'Provider A',
+                'max_streams': 1,
+                'profiles': profiles,
+            }
+
+            def __init__(self):
+                self.resolution_calls = []
+
+            def get_active_streams_for_account(self, _account_id):
+                return 0
+
+            def get_active_streams_count_per_profile(self, _account_id):
+                return {}
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def resolve_profile_stream_url(self, stream, profile):
+                resolved = super().resolve_profile_stream_url(stream, profile)
+                self.resolution_calls.append(
+                    (stream['id'], profile['id'], resolved[0], resolved[1])
+                )
+                return resolved
+
+            def apply_profile_url_transformation(self, _stream, profile=None):
+                raise AssertionError(
+                    f'profile {profile.get("id") if profile else None} was transformed after reservation'
+                )
+
+            def get_stream_by_id(self, _stream_id):
+                return None
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 1, profiles=profiles)
+        scheduler = SmartStreamScheduler(limiter, global_limit=2)
+        streams = [
+            {
+                'id': stream_id,
+                'name': f'Stream {stream_id}',
+                'url': raw_url_template.format(stream_id=stream_id),
+                'm3u_account': 1,
+            }
+            for stream_id in (101, 102)
+        ]
+
+        started_profiles = {}
+        probe_records = []
+        overlap_wait_results = []
+        active_probes = 0
+        max_active_probes = 0
+        both_probes_started = threading.Event()
+        state_lock = threading.Lock()
+        reservation_records = []
+        original_reserve = limiter.reserve_profile_for_stream_with_url
+
+        def observed_reserve(stream):
+            outcome = original_reserve(stream)
+            if outcome[0]:
+                with state_lock:
+                    reservation_records.append(
+                        (stream['id'], outcome[2]['id'] if outcome[2] else None, outcome[3])
+                    )
+            return outcome
+
+        limiter.reserve_profile_for_stream_with_url = observed_reserve
+
+        def started(stream, profile):
+            with state_lock:
+                started_profiles[stream['id']] = profile['id'] if profile else None
+
+        def mock_check(**kwargs):
+            nonlocal active_probes, max_active_probes
+            with state_lock:
+                profile_id = started_profiles.get(kwargs['stream_id'])
+                probe_records.append(
+                    (kwargs['stream_id'], profile_id, kwargs['stream_url'])
+                )
+                active_probes += 1
+                max_active_probes = max(max_active_probes, active_probes)
+                if len(probe_records) == 2:
+                    both_probes_started.set()
+
+            overlapped = both_probes_started.wait(2)
+
+            with state_lock:
+                overlap_wait_results.append(overlapped)
+                active_probes -= 1
+
+            return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+        results = scheduler.check_streams_with_limits(
+            streams=streams,
+            check_function=mock_check,
+            start_callback=started,
+            provider_wait_timeout=0.1,
+        )
+
+        expected_urls = {
+            (stream['id'], profile['id']): UDIManager.resolve_profile_stream_url(
+                udi,
+                stream,
+                profile,
+            )[1]
+            for stream in streams
+            for profile in profiles
+        }
+
+        self.assertEqual(limiter.get_account_limit(1), 2)
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(result['status'] == 'OK' for result in results))
+        self.assertEqual(max_active_probes, 2)
+        self.assertEqual(overlap_wait_results, [True, True])
+        self.assertEqual({record[1] for record in probe_records}, {10, 11})
+        for stream_id, profile_id, stream_url in probe_records:
+            self.assertEqual(stream_url, expected_urls[(stream_id, profile_id)])
+        self.assertEqual(set(reservation_records), set(probe_records))
+        for stream_id, profile_id, eligible, resolved_url in udi.resolution_calls:
+            self.assertTrue(eligible)
+            self.assertEqual(resolved_url, expected_urls[(stream_id, profile_id)])
+        self.assertEqual(limiter.account_checking_counts[1], 0)
+        self.assertTrue(all(count == 0 for count in limiter.profile_checking_counts.values()))
+
+    def test_invalid_alternate_profile_route_never_probes_with_raw_default_url(self):
+        """A reserved alternate profile must fail closed if its rewrite is unusable."""
+        raw_url = 'http://provider.example/live/source-user/source-token/101.ts'
+        default_profile = {
+            'id': 10,
+            'name': 'Default Credential',
+            'max_streams': 1,
+            'is_active': True,
+            'search_pattern': None,
+            'replace_pattern': None,
+        }
+
+        for case_name, alternate_profile in {
+            'nonmatching': {
+                'id': 11,
+                'name': 'Nonmatching Alternate',
+                'max_streams': 1,
+                'is_active': True,
+                'search_pattern': r'^http://different-provider\.example/(.+)$',
+                'replace_pattern': r'http://alternate.example/live/user/token/$1',
+            },
+            'malformed': {
+                'id': 11,
+                'name': 'Malformed Alternate',
+                'max_streams': 1,
+                'is_active': True,
+                'search_pattern': r'(',
+                'replace_pattern': r'http://alternate.example/live/user/token/$1',
+            },
+        }.items():
+            with self.subTest(route=case_name):
+                profiles = [alternate_profile, default_profile]
+
+                class FakeUDI(_RealProfileRouteResolverMixin):
+                    def __init__(self):
+                        self.account = {
+                            'id': 1,
+                            'name': 'Provider A',
+                            'max_streams': 1,
+                            'profiles': profiles,
+                        }
+
+                    def get_active_streams_for_account(self, _account_id):
+                        return 0
+
+                    def get_active_streams_count_per_profile(self, _account_id):
+                        return {}
+
+                    def get_m3u_account_by_id(self, account_id):
+                        return self.account if account_id == 1 else None
+
+                    def apply_profile_url_transformation(self, _stream, profile=None):
+                        raise AssertionError(
+                            f'profile {profile.get("id") if profile else None} was transformed after reservation'
+                        )
+
+                    def get_stream_by_id(self, _stream_id):
+                        return None
+
+                udi = FakeUDI()
+                limiter = AccountStreamLimiter(udi_manager=udi)
+                limiter.set_account_limit(1, 1, profiles=profiles)
+                scheduler = SmartStreamScheduler(limiter, global_limit=1)
+                reservation_records = []
+                started_profiles = {}
+                probe_records = []
+                original_reserve = limiter.reserve_profile_for_stream_with_url
+
+                def observed_reserve(stream):
+                    outcome = original_reserve(stream)
+                    if outcome[0]:
+                        reservation_records.append(
+                            (outcome[2]['id'] if outcome[2] else None, outcome[3])
+                        )
+                    return outcome
+
+                limiter.reserve_profile_for_stream_with_url = observed_reserve
+
+                def started(stream, profile):
+                    started_profiles[stream['id']] = profile['id'] if profile else None
+
+                def mock_check(**kwargs):
+                    probe_records.append(
+                        (
+                            started_profiles.get(kwargs['stream_id']),
+                            kwargs['stream_url'],
+                        )
+                    )
+                    return {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+
+                results = scheduler.check_streams_with_limits(
+                    streams=[{
+                        'id': 101,
+                        'name': 'Stream 101',
+                        'url': raw_url,
+                        'm3u_account': 1,
+                    }],
+                    check_function=mock_check,
+                    start_callback=started,
+                    provider_wait_timeout=0,
+                )
+
+                self.assertEqual(reservation_records, [(10, raw_url)])
+                self.assertEqual(probe_records, [(10, raw_url)])
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]['status'], 'OK')
+                self.assertEqual(limiter.account_checking_counts[1], 0)
+                self.assertTrue(
+                    all(count == 0 for count in limiter.profile_checking_counts.values())
+                )
+
+    def test_missing_profile_reservation_cannot_trigger_unreserved_auto_selection(self):
+        """The scheduler must not ask UDI to auto-select after reserving no profile."""
+        raw_url = 'http://provider.example/live/source-user/source-token/101.ts'
+        auto_selected_url = 'http://provider.example/live/unreserved-user/unreserved-token/101.ts'
+
+        class FakeUDI:
+            account = {
+                'id': 1,
+                'name': 'Provider A',
+                'max_streams': 1,
+                'profiles': [],
+            }
+
+            def __init__(self):
+                self.transform_profiles = []
+
+            def get_active_streams_for_account(self, _account_id):
+                return 0
+
+            def get_m3u_account_by_id(self, account_id):
+                return self.account if account_id == 1 else None
+
+            def check_stream_can_run(self, _stream):
+                return (True, None)
+
+            def apply_profile_url_transformation(self, _stream, profile=None):
+                self.transform_profiles.append(profile)
+                return auto_selected_url
+
+            def get_stream_by_id(self, _stream_id):
+                return None
+
+        udi = FakeUDI()
+        limiter = AccountStreamLimiter(udi_manager=udi)
+        limiter.set_account_limit(1, 1, profiles=[])
+        scheduler = SmartStreamScheduler(limiter, global_limit=1)
+        probed_urls = []
+
+        results = scheduler.check_streams_with_limits(
+            streams=[{
+                'id': 101,
+                'name': 'Stream 101',
+                'url': raw_url,
+                'm3u_account': 1,
+            }],
+            check_function=lambda **kwargs: (
+                probed_urls.append(kwargs['stream_url'])
+                or {'stream_id': kwargs['stream_id'], 'status': 'OK'}
+            ),
+            provider_wait_timeout=0,
+        )
+
+        self.assertEqual(udi.transform_profiles, [])
+        self.assertNotIn(auto_selected_url, probed_urls)
+        self.assertTrue(all(url == raw_url for url in probed_urls))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(limiter.account_checking_counts[1], 0)
+
+    def test_equivalent_profile_routes_do_not_inflate_account_capacity(self):
+        """Null or identical routes share the imported account's single slot."""
         transform_cases = {
             'null': (
                 [
@@ -1075,6 +2318,27 @@ class TestSmartStreamScheduler(unittest.TestCase):
                         'max_streams': 1,
                         'is_active': True,
                         'search_pattern': r'example\.test',
+                        'replace_pattern': 'shared.example.test',
+                    },
+                ],
+                lambda url: url.replace('example.test', 'shared.example.test'),
+            ),
+            'different_search_same_target': (
+                [
+                    {
+                        'id': 10,
+                        'name': 'Alias 1',
+                        'max_streams': 1,
+                        'is_active': True,
+                        'search_pattern': r'example\.test',
+                        'replace_pattern': 'shared.example.test',
+                    },
+                    {
+                        'id': 11,
+                        'name': 'Alias 2',
+                        'max_streams': 1,
+                        'is_active': True,
+                        'search_pattern': r'example[.]test',
                         'replace_pattern': 'shared.example.test',
                     },
                 ],
@@ -1203,14 +2467,16 @@ class TestSmartStreamScheduler(unittest.TestCase):
 
     def test_active_profile_does_not_block_free_sibling_profile(self):
         """A viewer on one credential should still leave a sibling credential usable."""
-        class FakeUDI:
+        profiles = [
+            _credential_profile(10, 'Busy Credential'),
+            _credential_profile(11, 'Free Credential'),
+        ]
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
             account = {
                 'id': 1,
                 'name': 'Provider A',
-                'profiles': [
-                    {'id': 10, 'name': 'Busy Credential', 'max_streams': 1, 'is_active': True},
-                    {'id': 11, 'name': 'Free Credential', 'max_streams': 1, 'is_active': True},
-                ],
+                'profiles': profiles,
             }
 
             def get_active_streams_for_account(self, _account_id):
@@ -1222,13 +2488,6 @@ class TestSmartStreamScheduler(unittest.TestCase):
             def get_m3u_account_by_id(self, account_id):
                 return self.account if account_id == 1 else None
 
-            def check_stream_can_run(self, _stream):
-                return (True, None)
-
-            def apply_profile_url_transformation(self, stream, profile=None):
-                profile_id = profile.get('id') if profile else 'none'
-                return f"{stream['url']}?profile={profile_id}"
-
             def get_stream_by_id(self, _stream_id):
                 return None
 
@@ -1236,10 +2495,7 @@ class TestSmartStreamScheduler(unittest.TestCase):
         limiter.set_account_limit(
             1,
             0,
-            profiles=[
-                {'id': 10, 'name': 'Busy Credential', 'max_streams': 1, 'is_active': True},
-                {'id': 11, 'name': 'Free Credential', 'max_streams': 1, 'is_active': True},
-            ],
+            profiles=profiles,
         )
         scheduler = SmartStreamScheduler(limiter, global_limit=1)
 
@@ -1324,7 +2580,7 @@ class TestSmartStreamScheduler(unittest.TestCase):
         """Active-viewer capacity timeout should preserve state instead of creating an error."""
         self.limiter.set_account_limit(1, 1)
         mock_udi = Mock()
-        mock_udi.check_stream_can_run.return_value = (False, 'active_viewers')
+        mock_udi.get_active_streams_for_account.return_value = 1
         mock_udi.get_stream_by_id.return_value = None
         self.limiter.udi_manager = mock_udi
 
@@ -1413,14 +2669,16 @@ class TestSmartStreamScheduler(unittest.TestCase):
 
     def test_viewer_preempted_probe_retries_free_sibling_profile(self):
         """A preempted probe should move to another free profile before skipping."""
-        class FakeUDI:
+        profiles = [
+            _credential_profile(10, 'Credential 1'),
+            _credential_profile(11, 'Credential 2'),
+        ]
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
             account = {
                 'id': 1,
                 'name': 'Provider A',
-                'profiles': [
-                    {'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True},
-                    {'id': 11, 'name': 'Credential 2', 'max_streams': 1, 'is_active': True},
-                ],
+                'profiles': profiles,
             }
 
             def __init__(self):
@@ -1437,13 +2695,6 @@ class TestSmartStreamScheduler(unittest.TestCase):
 
             def get_m3u_account_by_id(self, account_id):
                 return self.account if account_id == 1 else None
-
-            def check_stream_can_run(self, _stream):
-                return (True, None)
-
-            def apply_profile_url_transformation(self, stream, profile=None):
-                profile_id = profile.get('id') if profile else 'none'
-                return f"{stream['url']}?profile={profile_id}"
 
             def get_stream_by_id(self, _stream_id):
                 return {'stream_stats': {'resolution': '1920x1080', 'ffmpeg_output_bitrate': 5000}}
@@ -1494,14 +2745,16 @@ class TestSmartStreamScheduler(unittest.TestCase):
 
     def test_viewer_preempted_probe_waits_for_checker_sibling_profile(self):
         """If the sibling profile is checker-owned, the stream should wait and retry."""
-        class FakeUDI:
+        profiles = [
+            _credential_profile(10, 'Credential 1'),
+            _credential_profile(11, 'Credential 2'),
+        ]
+
+        class FakeUDI(_RealProfileRouteResolverMixin):
             account = {
                 'id': 1,
                 'name': 'Provider A',
-                'profiles': [
-                    {'id': 10, 'name': 'Credential 1', 'max_streams': 1, 'is_active': True},
-                    {'id': 11, 'name': 'Credential 2', 'max_streams': 1, 'is_active': True},
-                ],
+                'profiles': profiles,
             }
 
             def __init__(self):
@@ -1518,13 +2771,6 @@ class TestSmartStreamScheduler(unittest.TestCase):
 
             def get_m3u_account_by_id(self, account_id):
                 return self.account if account_id == 1 else None
-
-            def check_stream_can_run(self, _stream):
-                return (True, None)
-
-            def apply_profile_url_transformation(self, stream, profile=None):
-                profile_id = profile.get('id') if profile else 'none'
-                return f"{stream['url']}?profile={profile_id}"
 
             def get_stream_by_id(self, _stream_id):
                 return {'stream_stats': {'resolution': '1920x1080', 'ffmpeg_output_bitrate': 5000}}
@@ -1654,8 +2900,8 @@ class TestInitializeAccountLimits(unittest.TestCase):
         self.assertEqual(limiter.get_account_limit(2), 2)
         self.assertEqual(limiter.get_account_limit(3), 0)
     
-    def test_initialize_account_with_profiles_keeps_positive_account_hard_cap(self):
-        """Active profile limits must not raise a positive aggregate account cap."""
+    def test_initialize_equivalent_default_profiles_do_not_multiply_capacity(self):
+        """Default-route aliases share one route instead of multiplying slots."""
         limiter = get_account_limiter()
         limiter.clear()
         
@@ -1716,8 +2962,8 @@ class TestInitializeAccountLimits(unittest.TestCase):
         # Should use account-level limit
         self.assertEqual(limiter.get_account_limit(1), 5)
     
-    def test_initialize_account_profile_limit_cannot_raise_account_hard_cap(self):
-        """A profile sum above the account cap must remain a subordinate limit."""
+    def test_initialize_distinct_profile_routes_override_account_fallback(self):
+        """Usable profile routes, not a positive account fallback, define capacity."""
         limiter = get_account_limiter()
         limiter.clear()
         
@@ -1725,18 +2971,17 @@ class TestInitializeAccountLimits(unittest.TestCase):
             {
                 'id': 1,
                 'name': 'Test Account',
-                'max_streams': 1,  # Account says 1
+                'max_streams': 1,
                 'profiles': [
-                    {'id': 1, 'name': 'Profile 1', 'max_streams': 3, 'is_active': True},
-                    {'id': 2, 'name': 'Profile 2', 'max_streams': 2, 'is_active': True}
+                    _credential_profile(1, 'Profile 1', max_streams=3),
+                    _credential_profile(2, 'Profile 2', max_streams=2),
                 ]
-                # Total profile limit = 5, which is > account limit of 1
             }
         ]
         
         initialize_account_limits(accounts)
         
-        self.assertEqual(limiter.get_account_limit(1), 1)
+        self.assertEqual(limiter.get_account_limit(1), 5)
 
     def test_zero_or_unset_account_limit_uses_finite_active_profile_sum(self):
         """Finite profiles provide the aggregate fallback for an unlimited account."""
@@ -1747,15 +2992,15 @@ class TestInitializeAccountLimits(unittest.TestCase):
                 'id': 1,
                 'max_streams': 0,
                 'profiles': [
-                    {'id': 10, 'max_streams': 1, 'is_active': True},
-                    {'id': 11, 'max_streams': 2, 'is_active': True},
+                    _credential_profile(10, max_streams=1),
+                    _credential_profile(11, max_streams=2),
                 ],
             },
             'unset': {
                 'id': 2,
                 'profiles': [
-                    {'id': 20, 'max_streams': 1, 'is_active': True},
-                    {'id': 21, 'max_streams': 2, 'is_active': True},
+                    _credential_profile(20, max_streams=1),
+                    _credential_profile(21, max_streams=2),
                 ],
             },
         }.items():
@@ -1773,15 +3018,15 @@ class TestInitializeAccountLimits(unittest.TestCase):
             'id': 1,
             'max_streams': 0,
             'profiles': [
-                {'id': 10, 'max_streams': 2, 'is_active': True},
-                {'id': 11, 'max_streams': 0, 'is_active': True},
+                _credential_profile(10, max_streams=2),
+                _credential_profile(11, max_streams=0),
             ],
         }])
 
         self.assertEqual(limiter.get_account_limit(1), 0)
 
-    def test_positive_account_hard_cap_still_applies_with_unlimited_profile(self):
-        """An unlimited profile cannot bypass a positive aggregate account cap."""
+    def test_unlimited_distinct_profile_route_overrides_positive_account_fallback(self):
+        """An unlimited credential route makes the aggregate unlimited."""
         limiter = get_account_limiter()
         limiter.clear()
 
@@ -1789,12 +3034,12 @@ class TestInitializeAccountLimits(unittest.TestCase):
             'id': 1,
             'max_streams': 1,
             'profiles': [
-                {'id': 10, 'max_streams': 2, 'is_active': True},
-                {'id': 11, 'max_streams': 0, 'is_active': True},
+                _credential_profile(10, max_streams=2),
+                _credential_profile(11, max_streams=0),
             ],
         }])
 
-        self.assertEqual(limiter.get_account_limit(1), 1)
+        self.assertEqual(limiter.get_account_limit(1), 0)
 
 
 class TestProfileAwareStreamChecking(unittest.TestCase):
