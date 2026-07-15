@@ -12,6 +12,8 @@ from unittest.mock import Mock, patch, MagicMock
 import sys
 import os
 import json
+import threading
+import time
 from copy import deepcopy
 from datetime import datetime
 
@@ -21,7 +23,22 @@ pytestmark = pytest.mark.integration
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _make_bitrate_runtime_udi(channel_id, streams):
+@pytest.fixture(autouse=True)
+def _restore_concurrent_limiter_singleton():
+    """Keep the process singleton isolated across integration tests."""
+    from apps.stream.concurrent_stream_limiter import get_account_limiter
+
+    limiter = get_account_limiter()
+    previous_udi_manager = limiter.udi_manager
+    limiter.clear()
+    try:
+        yield
+    finally:
+        limiter.clear()
+        limiter.udi_manager = previous_udi_manager
+
+
+def _make_bitrate_runtime_udi(channel_id, streams, profiles=None):
     streams_by_id = {stream['id']: stream for stream in streams}
     udi = MagicMock()
     udi.fetcher = None
@@ -41,7 +58,7 @@ def _make_bitrate_runtime_udi(channel_id, streams):
         'name': 'Provider A',
         'is_active': True,
         'max_streams': 1,
-        'profiles': [],
+        'profiles': list(profiles or []),
     }
     udi.get_m3u_accounts.return_value = [account]
     udi.get_m3u_account_by_id.return_value = account
@@ -98,6 +115,214 @@ def _configure_bitrate_runtime_service(service, tracker_updates):
     })
     service.abort_current_check.clear()
     return tracker
+
+
+@pytest.mark.parametrize(
+    ('case_name', 'inventory'),
+    (
+        ('malformed', {'id': 1}),
+        ('rejected_malformed', [{'id': 'invalid', 'max_streams': 1}]),
+    ),
+)
+def test_concurrent_channel_inventory_fail_closed_before_scheduler(
+    case_name,
+    inventory,
+):
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    channel_id = 109
+    stream = {
+        'id': 1901,
+        'name': 'Inventory-guarded channel stream',
+        'url': 'http://provider.invalid/live/1901.ts',
+        'm3u_account': 1,
+        'stream_stats': {},
+    }
+    udi = _make_bitrate_runtime_udi(channel_id, [stream])
+    events = []
+    udi.get_m3u_accounts.side_effect = (
+        lambda value=inventory: events.append('fetch') or value
+    )
+    automation_config = MagicMock()
+    automation_config.get_profile.return_value = None
+    automation_config.get_effective_configuration.return_value = {
+        'profile': None,
+        'periods': [],
+    }
+    limiter = Mock()
+    limiter.invalidate_account_inventory.side_effect = (
+        lambda: events.append('invalidate')
+    )
+    scheduler = Mock()
+    service = StreamCheckerService()
+    _configure_bitrate_runtime_service(
+        service,
+        {'channels': {}, 'last_global_check': None},
+    )
+    service._check_channel_limits = Mock(return_value=None)
+    service.progress.update = Mock(return_value=True)
+
+    with (
+        patch(
+            'apps.stream.stream_checker_service.get_udi_manager',
+            return_value=udi,
+        ),
+        patch(
+            'apps.stream.stream_checker_service.get_automation_config_manager',
+            return_value=automation_config,
+        ),
+        patch(
+            'apps.stream.stream_checker_service.fetch_channel_streams',
+            return_value=[stream],
+        ),
+        patch(
+            'apps.stream.stream_checker_service.analyze_stream',
+        ) as analyzer,
+        patch('apps.stream.stream_checker_service.update_channel_streams'),
+        patch(
+            'apps.stream.stream_checker_service._get_base_url',
+            return_value='http://localhost:9191',
+        ),
+        patch(
+            'apps.stream.concurrent_stream_limiter.get_account_limiter',
+            return_value=limiter,
+        ),
+        patch(
+            'apps.stream.concurrent_stream_limiter.initialize_account_limits',
+            side_effect=lambda accounts: (
+                events.append('initialize')
+                or (False if case_name == 'rejected_malformed' else None)
+            ),
+        ) as initialize_limits,
+        patch(
+            'apps.stream.concurrent_stream_limiter.get_smart_scheduler',
+            return_value=scheduler,
+        ) as get_scheduler,
+    ):
+        result = service._check_channel_concurrent(
+            channel_id,
+            force_check_override=False,
+        )
+
+    assert result['error'] == (
+        'Provider account inventory unavailable for channel probes'
+    )
+    assert events[0] == 'invalidate'
+    limiter.invalidate_account_inventory.assert_called_once_with()
+    get_scheduler.assert_not_called()
+    scheduler.check_streams_with_limits.assert_not_called()
+    analyzer.assert_not_called()
+    limiter.acquire.assert_not_called()
+    limiter.reserve_profile_for_stream_with_url.assert_not_called()
+    limiter.release.assert_not_called()
+    limiter.release_profile.assert_not_called()
+    if case_name == 'rejected_malformed':
+        assert events == ['invalidate', 'fetch', 'initialize']
+        initialize_limits.assert_called_once_with(inventory)
+    else:
+        assert events == ['invalidate', 'fetch']
+        initialize_limits.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ('is_custom', 'should_analyze'),
+    (
+        (False, False),
+        (True, True),
+    ),
+)
+def test_concurrent_channel_empty_inventory_allows_only_custom_streams(
+    is_custom,
+    should_analyze,
+):
+    from apps.stream.concurrent_stream_limiter import get_account_limiter
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    channel_id = 110
+    stream = {
+        'id': 1902,
+        'name': 'Empty-inventory channel stream',
+        'url': 'http://stream.invalid/live/1902.ts',
+        'stream_stats': {},
+    }
+    if is_custom:
+        stream['is_custom'] = True
+    else:
+        stream['m3u_account'] = 1
+    udi = _make_bitrate_runtime_udi(channel_id, [stream])
+    udi.get_m3u_accounts.return_value = []
+    automation_config = MagicMock()
+    automation_config.get_profile.return_value = None
+    automation_config.get_effective_configuration.return_value = {
+        'profile': None,
+        'periods': [],
+    }
+    service = StreamCheckerService()
+    _configure_bitrate_runtime_service(
+        service,
+        {'channels': {}, 'last_global_check': None},
+    )
+    service._check_channel_limits = Mock(return_value=None)
+    service.progress.update = Mock(return_value=True)
+    analysis = {
+        'stream_id': stream['id'],
+        'stream_name': stream['name'],
+        'stream_url': stream['url'],
+        'status': 'OK',
+        'resolution': '1920x1080',
+        'bitrate_kbps': 4000,
+        'fps': 25,
+        'video_codec': 'h264',
+        'audio_codec': 'aac',
+    }
+
+    with (
+        patch(
+            'apps.stream.stream_checker_service.get_udi_manager',
+            return_value=udi,
+        ),
+        patch(
+            'apps.stream.stream_checker_service.get_automation_config_manager',
+            return_value=automation_config,
+        ),
+        patch(
+            'apps.stream.stream_checker_service.fetch_channel_streams',
+            return_value=[stream],
+        ),
+        patch(
+            'apps.stream.stream_checker_service.analyze_stream',
+            return_value=analysis,
+        ) as analyzer,
+        patch(
+            'apps.stream.stream_checker_service.batch_update_stream_stats',
+            return_value=(1, 0),
+        ),
+        patch('apps.stream.stream_checker_service.update_channel_streams'),
+        patch(
+            'apps.stream.stream_checker_service._get_base_url',
+            return_value='http://localhost:9191',
+        ),
+    ):
+        result = service._check_channel_concurrent(
+            channel_id,
+            force_check_override=False,
+        )
+
+    assert 'error' not in result
+    if should_analyze:
+        analyzer.assert_called_once()
+        assert result['checked_streams'][0]['status'] == 'completed'
+    else:
+        analyzer.assert_not_called()
+        # A newly assigned provider stream without authoritative account
+        # inventory is excluded rather than promoted from a synthetic result.
+        assert result['checked_streams'] == []
+    limiter = get_account_limiter()
+    assert limiter.account_inventory_trusted is True
+    assert limiter.account_inventory_ids == set()
+    assert limiter.account_checking_counts == {}
+    assert limiter.profile_checking_counts == {}
+    assert limiter.profile_reservations_by_token == {}
 
 
 class TestConcurrentLimiterIntegration(unittest.TestCase):
@@ -219,7 +444,9 @@ class TestConcurrentLimiterIntegration(unittest.TestCase):
         ]
         
         initialize_account_limits(accounts)
-        
+        limiter.udi_manager = Mock()
+        limiter.udi_manager.get_active_streams_for_account.return_value = 0
+
         # Verify limits were set
         self.assertEqual(limiter.get_account_limit(1), 1)
         self.assertEqual(limiter.get_account_limit(2), 2)
@@ -243,18 +470,549 @@ class TestConcurrentLimiterIntegration(unittest.TestCase):
             self.assertTrue(limiter.acquire(3, timeout=0.1))
 
 
+def test_viewer_preemption_clears_released_profile_before_sibling_retry():
+    from apps.stream.stream_checker_service import StreamCheckerService
+    from apps.stream.concurrent_stream_limiter import get_account_limiter
+
+    channel_id = 100
+    stream = {
+        'id': 901,
+        'name': 'Viewer preemption retry',
+        'url': 'http://provider.invalid/live/main-user/main-pass/901.ts',
+        'm3u_account': 1,
+        'stream_stats': {},
+    }
+    profiles = [
+        {
+            'id': 201,
+            'name': 'Provider A profile',
+            'is_active': True,
+            'is_default': True,
+            'max_streams': 1,
+            'search_pattern': 'main-user/main-pass',
+            'replace_pattern': 'profile-a-user/profile-a-pass',
+        },
+        {
+            'id': 202,
+            'name': 'Provider B profile',
+            'is_active': True,
+            'is_default': False,
+            'max_streams': 1,
+            'search_pattern': 'main-user/main-pass',
+            'replace_pattern': 'profile-b-user/profile-b-pass',
+        },
+    ]
+    profile_urls = {
+        201: 'http://provider.invalid/live/profile-a-user/profile-a-pass/901.ts',
+        202: 'http://provider.invalid/live/profile-b-user/profile-b-pass/901.ts',
+    }
+    udi = _make_bitrate_runtime_udi(channel_id, [stream], profiles=profiles)
+    udi.apply_profile_url_transformation.side_effect = (
+        lambda _stream, profile=None: profile_urls[profile['id']]
+    )
+    active_usage = {}
+    udi.get_active_stream_context_per_profile.side_effect = (
+        lambda _account_id: deepcopy(active_usage)
+    )
+    automation_config = MagicMock()
+    automation_config.get_profile.return_value = None
+    automation_config.get_effective_configuration.return_value = {
+        'profile': None,
+        'periods': [],
+    }
+    analyzed_urls = []
+
+    def analyze_with_viewer_preemption(**kwargs):
+        analyzed_urls.append(kwargs['stream_url'])
+        if len(analyzed_urls) == 1:
+            assert kwargs['preempt_check']() is False
+            active_usage[201] = {
+                'active_streams': 1,
+                'real_viewers': 1,
+                'real_viewer_streams': 1,
+                'shadow_watchers': 0,
+            }
+            assert kwargs['preempt_check']() is True
+            return {
+                'stream_id': stream['id'],
+                'stream_name': stream['name'],
+                'stream_url': kwargs['stream_url'],
+                'status': 'PREEMPTED',
+                'preempted': True,
+                'preempt_reason': 'viewer_preempted',
+            }
+        return {
+            'stream_id': stream['id'],
+            'stream_name': stream['name'],
+            'stream_url': kwargs['stream_url'],
+            'status': 'OK',
+            'resolution': '1920x1080',
+            'fps': 30,
+            'video_codec': 'h264',
+            'audio_codec': 'aac',
+            'bitrate_kbps': 5000,
+            'blank_probe_ran': True,
+            'blank_detected': False,
+            'freeze_probe_ran': True,
+            'freeze_detected': False,
+        }
+
+    progress_updates = []
+    with (
+        patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi),
+        patch(
+            'apps.stream.stream_checker_service.get_automation_config_manager',
+            return_value=automation_config,
+        ),
+        patch(
+            'apps.stream.stream_checker_service.fetch_channel_streams',
+            return_value=[stream],
+        ),
+        patch(
+            'apps.stream.stream_checker_service.analyze_stream',
+            side_effect=analyze_with_viewer_preemption,
+        ) as mock_analyze,
+        patch('apps.stream.stream_checker_service.update_channel_streams'),
+        patch(
+            'apps.stream.stream_checker_service.batch_update_stream_stats',
+            return_value=(1, 0),
+        ),
+        patch(
+            'apps.stream.stream_checker_service._get_base_url',
+            return_value='http://localhost:9191',
+        ),
+    ):
+        limiter = get_account_limiter()
+        limiter.clear()
+        limiter.udi_manager = udi
+        try:
+            service = StreamCheckerService()
+            _configure_bitrate_runtime_service(
+                service,
+                {'channels': {}, 'last_global_check': None},
+            )
+            service.progress.update = (
+                lambda **kwargs: progress_updates.append(deepcopy(kwargs))
+            )
+            result = service._check_channel_concurrent(
+                channel_id,
+                force_check_override=False,
+            )
+        finally:
+            limiter.clear()
+
+    assert 'error' not in result
+    assert mock_analyze.call_count == 2
+    assert analyzed_urls == [profile_urls[201], profile_urls[202]]
+
+    start_updates = [
+        update
+        for update in progress_updates
+        if update.get('step_detail') == f"Started checking {stream['name']}"
+    ]
+    assert len(start_updates) == 2
+    assert start_updates[0]['streams_detail'][0]['reserved_profile_id'] == 201
+    assert start_updates[1]['streams_detail'][0]['reserved_profile_id'] == 202
+    expected_reserved_fields = {
+        'reserved_profile_id',
+        'reserved_profile_name',
+        'reserved_profile_limit',
+    }
+    for update in start_updates:
+        row = update['streams_detail'][0]
+        assert {
+            key for key in row if key.startswith('reserved_profile_')
+        } == expected_reserved_fields
+
+    waiting_update = next(
+        update
+        for update in progress_updates
+        if update.get('step_detail') == f"Waiting for provider capacity: {stream['name']}"
+    )
+    waiting_row = waiting_update['streams_detail'][0]
+    assert waiting_row['status'] == 'waiting_provider_limit'
+    assert waiting_row['reason_detail'] == 'viewer_preempted'
+    assert 'reserved_profile_id' not in waiting_row
+    assert 'reserved_profile_name' not in waiting_row
+    assert 'reserved_profile_limit' not in waiting_row
+    assert progress_updates.index(start_updates[0]) < progress_updates.index(waiting_update)
+    assert progress_updates.index(waiting_update) < progress_updates.index(start_updates[1])
+
+    completed_update = next(
+        update
+        for update in progress_updates
+        if update.get('step_detail') == 'Completed 1/1'
+    )
+    completed_row = completed_update['streams_detail'][0]
+    assert completed_row['status'] == 'completed'
+    assert completed_row['reserved_profile_id'] == 202
+    assert completed_row['reserved_profile_name'] == 'Provider B profile'
+    assert completed_row['reserved_profile_limit'] == 1
+    assert {
+        key for key in completed_row if key.startswith('reserved_profile_')
+    } == expected_reserved_fields
+
+    assert progress_updates
+    assert all(
+        update.get('expected_generation') == 0
+        for update in progress_updates
+    )
+
+    serialized_progress = json.dumps(progress_updates, sort_keys=True)
+    for probe_url in (stream['url'], *profile_urls.values()):
+        assert probe_url not in serialized_progress
+    for credential_fragment in (
+        'main-user',
+        'main-pass',
+        'profile-a-user',
+        'profile-a-pass',
+        'profile-b-user',
+        'profile-b-pass',
+    ):
+        assert credential_fragment not in serialized_progress
+
+
+def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit():
+    import apps.stream.concurrent_stream_limiter as limiter_module
+    import apps.stream.stream_checker_service as service_module
+    from apps.stream.concurrent_stream_limiter import get_account_limiter
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    channel_id = 102
+    stream = {
+        'id': 1101,
+        'name': 'Atomic shared-route probe',
+        'url': 'http://provider.invalid/live/main-user/main-pass/1101.ts',
+        'm3u_account': 1,
+        'stream_stats': {},
+    }
+    profiles = [
+        {
+            'id': 301,
+            'name': 'Wide alias',
+            'is_active': True,
+            'is_default': False,
+            'max_streams': 5,
+            'search_pattern': 'main-user/main-pass',
+            'replace_pattern': 'shared-user/shared-pass',
+        },
+        {
+            'id': 302,
+            'name': 'Strict alias',
+            'is_active': True,
+            'is_default': False,
+            'max_streams': 2,
+            'search_pattern': 'main-user/main-pass',
+            'replace_pattern': 'shared-user/shared-pass',
+        },
+    ]
+    resolved_url = (
+        'http://provider.invalid/live/shared-user/shared-pass/1101.ts'
+    )
+    udi = _make_bitrate_runtime_udi(channel_id, [stream], profiles=profiles)
+    udi.apply_profile_url_transformation.side_effect = None
+    udi.apply_profile_url_transformation.return_value = resolved_url
+    automation_config = MagicMock()
+    automation_config.get_profile.return_value = None
+    automation_config.get_effective_configuration.return_value = {
+        'profile': None,
+        'periods': [],
+    }
+
+    transition_blocked = threading.Event()
+    release_transition = threading.Event()
+    heartbeat_seen = threading.Event()
+    original_reserved_profile = limiter_module.ReservedProfile
+
+    class BlockingReservedProfile(original_reserved_profile):
+        """Pause after the safe id is written but before name/limit are written."""
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._name_blocked = False
+
+        def get(self, key, default=None):
+            if key == 'name' and not self._name_blocked:
+                self._name_blocked = True
+                transition_blocked.set()
+                if not release_transition.wait(timeout=2):
+                    raise RuntimeError('timed out waiting to release profile transition')
+            return super().get(key, default)
+
+    progress_updates = []
+
+    def record_progress(**kwargs):
+        progress_updates.append(deepcopy(kwargs))
+        if kwargs.get('step_detail') == 'Checking streams...':
+            heartbeat_seen.set()
+
+    def analyze_after_heartbeat(**kwargs):
+        assert kwargs['stream_url'] == resolved_url
+        assert heartbeat_seen.wait(timeout=2), 'heartbeat did not publish during probe'
+        return {
+            'stream_id': stream['id'],
+            'stream_name': stream['name'],
+            'stream_url': kwargs['stream_url'],
+            'status': 'OK',
+            'resolution': '1920x1080',
+            'fps': 30,
+            'video_codec': 'h264',
+            'audio_codec': 'aac',
+            'bitrate_kbps': 5000,
+            'blank_probe_ran': True,
+            'blank_detected': False,
+            'freeze_probe_ran': True,
+            'freeze_detected': False,
+        }
+
+    def release_after_heartbeat_attempt():
+        if transition_blocked.wait(timeout=2):
+            time.sleep(0.05)
+            release_transition.set()
+
+    release_thread = threading.Thread(
+        target=release_after_heartbeat_attempt,
+        daemon=True,
+    )
+    release_thread.start()
+
+    with (
+        patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi),
+        patch(
+            'apps.stream.stream_checker_service.get_automation_config_manager',
+            return_value=automation_config,
+        ),
+        patch(
+            'apps.stream.stream_checker_service.fetch_channel_streams',
+            return_value=[stream],
+        ),
+        patch(
+            'apps.stream.stream_checker_service.analyze_stream',
+            side_effect=analyze_after_heartbeat,
+        ),
+        patch('apps.stream.stream_checker_service.update_channel_streams'),
+        patch(
+            'apps.stream.stream_checker_service.batch_update_stream_stats',
+            return_value=(1, 0),
+        ),
+        patch(
+            'apps.stream.stream_checker_service._get_base_url',
+            return_value='http://localhost:9191',
+        ),
+        patch.object(limiter_module, 'ReservedProfile', BlockingReservedProfile),
+        patch.object(
+            service_module,
+            '_STREAM_STATUS_HEARTBEAT_INTERVAL_SECONDS',
+            0.01,
+        ),
+    ):
+        limiter = get_account_limiter()
+        limiter.udi_manager = udi
+        service = StreamCheckerService()
+        _configure_bitrate_runtime_service(
+            service,
+            {'channels': {}, 'last_global_check': None},
+        )
+        service.progress.update = record_progress
+        result = service._check_channel_concurrent(
+            channel_id,
+            force_check_override=False,
+        )
+
+    release_thread.join(timeout=2)
+    assert not release_thread.is_alive()
+    assert 'error' not in result
+    assert transition_blocked.is_set()
+    assert heartbeat_seen.is_set()
+
+    heartbeat_updates = [
+        update
+        for update in progress_updates
+        if update.get('step_detail') == 'Checking streams...'
+    ]
+    assert heartbeat_updates
+    reserved_fields = {
+        'reserved_profile_id',
+        'reserved_profile_name',
+        'reserved_profile_limit',
+    }
+    for update in progress_updates:
+        for row in update.get('streams_detail') or []:
+            present_fields = {
+                key for key in row if key.startswith('reserved_profile_')
+            }
+            assert present_fields in (set(), reserved_fields)
+            if row.get('status') == 'waiting_provider_limit':
+                assert present_fields == set()
+
+    heartbeat_row = heartbeat_updates[0]['streams_detail'][0]
+    assert heartbeat_row['status'] == 'checking'
+    assert heartbeat_row['reserved_profile_id'] == 301
+    assert heartbeat_row['reserved_profile_name'] == 'Wide alias'
+    # Profile 301 advertises five slots, but its shared credential route is
+    # constrained by sibling alias 302 to two. Telemetry must match enforcement.
+    assert heartbeat_row['reserved_profile_limit'] == 2
+
+    slot_rows = heartbeat_updates[0]['provider_profile_slots']['1']
+    assert {row['id']: row['limit'] for row in slot_rows} == {301: 2, 302: 2}
+
+    serialized_progress = json.dumps(progress_updates, sort_keys=True)
+    for secret_fragment in (
+        stream['url'],
+        resolved_url,
+        'main-user',
+        'main-pass',
+        'shared-user',
+        'shared-pass',
+    ):
+        assert secret_fragment not in serialized_progress
+
+
+def test_loop_probe_fully_protected_target_uses_empty_status_snapshot():
+    from apps.stream.concurrent_stream_limiter import get_account_limiter
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    channel_id = 103
+    stream = {
+        'id': 1201,
+        'name': 'Viewer-protected loop target',
+        'url': 'http://provider.invalid/live/protected/1201.ts',
+        'm3u_account': 1,
+        'stream_stats': {},
+    }
+    udi = _make_bitrate_runtime_udi(channel_id, [stream])
+    automation_config = MagicMock()
+    automation_config.get_profile.return_value = None
+    automation_config.get_effective_configuration.return_value = {
+        'profile': {
+            'name': 'Loop-enabled test profile',
+            'stream_checking': {
+                'enabled': True,
+                'grace_period': False,
+                'loop_check_enabled': True,
+            },
+            'scoring_weights': {'loop_penalty': -0.1},
+        },
+        'periods': [],
+    }
+
+    with (
+        patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi),
+        patch(
+            'apps.stream.stream_checker_service.get_automation_config_manager',
+            return_value=automation_config,
+        ),
+        patch(
+            'apps.stream.stream_checker_service.fetch_channel_streams',
+            return_value=[stream],
+        ),
+        patch('apps.stream.stream_checker_service.analyze_stream') as mock_analyze,
+        patch('apps.stream.stream_checker_service.update_channel_streams'),
+        patch(
+            'apps.stream.stream_checker_service.batch_update_stream_stats',
+            return_value=(0, 0),
+        ),
+        patch(
+            'apps.stream.stream_checker_service._get_base_url',
+            return_value='http://localhost:9191',
+        ),
+    ):
+        limiter = get_account_limiter()
+        limiter.udi_manager = udi
+        service = StreamCheckerService()
+        _configure_bitrate_runtime_service(
+            service,
+            {'channels': {}, 'last_global_check': None},
+        )
+        service._get_active_viewer_protected_stream_ids = Mock(
+            return_value={stream['id']},
+        )
+        service._run_loop_probes = Mock()
+
+        result = service._check_channel_concurrent(
+            channel_id,
+            target_stream_ids=[stream['id']],
+            force_check_override=True,
+        )
+
+    assert 'error' not in result
+    mock_analyze.assert_not_called()
+    service._run_loop_probes.assert_called_once()
+    loop_call = service._run_loop_probes.call_args
+    assert loop_call.args[0] == []
+    assert loop_call.kwargs['streams_detail'] == []
+
+
 def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
     from apps.stream.stream_checker_service import StreamCheckerService
+    from apps.stream.concurrent_stream_limiter import get_account_limiter
 
     channel_id = 101
     stream = {
         'id': 1001,
         'name': 'Recovered bitrate',
-        'url': 'http://example.invalid/recovered',
+        'url': 'http://provider.invalid/live/main-user/main-pass/1001.ts',
         'm3u_account': 1,
         'stream_stats': {},
     }
-    udi = _make_bitrate_runtime_udi(channel_id, [stream])
+    profiles = [
+        {
+            'id': 101,
+            'name': 'Provider A profile',
+            'is_active': True,
+            'is_default': True,
+            'max_streams': 1,
+            'search_pattern': 'main-user/main-pass',
+            'replace_pattern': 'profile-a-user/profile-a-pass',
+        },
+        {
+            'id': 102,
+            'name': 'Provider B profile',
+            'is_active': True,
+            'is_default': False,
+            'max_streams': 1,
+            'search_pattern': 'main-user/main-pass',
+            'replace_pattern': 'profile-b-user/profile-b-pass',
+        },
+    ]
+    profile_urls = {
+        101: 'http://provider.invalid/live/profile-a-user/profile-a-pass/1001.ts',
+        102: 'http://provider.invalid/live/profile-b-user/profile-b-pass/1001.ts',
+    }
+    udi = _make_bitrate_runtime_udi(channel_id, [stream], profiles=profiles)
+    udi.apply_profile_url_transformation.side_effect = (
+        lambda _stream, profile=None: profile_urls[profile['id']]
+    )
+    probe_phase = {'recheck': False, 'release_profile_b': False}
+
+    def active_profile_usage(_account_id):
+        if not probe_phase['recheck']:
+            return {}
+        usage = {
+            101: {
+                'active_streams': 1,
+                'real_viewers': 1,
+                'real_viewer_streams': 1,
+                'shadow_watchers': 0,
+            },
+        }
+        # The first serial-recheck reservation attempt sees both profiles full.
+        # This forces a published defer row where the released initial Profile A
+        # must no longer be advertised. Profile B becomes available on retry.
+        if not probe_phase['release_profile_b']:
+            usage[102] = {
+                'active_streams': 1,
+                'real_viewers': 1,
+                'real_viewer_streams': 1,
+                'shadow_watchers': 0,
+            }
+        return usage
+
+    udi.get_active_stream_context_per_profile.side_effect = active_profile_usage
+
+    def release_profile_b_after_capacity_wait(seconds):
+        assert seconds == 0.5
+        probe_phase['release_profile_b'] = True
     automation_config = MagicMock()
     automation_config.get_profile.return_value = None
     automation_config.get_effective_configuration.return_value = {
@@ -297,6 +1055,14 @@ def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
         'bitrate_recheck_required': False,
     }
     progress_updates = []
+    analyzed_urls = []
+
+    def analyze_with_profile_switch(**kwargs):
+        analyzed_urls.append(kwargs['stream_url'])
+        if len(analyzed_urls) == 1:
+            probe_phase['recheck'] = True
+            return dict(initial_result, stream_url=kwargs['stream_url'])
+        return dict(recovered_result, stream_url=kwargs['stream_url'])
 
     with (
         patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi),
@@ -310,7 +1076,7 @@ def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
         ),
         patch(
             'apps.stream.stream_checker_service.analyze_stream',
-            side_effect=[initial_result, recovered_result],
+            side_effect=analyze_with_profile_switch,
         ) as mock_analyze,
         patch(
             'apps.stream.stream_checker_service.update_channel_streams',
@@ -323,23 +1089,34 @@ def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
             'apps.stream.stream_checker_service._get_base_url',
             return_value='http://localhost:9191',
         ),
+        patch(
+            'apps.stream.concurrent_stream_limiter.time.sleep',
+            side_effect=release_profile_b_after_capacity_wait,
+        ),
     ):
-        service = StreamCheckerService()
-        tracker = _configure_bitrate_runtime_service(
-            service,
-            {'channels': {}, 'last_global_check': None},
-        )
-        service.progress.update = (
-            lambda **kwargs: progress_updates.append(deepcopy(kwargs))
-        )
+        limiter = get_account_limiter()
+        limiter.clear()
+        limiter.udi_manager = udi
+        try:
+            service = StreamCheckerService()
+            tracker = _configure_bitrate_runtime_service(
+                service,
+                {'channels': {}, 'last_global_check': None},
+            )
+            service.progress.update = (
+                lambda **kwargs: progress_updates.append(deepcopy(kwargs))
+            )
 
-        result = service._check_channel_concurrent(
-            channel_id,
-            force_check_override=False,
-        )
+            result = service._check_channel_concurrent(
+                channel_id,
+                force_check_override=False,
+            )
+        finally:
+            limiter.clear()
 
     assert 'error' not in result
     assert mock_analyze.call_count == 2
+    assert analyzed_urls == [profile_urls[101], profile_urls[102]]
     mock_update_channel.assert_called_once()
     mock_batch_update.assert_called_once()
     tracker.mark_channel_checked.assert_called_once()
@@ -355,6 +1132,45 @@ def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
     assert initial_row['bitrate'] is None
     assert initial_row['measurement_incomplete'] is True
     assert initial_row['bitrate_recheck_required'] is True
+    assert initial_row['reserved_profile_id'] == 101
+    assert initial_row['reserved_profile_name'] == 'Provider A profile'
+    assert initial_row['reserved_profile_limit'] == 1
+    expected_reserved_fields = {
+        'reserved_profile_id',
+        'reserved_profile_name',
+        'reserved_profile_limit',
+    }
+    assert {
+        key for key in initial_row if key.startswith('reserved_profile_')
+    } == expected_reserved_fields
+
+    recheck_waiting_progress = next(
+        update
+        for update in progress_updates
+        if str(update.get('step_detail', '')).startswith(
+            'Waiting to start serial bitrate recheck 1/1:'
+        )
+    )
+    recheck_waiting_row = recheck_waiting_progress['streams_detail'][0]
+    assert recheck_waiting_row['status'] == 'waiting_provider_limit'
+    assert recheck_waiting_row['reason_detail'] == 'active_viewers'
+    assert 'reserved_profile_id' not in recheck_waiting_row
+    assert 'reserved_profile_name' not in recheck_waiting_row
+    assert 'reserved_profile_limit' not in recheck_waiting_row
+
+    recheck_started_progress = next(
+        update
+        for update in progress_updates
+        if update.get('step_detail') == 'Serial bitrate recheck 1/1'
+    )
+    recheck_started_row = recheck_started_progress['streams_detail'][0]
+    assert recheck_started_row['status'] == 'rechecking_bitrate'
+    assert recheck_started_row['reserved_profile_id'] == 102
+    assert recheck_started_row['reserved_profile_name'] == 'Provider B profile'
+    assert recheck_started_row['reserved_profile_limit'] == 1
+    assert {
+        key for key in recheck_started_row if key.startswith('reserved_profile_')
+    } == expected_reserved_fields
 
     recovered_progress = next(
         update
@@ -376,6 +1192,25 @@ def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
     assert recovered_row['bitrate_recheck_required'] is False
     assert recovered_row['bitrate_recheck_attempted'] is True
     assert recovered_row['bitrate_recheck_outcome'] == 'recovered'
+    assert recovered_row['reserved_profile_id'] == 102
+    assert recovered_row['reserved_profile_name'] == 'Provider B profile'
+    assert recovered_row['reserved_profile_limit'] == 1
+    assert {
+        key for key in recovered_row if key.startswith('reserved_profile_')
+    } == expected_reserved_fields
+
+    serialized_progress = json.dumps(progress_updates, sort_keys=True)
+    for probe_url in (stream['url'], *profile_urls.values()):
+        assert probe_url not in serialized_progress
+    for credential_fragment in (
+        'main-user',
+        'main-pass',
+        'profile-a-user',
+        'profile-a-pass',
+        'profile-b-user',
+        'profile-b-pass',
+    ):
+        assert credential_fragment not in serialized_progress
 
     checked_row = result['checked_streams'][0]
     assert checked_row['status'] == 'completed'

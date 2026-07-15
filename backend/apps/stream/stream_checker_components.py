@@ -1649,10 +1649,22 @@ class StreamCheckQueue:
 
 class StreamCheckerProgress:
     """Manages progress tracking for stream checker operations."""
+
+    # Service code checks this marker on ``type(progress)`` before requiring a
+    # generation token. Legacy test doubles intentionally remain compatible,
+    # while a real generation-aware progress store must never silently fall
+    # back to unguarded publications when its getter is broken.
+    GENERATION_GUARD_CAPABLE = True
     
     def __init__(self, progress_file: Optional[Any] = None):
         self.lock = threading.Lock()
         self.progress_file = progress_file
+        self._generation = 0
+
+    def get_generation(self) -> int:
+        """Return the in-memory clear generation for guarded publications."""
+        with self.lock:
+            return self._generation
 
     @staticmethod
     def _build_provider_progress(
@@ -2021,10 +2033,16 @@ class StreamCheckerProgress:
                quality_profile_name: Optional[str] = None,
                quality_profile_source: Optional[str] = None,
                capacity_profile_name: Optional[str] = None,
-               capacity_profile_source: Optional[str] = None):
+               capacity_profile_source: Optional[str] = None,
+               expected_generation: Optional[int] = None):
         """Update progress information."""
         from apps.database.manager import get_db_manager
         with self.lock:
+            if (
+                expected_generation is not None
+                and expected_generation != self._generation
+            ):
+                return False
             resolved_run_mode = run_mode or ("single_channel_check" if is_single_channel_check else "stream_checker")
             resolved_run_profile_id = run_profile_id if run_profile_id not in (None, '') else automation_profile_id
             resolved_run_profile_name = run_profile_name if run_profile_name not in (None, '') else automation_profile_name
@@ -2098,11 +2116,13 @@ class StreamCheckerProgress:
                     atomic_write_json(Path(self.progress_file), progress_data)
                 except Exception as e:
                     logger.warning(f"Failed to write progress to file: {e}")
+            return True
     
     def clear(self):
         """Clear progress tracking."""
         from apps.database.manager import get_db_manager
         with self.lock:
+            self._generation += 1
             try:
                 db = get_db_manager()
                 db.set_system_setting('stream_checker_progress', {})
@@ -2140,6 +2160,8 @@ class StreamCheckerProgress:
 
             if current != expected:
                 return False
+
+            self._generation += 1
 
             try:
                 if db is None:

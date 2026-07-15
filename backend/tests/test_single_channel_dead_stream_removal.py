@@ -111,6 +111,7 @@ class TestSingleChannelDeadStreamRemoval(unittest.TestCase):
             skip_batch_changelog=True,
             run_mode='single_channel_check',
             is_single_channel_check=True,
+            expected_progress_generation=0,
             force_check_override=False,
             force_check_generation=None,
         )
@@ -265,6 +266,7 @@ class TestSingleChannelDeadStreamRemoval(unittest.TestCase):
             skip_batch_changelog=True,
             run_mode='single_channel_check',
             is_single_channel_check=True,
+            expected_progress_generation=0,
             force_check_override=False,
             force_check_generation=None,
         )

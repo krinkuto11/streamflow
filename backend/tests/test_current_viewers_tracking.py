@@ -131,6 +131,7 @@ class TestCurrentViewersTracking(unittest.TestCase):
     
     def test_nonexistent_account(self):
         """Test handling of nonexistent account."""
+        self.udi.fetcher.fetch_proxy_status = Mock(return_value={})
         active_count = self.udi.get_active_streams_for_account(999)
         self.assertEqual(active_count, 0, "Nonexistent account should return 0 active streams")
         
@@ -244,10 +245,10 @@ class TestStreamLimiterWithCurrentViewers(unittest.TestCase):
         # Mock UDI to raise an error
         self.mock_udi.get_active_streams_for_account.side_effect = Exception("UDI error")
         
-        # Should still work (treating as 0 active streams)
+        # Unknown live provider usage must not be treated as zero.
         acquired, reason = self.limiter.acquire(1, timeout=0.1)
-        self.assertTrue(acquired, "Should acquire even with UDI error")
-        self.assertEqual(reason, 'acquired', "Should succeed with 'acquired' reason")
+        self.assertFalse(acquired)
+        self.assertEqual(reason, 'provider_usage_unavailable')
         
         # Clean up
         if acquired:

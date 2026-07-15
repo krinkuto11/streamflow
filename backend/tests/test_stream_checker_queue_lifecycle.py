@@ -1015,6 +1015,7 @@ class TestStreamCheckQueueLifecycle(unittest.TestCase):
             force_check_generation=None,
             batch_changelog_generation=23,
             queue_entry_token=29,
+            expected_progress_generation=None,
         )
         service._check_channel_sequential.assert_not_called()
 

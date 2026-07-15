@@ -37,15 +37,18 @@ the current bitrate. If it still cannot be measured, the current result stays
 ranking-only evidence.
 
 This is automatic backend behavior, not a user setting. Current activity is
-visible at `Stream Checker -> Current Progress -> Stream Progress Tracking ->
-Status`; completed evidence is under `Changelog -> Automation Runs -> Automation
-Period -> Quality Check -> Analyzed Streams -> Reason`.
+visible at `Stream Checker -> Current Progress (active run) -> Stream Progress
+Tracking -> Status -> Bitrate Recheck`; completed evidence is under `Changelog
+-> Action filter: Automation Runs -> Automation Period (expand) -> <channel> ->
+Quality Check (expand) -> Analyzed Streams -> Reason`.
 
 ---
 
 ## Scoring
 
-Streams are scored 0–100 using weighted dimensions. Weights are configured per Automation Profile under `scoring_weights`.
+Streams are scored 0–100 using weighted dimensions. Configure the weights at
+`Settings -> Profiles tab -> Edit profile -> Stream Checking -> Stream Quality
+Scoring`; `scoring_weights` is the corresponding profile configuration object.
 
 | Dimension  | Default weight |
 | ---------- | -------------- |
@@ -64,7 +67,10 @@ Streams are scored 0–100 using weighted dimensions. Weights are configured per
 
 ## Filters
 
-Before scoring, streams can be discarded based on minimum thresholds (set in `stream_checking` within the profile):
+Before scoring, streams can be discarded based on minimum thresholds. Configure
+resolution, FPS, and bitrate at `Settings -> Profiles tab -> Edit profile ->
+Stream Checking -> Minimum Quality Requirements`, and blank detection at the
+same Stream Checking step under `Check streams for blank screens`.
 
 | Field            | Effect                                                      |
 | ---------------- | ----------------------------------------------------------- |
@@ -82,15 +88,56 @@ respected.
 
 ## Parallel checking
 
-Stream checking runs in a thread pool. The pool size is configurable. Distinct usable profile routes represent independent provider credentials, and each profile's `max_streams` limit is enforced separately. Finite route limits are summed for the account aggregate; if any distinct route is unlimited (`max_streams: 0`), the aggregate is unlimited. Profiles that rewrite to the same credential target, including default aliases, share capacity instead of multiplying it. The M3U account `max_streams` value is used only as a fallback when the account has no active provider profile credentials. If active profiles exist but none can provide a usable route for a stream, that check fails closed instead of falling back to the stored URL.
+Configure concurrent checking at `Stream Checker -> Stream Checker Configuration
+-> Edit -> Concurrent Checking tab`.
+
+Stream checking runs in a thread pool. The pool size is configurable. Distinct
+usable credential-route components represent independent provider credentials
+and are enforced separately. Profiles that resolve to the same credential
+target, including default aliases, share one component whose capacity is the
+strictest finite limit among those aliases. Finite component limits are summed
+for the account aggregate; if any distinct component is unlimited
+(`max_streams: 0`), the aggregate is unlimited. The M3U account `max_streams`
+value is used only as a fallback when the account has no active provider profile
+credentials. If active profiles exist but none can provide a usable route for a
+stream, that check fails closed instead of falling back to the stored URL.
 
 Every probe URL is resolved while reserving its exact profile and remains bound to that reservation. A default profile may use the stored provider URL; every non-default profile must produce its own valid credential rewrite or the probe fails closed. The Profile Matrix is read-only status/API information; profile limits and credential rewrites are not editable there.
 
+Provider capacity is never inferred from malformed or missing authority. A
+missing account/profile inventory or an invalid route ends that probe immediately
+with `provider_profile_unavailable`; an unavailable or malformed live proxy-status
+usage read is `provider_usage_unavailable` and waits safely until the configured
+timeout. Neither condition is treated as zero usage. Inspect `Stream Checker ->
+Current Progress (active run) -> Stream Progress Tracking -> Status/reason` or
+`GET /api/stream-checker/progress -> streams_detail[].reason_detail|skipped_reason`
+before changing limits.
+
+The matrix is visible during an active run at `Stream Checker -> Current
+Progress (active run) -> Profile Matrix (expand)`; its API source is `GET
+/api/stream-checker/progress -> provider_progress[].profile_slots[]`.
+
+Per-stream reservation telemetry is visible at `Stream Checker -> Current
+Progress (active run) -> Stream Progress Tracking -> Account` (profile name;
+hover for ID and Limit), and at `GET /api/stream-checker/progress ->
+streams_detail[].reserved_profile_id|reserved_profile_name|reserved_profile_limit`.
+The reported limit is the capacity actually enforced for that reservation; when
+profile aliases share one credential route, it is their strict shared-route limit
+rather than a looser raw profile value. It contains no probe URL or credentials.
+Waiting or viewer-preempted rows clear a released profile; an initial probe and
+serial bitrate recheck may therefore show different exact profiles. A completed
+live row retains the profile that actually performed its final probe.
+
 Long loop-detection probes use the same account and profile reservations, apply the URL transformation of the profile they actually reserve, and stop without recording a clean result when manual cancellation or real-viewer preemption occurs.
 
-Set `check_all_streams: true` in the profile to check every stream on a channel. Default is to check only the currently active (top) stream.
+Enable `Check All Streams in Channel` at `Settings -> Profiles tab -> Edit
+profile -> Stream Checking` to check every stream on a channel. The profile key
+is `check_all_streams`; by default only the currently active (top) stream is
+checked.
 
-`stream_limit` caps the maximum number of streams checked per channel per run.
+`Stream Limit per Channel` at `Settings -> Profiles tab -> Edit profile -> Stream
+Checking` caps the maximum number of streams checked per channel per run; its
+profile key is `stream_limit`.
 
 ---
 
@@ -117,7 +164,8 @@ channel stream updates. If DNS, internet access, the gateway, or the Dispatcharr
 API cannot be verified, the quality-check step aborts and leaves channel stream
 assignments unchanged.
 
-The guard can be disabled from Stream Checker -> Safety or by setting:
+The guard can be disabled at `Stream Checker -> Stream Checker Configuration ->
+Edit -> Safety tab -> Connectivity Guard` or by setting:
 
 ```json
 {
@@ -133,7 +181,9 @@ The guard can be disabled from Stream Checker -> Safety or by setting:
 
 StreamFlow distinguishes between streams that are **currently in use** and streams that are idle. Currently active streams receive a longer grace period before being replaced — even if a higher-scoring stream is available — to avoid interrupting live playback. Idle streams are replaced aggressively.
 
-Set `grace_period: true` in the profile to enable the grace window for checked streams.
+Enable `Respect 2h Grace Period` at `Settings -> Profiles tab -> Edit profile ->
+Stream Checking` to enable the grace window for checked streams; its profile key
+is `grace_period`.
 
 ---
 

@@ -161,6 +161,31 @@ class TestM3UProfileURLTransformation(unittest.TestCase):
         self.assertTrue(all(not eligible for eligible, _url, _reason in outcomes))
         self.assertTrue(all(url == '' for _eligible, url, _reason in outcomes))
 
+    def test_non_boolean_default_flag_cannot_select_raw_provider_url(self):
+        """String-like booleans must not become implicit default credentials."""
+        from apps.udi.manager import UDIManager
+
+        manager = object.__new__(UDIManager)
+        stream = {
+            'id': 101,
+            'url': 'http://provider.test/live/private/private/101.ts',
+        }
+        profile = {
+            'id': 11,
+            'is_default': 'false',
+            'search_pattern': None,
+            'replace_pattern': None,
+        }
+
+        eligible, resolved_url, reason = manager.resolve_profile_stream_url(
+            stream,
+            profile,
+        )
+
+        self.assertFalse(eligible)
+        self.assertEqual(resolved_url, '')
+        self.assertEqual(reason, 'invalid_profile_default_flag')
+
     def test_invalid_regex_log_does_not_expose_pattern_or_url(self):
         """Configuration failures are observable without leaking credentials."""
         from apps.udi.manager import UDIManager

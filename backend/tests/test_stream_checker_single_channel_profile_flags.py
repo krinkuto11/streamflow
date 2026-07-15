@@ -16,6 +16,7 @@ import os
 import json
 import shutil
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -92,6 +93,100 @@ def _make_mock_acm(profile):
     acm.get_effective_epg_scheduled_profile.return_value = None
     acm.get_effective_configuration.return_value = {'profile': profile, 'periods': []}
     return acm
+
+
+def test_single_channel_fetch_clear_cannot_resurrect_progress():
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    class FakeDB:
+        def __init__(self):
+            self.settings = {}
+
+        def get_system_setting(self, key, default=None):
+            return self.settings.get(key, default)
+
+        def set_system_setting(self, key, value):
+            self.settings[key] = value
+
+    profile = _make_profile(
+        m3u_update_enabled=False,
+        matching_enabled=False,
+        checking_enabled=False,
+    )
+    streams = [
+        {
+            'id': 1,
+            'url': 'http://provider.invalid/stream/1',
+            'm3u_account': 5,
+            'stream_stats': {},
+        },
+    ]
+    fake_db = FakeDB()
+    fetch_entered = threading.Event()
+    release_fetch = threading.Event()
+
+    def blocked_fetch(_channel_id):
+        fetch_entered.set()
+        assert release_fetch.wait(timeout=2)
+        return streams
+
+    mock_udi = _make_mock_udi(42, 'Clear Race Channel', streams)
+    mock_acm = _make_mock_acm(profile)
+    mock_session_manager = Mock()
+    mock_session_manager.get_channels_in_active_sessions.return_value = []
+
+    with patch('apps.database.manager.get_db_manager', return_value=fake_db), patch(
+        'apps.stream.stream_checker_service.StreamCheckConfig'
+    ) as mock_config_class, patch(
+        'apps.stream.stream_checker_service.get_udi_manager',
+        return_value=mock_udi,
+    ), patch(
+        'apps.stream.stream_checker_service.get_automation_config_manager',
+        return_value=mock_acm,
+    ), patch(
+        'apps.stream.stream_checker_service.get_session_manager',
+        return_value=mock_session_manager,
+    ), patch(
+        'apps.stream.stream_checker_service.fetch_channel_streams',
+        side_effect=blocked_fetch,
+    ):
+        mock_config_class.return_value = _make_mock_config()
+        service = StreamCheckerService()
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service._check_channel_limits = Mock(return_value=None)
+        service.dead_streams_tracker = Mock()
+        service.dead_streams_tracker.get_dead_streams_for_channel.return_value = {}
+        service.dead_streams_tracker.cleanup_removed_streams.return_value = 0
+
+        progress_updates = []
+        original_update = service.progress.update
+
+        def record_progress(**kwargs):
+            progress_updates.append(dict(kwargs))
+            return original_update(**kwargs)
+
+        service.progress.update = record_progress
+        results = []
+        check_thread = threading.Thread(
+            target=lambda: results.append(service.check_single_channel(42)),
+        )
+        check_thread.start()
+        assert fetch_entered.wait(timeout=2)
+
+        clear_result = service.clear_queue()
+        release_fetch.set()
+        check_thread.join(timeout=2)
+
+    assert not check_thread.is_alive()
+    assert clear_result['abort_requested'] is True
+    assert results and results[0].get('aborted') is True
+    post_fetch_update = next(
+        update
+        for update in progress_updates
+        if update.get('step') == 'Identifying provider accounts'
+    )
+    assert post_fetch_update['expected_generation'] == 0
+    assert fake_db.settings['stream_checker_progress'] == {}
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +438,7 @@ class TestSingleChannelM3uUpdateFlagDisabled(unittest.TestCase):
             forced_profile_id='profile-v7',
             run_mode='single_channel_check',
             is_single_channel_check=True,
+            expected_progress_generation=0,
             force_check_override=False,
             force_check_generation=None,
         )

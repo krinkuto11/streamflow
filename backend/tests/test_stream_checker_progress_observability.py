@@ -1,7 +1,12 @@
-from unittest.mock import patch
+import threading
+from unittest.mock import Mock, patch
 
 from apps.stream.concurrent_stream_limiter import AccountStreamLimiter
-from apps.stream.stream_checker_components import StreamCheckerProgress
+from apps.stream.stream_checker_components import (
+    StreamCheckerProgress,
+    StreamCheckQueue,
+)
+from apps.stream.stream_checker_service import StreamCheckerService
 
 
 class FakeDB:
@@ -13,6 +18,308 @@ class FakeDB:
 
     def get_system_setting(self, key, default=None):
         return self.settings.get(key, default)
+
+
+def _make_active_generation_service():
+    """Build only the real service state needed by clear/capture races."""
+    service = StreamCheckerService.__new__(StreamCheckerService)
+    service.lock = threading.Lock()
+    service.abort_current_check = threading.Event()
+    service.progress = StreamCheckerProgress()
+    service.check_queue = StreamCheckQueue(max_size=10)
+    service.sync_batch_state = {'active': False}
+    service.checking = True
+    service._single_stream_check_active = False
+    service._single_channel_check_active = False
+    service._automation_cycle_active = False
+    service._sync_batch_execution_active = False
+    service._active_queue_entry_executions = {}
+    service._external_abort_generation = 0
+    service._cancel_queueing = False
+    service.batch_lock = threading.Lock()
+    service.batch_start_time = None
+    service.batch_changelog_entries = []
+    service._active_batch_changelog_generation = None
+    service.update_tracker = Mock()
+    return service
+
+
+def _assert_broken_generation_getter_aborts(
+    getter,
+    *,
+    expected_progress_generation=None,
+):
+    service = StreamCheckerService.__new__(StreamCheckerService)
+    service.lock = threading.Lock()
+    service.abort_current_check = threading.Event()
+    service.progress = StreamCheckerProgress()
+    service.progress.get_generation = getter
+    aborted = {'success': False, 'aborted': True}
+    service._abort_channel_check = Mock(return_value=aborted)
+    service._require_quality_check_connectivity = Mock()
+
+    result = service._check_channel(
+        42,
+        expected_progress_generation=expected_progress_generation,
+    )
+
+    assert result is aborted
+    service._abort_channel_check.assert_called_once_with(
+        42,
+        queue_entry_token=None,
+    )
+    service._require_quality_check_connectivity.assert_not_called()
+
+
+def test_generation_aware_progress_missing_getter_aborts_before_preflight():
+    _assert_broken_generation_getter_aborts(None)
+
+
+def test_generation_aware_progress_throwing_getter_aborts_before_preflight():
+    _assert_broken_generation_getter_aborts(
+        Mock(side_effect=RuntimeError('generation unavailable')),
+        expected_progress_generation=0,
+    )
+
+
+def test_generation_aware_progress_non_integer_getter_aborts_before_preflight():
+    _assert_broken_generation_getter_aborts(Mock(return_value='0'))
+
+
+def test_legacy_mock_progress_uses_unguarded_compatibility_without_dynamic_marker():
+    service = StreamCheckerService.__new__(StreamCheckerService)
+    service.lock = threading.Lock()
+    service.abort_current_check = threading.Event()
+    service.progress = Mock()
+    # An instance attribute must not opt a dynamic Mock into the strict
+    # generation contract. Capability is read from the concrete type only.
+    service.progress.GENERATION_GUARD_CAPABLE = True
+    service.progress.get_generation.side_effect = RuntimeError(
+        'legacy getter must not be called',
+    )
+
+    assert service._capture_operation_progress_generation() == (True, None)
+    service.progress.get_generation.assert_not_called()
+
+
+def test_operation_generation_capture_wins_before_clear_queue():
+    fake_db = FakeDB()
+    service = _make_active_generation_service()
+    getter_entered = threading.Event()
+    release_getter = threading.Event()
+    clear_started = threading.Event()
+    clear_finished = threading.Event()
+    capture_results = []
+    clear_results = []
+    original_get_generation = service.progress.get_generation
+
+    def blocked_get_generation():
+        getter_entered.set()
+        assert release_getter.wait(timeout=2)
+        return original_get_generation()
+
+    def clear_queue():
+        clear_started.set()
+        clear_results.append(service.clear_queue())
+        clear_finished.set()
+
+    service.progress.get_generation = blocked_get_generation
+    with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+        capture_thread = threading.Thread(
+            target=lambda: capture_results.append(
+                service._capture_operation_progress_generation()
+            ),
+        )
+        capture_thread.start()
+        assert getter_entered.wait(timeout=2)
+
+        clear_thread = threading.Thread(target=clear_queue)
+        clear_thread.start()
+        assert clear_started.wait(timeout=2)
+        assert not clear_finished.wait(timeout=0.05)
+
+        release_getter.set()
+        capture_thread.join(timeout=2)
+        clear_thread.join(timeout=2)
+
+        assert not capture_thread.is_alive()
+        assert not clear_thread.is_alive()
+        assert capture_results == [(True, 0)]
+        assert clear_results[0]['abort_requested'] is True
+        assert original_get_generation() == 1
+        assert service.progress.update(
+            channel_id=42,
+            channel_name='Cleared owner',
+            current=0,
+            total=1,
+            status='analyzing',
+            expected_generation=0,
+        ) is False
+
+    assert fake_db.settings['stream_checker_progress'] == {}
+
+
+def test_clear_queue_wins_before_operation_generation_capture():
+    fake_db = FakeDB()
+    service = _make_active_generation_service()
+    clear_entered_progress = threading.Event()
+    release_clear = threading.Event()
+    capture_started = threading.Event()
+    capture_finished = threading.Event()
+    clear_results = []
+    capture_results = []
+    original_clear = service.progress.clear
+    original_get_generation = service.progress.get_generation
+    generation_getter = Mock(wraps=original_get_generation)
+
+    def blocked_clear():
+        clear_entered_progress.set()
+        assert release_clear.wait(timeout=2)
+        original_clear()
+
+    def capture_generation():
+        capture_started.set()
+        capture_results.append(
+            service._capture_operation_progress_generation()
+        )
+        capture_finished.set()
+
+    service.progress.clear = blocked_clear
+    service.progress.get_generation = generation_getter
+    with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+        clear_thread = threading.Thread(
+            target=lambda: clear_results.append(service.clear_queue()),
+        )
+        clear_thread.start()
+        assert clear_entered_progress.wait(timeout=2)
+
+        capture_thread = threading.Thread(target=capture_generation)
+        capture_thread.start()
+        assert capture_started.wait(timeout=2)
+        assert not capture_finished.wait(timeout=0.05)
+
+        release_clear.set()
+        clear_thread.join(timeout=2)
+        capture_thread.join(timeout=2)
+
+    assert not clear_thread.is_alive()
+    assert not capture_thread.is_alive()
+    assert clear_results[0]['abort_requested'] is True
+    assert capture_results == [(False, None)]
+    generation_getter.assert_not_called()
+    assert original_get_generation() == 1
+    assert fake_db.settings['stream_checker_progress'] == {}
+
+
+def test_progress_clear_rejects_stale_run_publication():
+    fake_db = FakeDB()
+
+    with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+        progress = StreamCheckerProgress()
+        run_generation = progress.get_generation()
+
+        progress.clear()
+        published = progress.update(
+            channel_id=10,
+            channel_name='Cleared run',
+            current=0,
+            total=1,
+            status='analyzing',
+            step='Analyzing streams with account limits',
+            step_detail='Using smart scheduler with per-account limits',
+            expected_generation=run_generation,
+        )
+
+    assert published is False
+    assert progress.get_generation() == run_generation + 1
+    assert fake_db.settings['stream_checker_progress'] == {}
+
+
+def test_progress_clear_serializes_after_in_flight_guarded_publication():
+    publisher_entered_db = threading.Event()
+    release_publisher = threading.Event()
+    clear_started = threading.Event()
+
+    class BlockingDB(FakeDB):
+        def __init__(self):
+            super().__init__()
+            self.block_next_nonempty_write = True
+
+        def set_system_setting(self, key, value):
+            if value and self.block_next_nonempty_write:
+                self.block_next_nonempty_write = False
+                publisher_entered_db.set()
+                assert release_publisher.wait(timeout=2)
+            super().set_system_setting(key, value)
+
+    fake_db = BlockingDB()
+    publication_result = []
+
+    with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+        progress = StreamCheckerProgress()
+        run_generation = progress.get_generation()
+
+        publisher = threading.Thread(
+            target=lambda: publication_result.append(progress.update(
+                channel_id=10,
+                channel_name='In-flight run',
+                current=0,
+                total=1,
+                status='analyzing',
+                expected_generation=run_generation,
+            )),
+        )
+        publisher.start()
+        assert publisher_entered_db.wait(timeout=2)
+
+        def clear_progress():
+            clear_started.set()
+            progress.clear()
+
+        clearer = threading.Thread(target=clear_progress)
+        clearer.start()
+        assert clear_started.wait(timeout=2)
+        assert clearer.is_alive()
+
+        release_publisher.set()
+        publisher.join(timeout=2)
+        clearer.join(timeout=2)
+
+    assert not publisher.is_alive()
+    assert not clearer.is_alive()
+    assert publication_result == [True]
+    assert progress.get_generation() == run_generation + 1
+    assert fake_db.settings['stream_checker_progress'] == {}
+
+
+def test_progress_compare_and_clear_invalidates_stale_run_publication():
+    fake_db = FakeDB()
+
+    with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+        progress = StreamCheckerProgress()
+        run_generation = progress.get_generation()
+        assert progress.update(
+            channel_id=10,
+            channel_name='Owned run',
+            current=0,
+            total=1,
+            status='analyzing',
+            expected_generation=run_generation,
+        ) is True
+        owned_snapshot = fake_db.settings['stream_checker_progress']
+
+        assert progress.clear_if_matches(owned_snapshot) is True
+        assert progress.update(
+            channel_id=10,
+            channel_name='Owned run',
+            current=1,
+            total=1,
+            status='complete',
+            expected_generation=run_generation,
+        ) is False
+
+    assert progress.get_generation() == run_generation + 1
+    assert fake_db.settings['stream_checker_progress'] == {}
 
 
 def test_progress_update_builds_provider_progress_counters():

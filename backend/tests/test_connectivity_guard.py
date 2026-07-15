@@ -1,6 +1,7 @@
 import os
 import socket
 import sys
+import threading
 from datetime import datetime, timedelta
 from unittest.mock import Mock, patch
 
@@ -406,6 +407,165 @@ def test_destructive_quality_phase_uses_strict_write_connectivity_mode():
     assert service.connectivity_guard_status["channel_name"] == "Test Channel"
 
 
+def test_connectivity_abort_progress_cannot_resurrect_cleared_run():
+    class FakeDB:
+        def __init__(self):
+            self.settings = {}
+
+        def get_system_setting(self, key, default=None):
+            return self.settings.get(key, default)
+
+        def set_system_setting(self, key, value):
+            self.settings[key] = value
+
+    fake_db = FakeDB()
+    failed = ConnectivityCheckResult(
+        ok=False,
+        reason="connectivity_timeout",
+        message="Dispatcharr API did not recover",
+    )
+    service = StreamCheckerService()
+    service.config.config["connectivity_guard"]["recovery_wait_seconds"] = 0
+    service._run_connectivity_guard = Mock(return_value=failed)
+
+    with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+        run_generation = service.progress.get_generation()
+        service.progress.clear()
+        progress_updates = []
+        original_update = service.progress.update
+
+        def record_progress(**kwargs):
+            progress_updates.append(dict(kwargs))
+            return original_update(**kwargs)
+
+        service.progress.update = record_progress
+        result = service._require_quality_check_connectivity(
+            phase="channel_stream_update",
+            channel_id=42,
+            channel_name="Cleared connectivity run",
+            progress_context={"expected_generation": run_generation},
+        )
+
+    assert result is failed
+    assert len(progress_updates) == 1
+    assert progress_updates[0]["status"] == "aborted"
+    assert progress_updates[0]["expected_generation"] == run_generation
+    assert fake_db.settings["stream_checker_progress"] == {}
+
+
+def test_connectivity_recovery_progress_preserves_run_generation():
+    failed = ConnectivityCheckResult(
+        ok=False,
+        reason="connectivity_timeout",
+        message="Dispatcharr API is temporarily unavailable",
+    )
+    recovered = ConnectivityCheckResult(
+        ok=True,
+        reason="ok",
+        message="Dispatcharr API recovered",
+    )
+    service = StreamCheckerService()
+    service.config.config["connectivity_guard"]["recovery_wait_seconds"] = 1
+    service.config.config["connectivity_guard"]["recovery_poll_seconds"] = 1
+    service._run_connectivity_guard = Mock(side_effect=[failed, recovered])
+    service.progress.update = Mock(return_value=True)
+
+    with patch('apps.stream.stream_checker_service.time.sleep'):
+        result = service._require_quality_check_connectivity(
+            phase="channel_stream_update",
+            channel_id=42,
+            channel_name="Recovering connectivity run",
+            progress_context={"expected_generation": 7},
+        )
+
+    assert result is None
+    service.progress.update.assert_called_once()
+    assert service.progress.update.call_args.kwargs["status"] == "waiting_connectivity"
+    assert service.progress.update.call_args.kwargs["expected_generation"] == 7
+
+
+def test_outer_channel_preflight_cannot_resurrect_progress_after_clear():
+    class FakeDB:
+        def __init__(self):
+            self.settings = {}
+
+        def get_system_setting(self, key, default=None):
+            return self.settings.get(key, default)
+
+        def set_system_setting(self, key, value):
+            self.settings[key] = value
+
+    fake_db = FakeDB()
+    guard_entered = threading.Event()
+    release_guard = threading.Event()
+    failed = ConnectivityCheckResult(
+        ok=False,
+        reason="connectivity_timeout",
+        message="Blocked preflight failed after clear",
+    )
+    service = StreamCheckerService()
+    service.config.config["connectivity_guard"]["recovery_wait_seconds"] = 0
+
+    def blocked_guard(*_args, **_kwargs):
+        guard_entered.set()
+        assert release_guard.wait(timeout=2)
+        return failed
+
+    service._run_connectivity_guard = blocked_guard
+    results = []
+
+    with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+        check_thread = threading.Thread(
+            target=lambda: results.append(service._check_channel(42)),
+        )
+        check_thread.start()
+        assert guard_entered.wait(timeout=2)
+
+        service.progress.clear()
+        release_guard.set()
+        check_thread.join(timeout=2)
+
+    assert not check_thread.is_alive()
+    assert len(results) == 1
+    assert results[0]["error"] == "connectivity_guard"
+    assert fake_db.settings["stream_checker_progress"] == {}
+
+
+def test_outer_channel_preflight_keeps_original_generation_after_clear():
+    guard_entered = threading.Event()
+    release_guard = threading.Event()
+    service = StreamCheckerService()
+    service._check_channel_concurrent = Mock(return_value={"success": True})
+    original_generation = service.progress.get_generation()
+
+    def blocked_success(*_args, **_kwargs):
+        guard_entered.set()
+        assert release_guard.wait(timeout=2)
+        return ConnectivityCheckResult(
+            ok=True,
+            reason="ok",
+            message="Preflight completed after clear",
+        )
+
+    service._run_connectivity_guard = blocked_success
+    results = []
+    check_thread = threading.Thread(
+        target=lambda: results.append(service._check_channel(42)),
+    )
+    check_thread.start()
+    assert guard_entered.wait(timeout=2)
+
+    service.progress.clear()
+    release_guard.set()
+    check_thread.join(timeout=2)
+
+    assert not check_thread.is_alive()
+    assert results == [{"success": True}]
+    assert service._check_channel_concurrent.call_args.kwargs[
+        "expected_progress_generation"
+    ] == original_generation
+
+
 def test_automation_matching_preflight_uses_strict_write_connectivity_mode():
     service = StreamCheckerService()
     service.connectivity_guard.check = Mock(
@@ -571,7 +731,12 @@ def test_mid_run_transient_outage_waits_for_recovery_before_marking_dead():
     mock_automation_config = Mock()
     mock_automation_config.get_effective_configuration.return_value = {"profile": mock_profile}
 
-    streams = [{"id": 1001, "name": "Dead Candidate", "url": "http://stream.example/live"}]
+    streams = [{
+        "id": 1001,
+        "name": "Dead Candidate",
+        "url": "http://stream.example/live",
+        "is_custom": True,
+    }]
     dead_analysis = {
         "stream_id": 1001,
         "stream_name": "Dead Candidate",
@@ -644,7 +809,12 @@ def test_mid_run_outage_does_not_mark_dead_or_update_channel():
     mock_automation_config = Mock()
     mock_automation_config.get_effective_configuration.return_value = {"profile": mock_profile}
 
-    streams = [{"id": 1001, "name": "Dead Candidate", "url": "http://stream.example/live"}]
+    streams = [{
+        "id": 1001,
+        "name": "Dead Candidate",
+        "url": "http://stream.example/live",
+        "is_custom": True,
+    }]
     dead_analysis = {
         "stream_id": 1001,
         "stream_name": "Dead Candidate",

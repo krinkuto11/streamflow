@@ -1391,6 +1391,7 @@ class TestSingleStreamCheckService(unittest.TestCase):
 
         self.assertEqual(result[0]['status'], 'OK')
         self.assertIs(limiter.udi_manager, udi)
+        limiter.invalidate_account_inventory.assert_called_once_with()
         initialize_limits.assert_called_once_with(accounts)
         get_scheduler.assert_called_once_with(global_limit=4)
         scheduler.check_streams_with_limits.assert_called_once()
@@ -1398,6 +1399,172 @@ class TestSingleStreamCheckService(unittest.TestCase):
         self.assertEqual(scheduler_kwargs['provider_wait_timeout'], 15)
         self.assertIs(scheduler_kwargs['abort_event'], service.abort_current_check)
         self.assertEqual(scheduler_kwargs['streams'], [stream])
+
+    def test_one_off_probe_inventory_failures_never_reach_analyzer(self):
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        stream = {
+            'id': 456,
+            'name': 'Inventory-guarded stream',
+            'url': 'http://example.invalid/live.m3u8',
+            'm3u_account_id': 12,
+        }
+        cases = {
+            'malformed': {'id': 12},
+            'rejected_malformed': [{'id': 'invalid', 'max_streams': 1}],
+            'missing_getter': 'missing',
+            'throwing_getter': RuntimeError('UDI inventory unavailable'),
+        }
+
+        for case_name, inventory in cases.items():
+            with self.subTest(case=case_name):
+                service = object.__new__(StreamCheckerService)
+                service.abort_current_check = threading.Event()
+                service.config = Mock()
+                service.config.get.side_effect = lambda key, default=None: {
+                    'concurrent_streams.enabled': True,
+                    'concurrent_streams.global_limit': 4,
+                    'concurrent_streams.provider_wait_timeout': 15,
+                }.get(key, default)
+                udi = Mock()
+                events = []
+                if inventory == 'missing':
+                    udi.get_m3u_accounts = None
+                elif isinstance(inventory, Exception):
+                    def fail_inventory_fetch(error=inventory):
+                        events.append('fetch')
+                        raise error
+
+                    udi.get_m3u_accounts.side_effect = fail_inventory_fetch
+                else:
+                    udi.get_m3u_accounts.side_effect = (
+                        lambda value=inventory: events.append('fetch') or value
+                    )
+                limiter = Mock()
+                limiter.invalidate_account_inventory.side_effect = (
+                    lambda: events.append('invalidate')
+                )
+                scheduler = Mock()
+
+                with patch(
+                    'apps.stream.concurrent_stream_limiter.get_account_limiter',
+                    return_value=limiter,
+                ), patch(
+                    'apps.stream.concurrent_stream_limiter.initialize_account_limits',
+                    side_effect=lambda accounts: (
+                        events.append('initialize')
+                        or (False if case_name == 'rejected_malformed' else None)
+                    ),
+                ) as initialize_limits, patch(
+                    'apps.stream.concurrent_stream_limiter.get_smart_scheduler',
+                    return_value=scheduler,
+                ) as get_scheduler, patch(
+                    'apps.stream.stream_checker_service.analyze_stream',
+                ) as analyzer:
+                    result = StreamCheckerService._run_capacity_limited_stream_probes(
+                        service,
+                        [stream],
+                        udi=udi,
+                        ffmpeg_duration=7,
+                        timeout=8,
+                    )
+
+                self.assertEqual(result, [])
+                self.assertEqual(events[0], 'invalidate')
+                limiter.invalidate_account_inventory.assert_called_once_with()
+                get_scheduler.assert_not_called()
+                scheduler.check_streams_with_limits.assert_not_called()
+                analyzer.assert_not_called()
+                limiter.acquire.assert_not_called()
+                limiter.reserve_profile_for_stream_with_url.assert_not_called()
+                limiter.release.assert_not_called()
+                limiter.release_profile.assert_not_called()
+                if case_name == 'rejected_malformed':
+                    self.assertEqual(events, ['invalidate', 'fetch', 'initialize'])
+                    initialize_limits.assert_called_once_with(inventory)
+                else:
+                    initialize_limits.assert_not_called()
+
+    def test_one_off_empty_inventory_allows_custom_but_blocks_provider(self):
+        from apps.stream.concurrent_stream_limiter import get_account_limiter
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        service = object.__new__(StreamCheckerService)
+        service.abort_current_check = threading.Event()
+        service.config = Mock()
+        service.config.get.side_effect = lambda key, default=None: {
+            'concurrent_streams.enabled': True,
+            'concurrent_streams.global_limit': 2,
+            'concurrent_streams.provider_wait_timeout': 0,
+        }.get(key, default)
+        udi = Mock()
+        udi.get_m3u_accounts.return_value = []
+        udi.get_stream_by_id.return_value = None
+        provider_stream = {
+            'id': 456,
+            'name': 'Provider stream without authority',
+            'url': 'http://provider.invalid/live.m3u8',
+            'm3u_account_id': 12,
+        }
+        custom_stream = {
+            'id': 457,
+            'name': 'Explicit custom stream',
+            'url': 'http://custom.invalid/live.m3u8',
+            'is_custom': True,
+        }
+        limiter = get_account_limiter()
+        previous_udi_manager = limiter.udi_manager
+        limiter.clear()
+
+        with patch(
+            'apps.stream.stream_checker_service.analyze_stream',
+            return_value={
+                'stream_id': 457,
+                'stream_name': 'Explicit custom stream',
+                'status': 'OK',
+            },
+        ) as analyzer:
+            try:
+                provider_results = (
+                    StreamCheckerService._run_capacity_limited_stream_probes(
+                        service,
+                        [provider_stream],
+                        udi=udi,
+                        ffmpeg_duration=7,
+                        timeout=8,
+                    )
+                )
+                self.assertEqual(len(provider_results), 1)
+                self.assertTrue(provider_results[0]['provider_limit_skipped'])
+                self.assertEqual(
+                    provider_results[0]['reason_detail'],
+                    'provider_profile_unavailable',
+                )
+                analyzer.assert_not_called()
+
+                custom_results = (
+                    StreamCheckerService._run_capacity_limited_stream_probes(
+                        service,
+                        [custom_stream],
+                        udi=udi,
+                        ffmpeg_duration=7,
+                        timeout=8,
+                    )
+                )
+                self.assertEqual(custom_results[0]['status'], 'OK')
+                analyzer.assert_called_once()
+                self.assertEqual(
+                    analyzer.call_args.kwargs['stream_url'],
+                    custom_stream['url'],
+                )
+                self.assertTrue(limiter.account_inventory_trusted)
+                self.assertEqual(limiter.account_inventory_ids, set())
+                self.assertEqual(limiter.account_checking_counts, {})
+                self.assertEqual(limiter.profile_checking_counts, {})
+                self.assertEqual(limiter.profile_reservations_by_token, {})
+            finally:
+                limiter.clear()
+                limiter.udi_manager = previous_udi_manager
 
 
 class TestSingleChannelForcedProfileId(unittest.TestCase):

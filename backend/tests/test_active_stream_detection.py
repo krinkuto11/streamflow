@@ -15,6 +15,7 @@ from unittest.mock import Mock, patch, MagicMock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from apps.udi.manager import UDIManager
+from apps.udi.fetcher import ProxyStatusPayloadError
 
 
 class TestActiveStreamDetection(unittest.TestCase):
@@ -132,8 +133,8 @@ class TestActiveStreamDetection(unittest.TestCase):
             count = self.manager._count_active_streams(1)
             self.assertEqual(count, 1)
     
-    def test_count_active_streams_handles_unknown_profile(self):
-        """Test handling of proxy status with unknown profile ID."""
+    def test_count_active_streams_rejects_unknown_active_profile(self):
+        """An unknown active profile makes provider usage non-authoritative."""
         mock_proxy_status = {
             'channel-uuid-1': {
                 'channel_id': 'channel-uuid-1',
@@ -150,9 +151,13 @@ class TestActiveStreamDetection(unittest.TestCase):
         }
         
         with patch.object(self.manager, '_get_proxy_status', return_value=mock_proxy_status):
-            # Should only count channel-uuid-2
-            count = self.manager._count_active_streams(1)
-            self.assertEqual(count, 1)
+            with self.assertRaises(ProxyStatusPayloadError) as raised:
+                self.manager._count_active_streams(1)
+
+        self.assertEqual(
+            raised.exception.reason,
+            "proxy_status_active_profile_unowned",
+        )
     
     def test_count_active_streams_empty_proxy_status(self):
         """Test counting with empty proxy status."""
