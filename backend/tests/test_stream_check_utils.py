@@ -409,6 +409,266 @@ class TestGetStreamInfoAndBitrate(unittest.TestCase):
         self.assertEqual(result['ffprobe_fallback_reason'], 'ffmpeg_timeout')
         self.assertEqual(result['bitrate_source'], 'ffprobe_media_fallback_no_bitrate')
 
+    def test_ffprobe_fallback_remains_viewer_preemptible(self):
+        """A timeout fallback must not hold reserved capacity for another 20s."""
+        preempt_check = MagicMock(return_value=True)
+        with patch.object(
+            stream_check_utils,
+            '_run_ffmpeg_with_optional_fallback',
+            side_effect=[
+                subprocess.TimeoutExpired(cmd='ffmpeg', timeout=90),
+                stream_check_utils.StreamProbePreempted(),
+            ],
+        ) as run_media_command:
+            result = get_stream_info_and_bitrate(
+                'http://test.com/fallback-preempt',
+                duration=30,
+                timeout=30,
+                stream_startup_buffer=10,
+                preempt_check=preempt_check,
+            )
+
+        self.assertEqual(run_media_command.call_count, 2)
+        fallback_call = run_media_command.call_args_list[1]
+        self.assertIs(fallback_call.kwargs['preempt_check'], preempt_check)
+        self.assertEqual(fallback_call.kwargs['context'], 'ffprobe media fallback')
+        self.assertEqual(result['status'], 'PREEMPTED')
+        self.assertTrue(result['preempted'])
+        self.assertEqual(result['preempt_reason'], 'viewer_preempted')
+
+
+class TestPreemptibleMediaCommand(unittest.TestCase):
+    """Provider commands must stop promptly or avoid starting for viewers."""
+
+    class FakeProcess:
+        def __init__(self, poll_results):
+            self.poll_results = list(poll_results)
+            self.returncode = None
+            self.terminate_count = 0
+            self.kill_count = 0
+            self.communicate_timeouts = []
+
+        def poll(self):
+            if self.returncode is not None:
+                return self.returncode
+            if self.poll_results:
+                value = self.poll_results.pop(0)
+                if value is not None:
+                    self.returncode = value
+                return value
+            return self.returncode
+
+        def terminate(self):
+            self.terminate_count += 1
+            self.returncode = -15
+
+        def kill(self):
+            self.kill_count += 1
+            self.returncode = -9
+
+        def communicate(self, timeout=None):
+            self.communicate_timeouts.append(timeout)
+            return '', ''
+
+    @staticmethod
+    def run_command(preempt_check):
+        return stream_check_utils._run_ffmpeg_with_optional_fallback(
+            ['ffprobe', 'test-url'],
+            fallback_command=None,
+            timeout=20,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            context='ffprobe media fallback',
+            preempt_check=preempt_check,
+        )
+
+    def test_existing_viewer_prevents_provider_process_start(self):
+        preempt_check = MagicMock(return_value=True)
+        with patch.object(stream_check_utils.subprocess, 'Popen') as popen:
+            with self.assertRaises(stream_check_utils.StreamProbePreempted):
+                self.run_command(preempt_check)
+
+        preempt_check.assert_called_once_with()
+        popen.assert_not_called()
+
+    def test_callback_error_fails_closed_before_provider_process_start(self):
+        preempt_check = MagicMock(side_effect=RuntimeError('viewer state unavailable'))
+        with patch.object(stream_check_utils.subprocess, 'Popen') as popen:
+            with self.assertRaises(stream_check_utils.StreamProbePreempted):
+                self.run_command(preempt_check)
+
+        preempt_check.assert_called_once_with()
+        popen.assert_not_called()
+
+    def test_late_viewer_terminates_running_ffprobe_process(self):
+        process = self.FakeProcess([None])
+        preempt_check = MagicMock(side_effect=[False, True])
+        with patch.object(stream_check_utils.subprocess, 'Popen', return_value=process), \
+                patch.object(stream_check_utils.time, 'monotonic', return_value=0), \
+                patch.object(stream_check_utils.time, 'sleep') as sleep:
+            with self.assertRaises(stream_check_utils.StreamProbePreempted):
+                self.run_command(preempt_check)
+
+        self.assertEqual(preempt_check.call_count, 2)
+        self.assertEqual(process.terminate_count, 1)
+        self.assertEqual(process.kill_count, 0)
+        self.assertEqual(
+            process.communicate_timeouts,
+            [stream_check_utils.PROBE_PREEMPT_PROCESS_GRACE_SECONDS],
+        )
+        sleep.assert_not_called()
+
+    def test_wedged_process_cleanup_is_killed_with_bounded_waits(self):
+        process = self.FakeProcess([None])
+        process.communicate = MagicMock(side_effect=[
+            subprocess.TimeoutExpired(cmd='ffprobe', timeout=1),
+            ('', ''),
+        ])
+        preempt_check = MagicMock(side_effect=[False, True])
+        with patch.object(stream_check_utils.subprocess, 'Popen', return_value=process), \
+                patch.object(stream_check_utils.time, 'monotonic', return_value=0):
+            with self.assertRaises(stream_check_utils.StreamProbePreempted):
+                self.run_command(preempt_check)
+
+        self.assertEqual(process.terminate_count, 1)
+        self.assertEqual(process.kill_count, 1)
+        self.assertEqual(
+            process.communicate.call_args_list,
+            [
+                unittest.mock.call(
+                    timeout=stream_check_utils.PROBE_PREEMPT_PROCESS_GRACE_SECONDS
+                ),
+                unittest.mock.call(
+                    timeout=stream_check_utils.PROBE_PREEMPT_PROCESS_GRACE_SECONDS
+                ),
+            ],
+        )
+
+    def test_false_callback_allows_normal_process_completion(self):
+        process = self.FakeProcess([None, 0])
+        preempt_check = MagicMock(return_value=False)
+        with patch.object(stream_check_utils.subprocess, 'Popen', return_value=process), \
+                patch.object(stream_check_utils.time, 'monotonic', side_effect=[0, 0]), \
+                patch.object(stream_check_utils.time, 'sleep') as sleep:
+            result = self.run_command(preempt_check)
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(preempt_check.call_count, 2)
+        self.assertEqual(process.terminate_count, 0)
+        self.assertEqual(process.kill_count, 0)
+        sleep.assert_called_once_with(stream_check_utils.PROBE_PREEMPT_POLL_SECONDS)
+
+
+class TestVisualProbeViewerPreemption(unittest.TestCase):
+    """Visual decode-slot waits must never hide a late real viewer."""
+
+    class FakeSemaphore:
+        def __init__(self, acquire_results):
+            self.acquire_results = list(acquire_results)
+            self.acquire_timeouts = []
+            self.release_count = 0
+
+        def acquire(self, timeout=None):
+            self.acquire_timeouts.append(timeout)
+            if not self.acquire_results:
+                return False
+            return self.acquire_results.pop(0)
+
+        def release(self):
+            self.release_count += 1
+
+    @staticmethod
+    def run_probe(preempt_check):
+        return stream_check_utils._run_visual_detection_probe(
+            'http://test.stream',
+            duration=30,
+            timeout=30,
+            user_agent='test',
+            stream_startup_buffer=5,
+            blank_check_enabled=True,
+            blank_check_min_duration=2,
+            blank_check_pixel_threshold=0.1,
+            blank_check_ratio_threshold=0.8,
+            freeze_check_enabled=False,
+            freeze_check_min_duration=5,
+            freeze_check_noise_threshold=0.001,
+            freeze_check_ratio_threshold=0.8,
+            hardware_acceleration=None,
+            preempt_check=preempt_check,
+        )
+
+    def test_waiting_visual_probe_preempts_without_starting_ffmpeg(self):
+        semaphore = self.FakeSemaphore([False, False])
+        preempt_states = iter([False, False, True])
+
+        with patch.object(stream_check_utils, '_VISUAL_PROBE_SEMAPHORE', semaphore), \
+                patch.object(stream_check_utils, '_run_ffmpeg_with_optional_fallback') as run_ffmpeg:
+            result = self.run_probe(lambda: next(preempt_states))
+
+        self.assertEqual(
+            semaphore.acquire_timeouts,
+            [
+                stream_check_utils.PROBE_PREEMPT_POLL_SECONDS,
+                stream_check_utils.PROBE_PREEMPT_POLL_SECONDS,
+            ],
+        )
+        self.assertEqual(semaphore.release_count, 0)
+        run_ffmpeg.assert_not_called()
+        self.assertTrue(result['preempted'])
+        self.assertEqual(result['preempt_reason'], 'viewer_preempted')
+        self.assertEqual(result['visual_probe_incomplete_reason'], 'preempted')
+
+    def test_viewer_race_after_visual_slot_acquire_releases_without_ffmpeg(self):
+        semaphore = self.FakeSemaphore([True])
+        preempt_states = iter([False, True])
+
+        with patch.object(stream_check_utils, '_VISUAL_PROBE_SEMAPHORE', semaphore), \
+                patch.object(stream_check_utils, '_run_ffmpeg_with_optional_fallback') as run_ffmpeg:
+            result = self.run_probe(lambda: next(preempt_states))
+
+        self.assertEqual(
+            semaphore.acquire_timeouts,
+            [stream_check_utils.PROBE_PREEMPT_POLL_SECONDS],
+        )
+        self.assertEqual(semaphore.release_count, 1)
+        run_ffmpeg.assert_not_called()
+        self.assertTrue(result['preempted'])
+        self.assertEqual(result['preempt_reason'], 'viewer_preempted')
+
+    def test_acquired_visual_slot_is_released_after_normal_completion(self):
+        semaphore = self.FakeSemaphore([True])
+        completed = subprocess.CompletedProcess(['ffmpeg'], 0, '', '')
+
+        with patch.object(stream_check_utils, '_VISUAL_PROBE_SEMAPHORE', semaphore), \
+                patch.object(
+                    stream_check_utils,
+                    '_run_ffmpeg_with_optional_fallback',
+                    return_value=completed,
+                ) as run_ffmpeg:
+            result = self.run_probe(None)
+
+        self.assertEqual(semaphore.acquire_timeouts, [None])
+        self.assertEqual(semaphore.release_count, 1)
+        run_ffmpeg.assert_called_once()
+        self.assertTrue(result['visual_probe_completed'])
+
+    def test_acquired_visual_slot_is_released_after_inner_preemption(self):
+        semaphore = self.FakeSemaphore([True])
+        preempt_check = MagicMock(return_value=False)
+
+        with patch.object(stream_check_utils, '_VISUAL_PROBE_SEMAPHORE', semaphore), \
+                patch.object(
+                    stream_check_utils,
+                    '_run_ffmpeg_with_optional_fallback',
+                    side_effect=stream_check_utils.StreamProbePreempted(),
+                ):
+            result = self.run_probe(preempt_check)
+
+        self.assertEqual(semaphore.release_count, 1)
+        self.assertTrue(result['preempted'])
+        self.assertEqual(result['visual_probe_incomplete_reason'], 'preempted')
+
 
 class TestAnalyzeStream(unittest.TestCase):
     """Test complete stream analysis."""
@@ -759,6 +1019,77 @@ class TestAnalyzeStream(unittest.TestCase):
         self.assertEqual(result['status'], 'PREEMPTED')
         self.assertTrue(result['preempted'])
         self.assertEqual(result['preempt_reason'], 'viewer_preempted')
+
+    @patch('stream_check_utils.get_stream_info_and_bitrate')
+    @patch('time.sleep')
+    def test_retry_wait_preempts_before_sleeping_or_starting_next_probe(
+        self,
+        mock_sleep,
+        mock_get_info_and_bitrate,
+    ):
+        """Reserved profile capacity must stay viewer-preemptible between attempts."""
+        mock_get_info_and_bitrate.return_value = {
+            'video_codec': 'N/A',
+            'audio_codec': 'N/A',
+            'resolution': '0x0',
+            'fps': 0,
+            'bitrate_kbps': None,
+            'hdr_format': None,
+            'pixel_format': None,
+            'audio_sample_rate': None,
+            'audio_channels': None,
+            'channel_layout': None,
+            'audio_bitrate': None,
+            'status': 'Error',
+            'elapsed_time': 1.0,
+        }
+        preempt_check = MagicMock(side_effect=[False, True])
+
+        result = analyze_stream(
+            stream_url='http://test.stream',
+            stream_id=123,
+            stream_name='Test Stream',
+            retries=2,
+            retry_delay=10,
+            preempt_check=preempt_check,
+        )
+
+        self.assertEqual(mock_get_info_and_bitrate.call_count, 1)
+        self.assertEqual(preempt_check.call_count, 2)
+        mock_sleep.assert_called_once()
+        self.assertAlmostEqual(
+            mock_sleep.call_args.args[0],
+            stream_check_utils.PROBE_PREEMPT_POLL_SECONDS,
+            places=2,
+        )
+        self.assertEqual(result['status'], 'PREEMPTED')
+        self.assertTrue(result['preempted'])
+        self.assertEqual(result['preempt_reason'], 'viewer_preempted')
+        self.assertEqual(result['attempts'], 1)
+        self.assertEqual(result['stage'], 'stream analysis retry wait')
+        self.assertIsNone(result['quality_reason'])
+        self.assertIsNone(result['quality_reason_detail'])
+        self.assertEqual(result['quality_reason_context'], {})
+        self.assertFalse(result['measurement_incomplete'])
+        self.assertFalse(result['bitrate_recheck_required'])
+
+    def test_retry_sleep_completes_normally_when_viewer_callback_stays_false(self):
+        preempt_check = MagicMock(return_value=False)
+        with patch.object(
+            stream_check_utils.time,
+            'monotonic',
+            side_effect=[0, 0, 0.25, 0.5],
+        ), patch.object(stream_check_utils.time, 'sleep') as sleep:
+            stream_check_utils._sleep_with_preemption(0.5, preempt_check)
+
+        self.assertEqual(preempt_check.call_count, 3)
+        self.assertEqual(
+            sleep.call_args_list,
+            [
+                unittest.mock.call(stream_check_utils.PROBE_PREEMPT_POLL_SECONDS),
+                unittest.mock.call(stream_check_utils.PROBE_PREEMPT_POLL_SECONDS),
+            ],
+        )
 
 
 if __name__ == '__main__':

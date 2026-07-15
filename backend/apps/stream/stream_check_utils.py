@@ -115,6 +115,8 @@ except (TypeError, ValueError):
     VISUAL_PROBE_MAX_CONCURRENCY = 2
 VISUAL_PROBE_DEFAULT_BLANK_SECONDS = 8
 VISUAL_PROBE_DEFAULT_FREEZE_SECONDS = 10
+PROBE_PREEMPT_POLL_SECONDS = 0.25
+PROBE_PREEMPT_PROCESS_GRACE_SECONDS = 1.0
 _VISUAL_PROBE_SEMAPHORE = threading.BoundedSemaphore(VISUAL_PROBE_MAX_CONCURRENCY)
 
 try:
@@ -137,6 +139,70 @@ FFMPEG_BYTES_READ_RE = re.compile(r'Statistics:\s*(?P<bytes>\d+)\s+bytes\s+read'
 
 class StreamProbePreempted(Exception):
     """Raised when a real viewer needs the profile capacity used by a probe."""
+
+
+def _preemption_requested(preempt_check: Callable[[], bool]) -> bool:
+    """Treat an unreadable viewer state as a fail-closed preemption request."""
+    try:
+        return bool(preempt_check())
+    except Exception:
+        logger.warning(
+            "Viewer preemption check failed; aborting the provider probe fail-closed"
+        )
+        return True
+
+
+def _acquire_semaphore_with_preemption(
+    semaphore: threading.Semaphore,
+    preempt_check: Optional[Callable[[], bool]],
+) -> None:
+    """Acquire a probe slot without hiding a late real-viewer preemption.
+
+    Provider/profile capacity is already reserved while a visual probe waits
+    behind the global decode limit.  A blocking semaphore acquire would leave
+    that reservation uninterruptible until another visual probe finishes.  Poll
+    the viewer callback while waiting and once more after acquisition so the
+    reservation can be released before any new FFmpeg process starts.
+    """
+    if preempt_check is None:
+        semaphore.acquire()
+        return
+
+    while True:
+        if _preemption_requested(preempt_check):
+            raise StreamProbePreempted()
+        if not semaphore.acquire(timeout=PROBE_PREEMPT_POLL_SECONDS):
+            continue
+
+        keep_slot = False
+        try:
+            if _preemption_requested(preempt_check):
+                raise StreamProbePreempted()
+            keep_slot = True
+            return
+        finally:
+            if not keep_slot:
+                semaphore.release()
+
+
+def _sleep_with_preemption(
+    duration: float,
+    preempt_check: Optional[Callable[[], bool]],
+) -> None:
+    """Sleep between attempts while a reserved provider slot stays preemptible."""
+    delay = max(0.0, float(duration or 0.0))
+    if preempt_check is None:
+        time.sleep(delay)
+        return
+
+    deadline = time.monotonic() + delay
+    while True:
+        if _preemption_requested(preempt_check):
+            raise StreamProbePreempted()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(PROBE_PREEMPT_POLL_SECONDS, remaining))
 
 
 # FourCC to common codec name mapping
@@ -469,6 +535,13 @@ def _run_ffmpeg_with_optional_fallback(
                 text=text
             )
 
+        # Do not open a provider connection when viewer capacity is already
+        # waiting.  The polling loop below covers viewers that arrive after the
+        # process starts; this first check also covers commands that exit before
+        # the loop gets a chance to poll them.
+        if _preemption_requested(preempt_check):
+            raise StreamProbePreempted()
+
         process = subprocess.Popen(
             command_to_run,
             stdout=stdout,
@@ -481,7 +554,7 @@ def _run_ffmpeg_with_optional_fallback(
 
         try:
             while process.poll() is None:
-                if preempt_check():
+                if _preemption_requested(preempt_check):
                     preempted = True
                     process.terminate()
                     break
@@ -489,17 +562,37 @@ def _run_ffmpeg_with_optional_fallback(
                     timed_out = True
                     process.kill()
                     break
-                time.sleep(0.5)
+                time.sleep(PROBE_PREEMPT_POLL_SECONDS)
+
+            if preempted:
+                try:
+                    process.communicate(timeout=PROBE_PREEMPT_PROCESS_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.communicate(timeout=PROBE_PREEMPT_PROCESS_GRACE_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        logger.error(
+                            "Provider probe process did not exit within the bounded "
+                            "preemption cleanup window"
+                        )
+                raise StreamProbePreempted()
 
             try:
                 stdout_data, stderr_data = process.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 process.kill()
-                stdout_data, stderr_data = process.communicate()
+                try:
+                    stdout_data, stderr_data = process.communicate(
+                        timeout=PROBE_PREEMPT_PROCESS_GRACE_SECONDS
+                    )
+                except subprocess.TimeoutExpired:
+                    logger.error(
+                        "Provider probe process did not exit within the bounded timeout cleanup window"
+                    )
+                    stdout_data, stderr_data = '', ''
                 timed_out = True
 
-            if preempted:
-                raise StreamProbePreempted()
             if timed_out:
                 raise subprocess.TimeoutExpired(
                     command_to_run,
@@ -516,6 +609,12 @@ def _run_ffmpeg_with_optional_fallback(
         finally:
             if process.poll() is None:
                 process.kill()
+                try:
+                    process.wait(timeout=PROBE_PREEMPT_PROCESS_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    logger.error(
+                        "Provider probe process remained alive after the bounded final cleanup window"
+                    )
 
     try:
         result = _run(command)
@@ -1145,6 +1244,7 @@ def _ffprobe_media_fallback(
     timeout: int,
     user_agent: str,
     reason: str,
+    preempt_check: Optional[Callable[[], bool]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Use ffprobe as a narrow media-presence fallback after ffmpeg is inconclusive.
 
@@ -1168,13 +1268,18 @@ def _ffprobe_media_fallback(
 
     start = time.time()
     try:
-        result = subprocess.run(
+        result = _run_ffmpeg_with_optional_fallback(
             command,
+            fallback_command=None,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             timeout=max(5, timeout),
             text=True,
+            context="ffprobe media fallback",
+            preempt_check=preempt_check,
         )
+    except StreamProbePreempted:
+        raise
     except subprocess.TimeoutExpired:
         logger.warning("  [ffprobe fallback] Timeout while validating media presence")
         return None
@@ -1408,7 +1513,13 @@ def _run_visual_detection_probe(
     visual_timeout = timeout + visual_duration + stream_startup_buffer
     try:
         start = time.time()
-        with _VISUAL_PROBE_SEMAPHORE:
+        visual_slot_acquired = False
+        try:
+            _acquire_semaphore_with_preemption(
+                _VISUAL_PROBE_SEMAPHORE,
+                preempt_check,
+            )
+            visual_slot_acquired = True
             visual_result = _run_ffmpeg_with_optional_fallback(
                 command,
                 fallback_command=fallback_command,
@@ -1419,6 +1530,9 @@ def _run_visual_detection_probe(
                 context="visual stream analysis",
                 preempt_check=preempt_check,
             )
+        finally:
+            if visual_slot_acquired:
+                _VISUAL_PROBE_SEMAPHORE.release()
         elapsed = time.time() - start
         result_data['visual_probe_elapsed_time'] = elapsed
         result_data['visual_probe_completed'] = visual_result.returncode == 0
@@ -1931,12 +2045,23 @@ def get_stream_info_and_bitrate(
 
     except subprocess.TimeoutExpired:
         logger.warning(f"Timeout ({actual_timeout}s) while analyzing stream")
-        fallback = _ffprobe_media_fallback(
-            url,
-            timeout=min(max(timeout, 10), 20),
-            user_agent=user_agent,
-            reason='ffmpeg_timeout',
-        )
+        try:
+            fallback = _ffprobe_media_fallback(
+                url,
+                timeout=min(max(timeout, 10), 20),
+                user_agent=user_agent,
+                reason='ffmpeg_timeout',
+                preempt_check=preempt_check,
+            )
+        except StreamProbePreempted:
+            logger.info(
+                "FFprobe media fallback preempted because viewer capacity is needed"
+            )
+            result_data['status'] = "PREEMPTED"
+            result_data['preempted'] = True
+            result_data['preempt_reason'] = 'viewer_preempted'
+            result_data['elapsed_time'] = time.time() - start if 'start' in locals() else 0
+            return result_data
         if fallback:
             result_data.update(fallback)
             result_data['elapsed_time'] = actual_timeout + float(
@@ -2608,7 +2733,30 @@ def analyze_stream(
                     )
                 else:
                     logger.info(f"  Retry {attempt + 1}/{total_attempts} for {stream_audit_ref}")
-                time.sleep(retry_delay)
+                try:
+                    _sleep_with_preemption(retry_delay, preempt_check)
+                except StreamProbePreempted:
+                    logger.info(
+                        f"  {stream_audit_ref}: Retry wait preempted for active viewer capacity"
+                    )
+                    result.update({
+                        'status': 'PREEMPTED',
+                        'preempted': True,
+                        'preempt_reason': 'viewer_preempted',
+                        'elapsed_time': 0,
+                        'attempt': attempt,
+                        'attempts': attempt,
+                        'max_attempts': total_attempts,
+                        'stage': 'stream analysis retry wait',
+                        'quality_reason': None,
+                        'quality_reason_detail': None,
+                        'quality_reason_context': {},
+                        'measurement_incomplete': False,
+                        'measurement_incomplete_reason': 'none',
+                        'measurement_incomplete_context': {},
+                        'bitrate_recheck_required': False,
+                    })
+                    return result
 
             try:
                 if logger.isEnabledFor(logging.DEBUG):
