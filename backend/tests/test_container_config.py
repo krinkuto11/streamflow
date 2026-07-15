@@ -25,6 +25,24 @@ def test_dockerfile_installs_the_hashed_production_lock():
     assert "COPY backend/requirements.txt ." not in content
 
 
+def test_production_lock_overrides_base_setuptools_with_hashed_pin():
+    requirements = (BACKEND_DIR / "requirements.txt").read_text(encoding="utf-8")
+    lock = (BACKEND_DIR / "requirements.lock").read_text(encoding="utf-8")
+    test_lock = (BACKEND_DIR / "requirements-test.lock").read_text(encoding="utf-8")
+
+    assert "setuptools==83.0.0" in requirements
+    for compiled_lock in (lock, test_lock):
+        assert "setuptools==83.0.0" in compiled_lock
+        assert (
+            "sha256:025bccbbf0fa05b6192bc64ae1e7b16e001fd6d6d4d5de03c97b1c1ade523bef"
+            in compiled_lock
+        )
+        assert (
+            "sha256:29b23c360f22f414dc7336bb39178cc7bcbf6021ed2733cde173f09dba19abb3"
+            in compiled_lock
+        )
+
+
 def test_test_workflow_installs_locks_and_audits_dependencies():
     content = (REPO_ROOT / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
 

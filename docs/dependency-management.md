@@ -13,11 +13,17 @@ Regenerate both locks with Python 3.11 and `pip-tools 7.5.3`:
 python -m pip install pip-tools==7.5.3
 python -m piptools compile backend/requirements.txt \
   --output-file backend/requirements.lock --generate-hashes --strip-extras \
-  --resolver backtracking --newline lf --no-emit-index-url --no-emit-trusted-host --upgrade
+  --resolver backtracking --newline lf --no-emit-index-url --no-emit-trusted-host \
+  --allow-unsafe --upgrade
 python -m piptools compile backend/requirements.txt backend/requirements-dev.txt \
   --output-file backend/requirements-test.lock --generate-hashes --strip-extras \
-  --resolver backtracking --newline lf --no-emit-index-url --no-emit-trusted-host --upgrade
+  --resolver backtracking --newline lf --no-emit-index-url --no-emit-trusted-host \
+  --allow-unsafe --upgrade
 ```
+
+`--allow-unsafe` is intentional: the production input pins `setuptools` so the
+container replaces vulnerable vendored build tooling inherited from the Python
+base image, and both lock files must retain that reviewed version and its hashes.
 
 Verify a regenerated lock before committing it:
 
