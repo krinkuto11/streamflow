@@ -2530,6 +2530,7 @@ class SmartStreamScheduler:
         stagger_delay: float = 0.0,
         abort_event: Optional[threading.Event] = None,
         provider_wait_timeout: Optional[float] = 300.0,
+        capacity_transition_lock: Optional[Any] = None,
         **check_params
     ) -> List[Dict[str, Any]]:
         """
@@ -2550,6 +2551,10 @@ class SmartStreamScheduler:
                 externally unavailable (for example active viewers/profile capacity).
                 StreamFlow-owned checker saturation waits until a probe slot frees
                 instead of skipping streams from the same provider.
+            capacity_transition_lock: Optional re-entrant lock shared with progress
+                publication. Reservation/start and release/terminal transitions run
+                under this boundary so a heartbeat cannot mix stream rows and profile
+                slots from different capacity generations.
             **check_params: Additional parameters for check_function
             
         Returns:
@@ -2590,6 +2595,13 @@ class SmartStreamScheduler:
         results = []
         completed_count = 0
         lock = threading.Lock()
+
+        def capacity_transition_context():
+            return (
+                capacity_transition_lock
+                if capacity_transition_lock is not None
+                else nullcontext()
+            )
         
         # Submit all stream coordination tasks so a saturated account cannot block
         # the scheduling thread from reaching later streams on providers with free
@@ -2699,6 +2711,149 @@ class SmartStreamScheduler:
                             self.account_limiter.release_viewer_preemption_claim(preemption_token)
                             preemption_claimed = False
 
+                    def try_start_probe():
+                        """Atomically reserve capacity and publish the matching start row."""
+                        nonlocal acquired_account, acquired_profile
+                        nonlocal acquired_stream_url, acquired_global
+
+                        with capacity_transition_context():
+                            if abort_event and abort_event.is_set():
+                                return False, 'aborted', None
+
+                            acquired_account, start_reason = self.account_limiter.acquire(
+                                account_id,
+                                timeout=0,
+                            )
+                            if not acquired_account:
+                                return False, start_reason, None
+
+                            (
+                                profile_acquired,
+                                start_reason,
+                                acquired_profile,
+                                acquired_stream_url,
+                            ) = self.account_limiter.reserve_profile_for_stream_with_url(
+                                stream
+                            )
+                            if not profile_acquired:
+                                release_current_reservation()
+                                return False, start_reason, None
+
+                            acquired_global = global_probe_slots.acquire(blocking=False)
+                            if not acquired_global:
+                                release_current_reservation()
+                                return False, 'global_worker_limit', None
+
+                            if abort_event and abort_event.is_set():
+                                release_current_reservation()
+                                return False, 'aborted', None
+
+                            if not isinstance(acquired_stream_url, str) or not acquired_stream_url:
+                                logger.error(
+                                    "Reserved profile for stream %s without a usable URL",
+                                    stream.get('id'),
+                                )
+                                release_current_reservation()
+                                return (
+                                    False,
+                                    'profile_url_incompatible',
+                                    provider_wait_result('profile_url_incompatible'),
+                                )
+
+                            if start_callback:
+                                try:
+                                    with lock:
+                                        start_callback(stream, acquired_profile)
+                                except Exception as e:
+                                    logger.error(
+                                        "Error in start_callback for stream %s: %s",
+                                        stream['id'],
+                                        e,
+                                    )
+                                    raise
+
+                            if abort_event and abort_event.is_set():
+                                release_current_reservation()
+                                return False, 'aborted', None
+                            return True, None, None
+
+                    def finalize_completion():
+                        """Release capacity and publish the matching terminal row atomically."""
+                        nonlocal completed_count
+
+                        with capacity_transition_context():
+                            release_current_reservation()
+                            release_current_preemption_claim()
+
+                            completion_result = result
+                            if completion_result is not None and (
+                                not isinstance(completion_result, dict)
+                                or completion_result.get('stream_id') != stream['id']
+                            ):
+                                logger.error(
+                                    "Stream analysis worker returned an invalid result (%s) "
+                                    "for stream %s",
+                                    (
+                                        'type'
+                                        if not isinstance(completion_result, dict)
+                                        else 'stream identity'
+                                    ),
+                                    stream['id'],
+                                )
+                                completion_result = None
+                            with lock:
+                                if completion_result is not None:
+                                    results.append(completion_result)
+                                elif not retrying_after_preempt and not (
+                                    abort_event and abort_event.is_set()
+                                ):
+                                    completion_result = {
+                                        'stream_id': stream['id'],
+                                        'stream_name': stream.get('name', 'Unknown'),
+                                        'stream_url': stream.get('url', ''),
+                                        'status': 'ERROR',
+                                        'resolution': '0x0',
+                                        'bitrate_kbps': 0,
+                                        'fps': 0,
+                                        'video_codec': 'N/A',
+                                        'audio_codec': 'N/A',
+                                        'quality_reason': 'offline',
+                                        'quality_reason_detail': 'error',
+                                        'quality_reason_context': {
+                                            'stage': 'stream analysis',
+                                            'message': (
+                                                'Stream analysis worker returned no result'
+                                            ),
+                                        },
+                                    }
+                                    results.append(completion_result)
+
+                                if completion_result is not None:
+                                    completed_count += 1
+                                    current_completed = completed_count
+                                else:
+                                    current_completed = completed_count
+
+                            if not retrying_after_preempt:
+                                logger.debug(
+                                    f"Completed {current_completed}/{total_streams}: "
+                                    f"Stream {stream['id']} - {stream.get('name', 'Unknown')}"
+                                )
+
+                            if progress_callback and completion_result is not None:
+                                try:
+                                    progress_callback(
+                                        current_completed,
+                                        total_streams,
+                                        completion_result,
+                                    )
+                                except Exception as e:
+                                    logger.error(
+                                        "Error in progress_callback for stream %s: %s",
+                                        stream['id'],
+                                        e,
+                                    )
+
                     try:
                         while True:
                             if abort_event and abort_event.is_set():
@@ -2712,64 +2867,24 @@ class SmartStreamScheduler:
                             can_run, reason = (True, None)
 
                             if can_run:
-                                acquired_account, reason = self.account_limiter.acquire(account_id, timeout=0)
-                                if acquired_account:
-                                    profile_acquired, reason, acquired_profile, acquired_stream_url = (
-                                        self.account_limiter.reserve_profile_for_stream_with_url(stream)
-                                    )
-                                    if not profile_acquired:
-                                        self.account_limiter.release(account_id)
-                                        acquired_account = False
-                                        acquired_profile = None
-                                        acquired_stream_url = None
-                                        wait_reason = self._normalize_wait_reason(reason)
-                                        if defer_callback:
-                                            try:
-                                                with lock:
-                                                    defer_callback(stream, wait_reason)
-                                            except Exception as e:
-                                                logger.error(f"Error in defer_callback for stream {stream['id']}: {e}")
-
-                                        if wait_reason in {
-                                            'profile_url_incompatible',
-                                            'provider_profile_unavailable',
-                                        }:
-                                            result = provider_wait_result(wait_reason)
-                                            return result
-
-                                        if (
-                                            provider_wait_timeout is not None
-                                            and not self._is_internal_capacity_wait(wait_reason)
-                                        ):
-                                            elapsed = time.time() - wait_started
-                                            if elapsed >= provider_wait_timeout:
-                                                logger.warning(
-                                                    f"Provider capacity wait timed out for stream {stream['id']} "
-                                                    f"after {elapsed:.1f}s: {wait_reason}"
-                                                )
-                                                result = provider_wait_result(final_wait_reason(wait_reason))
-                                                return result
-
-                                        time.sleep(0.5)
-                                        continue
-
-                                    acquired_global = global_probe_slots.acquire(blocking=False)
-                                    if acquired_global:
-                                        break
-                                    self.account_limiter.release_profile(acquired_profile)
-                                    acquired_profile = None
-                                    acquired_stream_url = None
-                                    self.account_limiter.release(account_id)
-                                    acquired_account = False
-                                    reason = 'global_worker_limit'
+                                started, reason, immediate_result = try_start_probe()
+                                if immediate_result is not None:
+                                    result = immediate_result
+                                    return result
+                                if started:
+                                    break
+                                if reason == 'aborted':
+                                    return None
 
                             wait_reason = self._normalize_wait_reason(reason)
                             if defer_callback:
                                 try:
-                                    with lock:
-                                        defer_callback(stream, wait_reason)
+                                    with capacity_transition_context():
+                                        with lock:
+                                            defer_callback(stream, wait_reason)
                                 except Exception as e:
                                     logger.error(f"Error in defer_callback for stream {stream['id']}: {e}")
+                                    raise
 
                             if wait_reason in {
                                 'profile_url_incompatible',
@@ -2793,6 +2908,9 @@ class SmartStreamScheduler:
 
                             time.sleep(0.5)
 
+                        if abort_event and abort_event.is_set():
+                            return None
+
                         # The URL was resolved while reserving this exact profile.
                         # Never transform again here: doing so could reselect or
                         # fall back to another credential after capacity was taken.
@@ -2804,15 +2922,6 @@ class SmartStreamScheduler:
                             )
                             result = provider_wait_result('profile_url_incompatible')
                             return result
-
-                        # Notify that this stream has acquired a slot and is starting.
-                        # Lock protects stream_statuses which is shared across worker threads.
-                        if start_callback:
-                            try:
-                                with lock:
-                                    start_callback(stream, acquired_profile)
-                            except Exception as e:
-                                logger.error(f"Error in start_callback for stream {stream['id']}: {e}")
 
                         preempt_logged = False
 
@@ -2854,69 +2963,22 @@ class SmartStreamScheduler:
                                 stream.get('id'),
                             )
                             result = None
-                            release_current_reservation()
-                            release_current_preemption_claim()
                             wait_reason = 'viewer_preempted'
-                            if defer_callback:
-                                try:
-                                    with lock:
-                                        defer_callback(stream, wait_reason)
-                                except Exception as e:
-                                    logger.error(f"Error in defer_callback for stream {stream['id']}: {e}")
+                            with capacity_transition_context():
+                                release_current_reservation()
+                                release_current_preemption_claim()
+                                if defer_callback:
+                                    try:
+                                        with lock:
+                                            defer_callback(stream, wait_reason)
+                                    except Exception as e:
+                                        logger.error(f"Error in defer_callback for stream {stream['id']}: {e}")
+                                        raise
                             retrying_after_preempt = True
                             return wrapped_check(preempted_for_viewer=True)
                         return result
                     finally:
-                        # Release account slot immediately when stream finishes
-                        release_current_reservation()
-                        release_current_preemption_claim()
-
-                        # Fire progress callback from the worker thread the instant the
-                        # stream completes — before the submission loop has finished
-                        # stagger-sleeping through remaining streams. This is what makes
-                        # the live grid update in real time for large stream counts.
-                        with lock:
-                            if result is not None:
-                                results.append(result)
-                            elif not retrying_after_preempt and not (abort_event and abort_event.is_set()):
-                                results.append({
-                                    'stream_id': stream['id'],
-                                    'stream_name': stream.get('name', 'Unknown'),
-                                    'stream_url': stream.get('url', ''),
-                                    'status': 'ERROR',
-                                    'resolution': '0x0',
-                                    'bitrate_kbps': 0,
-                                    'fps': 0,
-                                    'video_codec': 'N/A',
-                                    'audio_codec': 'N/A',
-                                    'quality_reason': 'offline',
-                                    'quality_reason_detail': 'error',
-                                    'quality_reason_context': {
-                                        'stage': 'stream analysis',
-                                        'message': 'Stream analysis worker returned no result',
-                                    },
-                                })
-                            if result is not None or (
-                                not retrying_after_preempt
-                                and not (abort_event and abort_event.is_set())
-                            ):
-                                nonlocal completed_count
-                                completed_count += 1
-                                current_completed = completed_count
-                            else:
-                                current_completed = completed_count
-
-                        if not retrying_after_preempt:
-                            logger.debug(
-                                f"Completed {current_completed}/{total_streams}: "
-                                f"Stream {stream['id']} - {stream.get('name', 'Unknown')}"
-                            )
-
-                        if progress_callback and result is not None:
-                            try:
-                                progress_callback(current_completed, total_streams, result)
-                            except Exception as e:
-                                logger.error(f"Error in progress_callback for stream {stream['id']}: {e}")
+                        finalize_completion()
 
                 # Submit to executor
                 future = executor.submit(wrapped_check)

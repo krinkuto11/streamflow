@@ -722,7 +722,70 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
     transition_blocked = threading.Event()
     release_transition = threading.Event()
     heartbeat_seen = threading.Event()
+    reserve_boundary_open = threading.Event()
+    release_boundary_open = threading.Event()
+    heartbeat_attempted_during_reserve = threading.Event()
+    heartbeat_attempted_during_release = threading.Event()
+    heartbeat_boundary_locks = {'reserve': None, 'release': None}
     original_reserved_profile = limiter_module.ReservedProfile
+    original_rlock = threading.RLock
+
+    class ObservableRLock:
+        """Expose a heartbeat lock attempt without weakening the real lock."""
+
+        def __init__(self, *args, **kwargs):
+            self._lock = original_rlock(*args, **kwargs)
+            self._owner_lock = original_rlock()
+            self.owner_thread_id = None
+            self.depth = 0
+
+        def acquire(self, *args, **kwargs):
+            if threading.current_thread().name == 'stream-checker-heartbeat':
+                if reserve_boundary_open.is_set():
+                    heartbeat_boundary_locks['reserve'] = self
+                    heartbeat_attempted_during_reserve.set()
+                if release_boundary_open.is_set():
+                    heartbeat_boundary_locks['release'] = self
+                    heartbeat_attempted_during_release.set()
+            acquired = self._lock.acquire(*args, **kwargs)
+            if acquired:
+                thread_id = threading.get_ident()
+                with self._owner_lock:
+                    if self.owner_thread_id == thread_id:
+                        self.depth += 1
+                    else:
+                        assert self.owner_thread_id is None
+                        assert self.depth == 0
+                        self.owner_thread_id = thread_id
+                        self.depth = 1
+            return acquired
+
+        def release(self):
+            thread_id = threading.get_ident()
+            with self._owner_lock:
+                assert self.owner_thread_id == thread_id
+                assert self.depth > 0
+                self.depth -= 1
+                if self.depth == 0:
+                    self.owner_thread_id = None
+            return self._lock.release()
+
+        def held_by_current_thread(self):
+            with self._owner_lock:
+                return (
+                    self.owner_thread_id == threading.get_ident()
+                    and self.depth > 0
+                )
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            self.release()
+
+        def __getattr__(self, name):
+            return getattr(self._lock, name)
 
     class BlockingReservedProfile(original_reserved_profile):
         """Pause after the safe id is written but before name/limit are written."""
@@ -800,6 +863,7 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
             return_value='http://localhost:9191',
         ),
         patch.object(limiter_module, 'ReservedProfile', BlockingReservedProfile),
+        patch.object(service_module.threading, 'RLock', ObservableRLock),
         patch.object(
             service_module,
             '_STREAM_STATUS_HEARTBEAT_INTERVAL_SECONDS',
@@ -808,22 +872,69 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
     ):
         limiter = get_account_limiter()
         limiter.udi_manager = udi
-        service = StreamCheckerService()
-        _configure_bitrate_runtime_service(
-            service,
-            {'channels': {}, 'last_global_check': None},
-        )
-        service.progress.update = record_progress
-        result = service._check_channel_concurrent(
-            channel_id,
-            force_check_override=False,
-        )
+        original_reserve = limiter.reserve_profile_for_stream_with_url
+        original_release = limiter.release_profile
+
+        def reserve_with_heartbeat_gap(*args, **kwargs):
+            reservation = original_reserve(*args, **kwargs)
+            if reservation[0]:
+                reserve_boundary_open.set()
+                assert heartbeat_attempted_during_reserve.wait(timeout=2), (
+                    'heartbeat did not attempt the reserve-to-start boundary'
+                )
+                boundary_lock = heartbeat_boundary_locks['reserve']
+                assert isinstance(boundary_lock, ObservableRLock)
+                assert boundary_lock.held_by_current_thread()
+                assert boundary_lock.owner_thread_id == threading.get_ident()
+                assert boundary_lock.depth > 0
+                reserve_boundary_open.clear()
+            return reservation
+
+        def release_with_heartbeat_gap(reserved_profile):
+            original_release(reserved_profile)
+            if reserved_profile:
+                release_boundary_open.set()
+                assert heartbeat_attempted_during_release.wait(timeout=2), (
+                    'heartbeat did not attempt the release-to-terminal boundary'
+                )
+                boundary_lock = heartbeat_boundary_locks['release']
+                assert isinstance(boundary_lock, ObservableRLock)
+                assert boundary_lock.held_by_current_thread()
+                assert boundary_lock.owner_thread_id == threading.get_ident()
+                assert boundary_lock.depth > 0
+                release_boundary_open.clear()
+
+        with (
+            patch.object(
+                limiter,
+                'reserve_profile_for_stream_with_url',
+                side_effect=reserve_with_heartbeat_gap,
+            ),
+            patch.object(
+                limiter,
+                'release_profile',
+                side_effect=release_with_heartbeat_gap,
+            ),
+        ):
+            service = StreamCheckerService()
+            _configure_bitrate_runtime_service(
+                service,
+                {'channels': {}, 'last_global_check': None},
+            )
+            service.progress.update = record_progress
+            result = service._check_channel_concurrent(
+                channel_id,
+                force_check_override=False,
+            )
 
     release_thread.join(timeout=2)
     assert not release_thread.is_alive()
     assert 'error' not in result
     assert transition_blocked.is_set()
     assert heartbeat_seen.is_set()
+    assert heartbeat_attempted_during_reserve.is_set()
+    assert heartbeat_attempted_during_release.is_set()
+    assert heartbeat_boundary_locks['reserve'] is heartbeat_boundary_locks['release']
 
     heartbeat_updates = [
         update
@@ -856,6 +967,26 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
     slot_rows = heartbeat_updates[0]['provider_profile_slots']['1']
     assert {row['id']: row['limit'] for row in slot_rows} == {301: 2, 302: 2}
 
+    capacity_updates = [
+        update
+        for update in progress_updates
+        if update.get('streams_detail')
+        and update.get('provider_profile_slots', {}).get('1')
+    ]
+    assert any(
+        update['streams_detail'][0]['status'] == 'completed'
+        for update in capacity_updates
+    )
+    for update in capacity_updates:
+        stream_status = update['streams_detail'][0]['status']
+        capacity_counted_checking = sum(
+            int(slot.get('checking') or 0)
+            for slot in update['provider_profile_slots']['1']
+            if slot.get('capacity_counted') is True
+        )
+        expected_checking = 1 if stream_status == 'checking' else 0
+        assert capacity_counted_checking == expected_checking, update
+
     serialized_progress = json.dumps(progress_updates, sort_keys=True)
     for secret_fragment in (
         stream['url'],
@@ -866,6 +997,163 @@ def test_heartbeat_snapshot_is_atomic_and_reports_effective_shared_route_limit()
         'shared-pass',
     ):
         assert secret_fragment not in serialized_progress
+
+
+@pytest.mark.parametrize('failure_stage', ('classification', 'publish'))
+def test_progress_failure_republishes_new_non_active_revision(failure_stage):
+    from apps.stream.concurrent_stream_limiter import get_account_limiter
+    from apps.stream.stream_checker_service import StreamCheckerService
+
+    channel_id = 113
+    stream = {
+        'id': 2201,
+        'name': f'{failure_stage} progress failure',
+        'url': 'http://provider.invalid/live/2201.ts',
+        'm3u_account': 1,
+        'stream_stats': {},
+    }
+    analysis_result = {
+        'stream_id': stream['id'],
+        'stream_name': stream['name'],
+        'stream_url': stream['url'],
+        'status': 'OK',
+        'resolution': '1920x1080',
+        'fps': 30,
+        'video_codec': 'h264',
+        'audio_codec': 'aac',
+        'bitrate_kbps': 5000,
+        'blank_probe_ran': True,
+        'blank_detected': False,
+        'freeze_probe_ran': True,
+        'freeze_detected': False,
+    }
+    udi = _make_bitrate_runtime_udi(channel_id, [stream])
+    automation_config = MagicMock()
+    automation_config.get_profile.return_value = None
+    automation_config.get_effective_configuration.return_value = {
+        'profile': None,
+        'periods': [],
+    }
+    publish_attempts = []
+    published_updates = []
+    failed_terminal_publish = {'value': False}
+
+    def record_progress(**kwargs):
+        snapshot = deepcopy(kwargs)
+        publish_attempts.append(snapshot)
+        if (
+            failure_stage == 'publish'
+            and kwargs.get('step_detail') == 'Completed 1/1'
+            and not failed_terminal_publish['value']
+        ):
+            failed_terminal_publish['value'] = True
+            raise RuntimeError('synthetic terminal progress publish failure')
+        published_updates.append(snapshot)
+        return True
+
+    with (
+        patch('apps.stream.stream_checker_service.get_udi_manager', return_value=udi),
+        patch(
+            'apps.stream.stream_checker_service.get_automation_config_manager',
+            return_value=automation_config,
+        ),
+        patch(
+            'apps.stream.stream_checker_service.fetch_channel_streams',
+            return_value=[stream],
+        ),
+        patch(
+            'apps.stream.stream_checker_service.analyze_stream',
+            return_value=analysis_result,
+        ),
+        patch('apps.stream.stream_checker_service.update_channel_streams'),
+        patch(
+            'apps.stream.stream_checker_service.batch_update_stream_stats',
+            return_value=(1, 0),
+        ) as mock_batch_update,
+        patch(
+            'apps.stream.stream_checker_service._get_base_url',
+            return_value='http://localhost:9191',
+        ),
+    ):
+        limiter = get_account_limiter()
+        limiter.udi_manager = udi
+        service = StreamCheckerService()
+        _configure_bitrate_runtime_service(
+            service,
+            {'channels': {}, 'last_global_check': None},
+        )
+        service._require_quality_check_connectivity = Mock(return_value=None)
+        service.progress.update = record_progress
+
+        if failure_stage == 'classification':
+            original_calculate_score = service._calculate_stream_score
+            score_calls = {'count': 0}
+
+            def fail_first_score(*args, **kwargs):
+                score_calls['count'] += 1
+                if score_calls['count'] == 1:
+                    raise RuntimeError('synthetic progress classification failure')
+                return original_calculate_score(*args, **kwargs)
+
+            service._calculate_stream_score = fail_first_score
+
+        result = service._check_channel_concurrent(
+            channel_id,
+            force_check_override=False,
+        )
+
+    assert 'error' not in result
+    assert analysis_result['status'] == 'OK'
+    assert analysis_result['quality_reason'] == 'none'
+    assert analysis_result['quality_reason_detail'] == 'none'
+    assert limiter.account_checking_counts.get(1, 0) == 0
+
+    terminal_step = (
+        'Closed failed progress 1/1'
+        if failure_stage == 'classification'
+        else 'Republished terminal progress 1/1'
+    )
+    terminal_updates = [
+        update
+        for update in published_updates
+        if update.get('step_detail') == terminal_step
+    ]
+    assert len(terminal_updates) == 1
+    terminal_update = terminal_updates[0]
+    terminal_row = terminal_update['streams_detail'][0]
+    if failure_stage == 'classification':
+        assert terminal_row['status'] == 'error'
+        assert terminal_row['reason_detail'] == 'progress_callback_error'
+        assert terminal_row['quality_reason'] == 'offline'
+        assert terminal_row['quality_reason_context']['stage'] == 'stream progress'
+    else:
+        assert terminal_row['status'] == 'completed'
+        assert terminal_row['quality_reason'] == 'none'
+        assert terminal_row['quality_reason_context'] == {}
+    assert sum(
+        int(slot.get('checking') or 0)
+        for slot in terminal_update.get('provider_profile_slots', {}).get('1', [])
+        if slot.get('capacity_counted') is True
+    ) == 0
+    assert not any(
+        row.get('status') in {'checking', 'rechecking_bitrate'}
+        for update in published_updates[published_updates.index(terminal_update):]
+        for row in update.get('streams_detail') or []
+    )
+
+    if failure_stage == 'publish':
+        assert failed_terminal_publish['value'] is True
+        attempted_steps = [
+            update.get('step_detail') for update in publish_attempts
+        ]
+        assert attempted_steps.index('Completed 1/1') < attempted_steps.index(
+            'Republished terminal progress 1/1'
+        )
+
+    mock_batch_update.assert_called_once()
+    persisted_stats = mock_batch_update.call_args.args[0][0]['stream_stats']
+    assert persisted_stats['quality_reason'] == 'none'
+    assert persisted_stats['quality_reason_detail'] == 'none'
 
 
 def test_loop_probe_fully_protected_target_uses_empty_status_snapshot():
@@ -943,7 +1231,13 @@ def test_loop_probe_fully_protected_target_uses_empty_status_snapshot():
     assert loop_call.kwargs['streams_detail'] == []
 
 
-def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
+@pytest.mark.parametrize(
+    'recheck_failure_stage',
+    (None, 'classification', 'publish'),
+)
+def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags(
+    recheck_failure_stage,
+):
     from apps.stream.stream_checker_service import StreamCheckerService
     from apps.stream.concurrent_stream_limiter import get_account_limiter
 
@@ -1054,8 +1348,23 @@ def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
         'measurement_incomplete_context': {},
         'bitrate_recheck_required': False,
     }
+    progress_attempts = []
     progress_updates = []
+    failed_recheck_publish = {'value': False}
     analyzed_urls = []
+
+    def record_progress(**kwargs):
+        snapshot = deepcopy(kwargs)
+        progress_attempts.append(snapshot)
+        if (
+            recheck_failure_stage == 'publish'
+            and kwargs.get('step_detail') == 'Completed serial bitrate recheck 1/1'
+            and not failed_recheck_publish['value']
+        ):
+            failed_recheck_publish['value'] = True
+            raise RuntimeError('synthetic recheck terminal publish failure')
+        progress_updates.append(snapshot)
+        return True
 
     def analyze_with_profile_switch(**kwargs):
         analyzed_urls.append(kwargs['stream_url'])
@@ -1103,9 +1412,27 @@ def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
                 service,
                 {'channels': {}, 'last_global_check': None},
             )
-            service.progress.update = (
-                lambda **kwargs: progress_updates.append(deepcopy(kwargs))
-            )
+            service.progress.update = record_progress
+            failed_recheck_classification = {'value': False}
+            if recheck_failure_stage == 'classification':
+                original_is_stream_dead = service._is_stream_dead
+
+                def fail_first_recovered_classification(
+                    analyzed,
+                    *args,
+                    **kwargs,
+                ):
+                    if (
+                        analyzed.get('bitrate_kbps') == 17870
+                        and not failed_recheck_classification['value']
+                    ):
+                        failed_recheck_classification['value'] = True
+                        raise RuntimeError(
+                            'synthetic recheck classification failure'
+                        )
+                    return original_is_stream_dead(analyzed, *args, **kwargs)
+
+                service._is_stream_dead = fail_first_recovered_classification
 
             result = service._check_channel_concurrent(
                 channel_id,
@@ -1172,32 +1499,69 @@ def test_recovered_bitrate_recheck_updates_live_row_score_and_final_flags():
         key for key in recheck_started_row if key.startswith('reserved_profile_')
     } == expected_reserved_fields
 
+    if recheck_failure_stage == 'classification':
+        terminal_recheck_step = 'Closed failed serial bitrate recheck 1/1'
+    elif recheck_failure_stage == 'publish':
+        terminal_recheck_step = (
+            'Republished terminal serial bitrate recheck 1/1'
+        )
+    else:
+        terminal_recheck_step = 'Completed serial bitrate recheck 1/1'
     recovered_progress = next(
         update
         for update in progress_updates
-        if update.get('step_detail') == 'Completed serial bitrate recheck 1/1'
+        if update.get('step_detail') == terminal_recheck_step
     )
     recovered_row = recovered_progress['streams_detail'][0]
-    assert recovered_row['status'] == 'completed'
-    assert recovered_row['score'] == 1.0
-    assert recovered_row['bitrate'] == 17870
-    assert recovered_row['reason'] == 'none'
-    assert recovered_row['reason_detail'] == 'none'
-    assert recovered_row['quality_reason'] == 'none'
-    assert recovered_row['quality_reason_detail'] == 'none'
-    assert recovered_row['quality_reason_context'] == {}
-    assert recovered_row['measurement_incomplete'] is False
-    assert recovered_row['measurement_incomplete_reason'] == 'none'
-    assert recovered_row['measurement_incomplete_context'] == {}
-    assert recovered_row['bitrate_recheck_required'] is False
-    assert recovered_row['bitrate_recheck_attempted'] is True
-    assert recovered_row['bitrate_recheck_outcome'] == 'recovered'
+    if recheck_failure_stage == 'classification':
+        assert failed_recheck_classification['value'] is True
+        assert recovered_row['status'] == 'error'
+        assert recovered_row['score'] == 0.0
+        assert recovered_row['reason_detail'] == 'bitrate_recheck_progress_error'
+        assert recovered_row['quality_reason'] == 'offline'
+        assert recovered_row['quality_reason_detail'] == 'error'
+        assert recovered_row['quality_reason_context']['stage'] == (
+            'bitrate recheck progress'
+        )
+    else:
+        assert recovered_row['status'] == 'completed'
+        assert recovered_row['score'] == 1.0
+        assert recovered_row['bitrate'] == 17870
+        assert recovered_row['reason'] == 'none'
+        assert recovered_row['reason_detail'] == 'none'
+        assert recovered_row['quality_reason'] == 'none'
+        assert recovered_row['quality_reason_detail'] == 'none'
+        assert recovered_row['quality_reason_context'] == {}
+        assert recovered_row['measurement_incomplete'] is False
+        assert recovered_row['measurement_incomplete_reason'] == 'none'
+        assert recovered_row['measurement_incomplete_context'] == {}
+        assert recovered_row['bitrate_recheck_required'] is False
+        assert recovered_row['bitrate_recheck_attempted'] is True
+        assert recovered_row['bitrate_recheck_outcome'] == 'recovered'
     assert recovered_row['reserved_profile_id'] == 102
     assert recovered_row['reserved_profile_name'] == 'Provider B profile'
     assert recovered_row['reserved_profile_limit'] == 1
     assert {
         key for key in recovered_row if key.startswith('reserved_profile_')
     } == expected_reserved_fields
+    assert sum(
+        int(slot.get('checking') or 0)
+        for slot in recovered_progress.get('provider_profile_slots', {}).get(
+            '1',
+            [],
+        )
+        if slot.get('capacity_counted') is True
+    ) == 0
+    if recheck_failure_stage == 'publish':
+        assert failed_recheck_publish['value'] is True
+        attempted_steps = [
+            update.get('step_detail') for update in progress_attempts
+        ]
+        assert attempted_steps.index(
+            'Completed serial bitrate recheck 1/1'
+        ) < attempted_steps.index(
+            'Republished terminal serial bitrate recheck 1/1'
+        )
 
     serialized_progress = json.dumps(progress_updates, sort_keys=True)
     for probe_url in (stream['url'], *profile_urls.values()):

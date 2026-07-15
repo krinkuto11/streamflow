@@ -4295,8 +4295,13 @@ class StreamCheckerService:
                 # threads. Serialize writes and reject a snapshot overtaken by a
                 # newer transition so an old Profile A row cannot overwrite a
                 # later wait/clear or Profile B row.
-                with stream_status_publish_lock:
-                    with stream_statuses_lock:
+                # The status lock is also the scheduler's capacity-transition
+                # boundary. Take it before the publication lock so heartbeat and
+                # worker publications cannot invert the scheduler callback order.
+                with stream_statuses_lock:
+                    if self.abort_current_check.is_set():
+                        return False
+                    with stream_status_publish_lock:
                         if (
                             revision != stream_status_revision[0]
                             or revision <= last_published_stream_status_revision[0]
@@ -4334,9 +4339,6 @@ class StreamCheckerService:
             
             # Start callback for parallel checker
             def start_callback(stream, profile=None):
-                if self.abort_current_check.is_set():
-                    return
-
                 stream_id = stream.get('id')
                 with stream_statuses_lock:
                     if stream_id not in stream_statuses:
@@ -4366,10 +4368,7 @@ class StreamCheckerService:
                     **profile_progress_context,
                 )
             
-            def progress_callback(completed, total, result):
-                if self.abort_current_check.is_set():
-                    return
-
+            def apply_progress_callback(completed, total, result):
                 stream_name = result.get('stream_name', 'Unknown')
                 stream_id = result.get('stream_id')
 
@@ -4481,10 +4480,74 @@ class StreamCheckerService:
                     **profile_progress_context,
                 )
 
-            def defer_callback(stream, reason):
-                if self.abort_current_check.is_set():
-                    return
+            def progress_callback(completed, total, result):
+                try:
+                    return apply_progress_callback(completed, total, result)
+                except Exception:
+                    # Capacity has already been released when this callback runs.
+                    # Even if scoring/classification or its first publication
+                    # fails, commit a non-active row and a fresh revision so no
+                    # later heartbeat can revive the old checking snapshot.
+                    stream_id = result.get('stream_id')
+                    stream_name = result.get('stream_name', 'Unknown')
+                    logger.exception(
+                        "Failing stream %s closed after progress callback error",
+                        stream_id,
+                    )
+                    fallback_applied = False
+                    with stream_statuses_lock:
+                        completed_count[0] = completed
+                        if stream_id in stream_statuses:
+                            stream_status = dict(stream_statuses[stream_id])
+                            if stream_status.get('status') not in {
+                                'completed',
+                                'incomplete_bitrate',
+                                'provider_limit_wait_timeout',
+                                'viewer_preempted',
+                                'error',
+                                'dead',
+                                'blank',
+                                'freeze',
+                                'low_quality',
+                                'loop_detected',
+                            }:
+                                fallback_applied = True
+                                stream_status['status'] = 'error'
+                                stream_status['score'] = 0.0
+                                stream_status['reason_detail'] = (
+                                    'progress_callback_error'
+                                )
+                                stream_status['quality_reason'] = 'offline'
+                                stream_status['quality_reason_detail'] = 'error'
+                                stream_status['quality_reason_context'] = {
+                                    'stage': 'stream progress',
+                                    'message': (
+                                        'Stream progress finalization failed'
+                                    ),
+                                }
+                            stream_statuses[stream_id] = stream_status
+                        status_revision, streams_snapshot = capture_stream_statuses()
 
+                    return publish_stream_status_progress(
+                        status_revision,
+                        streams_snapshot,
+                        channel_id=channel_id,
+                        channel_name=channel_name,
+                        current=completed,
+                        total=total,
+                        current_stream=stream_name,
+                        status='analyzing',
+                        step='Analyzing streams with account limits',
+                        step_detail=(
+                            f'Closed failed progress {completed}/{total}'
+                            if fallback_applied
+                            else f'Republished terminal progress {completed}/{total}'
+                        ),
+                        stream_duration=analysis_params.get('ffmpeg_duration', 30),
+                        **profile_progress_context,
+                    )
+
+            def defer_callback(stream, reason):
                 stream_id = stream.get('id')
                 with stream_statuses_lock:
                     if stream_id not in stream_statuses:
@@ -4590,6 +4653,7 @@ class StreamCheckerService:
                         stagger_delay=stagger_delay,
                         abort_event=self.abort_current_check,
                         provider_wait_timeout=self.config.get('concurrent_streams.provider_wait_timeout', 300),
+                        capacity_transition_lock=stream_statuses_lock,
                         ffmpeg_duration=analysis_params.get('ffmpeg_duration', 30),
                         timeout=analysis_params.get('timeout', 30),
                         retries=analysis_params.get('retries', 1),
@@ -4625,6 +4689,7 @@ class StreamCheckerService:
                             'concurrent_streams.provider_wait_timeout',
                             300,
                         ),
+                        capacity_transition_lock=stream_statuses_lock,
                         ffmpeg_duration=analysis_params.get('ffmpeg_duration', 30),
                         timeout=analysis_params.get('timeout', 30),
                         retries=0,
@@ -4678,8 +4743,6 @@ class StreamCheckerService:
                         )
 
                 def bitrate_recheck_start_callback(stream, profile=None):
-                    if self.abort_current_check.is_set():
-                        return
                     stream_id = stream.get('id')
                     with stream_statuses_lock:
                         if stream_id not in stream_statuses:
@@ -4714,8 +4777,6 @@ class StreamCheckerService:
                     )
 
                 def bitrate_recheck_defer_callback(stream, reason):
-                    if self.abort_current_check.is_set():
-                        return
                     stream_id = stream.get('id')
                     with stream_statuses_lock:
                         if stream_id not in stream_statuses:
@@ -4748,7 +4809,7 @@ class StreamCheckerService:
                         **profile_progress_context,
                     )
 
-                def bitrate_recheck_completed(initial, outcome, index, total):
+                def apply_bitrate_recheck_completed(initial, outcome, index, total):
                     stream_id = initial.get('stream_id')
                     with stream_statuses_lock:
                         stream_status = (
@@ -4823,6 +4884,89 @@ class StreamCheckerService:
                         stream_duration=analysis_params.get('ffmpeg_duration', 30),
                         **profile_progress_context,
                     )
+
+                def bitrate_recheck_completed(initial, outcome, index, total):
+                    try:
+                        return apply_bitrate_recheck_completed(
+                            initial,
+                            outcome,
+                            index,
+                            total,
+                        )
+                    except Exception:
+                        stream_id = initial.get('stream_id')
+                        stream_name = initial.get('stream_name', 'Unknown')
+                        logger.exception(
+                            "Failing bitrate recheck progress closed for stream %s",
+                            stream_id,
+                        )
+                        fallback_applied = False
+                        with stream_statuses_lock:
+                            if stream_id in stream_statuses:
+                                stream_status = dict(stream_statuses[stream_id])
+                                if stream_status.get('status') not in {
+                                    'completed',
+                                    'incomplete_bitrate',
+                                    'provider_limit_wait_timeout',
+                                    'viewer_preempted',
+                                    'error',
+                                    'dead',
+                                    'blank',
+                                    'freeze',
+                                    'low_quality',
+                                    'loop_detected',
+                                }:
+                                    fallback_applied = True
+                                    stream_status['status'] = 'error'
+                                    stream_status['score'] = 0.0
+                                    stream_status['reason_detail'] = (
+                                        'bitrate_recheck_progress_error'
+                                    )
+                                    stream_status['quality_reason'] = 'offline'
+                                    stream_status['quality_reason_detail'] = 'error'
+                                    stream_status['quality_reason_context'] = {
+                                        'stage': 'bitrate recheck progress',
+                                        'message': (
+                                            'Bitrate recheck progress finalization failed'
+                                        ),
+                                    }
+                                    stream_statuses[stream_id] = stream_status
+                            status_revision, streams_snapshot = (
+                                capture_stream_statuses()
+                            )
+                            current_completed = completed_count[0]
+
+                        try:
+                            return publish_stream_status_progress(
+                                status_revision,
+                                streams_snapshot,
+                                channel_id=channel_id,
+                                channel_name=channel_name,
+                                current=current_completed,
+                                total=total_streams,
+                                current_stream=stream_name,
+                                status='analyzing',
+                                step='Rechecking missing bitrate',
+                                step_detail=(
+                                    'Closed failed serial bitrate recheck '
+                                    f'{index}/{total}'
+                                    if fallback_applied
+                                    else 'Republished terminal serial bitrate recheck '
+                                    f'{index}/{total}'
+                                ),
+                                stream_duration=analysis_params.get(
+                                    'ffmpeg_duration',
+                                    30,
+                                ),
+                                **profile_progress_context,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Could not republish closed bitrate recheck progress "
+                                "for stream %s",
+                                stream_id,
+                            )
+                            return False
 
                 self._run_deferred_bitrate_rechecks(
                     results,

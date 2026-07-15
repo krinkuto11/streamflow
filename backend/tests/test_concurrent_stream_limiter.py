@@ -11,7 +11,7 @@ Tests the AccountStreamLimiter and SmartStreamScheduler to ensure:
 import unittest
 import time
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from unittest.mock import Mock, patch
 import sys
 import os
@@ -3723,7 +3723,176 @@ class TestSmartStreamScheduler(unittest.TestCase):
             StreamCheckConfig.DEFAULT_CONFIG['concurrent_streams']['provider_wait_timeout'],
             180,
         )
-    
+
+    def test_invalid_or_exception_reports_synthetic_terminal_error_to_progress_callback(self):
+        """Workers without a dict result publish the same terminal error returned."""
+        for outcome in (
+            'none',
+            'exception',
+            'string',
+            'list',
+            'missing_id',
+            'wrong_id',
+        ):
+            with self.subTest(outcome=outcome):
+                self.limiter.clear()
+                self.limiter.set_account_limit(1, 1)
+                progress_calls = []
+
+                def mock_check(**_kwargs):
+                    if outcome == 'exception':
+                        raise RuntimeError('synthetic analyzer failure')
+                    return {
+                        'none': None,
+                        'string': 'invalid analyzer result',
+                        'list': [],
+                        'missing_id': {'status': 'OK'},
+                        'wrong_id': {'stream_id': 999, 'status': 'OK'},
+                    }[outcome]
+
+                results = self.scheduler.check_streams_with_limits(
+                    streams=[{
+                        'id': 71,
+                        'name': f'{outcome} analyzer result',
+                        'url': 'http://test.com/71',
+                        'm3u_account': 1,
+                    }],
+                    check_function=mock_check,
+                    progress_callback=lambda completed, total, result: (
+                        progress_calls.append((completed, total, result))
+                    ),
+                )
+
+                self.assertEqual(len(results), 1)
+                self.assertEqual(len(progress_calls), 1)
+                completed, total, callback_result = progress_calls[0]
+                self.assertEqual((completed, total), (1, 1))
+                self.assertIs(callback_result, results[0])
+                self.assertEqual(callback_result['stream_id'], 71)
+                self.assertEqual(callback_result['status'], 'ERROR')
+                self.assertEqual(callback_result['quality_reason'], 'offline')
+                self.assertEqual(
+                    callback_result['quality_reason_context']['stage'],
+                    'stream analysis',
+                )
+                with self.limiter.lock:
+                    self.assertEqual(
+                        self.limiter.account_checking_counts.get(1, 0),
+                        0,
+                    )
+
+    def test_start_or_defer_callback_exception_releases_capacity_and_reports_error(self):
+        """Callback failures terminalize the worker and leave all capacity reusable."""
+        for callback_name in ('start', 'defer'):
+            with self.subTest(callback_name=callback_name):
+                self.limiter.clear()
+                self.limiter.set_account_limit(1, 1)
+                checked = Mock()
+                progress_calls = []
+
+                def fail_callback(*_args, **_kwargs):
+                    raise RuntimeError(f'synthetic {callback_name} callback failure')
+
+                callback_args = {
+                    'start_callback': fail_callback,
+                } if callback_name == 'start' else {
+                    'defer_callback': fail_callback,
+                }
+                reserve_patch = (
+                    patch.object(
+                        self.limiter,
+                        'reserve_profile_for_stream_with_url',
+                        return_value=(False, 'provider_capacity', None, ''),
+                    )
+                    if callback_name == 'defer'
+                    else nullcontext()
+                )
+
+                with reserve_patch:
+                    results = self.scheduler.check_streams_with_limits(
+                        streams=[{
+                            'id': 72,
+                            'name': f'{callback_name} callback failure',
+                            'url': 'http://test.com/72',
+                            'm3u_account': 1,
+                        }],
+                        check_function=checked,
+                        progress_callback=lambda completed, total, result: (
+                            progress_calls.append((completed, total, result))
+                        ),
+                        **callback_args,
+                    )
+
+                self.assertEqual(len(results), 1)
+                self.assertEqual(results[0]['status'], 'ERROR')
+                self.assertEqual(progress_calls, [(1, 1, results[0])])
+                checked.assert_not_called()
+                with self.limiter.lock:
+                    self.assertEqual(
+                        self.limiter.account_checking_counts.get(1, 0),
+                        0,
+                    )
+
+                followup = self.scheduler.check_streams_with_limits(
+                    streams=[{
+                        'id': 73,
+                        'name': 'Capacity reuse probe',
+                        'url': 'http://test.com/73',
+                        'm3u_account': 1,
+                    }],
+                    check_function=lambda **kwargs: {
+                        'stream_id': kwargs['stream_id'],
+                        'status': 'OK',
+                    },
+                )
+                self.assertEqual(followup[0]['status'], 'OK')
+
+    def test_abort_from_start_callback_rolls_back_before_analyzer(self):
+        """An abort racing with start publication releases every reserved slot."""
+        self.limiter.clear()
+        self.limiter.set_account_limit(1, 1)
+        abort_event = threading.Event()
+        checked = Mock()
+        progress_calls = []
+
+        results = self.scheduler.check_streams_with_limits(
+            streams=[{
+                'id': 74,
+                'name': 'Post-start abort',
+                'url': 'http://test.com/74',
+                'm3u_account': 1,
+            }],
+            check_function=checked,
+            start_callback=lambda *_args: abort_event.set(),
+            progress_callback=lambda *args: progress_calls.append(args),
+            abort_event=abort_event,
+            capacity_transition_lock=threading.RLock(),
+        )
+
+        self.assertEqual(results, [])
+        self.assertEqual(progress_calls, [])
+        checked.assert_not_called()
+        with self.limiter.lock:
+            self.assertEqual(
+                self.limiter.account_checking_counts.get(1, 0),
+                0,
+            )
+
+        abort_event.clear()
+        followup = self.scheduler.check_streams_with_limits(
+            streams=[{
+                'id': 75,
+                'name': 'Post-abort capacity reuse',
+                'url': 'http://test.com/75',
+                'm3u_account': 1,
+            }],
+            check_function=lambda **kwargs: {
+                'stream_id': kwargs['stream_id'],
+                'status': 'OK',
+            },
+        )
+        self.assertEqual(followup[0]['status'], 'OK')
+
     def test_progress_callback(self):
         """Test that progress callback is called correctly."""
         self.limiter.set_account_limit(1, 2)
