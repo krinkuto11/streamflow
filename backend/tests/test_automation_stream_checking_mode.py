@@ -129,6 +129,92 @@ class TestAutomationStreamCheckingMode(unittest.TestCase):
             self.assertEqual(manager.forced_period_id, 'period-1')
             self.assertEqual(manager.get_status()['run_status']['state'], 'queued')
 
+    def test_background_scheduler_resumes_same_queued_run_when_checker_clears(self):
+        """A checker clear must reconcile the exact queued run without id churn."""
+        with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
+            manager = AutomatedStreamManager(config_file=self.config_file)
+            manager.automation_running = True
+            manager.last_playlist_update = None
+            manager.refresh_playlists = Mock(return_value=True)
+            manager.discover_and_assign_streams = Mock(return_value={})
+
+            observed_queued = []
+            status_calls = 0
+
+            def checker_status():
+                nonlocal status_calls
+                status_calls += 1
+                if status_calls == 1:
+                    return {
+                        'stream_checking_mode': True,
+                        'checking': True,
+                        'queue': {'queue_size': 1},
+                    }
+                observed_queued.append(manager.get_status()['run_status'])
+                return {
+                    'stream_checking_mode': False,
+                    'checking': False,
+                    'queue': {'queue_size': 0},
+                }
+
+            mock_stream_checker = Mock()
+            mock_stream_checker.get_status.side_effect = checker_status
+            mock_stream_checker.begin_automation_cycle_operation.return_value = True
+
+            with patch(
+                'stream_checker_service.get_stream_checker_service',
+                return_value=mock_stream_checker,
+            ), patch('automated_stream_manager.time.sleep') as mocked_sleep:
+                manager.run_automation_cycle()
+
+            self.assertEqual(status_calls, 2)
+            mocked_sleep.assert_called_once_with(0.25)
+            self.assertEqual(len(observed_queued), 1)
+            queued = observed_queued[0]
+            terminal = manager.get_status()['run_status']
+            self.assertEqual(queued['state'], 'queued')
+            self.assertFalse(queued['active'])
+            self.assertIsNone(queued['completed_at'])
+            self.assertEqual(terminal['run_id'], queued['run_id'])
+            self.assertEqual(terminal['state'], 'completed')
+            mock_stream_checker.begin_automation_cycle_operation.assert_called_once_with()
+            mock_stream_checker.end_automation_cycle_operation.assert_called_once_with()
+            manager.refresh_playlists.assert_called_once_with()
+
+    def test_background_scheduler_stop_terminalizes_queued_checker_wait(self):
+        """Stopping the service cannot leave a stale queued run behind."""
+        with patch('automated_stream_manager.CONFIG_DIR', Path(self.temp_dir)):
+            manager = AutomatedStreamManager(config_file=self.config_file)
+            manager.automation_running = True
+            manager.refresh_playlists = Mock()
+
+            mock_stream_checker = Mock()
+
+            def checker_status():
+                manager.automation_running = False
+                return {
+                    'stream_checking_mode': True,
+                    'checking': True,
+                    'queue': {'queue_size': 1},
+                }
+
+            mock_stream_checker.get_status.side_effect = checker_status
+
+            with patch(
+                'stream_checker_service.get_stream_checker_service',
+                return_value=mock_stream_checker,
+            ):
+                manager.run_automation_cycle(forced=True, forced_period_id='period-1')
+
+            terminal = manager.get_status()['run_status']
+            self.assertEqual(terminal['state'], 'aborted')
+            self.assertEqual(terminal['stage'], 'aborted')
+            self.assertIsNotNone(terminal['completed_at'])
+            self.assertIn('stopped while waiting', terminal['message'])
+            self.assertTrue(manager.force_next_run)
+            self.assertEqual(manager.forced_period_id, 'period-1')
+            manager.refresh_playlists.assert_not_called()
+
     def test_preserve_forced_run_intent_keeps_period_and_full_run_identity(self):
         manager = AutomatedStreamManager.__new__(AutomatedStreamManager)
         manager._trigger_lock = threading.Lock()

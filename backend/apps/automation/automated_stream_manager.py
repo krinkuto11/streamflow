@@ -5687,30 +5687,68 @@ class AutomatedStreamManager:
         automation_checker_reserved = False
         try:
             stream_checker = get_stream_checker_service()
-            status = stream_checker.get_status()
-            if status.get('stream_checking_mode', False):
-                if self._preserve_forced_run_intent(
-                    forced=forced,
-                    forced_period_id=forced_period_id,
-                ):
-                    logger.info(
-                        "Stream checking is active. Queuing forced automation cycle%s.",
-                        f" for period {forced_period_id}" if forced_period_id else "",
+            checker_waiting = False
+            background_wait = bool(getattr(self, 'automation_running', False))
+            while True:
+                status = stream_checker.get_status()
+                checker_active = bool(status.get('stream_checking_mode', False))
+                if not checker_active and stream_checker.begin_automation_cycle_operation():
+                    automation_checker_reserved = True
+                    if checker_waiting:
+                        self._update_run_status(
+                            state="running",
+                            stage="settings",
+                            stage_label="Preparing Automation",
+                            message="Stream checker is idle; resuming queued automation run",
+                        )
+                    break
+
+                queue_message = (
+                    "Stream checker is active; automation run is queued"
+                    if checker_active
+                    else "Stream checker became active; automation run is queued"
+                )
+                if not checker_waiting:
+                    if forced or forced_period_id:
+                        logger.info(
+                            "Stream checking is active. Queuing forced automation cycle%s.",
+                            f" for period {forced_period_id}" if forced_period_id else "",
+                        )
+                    else:
+                        logger.info(
+                            "Stream checking is active. Deferring automation cycle until checker is idle."
+                        )
+                    self._queue_run_status(queue_message)
+                    checker_waiting = True
+
+                # Direct/synchronous callers retain the historical non-blocking
+                # contract. The background scheduler, however, owns this exact
+                # queued intent and must keep its run id stable until the checker
+                # releases. Polling here prevents one new queued run id per
+                # 60-second scheduler tick and lets a guarded queue clear hand
+                # authority back well inside the 10-second reconciliation bound.
+                if not background_wait:
+                    self._preserve_forced_run_intent(
+                        forced=forced,
+                        forced_period_id=forced_period_id,
                     )
-                else:
-                    logger.info("Stream checking is active. Deferring automation cycle until checker is idle.")
-                self._queue_run_status("Stream checker is active; automation run is queued")
-                return
-            if not stream_checker.begin_automation_cycle_operation():
-                self._preserve_forced_run_intent(
-                    forced=forced,
-                    forced_period_id=forced_period_id,
-                )
-                self._queue_run_status(
-                    "Stream checker became active; automation run is queued"
-                )
-                return
-            automation_checker_reserved = True
+                    return
+                if not self.automation_running:
+                    self._preserve_forced_run_intent(
+                        forced=forced,
+                        forced_period_id=forced_period_id,
+                    )
+                    self._finish_run_status(
+                        state="aborted",
+                        stage="aborted",
+                        stage_label="Aborted",
+                        message="Automation service stopped while waiting for Stream Checker",
+                        error="Automation service stopped while waiting for Stream Checker",
+                    )
+                    return
+                if self._abort_run_if_manual_stop_requested():
+                    return
+                time.sleep(0.25)
         except Exception as e:
             logger.warning(f"Could not reserve Stream Checker for automation: {e}")
             self._preserve_forced_run_intent(
