@@ -278,7 +278,7 @@ def test_deferred_bitrate_rechecks_are_serial_and_preserve_visual_evidence():
         {
             "stream_id": 1,
             "stream_name": "Recover",
-            "status": "OK",
+            "status": "freeze",
             "bitrate_kbps": None,
             "measurement_incomplete": True,
             "measurement_incomplete_reason": "missing_bitrate",
@@ -294,7 +294,7 @@ def test_deferred_bitrate_rechecks_are_serial_and_preserve_visual_evidence():
         {
             "stream_id": 2,
             "stream_name": "Still missing",
-            "status": "OK",
+            "status": "blank",
             "bitrate_kbps": None,
             "measurement_incomplete": True,
             "measurement_incomplete_reason": "missing_bitrate",
@@ -365,7 +365,7 @@ def test_deferred_bitrate_rechecks_are_serial_and_preserve_visual_evidence():
     assert results[0]["freeze_probe_ran"] is True
     assert results[0]["freeze_detected"] is False
 
-    assert results[1]["status"] == "OK"
+    assert results[1]["status"] == "blank"
     assert results[1]["bitrate_kbps"] is None
     assert results[1]["measurement_incomplete"] is True
     assert results[1]["measurement_incomplete_reason"] == "missing_bitrate_after_recheck"
@@ -429,6 +429,33 @@ def test_cached_provider_capacity_skip_is_not_scheduled_for_deferred_recheck():
 
     assert called is False
     assert "bitrate_recheck_attempted" not in skipped
+
+
+def test_deferred_bitrate_recheck_requires_strict_boolean_authority():
+    service = object.__new__(StreamCheckerService)
+    malformed = {
+        "stream_id": 10,
+        "status": "freeze",
+        "bitrate_kbps": None,
+        "measurement_incomplete": True,
+        "measurement_incomplete_reason": "missing_bitrate",
+        "bitrate_recheck_required": "true",
+    }
+    called = False
+
+    def recheck(_stream, _initial):
+        nonlocal called
+        called = True
+        return None
+
+    service._run_deferred_bitrate_rechecks(
+        [malformed],
+        {10: {"id": 10}},
+        recheck,
+    )
+
+    assert called is False
+    assert "bitrate_recheck_attempted" not in malformed
 
 
 def test_incomplete_bitrate_status_exposes_exhausted_recheck_reason():

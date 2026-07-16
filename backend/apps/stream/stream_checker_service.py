@@ -2257,10 +2257,15 @@ class StreamCheckerService:
         candidates = []
         for stream_id, stream in streams_by_id.items():
             initial = result_by_id.get(str(stream_id))
+            initial_status = str((initial or {}).get("status") or "").lower()
             if (
                 initial is not None
                 and not initial.get("provider_limit_skipped")
-                and str(initial.get("status") or "").lower() == "ok"
+                # Blank/freeze are successful basis probes with a later visual
+                # classification. They still require the deferred bitrate pass
+                # when that successful basis probe could not measure bitrate.
+                and initial_status in {"ok", "blank", "freeze"}
+                and initial.get("bitrate_recheck_required") is True
                 and self._has_incomplete_bitrate_measurement(initial)
             ):
                 candidates.append((stream, initial))
