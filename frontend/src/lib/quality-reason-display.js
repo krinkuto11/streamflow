@@ -48,6 +48,17 @@ const STATUS_REASON_FALLBACKS = {
 
 const ACTIVE_STREAM_STATUSES = new Set(['checking', 'probing', 'rechecking_bitrate'])
 
+const VISUAL_PROBE_INCOMPLETE_LABELS = {
+  timeout: 'Probe timed out',
+  preempted: 'Viewer needed probe capacity',
+  exit_146: 'Connection timed out (FFmpeg 146)',
+  exit_155: 'Network unreachable (FFmpeg 155)',
+  exit_183: 'Invalid media data (FFmpeg 183)',
+  exit_234: 'Invalid input or argument (FFmpeg 234)',
+  exit_251: 'Input/output error (FFmpeg 251)',
+  exit_8: 'FFmpeg could not open or process the input (code 8)',
+}
+
 const STATIC_REASON_DETAILS = {
   viewer_preempted: 'Real playback kept the profile slot; check again later',
   active_viewers: 'Viewer protection kept the stream untouched',
@@ -92,6 +103,26 @@ const uniqueParts = (parts) => {
 }
 
 const formatProbeLabel = (label) => titleizeCode(label).replace(/\bApi\b/g, 'API')
+
+export function getVisualProbeLabel(stream = {}) {
+  if (stream.visual_probe_incomplete) {
+    const reason = stream.visual_probe_incomplete_reason || 'unknown'
+    const knownLabel = VISUAL_PROBE_INCOMPLETE_LABELS[reason]
+    if (knownLabel) return `Incomplete: ${knownLabel}`
+
+    const exitMatch = String(reason).match(/^exit_(-?\d+)$/)
+    if (exitMatch) return `Incomplete: FFmpeg failed (code ${exitMatch[1]})`
+    return `Incomplete: ${titleizeCode(reason) || 'Unknown reason'}`
+  }
+
+  if (stream.visual_probe_completed) {
+    const duration = stream.visual_probe_duration_seconds
+    const adjusted = stream.visual_probe_duration_adjusted ? ' adjusted' : ''
+    return duration != null ? `${duration}s${adjusted}` : `Complete${adjusted}`
+  }
+
+  return 'Pending'
+}
 
 const pickConnectivityDetails = (context = {}) => {
   if (Array.isArray(context.attempts)) {

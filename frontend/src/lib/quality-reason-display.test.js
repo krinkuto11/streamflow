@@ -3,7 +3,42 @@ import { describe, expect, it } from 'vitest'
 import {
   getIncompleteBitrateBadgeLabel,
   getQualityReasonDisplay,
+  getVisualProbeLabel,
 } from './quality-reason-display'
+
+describe('getVisualProbeLabel', () => {
+  it.each([
+    ['exit_146', 'Incomplete: Connection timed out (FFmpeg 146)'],
+    ['exit_155', 'Incomplete: Network unreachable (FFmpeg 155)'],
+    ['exit_183', 'Incomplete: Invalid media data (FFmpeg 183)'],
+    ['exit_234', 'Incomplete: Invalid input or argument (FFmpeg 234)'],
+    ['exit_251', 'Incomplete: Input/output error (FFmpeg 251)'],
+    ['exit_8', 'Incomplete: FFmpeg could not open or process the input (code 8)'],
+    ['timeout', 'Incomplete: Probe timed out'],
+    ['preempted', 'Incomplete: Viewer needed probe capacity'],
+  ])('explains visual-probe reason %s while retaining useful raw evidence', (reason, label) => {
+    expect(getVisualProbeLabel({
+      visual_probe_incomplete: true,
+      visual_probe_incomplete_reason: reason,
+    })).toBe(label)
+  })
+
+  it('keeps an unknown FFmpeg exit code visible without inventing a meaning', () => {
+    expect(getVisualProbeLabel({
+      visual_probe_incomplete: true,
+      visual_probe_incomplete_reason: 'exit_77',
+    })).toBe('Incomplete: FFmpeg failed (code 77)')
+  })
+
+  it('preserves completed and pending probe labels', () => {
+    expect(getVisualProbeLabel({
+      visual_probe_completed: true,
+      visual_probe_duration_seconds: 10,
+      visual_probe_duration_adjusted: true,
+    })).toBe('10s adjusted')
+    expect(getVisualProbeLabel({})).toBe('Pending')
+  })
+})
 
 describe('getQualityReasonDisplay', () => {
   it('formats threshold comparisons with machine-readable code retained', () => {

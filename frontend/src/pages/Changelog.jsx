@@ -15,7 +15,7 @@ import {
 } from '@/lib/changelog-run-summary.js'
 import { formatDuration } from '@/lib/time-format.js'
 import { TELEMETRY_DATE_RANGES } from '@/lib/telemetry-retention.js'
-import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
+import { getQualityReasonDisplay, getVisualProbeLabel } from '@/lib/quality-reason-display.js'
 import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download, EyeOff } from 'lucide-react'
 
 function formatTimestamp(timestamp) {
@@ -92,18 +92,6 @@ function getActionColor(action) {
 }
 
 const entrySearchText = (entry) => JSON.stringify(entry || {}).toLowerCase()
-
-function visualProbeLabel(stream) {
-  if (stream?.visual_probe_incomplete) {
-    return `Incomplete: ${stream.visual_probe_incomplete_reason || 'unknown'}`
-  }
-  if (stream?.visual_probe_completed) {
-    const duration = stream.visual_probe_duration_seconds
-    const adjusted = stream.visual_probe_duration_adjusted ? ' adjusted' : ''
-    return duration != null ? `${duration}s${adjusted}` : `Complete${adjusted}`
-  }
-  return 'Pending'
-}
 
 function QualityReasonValue({ stream }) {
   const reason = getQualityReasonDisplay(stream)
@@ -235,7 +223,7 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                               className={streamDetail.visual_probe_incomplete ? 'text-amber-500 text-xs' : 'text-muted-foreground text-xs'}
                               title={`Requested ${streamDetail.visual_probe_requested_duration_seconds ?? '-'}s; minimum ${streamDetail.visual_probe_minimum_duration_seconds ?? '-'}s; effective ${streamDetail.visual_probe_duration_seconds ?? '-'}s`}
                             >
-                              {streamDetail.visual_probe_ran ? visualProbeLabel(streamDetail) : '-'}
+                              {streamDetail.visual_probe_ran ? getVisualProbeLabel(streamDetail) : '-'}
                             </span>
                           </TableCell>
                         )}
@@ -554,7 +542,7 @@ function StepContent({ step }) {
                               className={s.visual_probe_incomplete ? 'text-amber-500 text-xs' : 'text-muted-foreground text-xs'}
                               title={`Requested ${s.visual_probe_requested_duration_seconds ?? '-'}s; minimum ${s.visual_probe_minimum_duration_seconds ?? '-'}s; effective ${s.visual_probe_duration_seconds ?? '-'}s`}
                             >
-                              {s.visual_probe_ran ? visualProbeLabel(s) : '-'}
+                              {s.visual_probe_ran ? getVisualProbeLabel(s) : '-'}
                             </span>
                           </TableCell>
                         )}
