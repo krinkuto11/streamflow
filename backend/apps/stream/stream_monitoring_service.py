@@ -469,7 +469,6 @@ class StreamMonitoringService:
     def _sync_stream_stats(self, active_sessions):
         """Sync stream metadata (res, fps, bitrate) to Dispatcharr"""
         stats_to_update = []
-        
         for session in active_sessions:
             for stream_id, stream_info in session.streams.items():
                 if stream_info.is_quarantined:
@@ -500,7 +499,11 @@ class StreamMonitoringService:
                 if stats:
                     stats_to_update.append({
                         'stream_id': stream_id,
-                        'stream_stats': stats
+                        'stream_stats': stats,
+                        # The batch updater evaluates this against its final UDI
+                        # snapshot so a newer visual reason is never cleared by
+                        # a stale monitoring decision.
+                        'recover_bitrate_state': 'ffmpeg_output_bitrate' in stats,
                     })
         
         if stats_to_update:

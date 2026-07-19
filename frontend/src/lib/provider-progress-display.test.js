@@ -126,6 +126,8 @@ describe('getProviderWaitReasonDisplay', () => {
             id: 70,
             name: 'Main',
             active_viewers: 1,
+            real_viewers: 0,
+            shadow_watchers: 1,
             checking: 0,
             used: 1,
             limit: 3,
@@ -147,7 +149,10 @@ describe('getProviderWaitReasonDisplay', () => {
         name: 'Main',
         limitText: '3',
         availableText: '2',
-        status: 'Viewer active',
+        realViewers: 0,
+        shadowWatchers: 1,
+        status: 'Shadow watcher',
+        capacityCounted: true,
       }),
       expect.objectContaining({
         key: '7:71',
@@ -158,6 +163,110 @@ describe('getProviderWaitReasonDisplay', () => {
         status: 'Available',
       }),
     ])
+  })
+
+  it('marks shared credential route aliases without hiding their profile rows', () => {
+    const rows = getProfileSlotMatrixRows([
+      {
+        account_id: 7,
+        name: 'Provider A',
+        profile_slots: [
+          {
+            id: 70,
+            name: 'Representative',
+            shared_route: true,
+            capacity_counted: true,
+          },
+          {
+            id: 71,
+            name: 'Default alias',
+            shared_route: true,
+            capacity_counted: false,
+          },
+        ],
+      },
+    ])
+
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({
+      sharedRoute: true,
+      capacityCounted: true,
+      isSharedRouteAlias: false,
+      sharedRouteLabel: 'Shared credential route',
+    })
+    expect(rows[1]).toMatchObject({
+      sharedRoute: true,
+      capacityCounted: false,
+      isSharedRouteAlias: true,
+      sharedRouteLabel: 'Shared credential route alias',
+    })
+  })
+
+  it('keeps unusable routes visible without presenting capacity as available', () => {
+    const rows = getProfileSlotMatrixRows([
+      {
+        account_id: 7,
+        name: 'Provider A',
+        profile_slots: [
+          {
+            id: 72,
+            name: 'Invalid route',
+            route_usable: false,
+            capacity_counted: false,
+            unlimited: true,
+            used: 0,
+            limit: 0,
+            available: null,
+            full: true,
+          },
+        ],
+      },
+    ])
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      id: 72,
+      name: 'Invalid route',
+      text: 'Invalid route: N/A',
+      full: false,
+      unlimited: false,
+      capacityCounted: false,
+      routeUsable: false,
+      routeUnavailable: true,
+      routeUnavailableHint: 'This profile cannot provide a usable credential route for StreamFlow checks.',
+      status: 'Route unavailable',
+      capacityText: 'N/A',
+      freeText: 'capacity N/A',
+      available: null,
+      limitText: 'N/A',
+      usageText: 'N/A',
+      availableText: 'N/A',
+    })
+    expect(rows[0].title).toContain('This profile cannot provide a usable credential route')
+    expect(rows[0].title).not.toContain('open')
+    expect(rows[0].title).not.toContain('free')
+
+    expect(getProfileSlotDisplay({
+      route_usable: false,
+      capacity_counted: true,
+      shared_route: true,
+    })).toMatchObject({
+      routeUnavailable: true,
+      capacityCounted: false,
+      sharedRoute: false,
+      isSharedRouteAlias: false,
+      sharedRouteLabel: null,
+      status: 'Route unavailable',
+    })
+  })
+
+  it('counts missing capacity metadata defensively for older snapshots', () => {
+    expect(getProfileSlotDisplay({ shared_route: true })).toMatchObject({
+      sharedRoute: true,
+      capacityCounted: true,
+      isSharedRouteAlias: false,
+      sharedRouteLabel: 'Shared credential route',
+    })
   })
 
   it('formats provider capacity explanations with source and action details', () => {
@@ -254,6 +363,15 @@ describe('getProviderWaitReasonDisplay', () => {
 
   it('describes missing dashboard worker capacity as sequential', () => {
     expect(getCheckerConcurrencyDisplay({ parallel: { max_workers: 0 } })).toEqual({
+      text: 'Sequential',
+      active: false,
+    })
+  })
+
+  it('describes disabled parallel mode as sequential despite its configured limit', () => {
+    expect(getCheckerConcurrencyDisplay({
+      parallel: { enabled: false, max_workers: 10, configured_max_workers: 10 },
+    })).toEqual({
       text: 'Sequential',
       active: false,
     })

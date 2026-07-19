@@ -262,6 +262,27 @@ class TestExtractStreamStats(unittest.TestCase):
         self.assertEqual(result['video_codec'], 'hevc')
         self.assertEqual(result['audio_codec'], 'ac3')
 
+    def test_incomplete_current_measurement_hides_preserved_cached_bitrate(self):
+        """Historical bitrate remains available in storage but not as current data."""
+        stream_data = {
+            'id': 1,
+            'stream_stats': {
+                'resolution': '1920x1080',
+                'ffmpeg_output_bitrate': 5000,
+                'measurement_incomplete': True,
+                'measurement_incomplete_reason': 'missing_bitrate_after_recheck',
+                'measurement_incomplete_context': {
+                    'preserved_bitrate_kbps': 5000,
+                    'preserved_bitrate_source': 'previous_stream_stats',
+                },
+            },
+        }
+
+        result = extract_stream_stats(stream_data)
+
+        self.assertIsNone(result['bitrate_kbps'])
+        self.assertEqual(format_stream_stats_for_display(result)['bitrate'], 'N/A')
+
 
 class TestIsStreamDead(unittest.TestCase):
     """Test dead stream detection."""

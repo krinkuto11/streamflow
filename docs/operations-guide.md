@@ -83,19 +83,32 @@ channel.
 
 Important settings:
 
-| Setting | Effect |
-| --- | --- |
-| FFmpeg duration | Probe window length per stream |
-| Timeout | Base stream operation timeout |
-| Retry attempts | Retry count for failed stream probes |
-| Retry delay | Delay between retry attempts |
-| Stream limit | Maximum streams checked per channel |
-| Check all streams | Check every stream instead of only the active one |
-| Start selection | Choose where the next queue starts |
+| Setting | Where | Effect |
+| --- | --- | --- |
+| FFmpeg duration | `Stream Checker -> Stream Checker Configuration -> Edit -> Stream Analysis tab -> FFmpeg Duration (seconds)` | Probe window length per stream |
+| Timeout | `Stream Checker -> Stream Checker Configuration -> Edit -> Stream Analysis tab -> Timeout (seconds)` | Base stream operation timeout |
+| Retry attempts | `Stream Checker -> Stream Checker Configuration -> Edit -> Stream Analysis tab -> Retry Attempts` | Retry count for failed stream probes |
+| Retry delay | `Stream Checker -> Stream Checker Configuration -> Edit -> Stream Analysis tab -> Retry Delay (seconds)` | Delay between retry attempts |
+| Stream limit | `Settings -> Profiles tab -> Edit profile -> Stream Checking -> Stream Limit per Channel` | Maximum streams checked per channel |
+| Check all streams | `Settings -> Profiles tab -> Edit profile -> Stream Checking -> Check All Streams in Channel` | Check every stream instead of only the active one |
+| Start selection | `Stream Checker -> Stream Checker Configuration -> Edit -> Queue tab -> Default Run Start` | Choose where the next queue starts |
 
 The start selection setting controls the first channel of the next run. Use
 wording like "Next run starts at" when reviewing UI state because profile names
 vary between installations.
+
+If an initial playable probe cannot measure a current bitrate, StreamFlow waits
+until every initial probe for that channel has finished and then rechecks only
+the affected streams, one at a time. This second attempt is bitrate-only and
+does not replace the original blank/freeze evidence. A recovered value becomes
+the current bitrate; otherwise the current result remains `N/A`, while an older
+stored bitrate may influence ranking only and is never displayed as the current
+measurement. The automatic state is visible under `Stream Checker -> Current
+Progress (active run) -> Stream Progress Tracking -> Status -> Needs Recheck`
+before the retry and as `Status -> Bitrate Recheck` while it runs. Completed
+evidence is under `Changelog -> Action filter: Automation Runs -> Automation
+Period (expand) -> <channel> -> Quality Check (expand) -> Analyzed Streams ->
+Reason`; it is not a user setting.
 
 ## Provider Limits
 
@@ -105,15 +118,27 @@ streams on the same source at once.
 When a provider is saturated, StreamFlow should defer streams from that provider
 and continue checking streams from providers with available capacity. If all
 candidate streams are blocked by provider limits, StreamFlow waits up to the
-configured provider wait timeout. A provider-limit timeout skips that stream for
-the current run without marking it dead or removing it from the channel.
+provider wait timeout at `Stream Checker -> Stream Checker Configuration -> Edit
+-> Concurrent Checking tab -> Provider Wait Timeout (seconds)`. A provider-limit
+timeout skips that stream for the current run without marking it dead or removing
+it from the channel.
+
+`provider_profile_unavailable` is different from saturation: the current
+account/profile inventory or route authority is missing, malformed, or changed,
+so the probe stops immediately and fail-closed. `provider_usage_unavailable`
+means current proxy status cannot prove how much provider capacity is in use, so
+StreamFlow waits safely and may time out rather than assuming zero usage. Inspect
+`Stream Checker -> Current Progress (active run) -> Stream Progress Tracking ->
+Status/reason` before tuning limits.
 
 Expected operator behavior:
 
 - Waiting streams are normal when a provider limit is full.
 - A provider-limit skip is not a dead-stream signal.
-- If many streams are skipped by provider limits, increase the wait timeout or
-  run checks during a quieter period.
+- If many streams are skipped because capacity is genuinely full, consider the
+  visible wait-timeout setting or run checks during a quieter period.
+- Do not raise limits for profile-authority or usage-status failures; correct the
+  inventory, credential route, or proxy-status health identified by the reason.
 
 ## Connectivity Guard
 
@@ -128,9 +153,10 @@ If the guard fails:
 3. The Dashboard and changelog should show the failure reason.
 4. A later successful stale-recovery check clears old guard failures.
 
-Use retry count, retry delay, timeout, and stale-recheck interval settings to
-fit your environment. Do not disable the guard unless another layer provides the
-same protection.
+Use `Stream Checker -> Stream Checker Configuration -> Edit -> Safety tab ->
+Connectivity Timeout`, `Connectivity Retries`, `Retry Backoff`, and `Recovery
+Recheck` to fit your environment. Do not disable the guard unless another layer
+provides the same protection.
 
 ## Dead, Blank, And Freeze Detection
 
@@ -158,14 +184,24 @@ Recommended setup:
 
 1. Create a dedicated Dispatcharr user or API key for Shadow Monitor.
 2. Do not reuse the main administrator identity for watcher traffic.
-3. Configure the watcher API key in the Shadow Monitor page.
-4. Start with dry run enabled.
-5. Confirm that watched channels and recent events look correct.
-6. Disable dry run only after the decisions are safe.
+3. Configure the watcher API key under
+   `Shadow Monitor -> Configuration -> Watcher API Key`.
+4. Under `Shadow Monitor -> Configuration -> Monitor Scope`, leave both
+   `Include Only` fields empty for normal all-channel protection. Use them only
+   for an intentionally isolated channel set; Exclude fields still win.
+5. Start with dry run enabled.
+6. Confirm that watched channels, out-of-scope warnings, and recent events look correct.
+7. Disable dry run only after the decisions are safe.
 
 The watcher identity should be separate because Shadow Monitor creates its own
 viewing sessions. A dedicated identity makes it clear which connections are real
 clients and which ones belong to StreamFlow.
+
+Configuration GET responses include `config_revision`. Configuration PUTs made
+from the UI use that revision as a compare-and-swap precondition, so a stale tab
+receives a conflict and reloads instead of overwriting a newer operator change.
+The visible path is `Shadow Monitor -> Save -> "Configuration changed" notice`;
+review the reloaded fields before saving the intended changes again.
 
 Single-stream channels cannot be switched to another stream. Shadow Monitor
 should record that decision clearly instead of retrying a switch that cannot
@@ -199,7 +235,7 @@ it on the Teamarr Preflight page and save. The selected profile controls whether
 the preflight only scores/reorders streams or also runs stricter checks such as
 dead, blank, or freeze handling.
 
-`Teamarr API Poll Interval` controls how often StreamFlow reads Teamarr managed
+`Teamarr Poll Interval` controls how often StreamFlow reads Teamarr managed
 event state. Use 30-60 seconds for normal event automation; longer intervals can
 miss narrow windows such as a 1-minute preflight offset or a short post-start
 grace.
@@ -304,7 +340,18 @@ services:
     environment:
       TZ: Europe/Berlin
       CONFIG_DIR: /app/data
+      PUID: 99
+      PGID: 100
 ```
+
+The container prepares mounted directories as root and then runs migrations,
+StreamFlow, and ffmpeg as `PUID:PGID` (`99:100` by default for Unraid-style
+hosts). Set both values to the owner expected by the host volume. The explicit
+`STREAMFLOW_RUN_AS_ROOT=true` compatibility escape hatch should only be used
+when a legacy or remote mount cannot support the non-root runtime. NVIDIA
+devices that are exposed with normal container-runtime permissions continue to
+work; hosts with group-restricted DRI devices must also pass the render group as
+described below.
 
 For NVIDIA/CUDA probing on a normal Docker Compose host, install the NVIDIA
 Container Toolkit on the host first, then expose the GPU runtime to StreamFlow:

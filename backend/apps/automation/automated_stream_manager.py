@@ -20,7 +20,7 @@ import copy
 from functools import lru_cache
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple, Any, Union
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Any, Union
 import concurrent.futures
 from collections import defaultdict
 
@@ -86,6 +86,7 @@ from apps.core.api_utils import (
     update_channel_streams,
     _get_base_url
 )
+from apps.core.atomic_json import atomic_write_json
 
 # Import UDI for direct data access
 from apps.udi import get_udi_manager
@@ -556,9 +557,7 @@ class RegexChannelMatcher:
                 "patterns": {},
                 "global_settings": default_channel_regex_global_settings(),
             }
-            self._config_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._config_file, 'w', encoding='utf-8') as fh:
-                json.dump(empty, fh, indent=2)
+            atomic_write_json(self._config_file, empty)
             return empty
 
         from apps.database.manager import get_db_manager
@@ -642,9 +641,7 @@ class RegexChannelMatcher:
             legacy_payload['global_settings'] = global_settings
         db.set_system_setting('channel_regex_config', legacy_payload)
         if self._config_file is not None and self._file_backed_compat:
-            self._config_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._config_file, 'w', encoding='utf-8') as fh:
-                json.dump(legacy_payload, fh, indent=2)
+            atomic_write_json(self._config_file, legacy_payload)
             self._remember_config_file_signature()
         # Keep in-memory cache in sync
         self.channel_patterns = self._build_in_memory(
@@ -881,9 +878,7 @@ class RegexChannelMatcher:
                 'regex_patterns': normalized_patterns,
             }
             if self._config_file is not None and self._file_backed_compat:
-                self._config_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(self._config_file, 'w', encoding='utf-8') as fh:
-                    json.dump(self.channel_patterns, fh, indent=2)
+                atomic_write_json(self._config_file, self.channel_patterns)
                 self._remember_config_file_signature()
         self._clear_runtime_caches()
         
@@ -1345,6 +1340,12 @@ class AutomatedStreamManager:
         "min_wait_seconds": 0,
         "retry_failed_providers": False,
     }
+    SCHEDULER_RETRY_DEFAULTS = {
+        "enabled": True,
+        "max_attempts": 3,
+        "base_delay_seconds": 300,
+        "max_delay_seconds": 3600,
+    }
 
     RUN_STAGES = [
         ("settings", "Preparing"),
@@ -1386,6 +1387,7 @@ class AutomatedStreamManager:
         self.state_file = CONFIG_DIR / "automation_state.json"
         self.last_playlist_update = None
         self._period_skip_history = {}
+        self._scheduler_retry_state = {}
         self.period_last_run = self._load_state()  # Tracks last run time per period ID
         self.automation_start_time = None
         
@@ -1398,6 +1400,7 @@ class AutomatedStreamManager:
         self.automation_running = False
         self.automation_wake_event = threading.Event()
         self._manual_stop_requested = threading.Event()
+        self._trigger_lock = threading.Lock()
         self.force_next_run = False
         self.forced_period_id = None
         
@@ -1449,6 +1452,15 @@ class AutomatedStreamManager:
                     if normalized_entries:
                         parsed_skip_history[str(pid)] = normalized_entries
             self._period_skip_history = parsed_skip_history
+
+            loaded_retry_state = state.get('scheduler_retry_state', {})
+            parsed_retry_state = {}
+            if isinstance(loaded_retry_state, dict):
+                for pid, retry in loaded_retry_state.items():
+                    if not isinstance(retry, dict):
+                        continue
+                    parsed_retry_state[str(pid)] = dict(retry)
+            self._scheduler_retry_state = parsed_retry_state
             
             if parsed_runs:
                 logger.info(f"Loaded {len(parsed_runs)} period last-run timestamps from state file")
@@ -1474,6 +1486,7 @@ class AutomatedStreamManager:
             state = {
                 'period_last_run': serializable_runs,
                 'period_skip_history': getattr(self, '_period_skip_history', {}),
+                'scheduler_retry_state': getattr(self, '_scheduler_retry_state', {}),
             }
             
             session = get_session()
@@ -1504,6 +1517,7 @@ class AutomatedStreamManager:
                 "changelog_tracking": True
             },
             "m3u_refresh_wait": dict(self.M3U_REFRESH_WAIT_DEFAULTS),
+            "scheduler_retry": dict(self.SCHEDULER_RETRY_DEFAULTS),
             "validate_existing_streams": False,
             "verify_stream_assignments": False
         }
@@ -1535,9 +1549,7 @@ class AutomatedStreamManager:
     def _save_config(self, config: Dict):
         """Save configuration to SQL."""
         try:
-            self.config_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.config_file, 'w', encoding='utf-8') as fh:
-                json.dump(config, fh, indent=2)
+            atomic_write_json(self.config_file, config)
         except Exception as file_exc:
             logger.debug(f"Could not write automation config file {self.config_file}: {file_exc}")
 
@@ -2019,6 +2031,7 @@ class AutomatedStreamManager:
         progress: Optional[Dict[str, Any]] = None,
         state: Optional[str] = None,
         error: Optional[str] = None,
+        scheduler_retry: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._ensure_run_status_fields()
         with self._run_status_lock:
@@ -2062,6 +2075,8 @@ class AutomatedStreamManager:
                 }
             if error is not None:
                 status["last_error"] = error
+            if scheduler_retry is not None:
+                status["scheduler_retry"] = copy.deepcopy(scheduler_retry)
             status["updated_at"] = now.isoformat()
 
             stage_keys = [item["key"] for item in status.get("stages", [])]
@@ -2971,6 +2986,257 @@ class AutomatedStreamManager:
 
         return result.get("error") or fallback_message, False
 
+    def _get_scheduler_retry_config(self) -> Dict[str, Any]:
+        raw = getattr(self, "config", {}).get("scheduler_retry", {})
+        if not isinstance(raw, dict):
+            raw = {}
+        merged = {**self.SCHEDULER_RETRY_DEFAULTS, **raw}
+
+        def bounded_int(key: str, minimum: int, maximum: int) -> int:
+            try:
+                value = int(merged.get(key, self.SCHEDULER_RETRY_DEFAULTS[key]))
+            except (TypeError, ValueError):
+                value = int(self.SCHEDULER_RETRY_DEFAULTS[key])
+            return max(minimum, min(maximum, value))
+
+        return {
+            "enabled": bool(merged.get("enabled", True)),
+            "max_attempts": bounded_int("max_attempts", 0, 10),
+            "base_delay_seconds": bounded_int("base_delay_seconds", 30, 86400),
+            "max_delay_seconds": bounded_int("max_delay_seconds", 30, 604800),
+        }
+
+    def _get_period_scheduler_retry(self, period_id: Any) -> Optional[Dict[str, Any]]:
+        retry = getattr(self, "_scheduler_retry_state", {}).get(str(period_id))
+        return dict(retry) if isinstance(retry, dict) else None
+
+    @staticmethod
+    def _parse_retry_time(value: Any) -> Optional[datetime]:
+        try:
+            return datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+
+    def _scheduler_retry_is_due(self, period_id: Any, now: Optional[datetime] = None) -> bool:
+        retry = self._get_period_scheduler_retry(period_id)
+        if not retry or retry.get("exhausted"):
+            return False
+        next_retry_at = self._parse_retry_time(retry.get("next_retry_at"))
+        return bool(next_retry_at and (now or datetime.now()) >= next_retry_at)
+
+    def _scheduler_retry_status(self) -> Dict[str, Any]:
+        retries = []
+        for period_id, retry in sorted(getattr(self, "_scheduler_retry_state", {}).items()):
+            if not isinstance(retry, dict):
+                continue
+            retries.append({
+                "period_id": str(period_id),
+                "period_name": retry.get("period_name"),
+                "attempt": int(retry.get("attempt") or 0),
+                "max_attempts": int(retry.get("max_attempts") or 0),
+                "next_retry_at": retry.get("next_retry_at"),
+                "exhausted": bool(retry.get("exhausted")),
+                "pending_channels": len(retry.get("pending_channel_ids") or []),
+                "completed_channels": len(retry.get("completed_channel_ids") or []),
+                "first_failure_at": retry.get("first_failure_at"),
+                "last_failure_at": retry.get("last_failure_at"),
+                "reason": retry.get("reason"),
+                "resume_stage": retry.get("resume_stage"),
+            })
+        return {
+            "active": any(not item["exhausted"] for item in retries),
+            "exhausted": any(item["exhausted"] for item in retries),
+            "periods": retries,
+        }
+
+    def _clear_scheduler_retries(self, active_periods: Dict[Any, Dict[str, Any]]) -> bool:
+        if not hasattr(self, "_scheduler_retry_state"):
+            self._scheduler_retry_state = {}
+        changed = False
+        for period_key in active_periods:
+            period_id = str(period_key[0])
+            if self._scheduler_retry_state.pop(period_id, None) is not None:
+                changed = True
+        return changed
+
+    def _prune_scheduler_retries(
+        self,
+        configured_period_channels: Dict[str, Iterable[int]],
+    ) -> bool:
+        if not hasattr(self, "_scheduler_retry_state"):
+            self._scheduler_retry_state = {}
+        changed = False
+        configured_period_ids = {str(period_id) for period_id in configured_period_channels}
+        for period_id in list(self._scheduler_retry_state):
+            if period_id not in configured_period_ids:
+                self._scheduler_retry_state.pop(period_id, None)
+                changed = True
+                continue
+            retry = self._scheduler_retry_state.get(period_id)
+            if not isinstance(retry, dict):
+                self._scheduler_retry_state.pop(period_id, None)
+                changed = True
+                continue
+            assigned_channels = {
+                int(channel_id)
+                for channel_id in configured_period_channels.get(period_id) or []
+            }
+            pending_channels = [
+                int(channel_id)
+                for channel_id in retry.get("pending_channel_ids") or []
+                if int(channel_id) in assigned_channels
+            ]
+            if not pending_channels:
+                self._scheduler_retry_state.pop(period_id, None)
+                changed = True
+                continue
+            if pending_channels != retry.get("pending_channel_ids"):
+                retry["pending_channel_ids"] = pending_channels
+                retry["target_stream_ids"] = {
+                    str(channel_id): stream_ids
+                    for channel_id, stream_ids in (retry.get("target_stream_ids") or {}).items()
+                    if int(channel_id) in pending_channels
+                }
+                retry["check_all_stream_ids"] = [
+                    int(channel_id)
+                    for channel_id in retry.get("check_all_stream_ids") or []
+                    if int(channel_id) in pending_channels
+                ]
+                changed = True
+        if changed:
+            self._save_state()
+        return changed
+
+    def _schedule_connectivity_retries(
+        self,
+        active_periods: Dict[Any, Dict[str, Any]],
+        *,
+        message: str,
+        selected_channel_ids: Iterable[Any],
+        completed_channel_ids: Iterable[Any],
+        target_stream_ids: Optional[Dict[Any, Iterable[Any]]] = None,
+        check_all_stream_ids: Optional[Iterable[Any]] = None,
+        resume_stage: str = "quality_checking",
+    ) -> Dict[str, Any]:
+        if not hasattr(self, "_scheduler_retry_state"):
+            self._scheduler_retry_state = {}
+        config = self._get_scheduler_retry_config()
+        selected = {int(channel_id) for channel_id in selected_channel_ids}
+        completed = {int(channel_id) for channel_id in completed_channel_ids}
+        pending = selected - completed
+        now = datetime.now()
+        summary = {
+            "scheduled": False,
+            "exhausted": False,
+            "next_retry_at": None,
+            "attempt": 0,
+            "max_attempts": config["max_attempts"],
+            "pending_channels": len(pending),
+        }
+
+        if not config["enabled"] or config["max_attempts"] <= 0 or not pending:
+            if self._clear_scheduler_retries(active_periods):
+                self._save_state()
+            return summary
+
+        normalized_targets = {
+            str(int(channel_id)): [int(stream_id) for stream_id in (stream_ids or [])]
+            for channel_id, stream_ids in (target_stream_ids or {}).items()
+            if int(channel_id) in pending
+        }
+        normalized_check_all = sorted({
+            int(channel_id)
+            for channel_id in (check_all_stream_ids or [])
+            if int(channel_id) in pending
+        })
+
+        for period_key, period in active_periods.items():
+            period_id = str(period_key[0])
+            period_channel_ids = {
+                int(channel.get("id"))
+                for channel in (period.get("channels") or [])
+                if isinstance(channel, dict) and channel.get("id") is not None
+            }
+            period_pending = sorted(pending & period_channel_ids)
+            if not period_pending:
+                self._scheduler_retry_state.pop(period_id, None)
+                continue
+
+            previous = self._get_period_scheduler_retry(period_id) or {}
+            attempt = int(previous.get("attempt") or 0) + 1
+            max_attempts = config["max_attempts"]
+            first_failure_at = previous.get("first_failure_at") or now.isoformat()
+            previous_completed = {
+                int(channel_id)
+                for channel_id in previous.get("completed_channel_ids") or []
+            }
+            period_completed = sorted(
+                previous_completed | (completed & period_channel_ids)
+            )
+
+            if attempt > max_attempts:
+                self._scheduler_retry_state[period_id] = {
+                    **previous,
+                    "period_name": period.get("period_name") or period_key[1],
+                    "attempt": max_attempts,
+                    "max_attempts": max_attempts,
+                    "next_retry_at": None,
+                    "exhausted": True,
+                    "pending_channel_ids": period_pending,
+                    "completed_channel_ids": period_completed,
+                    "first_failure_at": first_failure_at,
+                    "last_failure_at": now.isoformat(),
+                    "reason": "connectivity_guard",
+                }
+                self.period_last_run[period_id] = now
+                summary.update({
+                    "exhausted": True,
+                    "attempt": max_attempts,
+                })
+                continue
+
+            delay_seconds = min(
+                config["max_delay_seconds"],
+                config["base_delay_seconds"] * (2 ** (attempt - 1)),
+            )
+            next_retry_at = now + timedelta(seconds=delay_seconds)
+            self._scheduler_retry_state[period_id] = {
+                "period_name": period.get("period_name") or period_key[1],
+                "attempt": attempt,
+                "max_attempts": max_attempts,
+                "next_retry_at": next_retry_at.isoformat(),
+                "exhausted": False,
+                "pending_channel_ids": period_pending,
+                "completed_channel_ids": period_completed,
+                "target_stream_ids": {
+                    str(channel_id): normalized_targets.get(str(channel_id), [])
+                    for channel_id in period_pending
+                    if str(channel_id) in normalized_targets
+                },
+                "check_all_stream_ids": [
+                    channel_id for channel_id in normalized_check_all
+                    if channel_id in period_pending
+                ],
+                "first_failure_at": first_failure_at,
+                "last_failure_at": now.isoformat(),
+                "reason": "connectivity_guard",
+                "message": str(message or "Connectivity guard stopped the quality check")[:300],
+                "skip_provider_refresh": True,
+                "resume_stage": (
+                    "stream_matching"
+                    if resume_stage == "stream_matching"
+                    else "quality_checking"
+                ),
+            }
+            summary.update({
+                "scheduled": True,
+                "next_retry_at": next_retry_at.isoformat(),
+                "attempt": max(summary["attempt"], attempt),
+            })
+
+        self._save_state()
+        return summary
+
     def _advance_period_run_timestamps(
         self,
         active_periods: Dict[Any, Dict[str, Any]],
@@ -3007,21 +3273,36 @@ class AutomatedStreamManager:
     def _summarize_quality_check_results(check_results, expected_count: int) -> Dict[str, Any]:
         checked_count = len(check_results or {})
         expected_count = max(0, int(expected_count or 0))
+        result_values = list((check_results or {}).values())
         aborted_count = 0
         failed_count = 0
         first_abort_message = None
+        connectivity_aborted = False
 
-        for result in (check_results or {}).values():
+        for result in result_values:
             if not isinstance(result, dict):
                 continue
             if result.get("aborted") or result.get("error") == "connectivity_guard":
                 aborted_count += 1
+                connectivity_aborted = connectivity_aborted or (
+                    result.get("error") == "connectivity_guard"
+                    or result.get("skip_reason") == "connectivity_guard"
+                )
                 if first_abort_message is None:
                     first_abort_message = result.get("message") or "Quality check was aborted"
             elif result.get("success") is False or result.get("error"):
                 failed_count += 1
 
         incomplete_count = max(0, expected_count - checked_count)
+        stream_checker_busy = bool(
+            expected_count > 0
+            and checked_count == expected_count
+            and all(
+                isinstance(result, dict)
+                and result.get("error") == "stream_checker_active"
+                for result in result_values
+            )
+        )
         return {
             "ok": aborted_count == 0 and incomplete_count == 0,
             "checked_count": checked_count,
@@ -3030,7 +3311,27 @@ class AutomatedStreamManager:
             "failed_count": failed_count,
             "incomplete_count": incomplete_count,
             "abort_message": first_abort_message,
+            "connectivity_aborted": connectivity_aborted,
+            "stream_checker_busy": stream_checker_busy,
         }
+
+    def _preserve_forced_run_intent(
+        self,
+        *,
+        forced: bool,
+        forced_period_id: Optional[str],
+    ) -> bool:
+        """Keep a consumed manual run pending when the checker rejects it as busy."""
+        if not forced and forced_period_id is None:
+            return False
+        with self._trigger_lock:
+            # A trigger submitted after this run consumed its own intent is newer
+            # and must not be overwritten by the busy-run restoration.
+            if self.force_next_run or self.forced_period_id is not None:
+                return True
+            self.force_next_run = bool(forced)
+            self.forced_period_id = forced_period_id
+        return True
 
     def get_run_status(self) -> Dict[str, Any]:
         """Return the current or most recent automation-cycle status."""
@@ -3056,6 +3357,8 @@ class AutomatedStreamManager:
                     pass
             status["updated_at"] = now.isoformat()
 
+        status["scheduler_retry"] = self._scheduler_retry_status()
+
         return status
 
     def get_status(self) -> Dict[str, Any]:
@@ -3074,6 +3377,7 @@ class AutomatedStreamManager:
             "automation_start_time": self.automation_start_time.isoformat() if self.automation_start_time else None,
             "config": copy.deepcopy(self.config),
             "run_status": self.get_run_status(),
+            "scheduler_retry": self._scheduler_retry_status(),
         }
     
     def _is_dead_stream_removal_enabled(self) -> bool:
@@ -3193,6 +3497,28 @@ class AutomatedStreamManager:
             except Exception as callback_error:
                 logger.debug(f"M3U refresh progress callback failed: {callback_error}")
 
+        def targeted_account_unavailable_result() -> RefreshResult:
+            logger.warning(
+                "Requested playlist refresh target %s is unavailable, inactive, or custom",
+                account_id,
+            )
+            emit_refresh_progress({
+                "state": "failed",
+                "current": 0,
+                "total": 1,
+                "account_id": account_id,
+                "message": "Requested playlist is unavailable",
+            })
+            return RefreshResult(
+                False,
+                [],
+                failed_refresh_requests=[{
+                    "id": account_id,
+                    "reason": "account_unavailable",
+                }],
+                outcome="failed",
+            )
+
         try:
             if not force and not self.config.get("enabled_features", {}).get("auto_playlist_update", True):
                 if not force:  # Allow force to override feature flag
@@ -3205,6 +3531,9 @@ class AutomatedStreamManager:
             all_accounts = get_m3u_accounts()
             self._m3u_accounts_cache = all_accounts
             logger.debug(f"M3U accounts fetched from UDI cache: {len(all_accounts) if all_accounts else 0} accounts")
+
+            if account_id is not None and not all_accounts:
+                return targeted_account_unavailable_result()
             
             if all_accounts:
                 # Filter out "custom" account and non-active accounts
@@ -3222,7 +3551,7 @@ class AutomatedStreamManager:
                     if target_account:
                         accounts_to_process = [target_account]
                     else:
-                        logger.warning(f"Requested refresh for account {account_id}, but it was not found or is inactive/custom.")
+                        return targeted_account_unavailable_result()
                 else:
                     # Refresh all (or filtered by enabled_m3u_accounts config)
                     enabled_accounts = self.config.get("enabled_m3u_accounts", [])
@@ -5147,6 +5476,19 @@ class AutomatedStreamManager:
     def _is_period_due(self, period_id: str, period_info: dict) -> bool:
         """Check if a specific period is due to run based on its schedule."""
         now = datetime.now()
+        retry = self._get_period_scheduler_retry(period_id)
+        if retry and not retry.get("exhausted"):
+            next_retry_at = self._parse_retry_time(retry.get("next_retry_at"))
+            if next_retry_at and now >= next_retry_at:
+                logger.info(
+                    "Connectivity retry is due for period %s (attempt %s/%s)",
+                    period_id,
+                    retry.get("attempt"),
+                    retry.get("max_attempts"),
+                )
+                return True
+            return False
+
         last_run = self.period_last_run.get(period_id)
         if not last_run:
             if period_info.get("catch_up_missed_runs", False):
@@ -5171,12 +5513,20 @@ class AutomatedStreamManager:
                 logger.warning(f"Invalid interval value for period {period_id}, using default 60")
                 interval_mins = 60
             due_at = last_run + timedelta(minutes=interval_mins)
-            return self._period_due_inside_grace(period_id, period_info, due_at, now)
+            due = self._period_due_inside_grace(period_id, period_info, due_at, now)
+            if due and retry and retry.get("exhausted"):
+                self._scheduler_retry_state.pop(str(period_id), None)
+                self._save_state()
+            return due
         elif schedule_type == "cron" and CRONITER_AVAILABLE:
             try:
                 cron = croniter(schedule.get("value"), last_run)
                 next_run = cron.get_next(datetime)
-                return self._period_due_inside_grace(period_id, period_info, next_run, now)
+                due = self._period_due_inside_grace(period_id, period_info, next_run, now)
+                if due and retry and retry.get("exhausted"):
+                    self._scheduler_retry_state.pop(str(period_id), None)
+                    self._save_state()
+                return due
             except Exception as e:
                 logger.error(
                     f"Invalid cron expression for period {period_id} "
@@ -5333,23 +5683,82 @@ class AutomatedStreamManager:
         # Check if stream checking mode is active. Full automation must not run
         # next to single-channel checks or preflight work, but the run intent
         # should remain pending so it can start when the checker becomes idle.
+        stream_checker = None
+        automation_checker_reserved = False
         try:
             stream_checker = get_stream_checker_service()
-            status = stream_checker.get_status()
-            if status.get('stream_checking_mode', False):
-                if forced:
-                    self.force_next_run = True
-                    self.forced_period_id = forced_period_id
-                    logger.info(
-                        "Stream checking is active. Queuing forced automation cycle%s.",
-                        f" for period {forced_period_id}" if forced_period_id else "",
+            checker_waiting = False
+            background_wait = bool(getattr(self, 'automation_running', False))
+            while True:
+                status = stream_checker.get_status()
+                checker_active = bool(status.get('stream_checking_mode', False))
+                if not checker_active and stream_checker.begin_automation_cycle_operation():
+                    automation_checker_reserved = True
+                    if checker_waiting:
+                        self._update_run_status(
+                            state="running",
+                            stage="settings",
+                            stage_label="Preparing Automation",
+                            message="Stream checker is idle; resuming queued automation run",
+                        )
+                    break
+
+                queue_message = (
+                    "Stream checker is active; automation run is queued"
+                    if checker_active
+                    else "Stream checker became active; automation run is queued"
+                )
+                if not checker_waiting:
+                    if forced or forced_period_id:
+                        logger.info(
+                            "Stream checking is active. Queuing forced automation cycle%s.",
+                            f" for period {forced_period_id}" if forced_period_id else "",
+                        )
+                    else:
+                        logger.info(
+                            "Stream checking is active. Deferring automation cycle until checker is idle."
+                        )
+                    self._queue_run_status(queue_message)
+                    checker_waiting = True
+
+                # Direct/synchronous callers retain the historical non-blocking
+                # contract. The background scheduler, however, owns this exact
+                # queued intent and must keep its run id stable until the checker
+                # releases. Polling here prevents one new queued run id per
+                # 60-second scheduler tick and lets a guarded queue clear hand
+                # authority back well inside the 10-second reconciliation bound.
+                if not background_wait:
+                    self._preserve_forced_run_intent(
+                        forced=forced,
+                        forced_period_id=forced_period_id,
                     )
-                else:
-                    logger.info("Stream checking is active. Deferring automation cycle until checker is idle.")
-                self._queue_run_status("Stream checker is active; automation run is queued")
-                return
+                    return
+                if not self.automation_running:
+                    self._preserve_forced_run_intent(
+                        forced=forced,
+                        forced_period_id=forced_period_id,
+                    )
+                    self._finish_run_status(
+                        state="aborted",
+                        stage="aborted",
+                        stage_label="Aborted",
+                        message="Automation service stopped while waiting for Stream Checker",
+                        error="Automation service stopped while waiting for Stream Checker",
+                    )
+                    return
+                if self._abort_run_if_manual_stop_requested():
+                    return
+                time.sleep(0.25)
         except Exception as e:
-            logger.debug(f"Could not check stream checking mode status: {e}")
+            logger.warning(f"Could not reserve Stream Checker for automation: {e}")
+            self._preserve_forced_run_intent(
+                forced=forced,
+                forced_period_id=forced_period_id,
+            )
+            self._queue_run_status(
+                "Stream checker reservation unavailable; automation run is queued"
+            )
+            return
         # Global setting for playlist updates is now period-driven
         # We don't early return here, we let the individual periods be checked below
 
@@ -5367,12 +5776,15 @@ class AutomatedStreamManager:
                 return
             finally:
                 self._m3u_accounts_cache = None
+                if automation_checker_reserved:
+                    stream_checker.end_automation_cycle_operation()
         
         logger.debug("Starting automation cycle...")
-        automation_busy_guard = get_udi_manager()
-        automation_busy_guard.set_automation_busy()
+        automation_busy_guard = None
 
         try:
+            automation_busy_guard = get_udi_manager()
+            automation_busy_guard.set_automation_busy()
             if self._abort_run_if_manual_stop_requested():
                 return
 
@@ -5391,6 +5803,7 @@ class AutomatedStreamManager:
             }
             active_periods = {} # {(period_id, period_name): {profile_id, profile_name, channels: []}}
             active_profile_ids = set()
+            configured_period_channels: Dict[str, set] = {}
             
             for channel in channels:
                 channel_id = channel.get('id')
@@ -5401,12 +5814,29 @@ class AutomatedStreamManager:
                 if config and config.get('periods'):
                     for period_info in config['periods']:
                         p_id = period_info.get('id')
+                        if p_id is not None and channel_id is not None:
+                            configured_period_channels.setdefault(str(p_id), set()).add(
+                                int(channel_id)
+                            )
                         if forced_period_id and p_id != forced_period_id:
                             continue
                             
                         # Check if the period is actually due
                         if not forced and not forced_period_id and not self._is_period_due(p_id, period_info):
                             continue
+
+                        scheduler_retry = (
+                            self._get_period_scheduler_retry(p_id)
+                            if not forced and not forced_period_id
+                            else None
+                        )
+                        if scheduler_retry and not scheduler_retry.get("exhausted"):
+                            pending_channel_ids = {
+                                int(value)
+                                for value in scheduler_retry.get("pending_channel_ids") or []
+                            }
+                            if pending_channel_ids and int(channel_id) not in pending_channel_ids:
+                                continue
                             
                         p_name = period_info.get('name')
                         profile = period_info.get('profile')
@@ -5422,11 +5852,14 @@ class AutomatedStreamManager:
                                     'profile_name': profile.get('name') if profile else "Default",
                                     'period_name': p_name,
                                     'priority': period_info.get('priority', 0),
-                                    'channels': []
+                                    'channels': [],
+                                    'scheduler_retry': scheduler_retry,
                                 }
                             active_periods[key]['channels'].append(channel)
                             if profile_id:
                                 active_profile_ids.add(profile_id)
+
+            self._prune_scheduler_retries(configured_period_channels)
 
             active_periods = self._apply_global_catch_up_cap(
                 active_periods,
@@ -5438,6 +5871,15 @@ class AutomatedStreamManager:
                 for entry in active_periods.values()
                 if entry.get('profile_id') is not None
             }
+            scheduler_retry_without_refresh = bool(active_periods) and all(
+                isinstance(entry.get('scheduler_retry'), dict)
+                and not entry['scheduler_retry'].get('exhausted')
+                for entry in active_periods.values()
+            )
+            scheduler_retry_quality_only = scheduler_retry_without_refresh and all(
+                entry['scheduler_retry'].get('resume_stage') == 'quality_checking'
+                for entry in active_periods.values()
+            )
             self._finalize_run_snapshot(
                 active_periods,
                 automation_config,
@@ -5475,6 +5917,7 @@ class AutomatedStreamManager:
             update_all_playlists = False
             channels_to_quality_check = []
             channel_check_all_streams = {}
+            retry_target_stream_ids: Dict[int, List[int]] = {}
             
             for p_id in active_profile_ids:
                 profile = automation_config.get_profile(p_id)
@@ -5490,7 +5933,24 @@ class AutomatedStreamManager:
                                 if ch_id is None:
                                     continue
                                 channels_to_quality_check.append(ch_id)
-                                if check_all_streams:
+                                scheduler_retry = entry.get('scheduler_retry') or {}
+                                retry_check_all = {
+                                    int(value)
+                                    for value in scheduler_retry.get('check_all_stream_ids') or []
+                                }
+                                retry_targets = scheduler_retry.get('target_stream_ids') or {}
+                                retry_target_values = retry_targets.get(str(int(ch_id)))
+                                if retry_target_values:
+                                    retry_target_stream_ids[int(ch_id)] = [
+                                        int(value) for value in retry_target_values
+                                    ]
+                                if scheduler_retry_quality_only and int(ch_id) in retry_check_all:
+                                    channel_check_all_streams[ch_id] = True
+                                elif scheduler_retry_quality_only and retry_target_values:
+                                    channel_check_all_streams[ch_id] = False
+                                elif scheduler_retry_quality_only:
+                                    channel_check_all_streams[ch_id] = True
+                                elif check_all_streams:
                                     channel_check_all_streams[ch_id] = True
                                 elif ch_id not in channel_check_all_streams:
                                     channel_check_all_streams[ch_id] = False
@@ -5502,6 +5962,21 @@ class AutomatedStreamManager:
                         update_all_playlists = True
                     else:
                         playlists_to_update.update(pf_playlists)
+
+            if scheduler_retry_without_refresh:
+                update_all_playlists = False
+                playlists_to_update.clear()
+                self._update_run_status(
+                    counts={
+                        "scheduler_retry_without_refresh": True,
+                        "scheduler_retry_quality_only": scheduler_retry_quality_only,
+                    },
+                    message=(
+                        "Resuming pending quality checks without refreshing providers"
+                        if scheduler_retry_quality_only
+                        else "Resuming stream matching without refreshing providers"
+                    ),
+                )
 
             playlists_refreshed = bool(update_all_playlists or playlists_to_update)
             self._update_run_status(
@@ -5713,8 +6188,13 @@ class AutomatedStreamManager:
 
             validation_details = []
             assignment_details = []
+            assigned_stream_ids = dict(retry_target_stream_ids)
             cycle_abort_message = None
             cycle_failed_message = None
+            connectivity_abort = False
+            connectivity_retry_stage = None
+            channels_to_check_sync: List[int] = []
+            selected_target_stream_ids: Dict[int, List[int]] = {}
 
             if playlists_refreshed and refresh_success:
                 wait_result = self._wait_for_m3u_refresh_completion(
@@ -5912,6 +6392,8 @@ class AutomatedStreamManager:
                                 failed_connectivity.message,
                             )
                             cycle_abort_message = failed_connectivity.message
+                            connectivity_abort = True
+                            connectivity_retry_stage = 'stream_matching'
                             refresh_success = False
                     except Exception as guard_err:
                         logger.error(
@@ -5920,6 +6402,8 @@ class AutomatedStreamManager:
                             guard_err,
                         )
                         cycle_abort_message = str(guard_err)
+                        connectivity_abort = True
+                        connectivity_retry_stage = 'stream_matching'
                         refresh_success = False
 
             if refresh_success:
@@ -5945,7 +6429,15 @@ class AutomatedStreamManager:
                 
                 # Validate existing streams
                 try:
-                    val_res = self.validate_and_remove_non_matching_streams(force=forced, forced_period_id=forced_period_id, skip_changelog=True)
+                    val_res = (
+                        {"details": []}
+                        if scheduler_retry_quality_only
+                        else self.validate_and_remove_non_matching_streams(
+                            force=forced,
+                            forced_period_id=forced_period_id,
+                            skip_changelog=True,
+                        )
+                    )
                     validation_details = val_res.get("details", [])
                     child_abort_message, child_abort_handled = self._handle_child_stage_abort(
                         val_res,
@@ -5966,7 +6458,20 @@ class AutomatedStreamManager:
 
                 # Discover and assign new streams
                 try:
-                    assign_res = self.discover_and_assign_streams(force=forced, skip_check_trigger=True, forced_period_id=forced_period_id, skip_changelog=True)
+                    assign_res = (
+                        {
+                            "assignment_details": [],
+                            "assigned_stream_ids": dict(retry_target_stream_ids),
+                            "channel_visibility_events": [],
+                        }
+                        if scheduler_retry_quality_only
+                        else self.discover_and_assign_streams(
+                            force=forced,
+                            skip_check_trigger=True,
+                            forced_period_id=forced_period_id,
+                            skip_changelog=True,
+                        )
+                    )
                     assignment_details = assign_res.get("assignment_details", [])
                     assigned_stream_ids = assign_res.get("assigned_stream_ids", {})
                     channel_visibility_events.extend(assign_res.get("channel_visibility_events", []) or [])
@@ -6104,7 +6609,9 @@ class AutomatedStreamManager:
                             def _quality_progress_callback(completed_count, total_count, channel_result):
                                 if self._is_manual_stop_requested():
                                     try:
-                                        stream_checker.abort_current_check.set()
+                                        stream_checker.request_abort(
+                                            "automation_manual_stop"
+                                        )
                                     except Exception:
                                         pass
                                 channel_name = ""
@@ -6130,9 +6637,12 @@ class AutomatedStreamManager:
                                     "message": f"Checking {len(channels_to_check_sync)} selected channel(s)",
                                 },
                             )
+                            selected_target_stream_ids = dict(_target_stream_ids)
                             target_stream_ids = _target_stream_ids if _target_stream_ids else None
                             if self._is_manual_stop_requested():
-                                stream_checker.abort_current_check.set()
+                                stream_checker.request_abort(
+                                    "automation_manual_stop"
+                                )
                             check_results = stream_checker.check_channels_synchronously(
                                 channel_ids=channels_to_check_sync,
                                 force_check=forced,
@@ -6162,6 +6672,11 @@ class AutomatedStreamManager:
                             check_results,
                             expected_count=len(channels_to_check_sync),
                         )
+                        if quality_summary["stream_checker_busy"]:
+                            self._preserve_forced_run_intent(
+                                forced=forced,
+                                forced_period_id=forced_period_id,
+                            )
                         if not quality_summary["ok"]:
                             cycle_abort_message = (
                                 quality_summary["abort_message"]
@@ -6172,6 +6687,11 @@ class AutomatedStreamManager:
                                 )
                             )
                             logger.error("Automation quality-check stage aborted: %s", cycle_abort_message)
+                            connectivity_abort = bool(
+                                quality_summary.get("connectivity_aborted")
+                            )
+                            if connectivity_abort:
+                                connectivity_retry_stage = 'quality_checking'
                         self._update_run_status(
                             counts={
                                 "quality_checked": quality_summary["checked_count"],
@@ -6502,6 +7022,54 @@ class AutomatedStreamManager:
             run_results['failed_refresh_requests'] = len(failed_refresh_requests)
             run_results['provider_refresh_failed_count'] = provider_refresh_failed_count
             run_results['degraded_count'] = degraded_count
+
+            successful_quality_channel_ids = {
+                int(channel_id)
+                for channel_id, result in (check_results or {}).items()
+                if isinstance(result, dict)
+                and not result.get('aborted')
+                and result.get('error') != 'connectivity_guard'
+                and result.get('success') is not False
+            }
+            retry_summary = None
+            if connectivity_abort and not forced and not manual_stop_abort:
+                retry_selected_channels = (
+                    channels_to_check_sync
+                    if channels_to_check_sync
+                    else channels_to_quality_check
+                )
+                retry_summary = self._schedule_connectivity_retries(
+                    active_periods,
+                    message=cycle_abort_message or 'Connectivity guard stopped the quality check',
+                    selected_channel_ids=retry_selected_channels,
+                    completed_channel_ids=successful_quality_channel_ids,
+                    target_stream_ids=selected_target_stream_ids,
+                    check_all_stream_ids={
+                        int(channel_id)
+                        for channel_id, enabled in channel_check_all_streams.items()
+                        if enabled
+                    },
+                    resume_stage=connectivity_retry_stage or 'quality_checking',
+                )
+                run_results['scheduler_retry'] = retry_summary
+                if retry_summary.get('scheduled'):
+                    retry_label = (
+                        'matching retry'
+                        if connectivity_retry_stage == 'stream_matching'
+                        else 'quality-only retry'
+                    )
+                    cycle_abort_message = (
+                        f"{cycle_abort_message}; {retry_label} "
+                        f"{retry_summary['attempt']}/{retry_summary['max_attempts']} "
+                        f"scheduled for {retry_summary['next_retry_at']}"
+                    )
+                elif retry_summary.get('exhausted'):
+                    cycle_abort_message = (
+                        f"{cycle_abort_message}; scheduler retry budget exhausted, "
+                        "waiting for the next regular schedule"
+                    )
+            elif run_job_outcome in {'completed', 'completed_degraded'} or manual_stop_abort:
+                self._clear_scheduler_retries(active_periods)
             
             # Add to changelog if there's any work done
             has_work = any(len(p['channels']) > 0 for p in run_results['periods'])
@@ -6533,6 +7101,7 @@ class AutomatedStreamManager:
                     "provider_refresh_degraded": refresh_degraded,
                 },
                 durations={"total_cycle_seconds": duration_sec},
+                scheduler_retry=retry_summary or self._scheduler_retry_status(),
             )
             cycle_outcome = self._finish_cycle_outcome(
                 refresh_success=refresh_success,
@@ -6566,8 +7135,13 @@ class AutomatedStreamManager:
 
         finally:
             self._m3u_accounts_cache = None
-            automation_busy_guard.clear_automation_busy()
-            self._manual_stop_requested.clear()
+            try:
+                if automation_busy_guard is not None:
+                    automation_busy_guard.clear_automation_busy()
+            finally:
+                self._manual_stop_requested.clear()
+                if automation_checker_reserved:
+                    stream_checker.end_automation_cycle_operation()
 
             # Background UDI sync — pull all writes from this cycle back into cache.
             # Only fires when the cycle actually completed matching/checking work.
@@ -6614,11 +7188,15 @@ class AutomatedStreamManager:
                    If False, respects grace periods (simulates scheduled run).
         """
         logger.info(f"Triggering manual automation cycle{' for period ' + period_id if period_id else ''} (force={force})")
-        self.force_next_run = force
-        self.forced_period_id = period_id
-        if self.automation_thread and self.automation_thread.is_alive():
-            self.automation_wake_event.set()
-        else:
+        with self._trigger_lock:
+            self.force_next_run = bool(force)
+            self.forced_period_id = period_id
+            thread_alive = bool(
+                self.automation_thread and self.automation_thread.is_alive()
+            )
+            if thread_alive:
+                self.automation_wake_event.set()
+        if not thread_alive:
             # If not running, we could potentially run it synchronously or just log warning.
             # But the requirement is likely to trigger the *service*.
             logger.warning("Automation service not running, manual trigger queueing for next run or ignored")
@@ -6698,13 +7276,14 @@ class AutomatedStreamManager:
 
                 # Run automation cycle
                 # Pass forced period info to cycle
-                forced = self.force_next_run
-                period_id = self.forced_period_id
-                
-                # Reset forced flags before running
-                self.force_next_run = False
-                self.forced_period_id = None
-                self.automation_wake_event.clear()
+                with self._trigger_lock:
+                    # Clear the wake and consume its matching payload as one
+                    # operation so a concurrent HTTP trigger cannot be torn or lost.
+                    self.automation_wake_event.clear()
+                    forced = self.force_next_run
+                    period_id = self.forced_period_id
+                    self.force_next_run = False
+                    self.forced_period_id = None
                 
                 self.run_automation_cycle(forced=forced, forced_period_id=period_id)
                 

@@ -27,6 +27,22 @@ LEGACY_MODULE_ALIASES = {
     'udi': 'apps.udi',
 }
 
+RUNTIME_CREDENTIAL_ENV_KEYS = (
+    'DISPATCHARR_AUTH_MODE',
+    'DISPATCHARR_API_KEY',
+    'DISPATCHARR_API_KEY_FILE',
+    'DISPATCHARR_PASS',
+    'DISPATCHARR_PASS_FILE',
+    'DISPATCHARR_TOKEN',
+    'DISPATCHARR_USER',
+    'SHADOW_WATCHER_API_KEY',
+    'SHADOW_WATCHER_API_KEY_FILE',
+)
+ORIGINAL_RUNTIME_CREDENTIAL_ENV = {
+    key: os.environ.get(key)
+    for key in RUNTIME_CREDENTIAL_ENV_KEYS
+}
+
 
 def _install_legacy_module_alias(alias: str, target: str, *, force: bool = False) -> None:
     """Expose old top-level module names used by legacy tests."""
@@ -43,7 +59,7 @@ for _alias, _target in LEGACY_MODULE_ALIASES.items():
 
 
 @pytest.fixture(autouse=True, scope='function')
-def clean_test_db(monkeypatch):
+def clean_test_db(monkeypatch, tmp_path):
     """Each test function gets its own in-memory SQLite database.
 
     The fixture patches ``database.connection.get_engine`` and
@@ -54,6 +70,10 @@ def clean_test_db(monkeypatch):
     """
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker
+    from sqlalchemy.pool import StaticPool
+
+    for key in RUNTIME_CREDENTIAL_ENV_KEYS:
+        os.environ.pop(key, None)
 
     for alias, target in LEGACY_MODULE_ALIASES.items():
         _install_legacy_module_alias(alias, target, force=True)
@@ -71,9 +91,23 @@ def clean_test_db(monkeypatch):
 
     import apps.database.connection as conn
     import apps.database.manager as mgr
+    import apps.config.dispatcharr_config as dispatcharr_config_module
+    import apps.stream.stream_screenshot_service as screenshot_module
+
+    screenshot_module._service_instance = None
+    monkeypatch.setattr(
+        screenshot_module,
+        'SCREENSHOT_DIR',
+        tmp_path / 'screenshots',
+    )
 
     # Create a brand-new in-memory engine for this test
-    test_engine = create_engine('sqlite:///:memory:', echo=False)
+    test_engine = create_engine(
+        'sqlite://',
+        echo=False,
+        connect_args={'check_same_thread': False},
+        poolclass=StaticPool,
+    )
     TestSession = sessionmaker(bind=test_engine)
 
     monkeypatch.setattr(conn, 'get_engine', lambda: test_engine)
@@ -82,6 +116,7 @@ def clean_test_db(monkeypatch):
     # Reset the singleton so the next get_db_manager() call creates a fresh
     # instance that uses the patched session factory.
     mgr._db_manager = None
+    dispatcharr_config_module._dispatcharr_config = None
 
     # Create all tables
     from apps.database.connection import Base
@@ -96,4 +131,12 @@ def clean_test_db(monkeypatch):
     # Cleanup
     reset_stream_limiter_state()
     mgr._db_manager = None
+    dispatcharr_config_module._dispatcharr_config = None
+    screenshot_module._service_instance = None
     Base.metadata.drop_all(test_engine)
+    test_engine.dispose()
+    for key in RUNTIME_CREDENTIAL_ENV_KEYS:
+        os.environ.pop(key, None)
+        original = ORIGINAL_RUNTIME_CREDENTIAL_ENV.get(key)
+        if original is not None:
+            os.environ[key] = original

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { lazy, Suspense, useState, useEffect } from 'react'
 import { Navigate, Routes, Route, useLocation, useNavigate } from 'react-router-dom'
 import { cn } from '@/lib/utils.js'
 import { Sidebar } from '@/components/layout/Sidebar.jsx'
@@ -13,21 +13,29 @@ import {
   isStartupGateActive,
   shouldRedirectForStartupGate,
 } from '@/lib/startup-gate-state.js'
+import { createSequentialPoller } from '@/lib/sequential-poller.js'
 
-// Page imports
-import Dashboard from '@/pages/Dashboard'
-import StreamChecker from '@/pages/StreamChecker'
-import StreamMonitoring from '@/pages/StreamMonitoring'
-import ShadowBlankMonitor from '@/pages/ShadowBlankMonitor'
-import TeamarrPreflight from '@/pages/TeamarrPreflight'
-import ChannelConfiguration from '@/pages/ChannelConfiguration'
-import AutomationSettings from '@/pages/AutomationSettings'
-import Changelog from '@/pages/Changelog'
-import SetupWizard from '@/pages/SetupWizard'
-import AutomationProfileEditor from '@/pages/AutomationProfileEditor'
-import Scheduling from '@/pages/Scheduling'
-import StatsDashboard from '@/pages/StatsDashboard'
-import OperatorHelp from '@/pages/OperatorHelp'
+const Dashboard = lazy(() => import('@/pages/Dashboard'))
+const StreamChecker = lazy(() => import('@/pages/StreamChecker'))
+const StreamMonitoring = lazy(() => import('@/pages/StreamMonitoring'))
+const ShadowBlankMonitor = lazy(() => import('@/pages/ShadowBlankMonitor'))
+const TeamarrPreflight = lazy(() => import('@/pages/TeamarrPreflight'))
+const ChannelConfiguration = lazy(() => import('@/pages/ChannelConfiguration'))
+const AutomationSettings = lazy(() => import('@/pages/AutomationSettings'))
+const Changelog = lazy(() => import('@/pages/Changelog'))
+const SetupWizard = lazy(() => import('@/pages/SetupWizard'))
+const AutomationProfileEditor = lazy(() => import('@/pages/AutomationProfileEditor'))
+const Scheduling = lazy(() => import('@/pages/Scheduling'))
+const StatsDashboard = lazy(() => import('@/pages/StatsDashboard'))
+const OperatorHelp = lazy(() => import('@/pages/OperatorHelp'))
+
+function PageLoading() {
+  return (
+    <div className="flex min-h-[50vh] items-center justify-center" role="status" aria-label="Loading page">
+      <div className="h-10 w-10 animate-spin rounded-full border-b-2 border-primary" />
+    </div>
+  )
+}
 
 function App() {
   const [setupStatus, setSetupStatus] = useState(null)
@@ -79,31 +87,37 @@ function App() {
       return undefined
     }
 
-    let cancelled = false
+    const poller = createSequentialPoller({
+      intervalMs: 3000,
+      poll: async (signal) => {
+        try {
+          const response = await api.get('/readiness', { signal })
+          if (signal.aborted) return false
 
-    const pollInitializationStatus = async () => {
-      try {
-        const response = await api.get('/dispatcharr/initialization-status')
-        if (cancelled) return
-
-        const data = response.data || {}
-        setUdiInitialization(getInitializationStateFromStatus(data))
-        setUdiInitializationChecked(true)
-      } catch (err) {
-        console.error('Failed to check initialization status:', err)
-        if (!cancelled) {
+          const data = response.data || {}
+          setUdiInitialization(getInitializationStateFromStatus(data))
+          setUdiInitializationChecked(true)
+          return data.ready !== true
+        } catch (err) {
+          if (signal.aborted) return false
+          const readiness = err?.response?.data
+          if (readiness && typeof readiness.ready === 'boolean') {
+            setUdiInitialization(getInitializationStateFromStatus(readiness))
+            setUdiInitializationChecked(true)
+            return readiness.ready !== true
+          }
+          console.error('Failed to check initialization status:', err)
           setUdiInitialization((previous) => getInitializationStateFromStatusError(previous))
           setUdiInitializationChecked(true)
+          return true
         }
-      }
-    }
+      },
+    })
 
-    pollInitializationStatus()
-    const interval = setInterval(pollInitializationStatus, 3000)
+    poller.start()
 
     return () => {
-      cancelled = true
-      clearInterval(interval)
+      poller.stop()
     }
   }, [setupComplete])
 
@@ -130,7 +144,11 @@ function App() {
   }
 
   if (!setupComplete && setupStatus) {
-    return <SetupWizard onComplete={handleSetupComplete} setupStatus={setupStatus} />
+    return (
+      <Suspense fallback={<PageLoading />}>
+        <SetupWizard onComplete={handleSetupComplete} setupStatus={setupStatus} />
+      </Suspense>
+    )
   }
 
   if (!setupComplete && !setupStatus) {
@@ -174,23 +192,25 @@ function App() {
             />
           ) : (
             <AppErrorBoundary>
-              <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/dashboard" element={<Dashboard />} />
-                <Route path="/stream-checker" element={<StreamChecker />} />
-                <Route path="/stream-monitoring" element={<StreamMonitoring />} />
-                <Route path="/shadow-monitor" element={<ShadowBlankMonitor />} />
-                <Route path="/teamarr-preflight" element={<TeamarrPreflight />} />
-                <Route path="/channels" element={<ChannelConfiguration />} />
-                <Route path="/settings" element={<AutomationSettings />} />
-                <Route path="/automation/profiles/:profileId" element={<AutomationProfileEditor />} />
-                <Route path="/scheduling" element={<Scheduling />} />
-                <Route path="/stats" element={<StatsDashboard />} />
-                <Route path="/help" element={<OperatorHelp />} />
-                <Route path="/help/:topicId" element={<OperatorHelp />} />
-                <Route path="/changelog" element={<Changelog />} />
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
+              <Suspense fallback={<PageLoading />}>
+                <Routes>
+                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/dashboard" element={<Dashboard />} />
+                  <Route path="/stream-checker" element={<StreamChecker />} />
+                  <Route path="/stream-monitoring" element={<StreamMonitoring />} />
+                  <Route path="/shadow-monitor" element={<ShadowBlankMonitor />} />
+                  <Route path="/teamarr-preflight" element={<TeamarrPreflight />} />
+                  <Route path="/channels" element={<ChannelConfiguration />} />
+                  <Route path="/settings" element={<AutomationSettings />} />
+                  <Route path="/automation/profiles/:profileId" element={<AutomationProfileEditor />} />
+                  <Route path="/scheduling" element={<Scheduling />} />
+                  <Route path="/stats" element={<StatsDashboard />} />
+                  <Route path="/help" element={<OperatorHelp />} />
+                  <Route path="/help/:topicId" element={<OperatorHelp />} />
+                  <Route path="/changelog" element={<Changelog />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </Suspense>
             </AppErrorBoundary>
           )}
         </div>

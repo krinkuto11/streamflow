@@ -1,74 +1,153 @@
-import sys
+import threading
 import time
-from pathlib import Path
+from unittest.mock import patch
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+import pytest
 
-import logging
-from apps.database.connection import init_db, get_session
+from apps.database.connection import get_session
 from apps.database.models import MonitoringSession
-from apps.stream.stream_session_manager import StreamSessionManager, SessionInfo, StreamInfo
+from apps.stream.stream_session_manager import SessionInfo, StreamInfo, StreamSessionManager
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
-def main():
-    logger.info("Initializing Database...")
-    init_db()
-    
+def _new_manager():
+    StreamSessionManager._instance = None
     manager = StreamSessionManager()
-    
-    logger.info("--- Testing Save Sessions ---")
-    # Create a dummy session
-    s_info = SessionInfo(
-        session_id="test_sess_123",
-        channel_id=1,
-        channel_name="Test Channel",
+    manager.sessions = {}
+    manager.session_locks = {}
+    manager.scoring_windows = {}
+    manager.channel_ownership = {}
+    return manager
+
+
+def _session(session_id="session-one", *, channel_id=101, with_stream=True):
+    info = SessionInfo(
+        session_id=session_id,
+        channel_id=channel_id,
+        channel_name=f"Channel {channel_id}",
         regex_filter=".*",
         created_at=time.time(),
-        is_active=False
+        is_active=False,
     )
-    s_info.streams[991] = StreamInfo(
-        stream_id=991,
-        url="http://test.com",
-        name="Test stream",
-        channel_id=1,
-        status="review"
-    )
-    manager.sessions["test_sess_123"] = s_info
-    
-    logger.info("Invoking _save_sessions...")
-    manager._save_sessions()
-    
-    # Wait for the background thread to finish
-    time.sleep(2)
-    
-    logger.info("--- Verifying in DB ---")
+    if with_stream:
+        info.streams[9001] = StreamInfo(
+            stream_id=9001,
+            url="http://stream.invalid/test",
+            name="Test stream",
+            channel_id=channel_id,
+            status="review",
+        )
+    return info
+
+
+def _rows():
     session = get_session()
     try:
-        rows = session.query(MonitoringSession).all()
-        logger.info(f"Found {len(rows)} monitoring session rows in DB")
-        for r in rows:
-            logger.info(f"Row: {r.session_id} - Stream: {r.stream_id} - Status: {r.status}")
-            if r.session_id == "test_sess_123_991":
-                logger.info("✓ Found expected concatenated Session ID!")
-                logger.info(f"Raw Info keys: {r.raw_info.keys() if r.raw_info else 'None'}")
+        return session.query(MonitoringSession).order_by(MonitoringSession.session_id).all()
     finally:
         session.close()
 
-    logger.info("--- Testing Load Sessions ---")
-    # Clear memory dictionary to force load
-    manager.sessions = {}
-    manager._load_sessions()
-    logger.info(f"Reloaded {len(manager.sessions)} sessions")
-    if "test_sess_123" in manager.sessions:
-        logger.info("✓ Reassembled Session Info successfully!")
-        loaded_sess = manager.sessions["test_sess_123"]
-        logger.info(f"Loaded streams: {list(loaded_sess.streams.keys())}")
-        if 991 in loaded_sess.streams:
-             logger.info(f"✓ Found stream 991 with status {loaded_sess.streams[991].status}")
 
-    logger.info("Verification FINISHED successfully")
+def test_session_snapshots_persist_parent_and_stream_rows_and_reload():
+    manager = _new_manager()
+    manager.sessions["session-empty"] = _session("session-empty", with_stream=False)
+    manager.sessions["session-one"] = _session("session-one")
 
-if __name__ == "__main__":
-    main()
+    assert manager._save_sessions(wait=True)
+    assert [row.session_id for row in _rows()] == [
+        "session-empty",
+        "session-one",
+        "session-one_9001",
+    ]
+
+    reloaded = _new_manager()
+    reloaded._load_sessions()
+    assert set(reloaded.sessions) == {"session-empty", "session-one"}
+    assert reloaded.sessions["session-empty"].streams == {}
+    assert set(reloaded.sessions["session-one"].streams) == {9001}
+
+
+def test_delete_commits_before_success_and_does_not_return_after_restart():
+    manager = _new_manager()
+    manager.sessions["session-one"] = _session("session-one")
+    manager.session_locks["session-one"] = threading.Lock()
+    manager.scoring_windows["session-one"] = {}
+    assert manager._save_sessions(wait=True)
+
+    with patch(
+        "apps.stream.stream_monitoring_service.get_monitoring_service"
+    ) as monitoring, patch(
+        "apps.stream.stream_screenshot_service.get_screenshot_service"
+    ) as screenshots:
+        monitoring.return_value.stop_session_monitors.return_value = None
+        screenshots.return_value.delete_screenshot.return_value = True
+        assert manager.delete_session("session-one") is True
+
+    assert _rows() == []
+    restarted = _new_manager()
+    restarted._load_sessions()
+    assert "session-one" not in restarted.sessions
+
+
+def test_parallel_save_requests_are_serialized_and_latest_snapshot_wins():
+    manager = _new_manager()
+    manager.sessions["session-one"] = _session("session-one")
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = []
+    active = 0
+    max_active = 0
+    call_lock = threading.Lock()
+
+    def persist(snapshot):
+        nonlocal active, max_active
+        with call_lock:
+            active += 1
+            max_active = max(max_active, active)
+            calls.append(snapshot["session-one"].channel_name)
+            call_number = len(calls)
+        if call_number == 1:
+            first_started.set()
+            assert release_first.wait(timeout=2)
+        with call_lock:
+            active -= 1
+        return True, None
+
+    with patch.object(manager, "_persist_sessions_snapshot", side_effect=persist):
+        assert manager._save_sessions()
+        assert first_started.wait(timeout=2)
+        manager.sessions["session-one"].channel_name = "Latest channel name"
+        assert manager._save_sessions()
+        release_first.set()
+        assert manager._save_sessions(wait=True)
+
+    assert max_active == 1
+    assert calls[0] == "Channel 101"
+    assert calls[-1] == "Latest channel name"
+
+
+def test_failed_delete_restores_in_memory_session_and_reports_failure():
+    manager = _new_manager()
+    manager.sessions["session-one"] = _session("session-one")
+    manager.session_locks["session-one"] = threading.Lock()
+    manager.scoring_windows["session-one"] = {}
+    assert manager._save_sessions(wait=True)
+
+    with patch(
+        "apps.stream.stream_monitoring_service.get_monitoring_service"
+    ), patch(
+        "apps.stream.stream_screenshot_service.get_screenshot_service"
+    ), patch.object(
+        manager,
+        "_persist_sessions_snapshot",
+        return_value=(False, "database unavailable"),
+    ):
+        assert manager.delete_session("session-one") is False
+
+    assert "session-one" in manager.sessions
+    assert any(row.session_id == "session-one" for row in _rows())
+
+
+@pytest.fixture(autouse=True)
+def reset_singleton_after_test():
+    yield
+    StreamSessionManager._instance = None

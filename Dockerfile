@@ -8,16 +8,17 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \
     curl \
     ffmpeg \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Create working directory for backend
 WORKDIR /app
 
-# Copy backend requirements first for better caching
-COPY backend/requirements.txt .
+# Copy the compiled production lock first for deterministic caching.
+COPY backend/requirements.lock .
 
-# Install Python dependencies
-RUN pip install --no-cache-dir --trusted-host pypi.org --trusted-host files.pythonhosted.org -r requirements.txt
+# Install only artifacts whose versions and hashes were reviewed at lock time.
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Copy backend application code
 COPY backend/ ./
@@ -29,8 +30,15 @@ COPY frontend/build ./static
 # data directory will be mounted as volume for persistence
 RUN mkdir -p csv logs data
 
+# The entrypoint prepares mounted paths as root, then drops to this account.
+RUN groupadd --gid 10001 streamflow \
+    && useradd --uid 10001 --gid 10001 --home-dir /app --no-create-home --shell /usr/sbin/nologin streamflow
+
 # Set environment variable for config directory
 ENV CONFIG_DIR=/app/data
+ENV PUID=99
+ENV PGID=100
+ENV STREAMFLOW_RUN_AS_ROOT=false
 
 # Normalize line endings for Windows build contexts and set permissions for entrypoint
 RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh

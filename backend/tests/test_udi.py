@@ -14,6 +14,7 @@ import tempfile
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta
@@ -199,6 +200,7 @@ class TestUDIStorage(unittest.TestCase):
         
         self.assertEqual(self.storage.load_channels(), [])
         self.assertEqual(self.storage.load_streams(), [])
+        self.assertEqual(list(self.storage.storage_dir.glob("*.last-good")), [])
     
     def test_is_initialized(self):
         """Test checking if storage is initialized."""
@@ -329,6 +331,101 @@ class TestUDIManager(unittest.TestCase):
         self.assertEqual(len(self.manager._streams_by_id), 2)
         self.assertEqual(len(self.manager._streams_by_url), 2)
         self.assertEqual(len(self.manager._valid_stream_ids), 2)
+
+    def test_account_authority_lease_blocks_refresh_pointer_swap(self):
+        """A refresh cannot replace account authority during final admission."""
+
+        class ObservedRLock:
+            def __init__(self):
+                self._inner = threading.RLock()
+                self.contention = threading.Event()
+
+            def acquire(self, blocking=True, timeout=-1):
+                if self._inner.acquire(blocking=False):
+                    return True
+                self.contention.set()
+                if not blocking:
+                    return False
+                if timeout == -1:
+                    return self._inner.acquire()
+                return self._inner.acquire(timeout=timeout)
+
+            def release(self):
+                self._inner.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                self.release()
+
+        old_account = {
+            "id": 7,
+            "name": "Before refresh",
+            "profiles": [{"id": 70, "max_streams": 1}],
+        }
+        new_account = {
+            "id": 7,
+            "name": "After refresh",
+            "profiles": [{"id": 70, "max_streams": 2}],
+        }
+        self.manager._initialized = True
+        self.manager._m3u_accounts_cache = [old_account]
+        self.manager._build_indexes()
+        observed_lock = ObservedRLock()
+        self.manager._lock = observed_lock
+        self.manager.fetcher.fetch_m3u_accounts = Mock(return_value=[new_account])
+
+        lease_entered = threading.Event()
+        release_lease = threading.Event()
+        refresh_finished = threading.Event()
+        snapshots = []
+        refresh_results = []
+        thread_errors = []
+
+        def hold_lease():
+            try:
+                with self.manager.account_authority_lease(7) as snapshot:
+                    snapshots.append(snapshot)
+                    lease_entered.set()
+                    if not release_lease.wait(timeout=2):
+                        raise AssertionError("lease release timed out")
+            except BaseException as exc:  # surfaced in the parent test thread
+                thread_errors.append(exc)
+
+        def refresh_accounts():
+            try:
+                refresh_results.append(self.manager.refresh_m3u_accounts())
+            except BaseException as exc:  # surfaced in the parent test thread
+                thread_errors.append(exc)
+            finally:
+                refresh_finished.set()
+
+        holder = threading.Thread(target=hold_lease)
+        refresher = threading.Thread(target=refresh_accounts)
+        holder.start()
+        self.assertTrue(lease_entered.wait(timeout=2))
+        refresher.start()
+
+        self.assertTrue(observed_lock.contention.wait(timeout=2))
+        self.assertFalse(refresh_finished.is_set())
+        self.assertEqual(snapshots[0]["name"], "Before refresh")
+        self.assertEqual(snapshots[0]["profiles"][0]["max_streams"], 1)
+
+        release_lease.set()
+        holder.join(timeout=2)
+        refresher.join(timeout=2)
+
+        self.assertFalse(holder.is_alive())
+        self.assertFalse(refresher.is_alive())
+        self.assertEqual(thread_errors, [])
+        self.assertEqual(refresh_results, [True])
+        self.assertEqual(
+            self.manager.get_m3u_account_by_id(7)["name"],
+            "After refresh",
+        )
+        self.assertIs(UDIManager.supports_account_authority_lease, True)
     
     def test_get_channel_by_id(self):
         """Test getting channel by ID."""
@@ -734,6 +831,7 @@ class TestUDIManager(unittest.TestCase):
             result = self.manager.refresh_all()
 
         self.assertTrue(result)
+        self.assertTrue(self.manager.is_initialized())
         self.assertEqual({channel['id'] for channel in self.manager.get_channels()}, {1, 42})
         self.assertEqual(self.manager.get_channel_by_id(42)['name'], 'Hidden News')
         self.assertEqual(self.manager.get_profile_channels(7)['channels'], [42])

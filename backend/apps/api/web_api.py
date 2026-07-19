@@ -37,7 +37,6 @@ from apps.background.scheduling_workers import (
     udi_refresh_processor_loop,
 )
 from apps.stream.udp_proxy import UDPProxyManager
-
 from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.channels.channel_order_manager import get_channel_order_manager
 from apps.channels.repository import UdiChannelRepository
@@ -249,11 +248,17 @@ from apps.api.stream_sessions_handlers import (
 from apps.api.meta_handlers import (
     get_environment_response,
     health_check_response,
+    readiness_check_response,
     get_version_response,
     root_response,
     serve_frontend_response,
 )
-from apps.api.middleware import API_RATE_LIMIT_ENABLED, api_rate_limiter
+from apps.api.middleware import (
+    API_RATE_LIMIT_ENABLED,
+    TRUSTED_PROXY_NETWORKS,
+    api_rate_limiter,
+    resolve_client_ip,
+)
 from apps.core.api_responses import error_response
 
 # Pre-compiled regex pattern for whitespace conversion (performance optimization)
@@ -282,6 +287,11 @@ except ImportError:
 from apps.core.logging_config import setup_logging, log_function_call, log_function_return, log_exception
 
 logger = setup_logging(__name__)
+STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+def _reject_non_finite_json_constant(value):
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
 # Configuration constants
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
@@ -320,11 +330,23 @@ def _apply_rate_limit():
     path = request.path or ""
     if not path.startswith('/api/'):
         return None
-    if path in {'/api/health', '/api/v1/health', '/api/version', '/api/environment'}:
+    if path in {
+        '/api/health',
+        '/api/v1/health',
+        '/api/readiness',
+        '/api/v1/readiness',
+        '/api/version',
+        '/api/environment',
+    }:
         return None
 
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown')
-    key = f"{client_ip}:{path}"
+    client_ip = resolve_client_ip(
+        request.remote_addr,
+        request.headers.get('X-Forwarded-For'),
+        TRUSTED_PROXY_NETWORKS,
+    )
+    route = request.url_rule.rule if request.url_rule is not None else path
+    key = f"{client_ip}:{request.method}:{route}"
     decision = api_rate_limiter.check(key)
     if decision.allowed:
         return None
@@ -676,6 +698,147 @@ def health_check():
 def health_check_stripped():
     """Health check endpoint for nginx proxy (stripped /api prefix)."""
     return health_check_response()
+
+
+def _required_services_readiness():
+    """Describe configured runtime workers without creating new singletons."""
+    if not check_wizard_complete():
+        return {}
+
+    from apps.stream import shadow_blank_monitor_service as shadow_module
+    from apps.stream import stream_checker_service as checker_module
+    from apps.stream import stream_monitoring_service as monitoring_module
+    from apps.stream import teamarr_preflight_service as preflight_module
+
+    def item(required, ready, state):
+        return {
+            "required": bool(required),
+            "ready": bool(ready) if required else True,
+            "state": state,
+        }
+
+    monitoring = monitoring_module._monitoring_instance
+    checker = checker_module._service_instance
+    shadow = shadow_module._shadow_monitor_instance
+    preflight = preflight_module._teamarr_preflight_instance
+
+    checker_controls = checker.config.get('automation_controls', {}) if checker else {}
+    checker_required = bool(
+        checker
+        and checker.config.get('enabled', True)
+        and (
+            checker_controls.get('auto_m3u_updates', True)
+            or checker_controls.get('auto_stream_matching', True)
+            or checker_controls.get('auto_quality_checking', True)
+            or checker_controls.get('scheduled_global_action', False)
+        )
+    )
+    automation_required = bool(
+        automation_manager
+        and get_automation_config_manager().get_global_settings().get(
+            'regular_automation_enabled',
+            False,
+        )
+    )
+    shadow_required = bool(shadow and shadow.get_config().get("enabled"))
+    preflight_required = bool(preflight and preflight.get_config().get("enabled"))
+    monitoring_threads_ready = bool(
+        monitoring
+        and monitoring._running
+        and all(
+            thread is not None and thread.is_alive()
+            for thread in (
+                monitoring._monitor_thread,
+                monitoring._refresh_thread,
+                monitoring._screenshot_thread,
+            )
+        )
+    )
+    checker_threads_ready = bool(
+        checker
+        and checker.running
+        and checker.worker_thread
+        and checker.worker_thread.is_alive()
+        and checker.scheduler_thread
+        and checker.scheduler_thread.is_alive()
+    )
+    automation_thread_ready = bool(
+        automation_manager
+        and automation_manager.automation_running
+        and automation_manager.automation_thread
+        and automation_manager.automation_thread.is_alive()
+    )
+
+    return {
+        "stream_monitoring": item(
+            True,
+            monitoring_threads_ready,
+            "running" if monitoring_threads_ready else "stopped",
+        ),
+        "stream_checker": item(
+            checker_required,
+            checker_threads_ready,
+            "running" if checker_threads_ready else (
+                "stopped" if checker_required else "disabled"
+            ),
+        ),
+        "automation": item(
+            automation_required,
+            automation_thread_ready,
+            "running" if automation_thread_ready else (
+                "stopped" if automation_required else "disabled"
+            ),
+        ),
+        "scheduled_events": item(
+            True,
+            scheduled_event_processor_thread.is_alive(),
+            "running" if scheduled_event_processor_thread.is_alive() else "stopped",
+        ),
+        "epg_refresh": item(
+            True,
+            bool(epg_refresh_thread and epg_refresh_thread.is_alive()),
+            "running" if epg_refresh_thread and epg_refresh_thread.is_alive() else "stopped",
+        ),
+        "udi_refresh": item(
+            True,
+            bool(udi_refresh_thread and udi_refresh_thread.is_alive()),
+            "running" if udi_refresh_thread and udi_refresh_thread.is_alive() else "stopped",
+        ),
+        "shadow_monitor": item(
+            shadow_required,
+            bool(shadow and shadow.get_status().get("running")),
+            "running" if shadow and shadow.get_status().get("running") else (
+                "stopped" if shadow_required else "disabled"
+            ),
+        ),
+        "teamarr_preflight": item(
+            preflight_required,
+            bool(preflight and preflight.get_status().get("running")),
+            "running" if preflight and preflight.get_status().get("running") else (
+                "stopped" if preflight_required else "disabled"
+            ),
+        ),
+    }
+
+
+@app.route('/api/readiness', methods=['GET'])
+@app.route('/api/v1/readiness', methods=['GET'])
+def readiness_check():
+    """Readiness gate for the UI and deployment verification."""
+    from apps.database.connection import get_engine
+
+    return readiness_check_response(
+        get_engine=get_engine,
+        get_dispatcharr_config=get_dispatcharr_config,
+        get_udi_manager=get_udi_manager,
+        get_required_services_status=_required_services_readiness,
+    )
+
+
+@app.route('/ready', methods=['GET'])
+def readiness_check_stripped():
+    """Readiness endpoint for a proxy with a stripped API prefix."""
+    return readiness_check()
 
 @app.route('/api/version', methods=['GET'])
 def get_version():
@@ -1110,8 +1273,15 @@ def discover_streams():
 @app.route('/api/refresh-playlist', methods=['POST'])
 def refresh_playlist():
     """Trigger M3U playlist refresh (manual Quick Action)."""
+    raw_body = request.get_data(cache=True)
+    payload = None
+    if raw_body:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Request body must be a valid JSON object"}), 400
+
     return refresh_playlist_response(
-        payload=request.get_json(silent=True),
+        payload=payload,
         get_automation_manager=get_automation_manager,
     )
 
@@ -1292,7 +1462,33 @@ def add_to_stream_checker_queue():
 @app.route('/api/stream-checker/queue/clear', methods=['POST'])
 def clear_stream_checker_queue():
     """Clear the checking queue."""
-    return clear_stream_checker_queue_response(get_stream_checker_service=get_stream_checker_service)
+    content_length = request.content_length
+    if (
+        content_length is not None
+        and content_length > STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES
+    ):
+        return jsonify({"error": "queue clear request body is too large"}), 413
+    raw_body = request.stream.read(
+        STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES + 1
+    )
+    if len(raw_body) > STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES:
+        return jsonify({"error": "queue clear request body is too large"}), 413
+    if raw_body:
+        try:
+            payload = json.loads(
+                raw_body.decode('utf-8'),
+                parse_constant=_reject_non_finite_json_constant,
+            )
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            return jsonify({"error": "queue clear request body must be valid JSON"}), 400
+        if payload is None:
+            return jsonify({"error": "queue clear request body must be an object"}), 400
+    else:
+        payload = None
+    return clear_stream_checker_queue_response(
+        payload=payload,
+        get_stream_checker_service=get_stream_checker_service,
+    )
 
 @app.route('/api/stream-checker/config', methods=['GET'])
 def get_stream_checker_config():

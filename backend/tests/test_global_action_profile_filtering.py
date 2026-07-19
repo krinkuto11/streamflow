@@ -9,6 +9,7 @@ that are in that profile, not all channels.
 import os
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
@@ -30,6 +31,8 @@ class TestGlobalActionProfileFiltering(unittest.TestCase):
         os.environ['CONFIG_DIR'] = self.test_dir
         
         self.service = StreamCheckerService.__new__(StreamCheckerService)
+        self.service.lock = threading.Lock()
+        self.service._cancel_queueing = False
         self.service.config = MagicMock()
         self.service.config.get.side_effect = lambda key, default=None: {
             'queue.max_channels_per_run': 50,
@@ -37,7 +40,13 @@ class TestGlobalActionProfileFiltering(unittest.TestCase):
             'queue.start_channel_id': None,
         }.get(key, default)
         self.service.check_queue = MagicMock()
-        self.service.check_queue.add_channels.side_effect = lambda channel_ids, priority=5: len(channel_ids)
+        def add_channels(channel_ids, priority=5, on_accepted=None):
+            if on_accepted:
+                for channel_id in channel_ids:
+                    on_accepted(channel_id)
+            return len(channel_ids)
+
+        self.service.check_queue.add_channels.side_effect = add_channels
         self.service.check_queue.remove_from_completed = MagicMock()
         self.service.update_tracker = MagicMock()
         

@@ -9,12 +9,15 @@ This test shows that the single channel check now correctly:
 """
 
 import unittest
+import pytest
 from unittest.mock import Mock, patch
 import sys
 import os
 
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+pytestmark = pytest.mark.integration
 
 
 class TestSingleChannelCheckIntegration(unittest.TestCase):
@@ -141,6 +144,9 @@ class TestSingleChannelCheckIntegration(unittest.TestCase):
             skip_batch_changelog=True,
             run_mode='single_channel_check',
             is_single_channel_check=True,
+            expected_progress_generation=0,
+            force_check_override=False,
+            force_check_generation=None,
         )
         
         # 4. Verify final stats reflect the revived stream

@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   backend:
-    name: Backend smoke tests
+    name: Backend stable suite
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -22,17 +22,39 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
-          cache-dependency-path: |
-            backend/requirements.txt
-            backend/requirements-dev.txt
+          cache-dependency-path: backend/requirements-test.lock
 
       - name: Install backend dependencies
-        run: |
-          python -m pip install -r backend/requirements.txt
-          python -m pip install -r backend/requirements-dev.txt
+        run: python -m pip install --require-hashes -r backend/requirements-test.lock
 
-      - name: Run backend checks
-        run: python scripts/run_ci_checks.py
+      - name: Audit production Python dependencies
+        run: pip-audit -r backend/requirements.lock
+
+      - name: Compile backend
+        run: python -m compileall backend/apps
+
+      - name: Run stable backend suite
+        run: python -m pytest backend/tests -m "not integration and not live" -q
+
+  backend-integration:
+    name: Backend integration contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: backend/requirements-test.lock
+
+      - name: Install backend dependencies
+        run: python -m pip install --require-hashes -r backend/requirements-test.lock
+
+      - name: Run isolated integration contracts
+        run: python -m pytest backend/tests -m "integration and not live" -q
 
   frontend:
     name: Frontend build and tests
@@ -51,6 +73,10 @@ jobs:
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
+
+      - name: Audit frontend dependencies
+        working-directory: frontend
+        run: npm audit --audit-level=high
 
       - name: Run frontend tests
         working-directory: frontend

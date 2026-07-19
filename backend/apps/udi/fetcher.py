@@ -77,6 +77,26 @@ class FetchCancelled(Exception):
     """Raised when a long Dispatcharr fetch is cancelled by the caller."""
 
 
+class ProxyStatusError(RuntimeError):
+    """Base class for secret-free proxy-status authority failures."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+class ProxyStatusConfigurationError(ProxyStatusError):
+    """Raised when proxy status cannot be queried due to local configuration."""
+
+
+class ProxyStatusTransportError(ProxyStatusError):
+    """Raised when Dispatcharr proxy status could not be fetched."""
+
+
+class ProxyStatusPayloadError(ProxyStatusError):
+    """Raised when Dispatcharr returned a non-authoritative status payload."""
+
+
 class UDIFetcher:
     """Fetches data from the Dispatcharr API for the UDI system."""
     
@@ -850,7 +870,7 @@ class UDIFetcher:
         return profile_channels
     
     def _process_channels_from_response(self, status_data: Any) -> Dict[str, Any]:
-        """Process proxy status response and extract channels as a dict.
+        """Validate proxy status and extract channels as a keyed mapping.
         
         Handles the API response format:
         - Standard format: {"channels": [...], "count": N}
@@ -860,20 +880,40 @@ class UDIFetcher:
             
         Returns:
             Dictionary with channel_id -> status mapping
+
+        Raises:
+            ProxyStatusPayloadError: The response cannot authoritatively
+                distinguish an idle provider from an incomplete payload.
         """
-        result = {}
-        
-        # Handle the API response format with nested channels array
-        if isinstance(status_data, dict) and 'channels' in status_data:
-            channels_list = status_data.get('channels', [])
-            if isinstance(channels_list, list):
-                for item in channels_list:
-                    if isinstance(item, dict) and 'channel_id' in item:
-                        result[str(item['channel_id'])] = item
-                logger.debug(f"Processed {len(result)} channels from proxy status")
-                return result
-        
-        logger.warning(f"Unexpected proxy status format: {type(status_data)}")
+        if not isinstance(status_data, dict):
+            raise ProxyStatusPayloadError("proxy_status_payload_not_mapping")
+
+        channels_list = status_data.get("channels")
+        declared_count = status_data.get("count")
+        if not isinstance(channels_list, list):
+            raise ProxyStatusPayloadError("proxy_status_channels_not_list")
+        if (
+            isinstance(declared_count, bool)
+            or not isinstance(declared_count, int)
+            or declared_count < 0
+        ):
+            raise ProxyStatusPayloadError("proxy_status_count_invalid")
+        if declared_count != len(channels_list):
+            raise ProxyStatusPayloadError("proxy_status_count_mismatch")
+
+        result: Dict[str, Any] = {}
+        for item in channels_list:
+            if not isinstance(item, dict):
+                raise ProxyStatusPayloadError("proxy_status_channel_not_mapping")
+            channel_id = item.get("channel_id")
+            if channel_id in (None, "") or isinstance(channel_id, bool):
+                raise ProxyStatusPayloadError("proxy_status_channel_id_invalid")
+            channel_key = str(channel_id)
+            if channel_key in result:
+                raise ProxyStatusPayloadError("proxy_status_channel_id_duplicate")
+            result[channel_key] = item
+
+        logger.debug(f"Processed {len(result)} channels from proxy status")
         return result
     
     def fetch_proxy_status(self) -> Dict[str, Any]:
@@ -886,20 +926,33 @@ class UDIFetcher:
         - Standard format: {"channels": [...], "count": N}
         
         Returns:
-            Dictionary with channel_id -> status mapping, or empty dict if unavailable
+            Authoritative dictionary with channel_id -> status mapping. A valid
+            idle response is represented by an empty dictionary.
+
+        Raises:
+            ProxyStatusConfigurationError: Dispatcharr has no configured base URL.
+            ProxyStatusTransportError: The status endpoint was unreachable.
+            ProxyStatusPayloadError: The endpoint returned an invalid payload.
         """
         if not self.base_url:
-            logger.debug("DISPATCHARR_BASE_URL not set, cannot fetch proxy status")
-            return {}
+            logger.warning("Proxy status unavailable: base URL is not configured")
+            raise ProxyStatusConfigurationError("proxy_status_base_url_missing")
         
         url = f"{self.base_url}/proxy/ts/status"
         try:
             status_data = self._fetch_url(url)
-            return self._process_channels_from_response(status_data)
-        except Exception as e:
-            logger.debug(f"Could not fetch proxy status: {e}")
-        
-        return {}
+        except ProxyStatusError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Proxy status transport failed (%s)",
+                type(exc).__name__,
+            )
+            raise ProxyStatusTransportError("proxy_status_transport_failed") from None
+
+        if status_data is None:
+            raise ProxyStatusTransportError("proxy_status_transport_failed")
+        return self._process_channels_from_response(status_data)
     
     def refresh_all(self) -> Dict[str, List[Dict[str, Any]]]:
         """Fetch all data from Dispatcharr.

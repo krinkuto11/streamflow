@@ -139,8 +139,14 @@ describe('operatorHelpSections', () => {
           useWhen: expect.any(String),
           risk: expect.any(String),
         }))
-        expect(['Visible UI setting', 'Container setting', 'Status/API']).toContain(setting.controlType)
-        if (setting.controlType === 'Visible UI setting') {
+        expect([
+          'Visible UI setting',
+          'Visible UI action',
+          'Container setting',
+          'Status/API',
+          'Backend/API only',
+        ]).toContain(setting.controlType)
+        if (['Visible UI setting', 'Visible UI action'].includes(setting.controlType)) {
           expect(setting.locationTo || topic.settingsLocationTo).toMatch(/^\//)
           expect(setting.location.split('->').map(part => part.trim()).filter(Boolean).length).toBeGreaterThanOrEqual(3)
         }
@@ -154,6 +160,8 @@ describe('operatorHelpSections', () => {
     expect(getOperatorHelpDetailTopic('teamarr-preflight').settings.map(setting => setting.name)).toContain('Post-Start Checks')
     const teamarr = getOperatorHelpDetailTopic('teamarr-preflight')
     expect(teamarr.settings.map(setting => setting.name)).toContain('Static Teams')
+    expect(teamarr.settings.map(setting => setting.name)).toContain('Scan & Queue Due Checks')
+    expect(teamarr.settings.find(setting => setting.name === 'Scan & Queue Due Checks').risk).toMatch(/not a read-only refresh/i)
     expect(teamarr.settings.find(setting => setting.name === 'Quality Profile').effect).toMatch(/static-team preflight checks/i)
     expect(teamarr.settings.find(setting => setting.name === 'Static Teams').effect).toMatch(/mapped persistent Dispatcharr team channel/i)
     expect(teamarr.settings.find(setting => setting.name === 'Static Teams').risk).toMatch(/Missing Channel/i)
@@ -174,6 +182,7 @@ describe('operatorHelpSections', () => {
     expect(teamarr.steps.join(' ')).toMatch(/priority queue during Automation or Stream Checker runs/i)
     expect(teamarr.settings.find(setting => setting.name === 'Queue Events During Active Checks').defaultValue).toBe('On')
     expect(teamarr.settings.find(setting => setting.name === 'Queue Events During Active Checks').effect).toMatch(/does not queue new event checks/i)
+    expect(teamarr.settings.find(setting => setting.name === 'Event Priority Queue').location).toBe('Teamarr Preflight -> Active Preflight Checks and Stream Checker -> Stream Checker Configuration -> Queue')
     expect(teamarr.settings.find(setting => setting.name === 'Provider Limit Override')).toBeUndefined()
     expect(teamarr.smokeChecks.join(' ')).toMatch(/queued or deferred event-check context/i)
     expect(teamarr.smokeChecks.join(' ')).toMatch(/No Game Evidence/i)
@@ -194,12 +203,63 @@ describe('operatorHelpSections', () => {
     expect(automation.settings.find(setting => setting.name === 'Case Sensitive Regex Matching').effect).toMatch(/case-insensitive regex evaluation/i)
     const streamChecker = getOperatorHelpDetailTopic('stream-checker')
     expect(streamChecker.settings.find(setting => setting.name === 'Direct Stream Check').effect).toMatch(/without requiring that stream to be assigned to a channel/i)
+    expect(streamChecker.settings.find(setting => setting.name === 'Direct Stream Check').risk).toMatch(/must be idle.*HTTP 409/i)
     expect(streamChecker.settings.find(setting => setting.name === 'Check on update').controlType).toBe('Status/API')
-    expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Concurrent Checking tab -> Global Concurrent Limit')
+    expect(streamChecker.settings.find(setting => setting.name === 'Global Concurrent Limit').location).toBe('Stream Checker -> Stream Checker Configuration -> Edit -> Concurrent Checking tab -> Global Concurrent Limit')
+    expect(streamChecker.settings.find(setting => setting.name === 'Max channels per run').location).toBe('Stream Checker -> Stream Checker Configuration -> Edit -> Queue tab -> Max Channels Per Run')
+    expect(streamChecker.settings.find(setting => setting.name === 'CPU Fallback').location).toBe('Stream Checker -> Stream Checker Configuration -> Edit -> Stream Analysis tab -> Hardware Acceleration -> CPU Fallback')
+    const accountLimit = streamChecker.settings.find(setting => setting.name === 'M3U account Max Streams')
+    expect(accountLimit.controlType).toBe('Backend/API only')
+    expect(accountLimit.location).toMatch(/GET \/api\/m3u-accounts -> accounts\[\]\.max_streams/i)
+    expect(accountLimit.location).toMatch(/backend\/API.*not editable in the StreamFlow UI/i)
+    expect(accountLimit.location).not.toMatch(/Profile Matrix/i)
+    expect(accountLimit.defaultValue).toMatch(/fallback when no active provider profile credentials exist/i)
+    expect(accountLimit.effect).toMatch(/fallback account capacity only when no active provider profiles exist/i)
+    expect(accountLimit.effect).toMatch(/does not cap the aggregate while usable profiles are active/i)
+    expect(accountLimit.risk).toMatch(/active profiles.*none can resolve a usable route.*fails closed/i)
+    const profileLimits = streamChecker.settings.find(setting => setting.name === 'Provider profile limits')
+    expect(profileLimits.controlType).toBe('Status/API')
+    expect(profileLimits.location).toBe('Stream Checker -> Current Progress (active run) -> Profile Matrix (expand); API GET /api/stream-checker/progress -> provider_progress[].profile_slots[]')
+    expect(profileLimits.effect).toMatch(/independent provider credentials/i)
+    expect(profileLimits.effect).toMatch(/finite route limits sum to the account aggregate/i)
+    expect(profileLimits.effect).toMatch(/unlimited distinct route makes the aggregate unlimited/i)
+    expect(profileLimits.effect).toMatch(/same credential target.*default aliases.*share capacity/i)
+    expect(profileLimits.risk).toMatch(/probe URL must remain bound to the profile actually reserved/i)
+    expect(profileLimits.risk).toMatch(/non-default profile must produce its own valid credential rewrite or fail closed/i)
+    expect(profileLimits.risk).toMatch(/read-only status\/API.*not an editable/i)
+    const capacityAuthority = streamChecker.settings.find(setting => setting.name === 'Provider capacity authority')
+    expect(capacityAuthority.controlType).toBe('Status/API')
+    expect(capacityAuthority.effect).toMatch(/provider_profile_unavailable.*provider_usage_unavailable/i)
+    expect(capacityAuthority.risk).toMatch(/never treat either unavailable state as zero usage/i)
+    const reservedProfile = streamChecker.settings.find(setting => setting.name === 'Reserved probe profile')
+    expect(reservedProfile.controlType).toBe('Status/API')
+    expect(reservedProfile.location).toMatch(/Stream Progress Tracking -> Account.*hover for ID and Limit/i)
+    expect(reservedProfile.location).toMatch(/streams_detail\[\]\.reserved_profile_id\|reserved_profile_name\|reserved_profile_limit/i)
+    expect(reservedProfile.effect).toMatch(/safe ID, name, and actually enforced limit/i)
+    expect(reservedProfile.effect).toMatch(/strict shared-route limit/i)
+    expect(reservedProfile.effect).toMatch(/profile A with profile B/i)
+    expect(reservedProfile.useWhen).toMatch(/without exposing its URL or credentials/i)
+    expect(reservedProfile.risk).toMatch(/clears on capacity wait or viewer preemption/i)
+    expect(reservedProfile.risk).toMatch(/not retained as Changelog history/i)
+    const bitrateRecheck = streamChecker.settings.find(setting => setting.name === 'Bitrate Recheck')
+    expect(bitrateRecheck.controlType).toBe('Status/API')
+    expect(bitrateRecheck.location).toBe('Stream Checker -> Current Progress (active run) -> Stream Progress Tracking -> Status -> Bitrate Recheck')
+    expect(bitrateRecheck.effect).toMatch(/one at a time/i)
+    expect(bitrateRecheck.risk).toMatch(/current result remains N\/A/i)
+    const bitrateHistory = streamChecker.settings.find(setting => setting.name === 'Bitrate Recheck history')
+    expect(bitrateHistory.location).toMatch(/Action filter: Automation Runs.*Analyzed Streams -> Reason/i)
+    expect(bitrateHistory.locationTo).toBe('/changelog')
+    expect(streamChecker.smokeChecks.join(' ')).toMatch(/Capacity deferred.*provider\/profile slot.*authority\/usage could not be proved/i)
+    const hardware = getOperatorHelpDetailTopic('hardware-fallback')
+    for (const name of ['Hardware Acceleration', 'Mode', 'Device', 'CPU Fallback']) {
+      expect(hardware.settings.find(setting => setting.name === name).location).toMatch(/^Stream Checker -> Stream Checker Configuration -> Edit -> Stream Analysis tab -> Hardware Acceleration/)
+    }
+    expect(getOperatorHelpDetailTopic('troubleshooting').settings.find(setting => setting.name === 'Effective visual probe duration').location).toMatch(/^Stream Checker -> Stream Checker Configuration -> Edit -> Stream Analysis tab -> FFmpeg Duration/)
     const shadowSettings = getOperatorHelpDetailTopic('shadow-monitor').settings
     expect(shadowSettings.map(setting => setting.name)).toEqual(expect.arrayContaining([
-      'Continuous mode',
+      'Continuous Monitoring',
       'Viewer Output Format',
+      'Watcher API Key',
       'Watcher User Agent',
       'Viewer Grace',
       'Dry Run',
@@ -208,15 +268,23 @@ describe('operatorHelpSections', () => {
       'Silent Audio',
       'Offline Image',
       'Next Stream Pre-Probe',
+      'Configuration revision guard',
       'Loop Detection',
       'Loop Probe Duration',
       'Probe Duration',
       'Healthy Probe Interval',
       'Channel Switch Limit',
     ]))
-    expect(shadowSettings.find(setting => setting.name === 'Continuous mode').defaultValue).toBe('Continuous')
-    expect(shadowSettings.find(setting => setting.name === 'Continuous mode').effect).toMatch(/Legacy periodic config is normalized/i)
+    expect(shadowSettings.find(setting => setting.name === 'Continuous Monitoring').defaultValue).toBe('Continuous')
+    expect(shadowSettings.find(setting => setting.name === 'Continuous Monitoring').effect).toMatch(/Legacy periodic config is normalized/i)
     expect(shadowSettings.find(setting => setting.name === 'Viewer Output Format').effect).toMatch(/fMP4 or MPEGTS/i)
+    expect(shadowSettings.find(setting => setting.name === 'Viewer Output Format').location).toMatch(/backend-only/i)
+    expect(shadowSettings.find(setting => setting.name === 'Viewer Output Format').location).not.toMatch(/Watched Now/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').location).toBe('Shadow Monitor -> Configuration card -> Watcher API Key')
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').risk).toMatch(/administrator or primary account key/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').risk).toMatch(/separate ordinary playback identity/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').effect).toMatch(/never returned/i)
+    expect(shadowSettings.find(setting => setting.name === 'Watcher API Key').useWhen).toMatch(/reserved for Shadow/i)
     expect(shadowSettings.find(setting => setting.name === 'Watcher User Agent').defaultValue).toMatch(/TiviMate/i)
     expect(shadowSettings.find(setting => setting.name === 'Watcher User Agent').effect).toMatch(/unique marker/i)
     expect(shadowSettings.find(setting => setting.name === 'Viewer Grace').defaultValue).toBe('5 seconds')
@@ -224,10 +292,21 @@ describe('operatorHelpSections', () => {
     expect(shadowSettings.find(setting => setting.name === 'Viewer Grace').risk).toMatch(/provider\/profile capacity/i)
     expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').defaultValue).toBe('120 seconds')
     expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').effect).toMatch(/constant extra viewer/i)
+    expect(shadowSettings.find(setting => setting.name === 'Healthy Probe Interval').effect).toMatch(/Probe active.*Last probe.*Next probe/i)
     expect(shadowSettings.find(setting => setting.name === 'Dry Run').defaultValue).toBe('Off')
     expect(shadowSettings.find(setting => setting.name === 'Freeze Detection').defaultValue).toBe('On')
+    expect(shadowSettings.find(setting => setting.name === 'Garbled Audio').defaultValue).toBe('Off')
+    expect(shadowSettings.find(setting => setting.name === 'Silent Audio').defaultValue).toBe('Off')
     expect(shadowSettings.find(setting => setting.name === 'Silent Audio').effect).toMatch(/no usable audio stream/i)
+    expect(shadowSettings.find(setting => setting.name === 'Offline Image').defaultValue).toBe('Off')
+    expect(shadowSettings.find(setting => setting.name === 'Offline Image').useWhen).toMatch(/do not turn detection on/i)
+    expect(shadowSettings.find(setting => setting.name === 'Next Stream Pre-Probe').defaultValue).toBe('Off')
     expect(shadowSettings.find(setting => setting.name === 'Next Stream Pre-Probe').risk).toMatch(/loop-triggered live switches are blocked/i)
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').controlType).toBe('Status/API')
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').defaultValue).toBe('Applied by UI saves')
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').location).toBe('Shadow Monitor -> Save -> "Configuration changed" notice')
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').effect).toMatch(/cannot silently overwrite/i)
+    expect(shadowSettings.find(setting => setting.name === 'Configuration revision guard').risk).toMatch(/operator or API client/i)
     expect(shadowSettings.find(setting => setting.name === 'Loop Detection').risk).toMatch(/real viewers/i)
     expect(shadowSettings.find(setting => setting.name === 'Loop Detection').risk).toMatch(/next-stream pre-probe/i)
     expect(shadowSettings.find(setting => setting.name === 'Loop Probe Duration').defaultValue).toBe('360 seconds')
@@ -235,8 +314,11 @@ describe('operatorHelpSections', () => {
     expect(getOperatorHelpDetailTopic('hardware-fallback').settings.map(setting => setting.name)).toContain('CPU Fallback')
     expect(getOperatorHelpDetailTopic('automation-periods').settings.map(setting => setting.name)).toContain('Missed-run grace')
     const troubleshooting = getOperatorHelpDetailTopic('troubleshooting')
-    expect(troubleshooting.settings.map(setting => setting.controlType)).toEqual(
-      troubleshooting.settings.map(() => 'Status/API'),
+    const troubleshootingStatusSettings = troubleshooting.settings.filter(
+      setting => setting.name !== 'Analytics history range',
+    )
+    expect(troubleshootingStatusSettings.map(setting => setting.controlType)).toEqual(
+      troubleshootingStatusSettings.map(() => 'Status/API'),
     )
     expect(troubleshooting.settings.map(setting => setting.name)).toEqual(expect.arrayContaining([
       'Startup readiness',
@@ -244,6 +326,7 @@ describe('operatorHelpSections', () => {
       'Previous progress hidden',
       'Dispatcharr status notice',
       'Dashboard and Changelog counters',
+      'Analytics history range',
       'Quality reason details',
       'Hardware status',
       'Teamarr Preflight status',
@@ -255,8 +338,17 @@ describe('operatorHelpSections', () => {
     expect(troubleshooting.settings.find(setting => setting.name === 'Dispatcharr status notice').effect).toMatch(/not automatically a quality-check failure/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Dashboard and Changelog counters').effect).toMatch(/Channels Restored/)
     expect(troubleshooting.settings.find(setting => setting.name === 'Dashboard and Changelog counters').effect).toMatch(/not the total number of visible channels/)
+    expect(troubleshooting.settings.find(setting => setting.name === 'Analytics history range').location).toBe('Analytics -> System Analytics header -> Date Range')
+    expect(troubleshooting.settings.find(setting => setting.name === 'Analytics history range').controlType).toBe('Visible UI setting')
+    expect(troubleshooting.settings.find(setting => setting.name === 'Analytics history range').effect).toMatch(/retained seven-day telemetry history/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').effect).toMatch(/elapsed\/limit/i)
     expect(troubleshooting.settings.find(setting => setting.name === 'Quality reason details').useWhen).toMatch(/timeout values/)
+    const needsRecheck = troubleshooting.settings.find(setting => setting.name === 'Needs Recheck bitrate status')
+    expect(needsRecheck.location).toBe('Stream Checker -> Current Progress (active run) -> Stream Progress Tracking -> Status -> Needs Recheck')
+    expect(needsRecheck.effect).toMatch(/serial bitrate recheck after the channel initial probes finish/i)
+    const needsRecheckHistory = troubleshooting.settings.find(setting => setting.name === 'Needs Recheck bitrate history')
+    expect(needsRecheckHistory.location).toMatch(/Action filter: Automation Runs.*Analyzed Streams -> Reason/i)
+    expect(needsRecheckHistory.locationTo).toBe('/changelog')
     expect(troubleshooting.settings.find(setting => setting.name === 'Changelog and logs').effect).toMatch(/full run or only dead\/blank\/freeze\/failed/i)
     expect(troubleshooting.steps.join(' ')).toMatch(/smallest manual check/i)
     expect(troubleshooting.steps.join(' ')).toMatch(/reason-detail fields/i)

@@ -1,6 +1,7 @@
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -8,7 +9,9 @@ from unittest.mock import Mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from apps.core.atomic_json import atomic_write_json
 from apps.stream.teamarr_preflight_service import (
+    ATTEMPT_STATE_KEY,
     DEFAULT_TEAMARR_PREFLIGHT_PROFILE_NAME,
     DEFAULT_TEAMARR_PREFLIGHT_VISIBILITY_POLICY,
     TEAMARR_PREFLIGHT_QUEUE_PRIORITY,
@@ -33,6 +36,18 @@ class FakeResponse:
         return self.payload
 
 
+class FakeDb:
+    def __init__(self):
+        self.settings = {}
+
+    def get_system_setting(self, key, default=None):
+        return self.settings.get(key, default)
+
+    def set_system_setting(self, key, value):
+        self.settings[key] = value
+        return True
+
+
 class RouteHttpGet:
     def __init__(self, routes):
         self.routes = dict(routes)
@@ -45,6 +60,47 @@ class RouteHttpGet:
         if isinstance(payload, Exception):
             raise payload
         return FakeResponse(payload)
+
+
+class SlowTeamStatusHttpGet:
+    def __init__(self, teams, *, delay=0.05, block_event=None):
+        self.teams = [dict(team) for team in teams]
+        self.delay = delay
+        self.block_event = block_event
+        self.entered = threading.Event()
+        self.lock = threading.Lock()
+        self.active = 0
+        self.max_active = 0
+        self.timeouts = []
+
+    def __call__(self, url, *args, **kwargs):
+        path = str(url).replace("http://teamarr.test", "")
+        if path == "/api/v1/teams?active_only=true":
+            return FakeResponse(self.teams)
+        if path.endswith("/channel-status"):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+                self.timeouts.append(kwargs.get("timeout"))
+            self.entered.set()
+            try:
+                if self.block_event is not None:
+                    self.block_event.wait(timeout=2)
+                else:
+                    time.sleep(self.delay)
+                team_id = int(path.split("/")[-2])
+                team = next(team for team in self.teams if int(team["id"]) == team_id)
+                return FakeResponse(make_team_status(team=team))
+            finally:
+                with self.lock:
+                    self.active -= 1
+        if path == "/api/v1/sports-subscription":
+            return FakeResponse({"leagues": []})
+        if path == "/api/v1/cache/sports":
+            return FakeResponse({"sports": {}})
+        if path == "/api/v1/cache/leagues":
+            return FakeResponse({"leagues": []})
+        return FakeResponse([])
 
 
 class FakeChecker:
@@ -112,6 +168,7 @@ class QueueBackedChecker(FakeChecker):
         self.check_queue.queued_metadata = {
             77: {
                 "source": "teamarr_preflight",
+                "attempted_key": "id:queued:pre",
                 "program_name": "Queued Match",
                 "trigger_bucket": "pre",
                 "event": {
@@ -130,6 +187,7 @@ class QueueBackedChecker(FakeChecker):
         self.check_queue.in_progress_metadata = {
             78: {
                 "source": "teamarr_preflight",
+                "attempted_key": "id:running:pre",
                 "program_name": "Running Match",
                 "event": {
                     "identity": "id:running",
@@ -257,12 +315,24 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def make_service(self, events, *, checker=None, udi=None, automation_config=None, automation_status=None, http_get=None):
+    def make_service(
+        self,
+        events,
+        *,
+        checker=None,
+        udi=None,
+        automation_config=None,
+        automation_status=None,
+        http_get=None,
+        db=None,
+        service_options=None,
+    ):
         checker = checker or FakeChecker()
         udi = udi or FakeUdi()
         automation_config = automation_config or FakeAutomationConfig()
         automation_status = automation_status or {}
         http_get = http_get or Mock(return_value=FakeResponse(events))
+        db = db or FakeDb()
         service = TeamarrPreflightService(
             config_file=self.config_file,
             http_get=http_get,
@@ -270,7 +340,9 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             stream_checker_provider=lambda: checker,
             automation_config_provider=lambda: automation_config,
             automation_status_provider=lambda: automation_status,
+            db_provider=lambda: db,
             clock=lambda: FIXED_NOW,
+            **(service_options or {}),
         )
         service.update_config({
             "teamarr_base_url": "http://teamarr.test",
@@ -280,6 +352,15 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
             "retry_offsets_minutes": [10, 3],
         })
         return service, checker, http_get
+
+    def test_config_recovers_from_last_known_good_copy(self):
+        atomic_write_json(self.config_file, {"enabled": False})
+        atomic_write_json(self.config_file, {"enabled": True})
+        self.config_file.write_text("{broken", encoding="utf-8")
+
+        service, _, _ = self.make_service([])
+
+        self.assertFalse(service.get_config()["enabled"])
 
     def test_config_redacts_api_key_and_normalizes_filters(self):
         config = normalize_config({
@@ -360,6 +441,163 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(status["upcoming_teams"][0]["teamarr_team_id"], 501)
         self.assertEqual(status["upcoming_teams"][0]["state"], "due")
         self.assertEqual(status["preflight_items"][0]["identity"], status["upcoming_teams"][0]["identity"])
+
+    def test_static_team_status_requests_use_bounded_parallelism(self):
+        base_team = make_team_status()["team"]
+        teams = [
+            {
+                **base_team,
+                "id": 600 + index,
+                "provider_team_id": str(600 + index),
+                "team_name": f"Parallel Team {index}",
+                "channel_id": f"ParallelTeam{index}.mlb",
+            }
+            for index in range(8)
+        ]
+        http_get = SlowTeamStatusHttpGet(teams, delay=0.05)
+        service, _, _ = self.make_service(
+            [],
+            http_get=http_get,
+            service_options={
+                "static_team_scan_workers": 4,
+                "static_team_request_timeout_seconds": 0.5,
+                "static_team_scan_budget_seconds": 2,
+            },
+        )
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        started = time.monotonic()
+        result = service.run_once(force=True)
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(result["success"])
+        self.assertFalse(result["partial"])
+        self.assertEqual(result["teams_seen"], 8)
+        self.assertEqual(http_get.max_active, 4)
+        self.assertLess(elapsed, 0.35)
+        self.assertTrue(all(timeout <= 0.5 for timeout in http_get.timeouts))
+        scan_status = service.get_status()["scan_status"]
+        self.assertEqual(scan_status["completed"], 8)
+        self.assertEqual(scan_status["pending_requests"], 0)
+
+    def test_static_team_scan_budget_returns_visible_partial_result(self):
+        base_team = make_team_status()["team"]
+        teams = [
+            {
+                **base_team,
+                "id": 700 + index,
+                "provider_team_id": str(700 + index),
+                "team_name": f"Budget Team {index}",
+            }
+            for index in range(6)
+        ]
+        http_get = SlowTeamStatusHttpGet(teams, delay=0.2)
+        service, _, _ = self.make_service(
+            [],
+            http_get=http_get,
+            service_options={
+                "static_team_scan_workers": 2,
+                "static_team_request_timeout_seconds": 0.05,
+                "static_team_scan_budget_seconds": 0.1,
+            },
+        )
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        result = service.run_once(force=True)
+
+        self.assertTrue(result["success"])
+        self.assertTrue(result["partial"])
+        self.assertTrue(result["degraded"])
+        scan_status = service.get_status()["scan_status"]
+        self.assertEqual(scan_status["state"], "degraded")
+        self.assertTrue(scan_status["budget_exhausted"])
+        self.assertEqual(scan_status["requested"], 6)
+        self.assertGreater(scan_status["cancelled"], 0)
+        self.assertTrue(service._static_requests_finished_event.wait(timeout=1))
+
+    def test_stop_reports_stopping_until_blocked_team_request_finishes(self):
+        release = threading.Event()
+        team = make_team_status()["team"]
+        http_get = SlowTeamStatusHttpGet([team], block_event=release)
+        service, checker, _ = self.make_service(
+            [],
+            http_get=http_get,
+            service_options={
+                "static_team_scan_workers": 1,
+                "static_team_request_timeout_seconds": 1,
+                "static_team_scan_budget_seconds": 2,
+                "stop_wait_seconds": 0.05,
+            },
+        )
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        service.start(persist=True)
+        self.assertTrue(http_get.entered.wait(timeout=1))
+        stopped = service.stop(persist=False)
+
+        self.assertFalse(stopped)
+        status = service.get_status()
+        self.assertTrue(status["stopping"])
+        self.assertEqual(status["scan_status"]["state"], "stopping")
+        self.assertGreater(status["scan_status"]["pending_requests"], 0)
+        self.assertEqual(checker.calls, [])
+        self.assertFalse(service.start(persist=False))
+
+        release.set()
+        self.assertTrue(service._static_requests_finished_event.wait(timeout=1))
+        self.assertTrue(service._scan_finished_event.wait(timeout=1))
+        deadline = time.time() + 1
+        while time.time() < deadline and service.get_status()["running"]:
+            time.sleep(0.01)
+        final_status = service.get_status()
+        self.assertFalse(final_status["running"])
+        self.assertFalse(final_status["stopping"])
+        self.assertEqual(final_status["scan_status"]["state"], "cancelled")
+        self.assertEqual(checker.calls, [])
+
+    def test_cancelled_manual_scan_does_not_report_success(self):
+        release = threading.Event()
+        http_get = SlowTeamStatusHttpGet([make_team_status()["team"]], block_event=release)
+        service, checker, _ = self.make_service(
+            [],
+            http_get=http_get,
+            service_options={
+                "static_team_scan_workers": 1,
+                "static_team_request_timeout_seconds": 1,
+                "static_team_scan_budget_seconds": 2,
+                "stop_wait_seconds": 0.05,
+            },
+        )
+        service.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+        result = {}
+
+        scan_thread = threading.Thread(
+            target=lambda: result.update(service.run_once(force=True)),
+            daemon=True,
+        )
+        scan_thread.start()
+        self.assertTrue(http_get.entered.wait(timeout=1))
+        self.assertFalse(service.stop(persist=False))
+        release.set()
+        scan_thread.join(timeout=1)
+
+        self.assertFalse(scan_thread.is_alive())
+        self.assertFalse(result["success"])
+        self.assertEqual(result["code"], "scan_cancelled")
+        self.assertTrue(result["partial"])
+        self.assertEqual(checker.calls, [])
 
     def test_incomplete_static_team_is_visible_but_not_queueable(self):
         incomplete = make_team_status(
@@ -888,6 +1126,39 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(recent[0]["type"], "preflight_completed")
         self.assertEqual(recent[0]["details"]["stats"]["total_streams"], 1)
 
+    def test_late_stream_checker_reservation_race_defers_bucket_for_retry(self):
+        checker = SequencedChecker([
+            {
+                "success": False,
+                "error": "stream_checker_active",
+                "message": "Stream Checker work is already active",
+            },
+            {
+                "success": True,
+                "stats": {"total_streams": 1, "duration_seconds": 8},
+            },
+        ])
+        service, _, _ = self.make_service([make_event()], checker=checker)
+
+        first_result = service.run_once(force=True)
+        self.assertTrue(first_result["success"])
+        self.assertEqual(first_result["launched"], 1)
+
+        deadline = time.time() + 2
+        recent = []
+        while time.time() < deadline:
+            recent = service.get_status()["recent_events"]
+            if recent and recent[0]["type"] == "preflight_deferred":
+                break
+            time.sleep(0.01)
+
+        self.assertEqual(recent[0]["type"], "preflight_deferred")
+        self.assertEqual(recent[0]["details"]["reason"], "stream_checker_active")
+
+        second_result = service.run_once(force=True)
+        self.assertTrue(second_result["success"])
+        self.assertEqual(second_result["launched"], 1)
+
     def test_retry_offsets_do_not_fire_before_preflight_offset(self):
         checker = FakeChecker()
         service, _, _ = self.make_service(
@@ -1031,6 +1302,85 @@ class TeamarrPreflightServiceTest(unittest.TestCase):
         self.assertEqual(len(checker.calls), 1)
         recent = service.get_status()["recent_events"]
         self.assertEqual(recent[0]["details"]["bucket"], "post+2m")
+
+    def test_managed_event_attempt_survives_service_restart(self):
+        db = FakeDb()
+        first_checker = FakeChecker()
+        first, _, _ = self.make_service([make_event()], checker=first_checker, db=db)
+
+        first_result = first.run_once(force=True)
+        self.assertTrue(first_result["success"])
+        self.assertEqual(first_result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not first_checker.calls:
+            time.sleep(0.01)
+        self.assertEqual(len(first_checker.calls), 1)
+        self.assertIn(ATTEMPT_STATE_KEY, db.settings)
+
+        second_checker = FakeChecker()
+        second, _, _ = self.make_service([make_event()], checker=second_checker, db=db)
+        second_result = second.run_once(force=True)
+
+        self.assertTrue(second_result["success"])
+        self.assertEqual(second_result["launched"], 0)
+        self.assertEqual(second_checker.calls, [])
+        self.assertEqual(second.get_status()["upcoming_events"][0]["state"], "already_attempted")
+
+    def test_static_team_attempt_survives_service_restart(self):
+        db = FakeDb()
+        team_status = make_team_status()
+        routes = {
+            "/api/v1/teams?active_only=true": [team_status["team"]],
+            "/api/v1/teams/501/channel-status": team_status,
+            "/api/v1/sports-subscription": {"leagues": []},
+            "/api/v1/cache/sports": {"sports": {}},
+            "/api/v1/cache/leagues": {"leagues": []},
+        }
+        first_checker = FakeChecker()
+        first, _, _ = self.make_service(
+            [], checker=first_checker, db=db, http_get=RouteHttpGet(routes)
+        )
+        first.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+
+        first_result = first.run_once(force=True)
+        self.assertTrue(first_result["success"])
+        self.assertEqual(first_result["launched"], 1)
+
+        deadline = time.time() + 2
+        while time.time() < deadline and not first_checker.calls:
+            time.sleep(0.01)
+        self.assertEqual(len(first_checker.calls), 1)
+
+        second_checker = FakeChecker()
+        second, _, _ = self.make_service(
+            [], checker=second_checker, db=db, http_get=RouteHttpGet(routes)
+        )
+        second.update_config({
+            "managed_event_preflight_enabled": False,
+            "static_team_preflight_enabled": True,
+        })
+        second_result = second.run_once(force=True)
+
+        self.assertTrue(second_result["success"])
+        self.assertEqual(second_result["launched"], 0)
+        self.assertEqual(second_checker.calls, [])
+        self.assertEqual(second.get_status()["upcoming_teams"][0]["state"], "already_attempted")
+
+    def test_queue_state_reconciles_missing_persisted_attempt_on_start(self):
+        db = FakeDb()
+        checker = QueueBackedChecker()
+        service, _, _ = self.make_service([], checker=checker, db=db)
+
+        service.start(persist=False)
+        service.stop(persist=False)
+
+        attempts = db.settings[ATTEMPT_STATE_KEY]["attempts"]
+        self.assertIn("id:queued:pre", attempts)
+        self.assertIn("id:running:pre", attempts)
 
     def test_second_post_start_bucket_runs_after_first_post_start_attempt(self):
         checker = FakeChecker()

@@ -6,6 +6,8 @@ const REASON_LABELS = {
   zero_resolution_dimension: 'Invalid video resolution',
   zero_bitrate: 'No bitrate detected',
   missing_bitrate: 'Needs bitrate recheck',
+  missing_bitrate_after_recheck: 'Bitrate unavailable after recheck',
+  bitrate_recheck_recovered: 'Bitrate recovered after recheck',
   resolution_width_below_threshold: 'Resolution width below threshold',
   resolution_height_below_threshold: 'Resolution height below threshold',
   bitrate_below_threshold: 'Bitrate below threshold',
@@ -44,7 +46,18 @@ const STATUS_REASON_FALLBACKS = {
   error: 'error',
 }
 
-const ACTIVE_STREAM_STATUSES = new Set(['checking', 'probing'])
+const ACTIVE_STREAM_STATUSES = new Set(['checking', 'probing', 'rechecking_bitrate'])
+
+const VISUAL_PROBE_INCOMPLETE_LABELS = {
+  timeout: 'Probe timed out',
+  preempted: 'Viewer needed probe capacity',
+  exit_146: 'Connection timed out (FFmpeg 146)',
+  exit_155: 'Network unreachable (FFmpeg 155)',
+  exit_183: 'Invalid media data (FFmpeg 183)',
+  exit_234: 'Invalid input or argument (FFmpeg 234)',
+  exit_251: 'Input/output error (FFmpeg 251)',
+  exit_8: 'FFmpeg could not open or process the input (code 8)',
+}
 
 const STATIC_REASON_DETAILS = {
   viewer_preempted: 'Real playback kept the profile slot; check again later',
@@ -90,6 +103,26 @@ const uniqueParts = (parts) => {
 }
 
 const formatProbeLabel = (label) => titleizeCode(label).replace(/\bApi\b/g, 'API')
+
+export function getVisualProbeLabel(stream = {}) {
+  if (stream.visual_probe_incomplete) {
+    const reason = stream.visual_probe_incomplete_reason || 'unknown'
+    const knownLabel = VISUAL_PROBE_INCOMPLETE_LABELS[reason]
+    if (knownLabel) return `Incomplete: ${knownLabel}`
+
+    const exitMatch = String(reason).match(/^exit_(-?\d+)$/)
+    if (exitMatch) return `Incomplete: FFmpeg failed (code ${exitMatch[1]})`
+    return `Incomplete: ${titleizeCode(reason) || 'Unknown reason'}`
+  }
+
+  if (stream.visual_probe_completed) {
+    const duration = stream.visual_probe_duration_seconds
+    const adjusted = stream.visual_probe_duration_adjusted ? ' adjusted' : ''
+    return duration != null ? `${duration}s${adjusted}` : `Complete${adjusted}`
+  }
+
+  return 'Pending'
+}
 
 const pickConnectivityDetails = (context = {}) => {
   if (Array.isArray(context.attempts)) {
@@ -162,12 +195,28 @@ const formatAnalysisFailureDetail = (context = {}) => {
 export function getQualityReasonDisplay(stream = {}) {
   if (ACTIVE_STREAM_STATUSES.has(stream.status)) return null
 
-  const code = stream.quality_reason_detail
+  const context = {
+    ...(stream.measurement_incomplete_context || {}),
+    ...(stream.quality_reason_context || {}),
+  }
+  const bitrateRecheckOutcome = stream.bitrate_recheck_outcome
+    || context.bitrate_recheck_outcome
+  const primaryCode = stream.quality_reason_detail
     || stream.reason_detail
     || STATUS_REASON_FALLBACKS[stream.status]
+  const capacityIsPrimary = (
+    primaryCode === 'missing_bitrate'
+    || primaryCode === 'missing_bitrate_after_recheck'
+  )
+  const code = (
+    bitrateRecheckOutcome === 'provider_capacity_unavailable' && capacityIsPrimary
+      ? 'provider_capacity_unavailable'
+      : bitrateRecheckOutcome === 'recovered' && (!primaryCode || primaryCode === 'none')
+        ? 'bitrate_recheck_recovered'
+        : primaryCode
+  )
   if (!code || code === 'none') return null
 
-  const context = stream.quality_reason_context || {}
   const label = REASON_LABELS[code] || titleizeCode(code)
   let detail = null
 
@@ -232,4 +281,21 @@ export function getQualityReasonDisplay(stream = {}) {
     text,
     title: detail ? `${code}: ${detail}` : code,
   }
+}
+
+export function getIncompleteBitrateBadgeLabel(stream = {}) {
+  const context = {
+    ...(stream.measurement_incomplete_context || {}),
+    ...(stream.quality_reason_context || {}),
+  }
+  const outcome = stream.bitrate_recheck_outcome || context.bitrate_recheck_outcome
+  const reason = stream.quality_reason_detail
+    || stream.measurement_incomplete_reason
+    || stream.reason_detail
+
+  if (outcome === 'provider_capacity_unavailable') return 'Capacity deferred'
+  if (outcome === 'unavailable' || reason === 'missing_bitrate_after_recheck') {
+    return 'Unavailable after recheck'
+  }
+  return 'Needs Recheck'
 }

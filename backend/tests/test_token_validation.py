@@ -91,7 +91,9 @@ class TestTokenValidation(unittest.TestCase):
         # Mock that we have a token
         mock_getenv.return_value = 'existing_token_123'
         
-        headers = _get_auth_headers()
+        with patch('apps.core.auth.get_dispatcharr_config') as get_config:
+            get_config.return_value.get_auth_mode.return_value = 'credentials'
+            headers = _get_auth_headers()
         
         # Verify token is used directly
         self.assertEqual(headers['Authorization'], 'Bearer existing_token_123')
@@ -117,8 +119,10 @@ class TestTokenValidation(unittest.TestCase):
         
         # Mock that .env file exists
         mock_env_path.exists.return_value = True
-        
-        headers = _get_auth_headers()
+
+        with patch('apps.core.auth.get_dispatcharr_config') as get_config:
+            get_config.return_value.get_auth_mode.return_value = 'credentials'
+            headers = _get_auth_headers()
         
         # Verify login WAS called because token was missing
         mock_login.assert_called_once()

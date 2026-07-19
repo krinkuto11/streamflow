@@ -9,7 +9,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from apps.core.log_sanitizer import audit_ref, scrub_urls, stream_context, stream_ref
+from apps.core.log_sanitizer import (
+    audit_ref,
+    scrub_secrets,
+    scrub_urls,
+    stream_context,
+    stream_ref,
+)
 from apps.stream.dead_streams_tracker import DeadStreamsTracker
 from apps.stream.ffmpeg_stream_monitor import FFmpegStreamMonitor
 
@@ -71,14 +77,11 @@ class LogSanitizerTests(unittest.TestCase):
         self.assertNotIn(raw_url, context)
         self.assertNotIn("provider.example", context)
 
-    def test_debug_mode_keeps_raw_stream_identifiers_visible(self):
+    def test_debug_mode_keeps_ids_visible_but_never_raw_urls(self):
         raw_url = "http://provider.example/live/user/password/123.ts?token=secret"
 
         with patch.dict(os.environ, {"DEBUG_MODE": "true"}):
-            self.assertEqual(
-                scrub_urls(f"ffmpeg failed while opening {raw_url}"),
-                f"ffmpeg failed while opening {raw_url}",
-            )
+            self.assertNotIn(raw_url, scrub_urls(f"ffmpeg failed while opening {raw_url}"))
             self.assertIn("stream-123", stream_ref(123, raw_url))
 
             context = stream_context(
@@ -93,6 +96,20 @@ class LogSanitizerTests(unittest.TestCase):
         default_context = stream_context(stream_id=123, stream_url=raw_url)
         self.assertNotIn("stream_ref=stream-123", default_context)
         self.assertNotIn(raw_url, default_context)
+
+    def test_scrub_secrets_handles_headers_assignments_and_urls(self):
+        raw_url = "http://provider.example/live/user/password/123.ts?token=secret"
+        message = (
+            f"url={raw_url} Authorization: Bearer abc.def "
+            'api_key="super-secret" password=hunter2 watcher_api_key=watcher-secret'
+        )
+
+        scrubbed = scrub_secrets(message)
+
+        for secret in (raw_url, "abc.def", "super-secret", "hunter2", "watcher-secret"):
+            self.assertNotIn(secret, scrubbed)
+        self.assertIn("<url-", scrubbed)
+        self.assertIn("Authorization: <redacted>", scrubbed)
 
     def test_dead_stream_tracker_logs_refs_without_names_or_urls(self):
         raw_url = "http://provider.example/live/user/password/123.ts?token=secret"

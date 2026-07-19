@@ -208,13 +208,25 @@ export const streamCheckerAPI = {
     ...(profileId ? { profile_id: profileId } : {}),
     force_check: forceCheck,
   }, { timeout: 120000 }),
-  checkStream: (streamIdOrPayload, options = {}) => {
-    const payload = typeof streamIdOrPayload === 'object'
+  checkStream: (streamIdOrPayload, options = {}, requestConfig = {}) => {
+    const payloadProvided = typeof streamIdOrPayload === 'object'
+    const payload = payloadProvided
       ? streamIdOrPayload
       : { stream_id: streamIdOrPayload, ...options };
-    return api.post('/stream-checker/check-stream', payload, { timeout: 120000 });
+    const effectiveRequestConfig = payloadProvided ? options : requestConfig;
+    // Direct checks may wait for provider capacity and run a serial bitrate
+    // recheck. Do not let Axios abandon the request while the reserved backend
+    // operation is still running and may persist its result.
+    return api.post('/stream-checker/check-stream', payload, {
+      ...effectiveRequestConfig,
+      timeout: 0,
+    });
   },
-  checkStreamById: (streamId, options = {}) => api.post(`/stream-checker/streams/${streamId}/check`, options, { timeout: 120000 }),
+  checkStreamById: (streamId, options = {}, requestConfig = {}) => api.post(
+    `/stream-checker/streams/${streamId}/check`,
+    options,
+    { ...requestConfig, timeout: 0 },
+  ),
   getStreamLastQualityStats: (streamId) => api.get(`/stream-checker/streams/${streamId}/last-quality-stats`),
   markUpdated: (data) => api.post('/stream-checker/mark-updated', data),
   queueAllChannels: (options = {}) => api.post('/stream-checker/queue-all', options),

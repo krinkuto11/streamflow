@@ -23,6 +23,7 @@ class AutomationRunStatusTests(unittest.TestCase):
     def _manager(self):
         manager = AutomatedStreamManager.__new__(AutomatedStreamManager)
         manager._run_status_lock = threading.RLock()
+        manager._trigger_lock = threading.Lock()
         manager._run_sequence = 0
         manager._manual_stop_requested = threading.Event()
         manager.automation_thread = None
@@ -312,6 +313,169 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(manager.last_playlist_update, original_last_run)
         manager._save_state.assert_not_called()
 
+    def test_connectivity_retry_persists_only_unfinished_quality_channels(self):
+        manager = self._manager()
+        manager.config = {
+            "scheduler_retry": {
+                "enabled": True,
+                "max_attempts": 3,
+                "base_delay_seconds": 30,
+                "max_delay_seconds": 120,
+            },
+        }
+        manager._scheduler_retry_state = {}
+        manager.period_last_run = {"period-1": datetime.now() - timedelta(hours=2)}
+        manager._save_state = Mock()
+        active_periods = {
+            ("period-1", "Full Check"): {
+                "period_name": "Full Check",
+                "channels": [{"id": 1}, {"id": 2}, {"id": 3}],
+            },
+        }
+
+        summary = manager._schedule_connectivity_retries(
+            active_periods,
+            message="Dispatcharr API connectivity probe timed out",
+            selected_channel_ids=[1, 2, 3],
+            completed_channel_ids=[1],
+            target_stream_ids={2: [20, 21], 3: [30]},
+            check_all_stream_ids=[3],
+        )
+
+        retry = manager._scheduler_retry_state["period-1"]
+        self.assertTrue(summary["scheduled"])
+        self.assertEqual(summary["attempt"], 1)
+        self.assertEqual(retry["pending_channel_ids"], [2, 3])
+        self.assertEqual(retry["completed_channel_ids"], [1])
+        self.assertEqual(retry["target_stream_ids"], {"2": [20, 21], "3": [30]})
+        self.assertEqual(retry["check_all_stream_ids"], [3])
+        self.assertTrue(retry["skip_provider_refresh"])
+        self.assertEqual(retry["resume_stage"], "quality_checking")
+        self.assertTrue(manager._scheduler_retry_is_due(
+            "period-1",
+            now=datetime.fromisoformat(retry["next_retry_at"]),
+        ))
+        manager._save_state.assert_called_once()
+
+    def test_connectivity_retry_exhaustion_waits_for_next_regular_schedule(self):
+        manager = self._manager()
+        manager.config = {
+            "scheduler_retry": {
+                "enabled": True,
+                "max_attempts": 2,
+                "base_delay_seconds": 30,
+                "max_delay_seconds": 60,
+            },
+        }
+        manager._scheduler_retry_state = {}
+        original_last_run = datetime.now() - timedelta(hours=2)
+        manager.period_last_run = {"period-1": original_last_run}
+        manager._save_state = Mock()
+        active_periods = {
+            ("period-1", "Full Check"): {
+                "period_name": "Full Check",
+                "channels": [{"id": 1}],
+            },
+        }
+
+        first = manager._schedule_connectivity_retries(
+            active_periods,
+            message="timeout",
+            selected_channel_ids=[1],
+            completed_channel_ids=[],
+        )
+        second = manager._schedule_connectivity_retries(
+            active_periods,
+            message="timeout",
+            selected_channel_ids=[1],
+            completed_channel_ids=[],
+        )
+        exhausted = manager._schedule_connectivity_retries(
+            active_periods,
+            message="timeout",
+            selected_channel_ids=[1],
+            completed_channel_ids=[],
+        )
+
+        retry = manager._scheduler_retry_state["period-1"]
+        self.assertTrue(first["scheduled"])
+        self.assertTrue(second["scheduled"])
+        self.assertFalse(exhausted["scheduled"])
+        self.assertTrue(exhausted["exhausted"])
+        self.assertTrue(retry["exhausted"])
+        self.assertIsNone(retry["next_retry_at"])
+        self.assertGreater(manager.period_last_run["period-1"], original_last_run)
+        self.assertFalse(manager._scheduler_retry_is_due("period-1"))
+
+    def test_scheduler_retry_prunes_removed_periods_and_unassigned_channels(self):
+        manager = self._manager()
+        manager._scheduler_retry_state = {
+            "removed-period": {
+                "pending_channel_ids": [1],
+            },
+            "period-1": {
+                "pending_channel_ids": [2, 3],
+                "target_stream_ids": {"2": [20], "3": [30]},
+                "check_all_stream_ids": [2, 3],
+            },
+        }
+        manager._save_state = Mock()
+
+        changed = manager._prune_scheduler_retries({"period-1": {3}})
+
+        self.assertTrue(changed)
+        self.assertNotIn("removed-period", manager._scheduler_retry_state)
+        retry = manager._scheduler_retry_state["period-1"]
+        self.assertEqual(retry["pending_channel_ids"], [3])
+        self.assertEqual(retry["target_stream_ids"], {"3": [30]})
+        self.assertEqual(retry["check_all_stream_ids"], [3])
+        manager._save_state.assert_called_once()
+
+    def test_quality_summary_identifies_connectivity_abort_for_scheduler_retry(self):
+        summary = AutomatedStreamManager._summarize_quality_check_results(
+            {
+                1: {"success": True},
+                2: {
+                    "success": False,
+                    "aborted": True,
+                    "error": "connectivity_guard",
+                    "message": "Dispatcharr API timeout",
+                },
+            },
+            expected_count=3,
+        )
+
+        self.assertFalse(summary["ok"])
+        self.assertTrue(summary["connectivity_aborted"])
+        self.assertEqual(summary["checked_count"], 2)
+        self.assertEqual(summary["incomplete_count"], 1)
+
+    def test_quality_summary_identifies_only_complete_checker_busy_rejections(self):
+        all_busy = AutomatedStreamManager._summarize_quality_check_results(
+            {
+                1: {"success": False, "aborted": True, "error": "stream_checker_active"},
+                2: {"success": False, "aborted": True, "error": "stream_checker_active"},
+            },
+            expected_count=2,
+        )
+        mixed = AutomatedStreamManager._summarize_quality_check_results(
+            {
+                1: {"success": False, "aborted": True, "error": "stream_checker_active"},
+                2: {"success": True},
+            },
+            expected_count=2,
+        )
+        incomplete = AutomatedStreamManager._summarize_quality_check_results(
+            {
+                1: {"success": False, "aborted": True, "error": "stream_checker_active"},
+            },
+            expected_count=2,
+        )
+
+        self.assertTrue(all_busy["stream_checker_busy"])
+        self.assertFalse(mixed["stream_checker_busy"])
+        self.assertFalse(incomplete["stream_checker_busy"])
+
     def test_manual_stop_aborted_cycle_advances_period_schedule_clock(self):
         manager = self._manager()
         original_last_run = datetime.now() - timedelta(minutes=90)
@@ -578,7 +742,41 @@ class AutomationRunStatusTests(unittest.TestCase):
         self.assertEqual(events[1]["message"], "Refreshing playlist 1/2: One")
         self.assertEqual(events[-1]["message"], "Playlist 2/2 refresh accepted: Two")
 
-    def test_refresh_playlists_reports_missing_account_as_skipped(self):
+    def test_refresh_playlists_targets_only_requested_active_account(self):
+        manager = self._manager()
+        manager.config = {
+            "enabled_features": {
+                "auto_playlist_update": True,
+                "changelog_tracking": False,
+            },
+            "enabled_m3u_accounts": [],
+        }
+        response = Mock(status_code=200)
+        scheduling_service = Mock()
+
+        with patch(
+            "apps.automation.automated_stream_manager.get_m3u_accounts",
+            return_value=[
+                {"id": 17, "name": "Target", "is_active": True},
+                {"id": 18, "name": "Other", "is_active": True},
+            ],
+        ), patch(
+            "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+            return_value=response,
+        ) as refresh_mock, patch(
+            "apps.automation.scheduling_service.get_scheduling_service",
+            return_value=scheduling_service,
+        ):
+            result = manager.refresh_playlists(
+                account_id=17,
+                skip_changelog=True,
+            )
+
+        self.assertTrue(result)
+        self.assertEqual(result[1], [{"id": 17, "name": "Target"}])
+        refresh_mock.assert_called_once_with(account_id=17)
+
+    def test_refresh_playlists_reports_missing_account_as_failed(self):
         manager = self._manager()
         manager.config = {
             "enabled_features": {
@@ -599,17 +797,91 @@ class AutomationRunStatusTests(unittest.TestCase):
             "apps.automation.scheduling_service.get_scheduling_service",
             return_value=scheduling_service,
         ):
-            success, accounts = manager.refresh_playlists(
+            result = manager.refresh_playlists(
                 account_id=99,
                 skip_changelog=True,
                 progress_callback=events.append,
             )
+            success, accounts = result
 
-        self.assertTrue(success)
+        self.assertFalse(success)
         self.assertEqual(accounts, [])
+        self.assertEqual(result.outcome, "failed")
+        self.assertEqual(
+            result.failed_refresh_requests,
+            [{"id": 99, "reason": "account_unavailable"}],
+        )
         refresh_mock.assert_not_called()
-        self.assertEqual(events[-1]["state"], "skipped")
-        self.assertEqual(events[-1]["message"], "No active playlists matched the refresh request")
+        self.assertEqual(events[-1]["state"], "failed")
+        self.assertEqual(events[-1]["message"], "Requested playlist is unavailable")
+
+    def test_targeted_refresh_never_falls_back_when_account_list_is_unavailable(self):
+        for all_accounts in (None, []):
+            with self.subTest(all_accounts=all_accounts):
+                manager = self._manager()
+                manager.config = {
+                    "enabled_features": {
+                        "auto_playlist_update": True,
+                        "changelog_tracking": False,
+                    },
+                    "enabled_m3u_accounts": [],
+                }
+                events = []
+
+                with patch(
+                    "apps.automation.automated_stream_manager.get_m3u_accounts",
+                    return_value=all_accounts,
+                ), patch(
+                    "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+                ) as refresh_mock:
+                    result = manager.refresh_playlists(
+                        account_id=99,
+                        skip_changelog=True,
+                        progress_callback=events.append,
+                    )
+
+                self.assertFalse(result)
+                self.assertEqual(result.outcome, "failed")
+                self.assertEqual(result[1], [])
+                self.assertEqual(result.failed_refresh_request_count, 1)
+                refresh_mock.assert_not_called()
+                self.assertEqual(events[-1]["state"], "failed")
+
+    def test_targeted_refresh_rejects_inactive_and_custom_accounts(self):
+        unavailable_accounts = (
+            {"id": 99, "name": "Inactive", "is_active": False},
+            {"id": 99, "name": "custom", "is_active": True},
+        )
+
+        for account in unavailable_accounts:
+            with self.subTest(account=account):
+                manager = self._manager()
+                manager.config = {
+                    "enabled_features": {
+                        "auto_playlist_update": True,
+                        "changelog_tracking": False,
+                    },
+                    "enabled_m3u_accounts": [],
+                }
+
+                with patch(
+                    "apps.automation.automated_stream_manager.get_m3u_accounts",
+                    return_value=[account],
+                ), patch(
+                    "apps.automation.automated_stream_manager.refresh_m3u_playlists",
+                ) as refresh_mock:
+                    result = manager.refresh_playlists(
+                        account_id=99,
+                        skip_changelog=True,
+                    )
+
+                self.assertFalse(result)
+                self.assertEqual(result.outcome, "failed")
+                self.assertEqual(
+                    result.failed_refresh_requests,
+                    [{"id": 99, "reason": "account_unavailable"}],
+                )
+                refresh_mock.assert_not_called()
 
     def test_refresh_playlists_monitors_already_running_account_without_retriggering(self):
         manager = self._manager()

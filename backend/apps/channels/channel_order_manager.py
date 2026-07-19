@@ -5,12 +5,12 @@ Channel Order Manager for StreamFlow.
 Manages custom ordering of channels in the UI.
 """
 
-import json
 import os
 import threading
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
+from apps.core.atomic_json import atomic_write_json, load_json_with_backup
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
@@ -38,14 +38,17 @@ class ChannelOrderManager:
     def _load_order(self) -> None:
         """Load channel order from file."""
         try:
-            if CHANNEL_ORDER_FILE.exists():
-                with open(CHANNEL_ORDER_FILE, 'r') as f:
-                    data = json.load(f)
-                    self._channel_order = data.get('order', [])
-                    logger.info(f"Loaded order for {len(self._channel_order)} channels")
-            else:
+            data = load_json_with_backup(
+                CHANNEL_ORDER_FILE,
+                default=None,
+                validator=lambda value: isinstance(value, dict),
+            )
+            if data is None:
                 self._channel_order = []
                 logger.info("No existing channel order file")
+            else:
+                self._channel_order = data.get('order', [])
+                logger.info(f"Loaded order for {len(self._channel_order)} channels")
         except Exception as e:
             logger.error(f"Error loading channel order: {e}", exc_info=True)
             self._channel_order = []
@@ -57,10 +60,7 @@ class ChannelOrderManager:
             True if successful, False otherwise
         """
         try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            data = {'order': self._channel_order}
-            with open(CHANNEL_ORDER_FILE, 'w') as f:
-                json.dump(data, f, indent=2)
+            atomic_write_json(CHANNEL_ORDER_FILE, {'order': self._channel_order})
             logger.debug("Channel order saved successfully")
             return True
         except Exception as e:

@@ -26,7 +26,10 @@ import {
   getProviderCapacityExplanationDisplay,
   getProviderWaitReasonDisplay,
 } from '@/lib/provider-progress-display.js'
-import { getQualityReasonDisplay } from '@/lib/quality-reason-display.js'
+import {
+  getIncompleteBitrateBadgeLabel,
+  getQualityReasonDisplay,
+} from '@/lib/quality-reason-display.js'
 import {
   Activity,
   CheckCircle2,
@@ -843,17 +846,27 @@ export default function StreamChecker() {
                                     <td className="max-w-[12rem] truncate px-2 py-2" title={slot.accountName}>
                                       {slot.accountName}
                                     </td>
-                                    <td className="max-w-[14rem] truncate px-2 py-2 font-medium" title={slot.name}>
-                                      {slot.name}
+                                    <td className="max-w-[18rem] px-2 py-2 font-medium" title={slot.title}>
+                                      <div className="flex min-w-0 items-center gap-1.5">
+                                        <span className="truncate">{slot.name}</span>
+                                        {slot.sharedRoute && (
+                                          <Badge
+                                            variant="outline"
+                                            className="shrink-0 text-[9px] font-normal text-muted-foreground"
+                                          >
+                                            {slot.sharedRouteLabel}
+                                          </Badge>
+                                        )}
+                                      </div>
                                     </td>
                                     <td className="px-2 py-2 text-right font-mono tabular-nums text-muted-foreground">
                                       {slot.id ?? 'N/A'}
                                     </td>
                                     <td className="px-2 py-2 text-right font-mono tabular-nums">
-                                      {slot.used}/{slot.limitText}
+                                      {slot.usageText}
                                     </td>
                                     <td className="px-2 py-2 text-right font-mono tabular-nums">
-                                      {slot.activeViewers}
+                                      {slot.realViewers}
                                     </td>
                                     <td className="px-2 py-2 text-right font-mono tabular-nums">
                                       {slot.checking}
@@ -865,13 +878,15 @@ export default function StreamChecker() {
                                       <Badge
                                         variant="outline"
                                         className={`text-[10px] ${
-                                          slot.full
+                                          slot.routeUnavailable
+                                            ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                                            : slot.full
                                             ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
                                             : slot.checking > 0
                                               ? 'border-blue-500/30 bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
                                               : 'text-muted-foreground'
                                         }`}
-                                        title={slot.title}
+                                        title={slot.routeUnavailableHint || slot.title}
                                       >
                                         {slot.status}
                                       </Badge>
@@ -895,8 +910,8 @@ export default function StreamChecker() {
               // normal analysis phase floats completed streams to top by score.
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
-                ? { probing: 0, loop_detected: 1, completed: 2, incomplete_bitrate: 3, checking: 4, pending: 5, error: 6, low_quality: 7, blank: 8, freeze: 9, dead: 10 }
-                : { checking: 0, waiting_provider_limit: 1, pending: 2, completed: 3, incomplete_bitrate: 4, viewer_preempted: 5, provider_limit_wait_timeout: 6, error: 7, low_quality: 8, blank: 9, freeze: 10, dead: 11 }
+                ? { probing: 0, loop_detected: 1, completed: 2, incomplete_bitrate: 3, rechecking_bitrate: 4, checking: 5, pending: 6, error: 7, low_quality: 8, blank: 9, freeze: 10, dead: 11 }
+                : { checking: 0, rechecking_bitrate: 1, waiting_provider_limit: 2, pending: 3, completed: 4, incomplete_bitrate: 5, viewer_preempted: 6, provider_limit_wait_timeout: 7, error: 8, low_quality: 9, blank: 10, freeze: 11, dead: 12 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -984,6 +999,7 @@ export default function StreamChecker() {
                               <td className="px-3 py-1.5 align-middle text-center">
                                 {stream.status === 'pending' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Pending</Badge>}
                                 {stream.status === 'checking' && <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">Checking</Badge>}
+                                {stream.status === 'rechecking_bitrate' && <Badge variant="outline" className="text-[10px] border-cyan-500/40 bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300 animate-pulse">Bitrate Recheck</Badge>}
                                 {stream.status === 'waiting_provider_limit' && <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Waiting</Badge>}
                                 {stream.status === 'viewer_preempted' && <Badge variant="outline" className="text-[10px] border-cyan-500/40 bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300">Preempted</Badge>}
                                 {stream.status === 'provider_limit_wait_timeout' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Skipped</Badge>}
@@ -991,7 +1007,7 @@ export default function StreamChecker() {
                                 {stream.status === 'incomplete_bitrate' && (
                                   <div className="mx-auto flex max-w-[180px] flex-col items-center gap-1" title={qualityReason?.title}>
                                     <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
-                                      Needs Recheck
+                                      {getIncompleteBitrateBadgeLabel(stream)}
                                     </Badge>
                                     {qualityReason && (
                                       <span className="max-w-full truncate text-[10px] leading-tight text-amber-700 dark:text-amber-300">
@@ -1140,7 +1156,7 @@ export default function StreamChecker() {
                         max={120}
                       />
                       <p className="text-xs text-muted-foreground">
-                        Duration to analyze each stream (5-120 seconds)
+                        Basis analysis duration (5-120 seconds). Blank/freeze profiles use a separate visual probe that is automatically extended to at least the detector threshold plus 1 second; Changelog shows its effective duration and completion state.
                       </p>
                     </div>
 
@@ -1448,7 +1464,7 @@ export default function StreamChecker() {
                     <Activity className="h-4 w-4" />
                     <AlertTitle>Check Capacity</AlertTitle>
                     <AlertDescription>
-                      `Check slots full` means the checker is waiting for global workers, provider/profile slots, or viewer-protected capacity. Viewer-preempted probes are skipped safely and can be checked again later.
+                      `Check slots full` means the checker is waiting for global workers, provider/profile slots, or viewer-protected capacity. Distinct usable profiles are independent provider credentials: finite route limits add to the account aggregate, while profiles with the same credential target (including default aliases) share capacity. M3U account Max Streams is only the no-active-profile fallback; active profiles without a usable route fail closed. Each probe URL is bound to its exact reserved profile; non-default profiles must produce their own valid credential rewrite. The Profile Matrix is read-only status/API information, not an editor. Viewer-preempted probes are skipped safely and can be checked again later.
                     </AlertDescription>
                   </Alert>
 

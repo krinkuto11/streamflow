@@ -13,6 +13,8 @@ import inspect
 from typing import Optional, Callable, Any
 from functools import wraps
 
+from apps.core.log_sanitizer import scrub_secrets, url_ref
+
 
 class HTTPLogFilter(logging.Filter):
     """Filter out HTTP-related log messages."""
@@ -34,6 +36,23 @@ class HTTPLogFilter(logging.Filter):
             'werkzeug',
         ]
         return not any(indicator in message for indicator in http_indicators)
+
+
+class SensitiveDataFilter(logging.Filter):
+    """Redact URLs and common secret forms from every formatted log record."""
+
+    def filter(self, record):
+        record.msg = scrub_secrets(record.getMessage())
+        record.args = ()
+        return True
+
+
+def _ensure_root_filters() -> None:
+    for handler in logging.root.handlers:
+        if not any(isinstance(item, HTTPLogFilter) for item in handler.filters):
+            handler.addFilter(HTTPLogFilter())
+        if not any(isinstance(item, SensitiveDataFilter) for item in handler.filters):
+            handler.addFilter(SensitiveDataFilter())
 
 
 def setup_logging(module_name: Optional[str] = None) -> logging.Logger:
@@ -61,14 +80,13 @@ def setup_logging(module_name: Optional[str] = None) -> logging.Logger:
             stream=sys.stdout
         )
         
-        # Apply HTTP filter to all handlers
-        for handler in logging.root.handlers:
-            handler.addFilter(HTTPLogFilter())
     else:
         # Update level if logger already exists
         logging.root.setLevel(log_level)
         for handler in logging.root.handlers:
             handler.setLevel(log_level)
+
+    _ensure_root_filters()
     
     # Get logger for the specific module
     logger = logging.getLogger(module_name) if module_name else logging.root
@@ -217,7 +235,7 @@ def log_api_request(logger: logging.Logger, method: str, url: str, **kwargs):
                 sanitized_kwargs[key] = value
         
         extras = ', '.join(f"{k}={v}" for k, v in sanitized_kwargs.items())
-        logger.debug(f"→ API {method} {url} {extras}")
+        logger.debug(f"→ API {method} {url_ref(url)} {extras}")
 
 
 def log_api_response(logger: logging.Logger, method: str, url: str, status_code: int, elapsed_time: Optional[float] = None):
@@ -232,7 +250,7 @@ def log_api_response(logger: logging.Logger, method: str, url: str, status_code:
         elapsed_time: Request duration in seconds (optional)
     """
     if logger.isEnabledFor(logging.DEBUG):
-        msg = f"← API {method} {url} → {status_code}"
+        msg = f"← API {method} {url_ref(url)} → {status_code}"
         if elapsed_time is not None:
             msg += f" ({elapsed_time:.3f}s)"
         logger.debug(msg)

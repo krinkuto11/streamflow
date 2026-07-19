@@ -6,6 +6,10 @@ from flask import jsonify
 
 from apps.core.api_responses import error_response
 from apps.core.logging_config import setup_logging
+from apps.stream.shadow_blank_monitor_service import (
+    ShadowConfigConflictError,
+    ShadowConfigValidationError,
+)
 
 logger = setup_logging(__name__)
 
@@ -38,6 +42,13 @@ def update_shadow_blank_monitor_config_response(
 ):
     try:
         return jsonify(get_service().update_config(payload or {})), 200
+    except (ShadowConfigConflictError, ShadowConfigValidationError) as exc:
+        return error_response(
+            exc.message,
+            status_code=exc.status_code,
+            code=exc.error_code,
+            details=exc.details,
+        )
     except Exception as exc:
         logger.error(f"Error updating shadow blank monitor config: {exc}", exc_info=True)
         return error_response("Internal Server Error", status_code=500, code="internal_error")

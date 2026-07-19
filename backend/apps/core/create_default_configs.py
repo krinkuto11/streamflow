@@ -7,10 +7,14 @@ It creates necessary configuration files for automation, webhooks,
 regex patterns, and changelog tracking.
 """
 
-import json
 import os
 from pathlib import Path
 from typing import Dict, Any
+
+try:
+    from apps.core.atomic_json import atomic_write_json
+except ModuleNotFoundError:  # Direct Docker build script execution.
+    from atomic_json import atomic_write_json
 
 # Configuration directory - persisted via Docker volume
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
@@ -39,23 +43,20 @@ def create_default_configs() -> None:
             'stream_timeout': 30,
             'webhook_enabled': False
         }
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2)
+        atomic_write_json(config_path, config)
         print(f"Created {config_path}")
 
     # Create default regex config
     regex_path = CONFIG_DIR / 'channel_regex_config.json'
     if not regex_path.exists():
         config = {'patterns': {}}
-        with open(regex_path, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2)
+        atomic_write_json(regex_path, config)
         print(f"Created {regex_path}")
 
     # Create empty changelog
     changelog_path = CONFIG_DIR / 'changelog.json'
     if not changelog_path.exists():
-        with open(changelog_path, 'w', encoding='utf-8') as f:
-            json.dump([], f)
+        atomic_write_json(changelog_path, [])
         print(f"Created {changelog_path}")
 
     # Create default webhook config
@@ -68,8 +69,7 @@ def create_default_configs() -> None:
             'retry_delay_seconds': 5,
             'timeout_seconds': 10
         }
-        with open(webhook_path, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2)
+        atomic_write_json(webhook_path, config)
         print(f"Created {webhook_path}")
 
 if __name__ == '__main__':

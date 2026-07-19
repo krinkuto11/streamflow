@@ -483,6 +483,10 @@ export default function Dashboard() {
 
   const isAutomationRunning = status?.running || false
   const runStatus = status?.run_status || {}
+  const schedulerRetry = runStatus?.scheduler_retry || status?.scheduler_retry || {}
+  const schedulerRetryPeriods = Array.isArray(schedulerRetry?.periods)
+    ? schedulerRetry.periods
+    : []
   const runCounts = runStatus.counts || {}
   const runDurations = runStatus.durations || {}
   const udiStatus = status?.udi_status || {}
@@ -879,6 +883,30 @@ export default function Dashboard() {
                 </div>
               )}
             </div>
+
+            {schedulerRetryPeriods.length > 0 && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm">
+                <div className="flex items-center gap-2 font-medium text-amber-200">
+                  <Clock3 className="h-4 w-4" />
+                  Quality retry status
+                </div>
+                <div className="mt-2 space-y-1 text-muted-foreground">
+                  {schedulerRetryPeriods.map((retry) => (
+                    <div key={retry.period_id} className="flex flex-wrap gap-x-2 gap-y-1">
+                      <span className="font-medium text-foreground">
+                        {retry.period_name || `Period ${retry.period_id}`}
+                      </span>
+                      <span>{retry.pending_channels} channel(s) pending</span>
+                      <span>
+                        {retry.exhausted
+                          ? 'Retry budget exhausted; waiting for the next regular schedule'
+                          : `Retry ${retry.attempt}/${retry.max_attempts} at ${new Date(retry.next_retry_at).toLocaleString()}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="grid gap-2 md:grid-cols-4 lg:grid-cols-8">
               {displayStageCards.map((stage) => {

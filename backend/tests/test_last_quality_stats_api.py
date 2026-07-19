@@ -216,6 +216,88 @@ def test_last_quality_stats_missing_bitrate_requires_recheck_without_dead_reason
     assert payload["quality_reason"] == "none"
 
 
+def test_last_quality_stats_does_not_reuse_preserved_bitrate_after_failed_recheck():
+    session = connection.get_session()
+    try:
+        _add_stream(session)
+        run = _add_run(session, timestamp=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc))
+        run.raw_details = (
+            '{"stream_details":[{"stream_id":683989,"status":"incomplete_bitrate",'
+            '"quality_reason_detail":"missing_bitrate_after_recheck",'
+            '"measurement_incomplete":true,'
+            '"measurement_incomplete_reason":"missing_bitrate_after_recheck",'
+            '"bitrate_recheck_required":true,'
+            '"bitrate_recheck_attempted":true,'
+            '"bitrate_recheck_outcome":"unavailable"}]}'
+        )
+        session.add(
+            StreamTelemetry(
+                run_id=run.id,
+                channel_id=1914,
+                provider_id=21,
+                stream_id=683989,
+                # Historical ranking evidence preserved in telemetry must not
+                # become the current result after an explicit failed recheck.
+                bitrate_kbps=14645,
+                resolution_width=3840,
+                resolution_height=2160,
+                fps=50.0,
+                codec="hevc",
+                is_dead=False,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    payload = get_last_quality_stats(683989, session_factory=connection.get_session)
+
+    assert payload["measured"] is False
+    assert payload["recheck_required"] is True
+    assert payload["reason"] == "missing_bitrate_after_recheck"
+    assert payload["last_status"] == "incomplete_bitrate"
+    assert payload["quality_reason"] == "missing_bitrate_after_recheck"
+
+
+def test_last_quality_stats_reuses_valid_bitrate_after_visual_probe_timeout():
+    session = connection.get_session()
+    try:
+        _add_stream(session)
+        run = _add_run(
+            session,
+            timestamp=datetime(2026, 6, 7, 12, 0, tzinfo=timezone.utc),
+        )
+        run.raw_details = (
+            '{"stream_details":[{"stream_id":683989,"status":"completed",'
+            '"measurement_incomplete":true,'
+            '"measurement_incomplete_reason":"visual_probe_timeout"}]}'
+        )
+        session.add(
+            StreamTelemetry(
+                run_id=run.id,
+                channel_id=1914,
+                provider_id=21,
+                stream_id=683989,
+                bitrate_kbps=12000,
+                resolution_width=3840,
+                resolution_height=2160,
+                fps=50.0,
+                codec="hevc",
+                is_dead=False,
+            )
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    payload = get_last_quality_stats(683989, session_factory=connection.get_session)
+
+    assert payload["measured"] is True
+    assert payload["recheck_required"] is False
+    assert payload["bitrate_kbps"] == 12000
+    assert payload["status"] == "completed"
+
+
 def test_last_quality_stats_marks_current_stream_stale():
     session = connection.get_session()
     try:

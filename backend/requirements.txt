@@ -11,3 +11,5 @@ opencv-python-headless
 waitress
 m3u8
 SQLAlchemy
+# Override vulnerable vendored tooling shipped by the Python base image.
+setuptools==83.0.0

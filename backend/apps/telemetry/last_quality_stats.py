@@ -119,13 +119,39 @@ def _extract_resolution(payload: Dict[str, Any]) -> Tuple[Optional[int], Optiona
 def _row_or_payload_stats(row: StreamTelemetry, payload: Dict[str, Any]) -> Dict[str, Any]:
     extracted = extract_stream_stats(payload) if payload else {}
     stream_stats = payload.get("stream_stats") if isinstance(payload.get("stream_stats"), dict) else {}
+    measurement_incomplete_reason = (
+        _clean_string(payload.get("measurement_incomplete_reason"))
+        or _clean_string(stream_stats.get("measurement_incomplete_reason"))
+        or _clean_string(extracted.get("measurement_incomplete_reason"))
+    )
+    bitrate_recheck_required = bool(
+        payload.get("bitrate_recheck_required")
+        or stream_stats.get("bitrate_recheck_required")
+        or extracted.get("bitrate_recheck_required")
+    )
+    bitrate_measurement_incomplete = bool(
+        bitrate_recheck_required
+        or str(measurement_incomplete_reason or '').lower()
+        in {"missing_bitrate", "missing_bitrate_after_recheck"}
+        or (
+            (
+                payload.get("measurement_incomplete")
+                or stream_stats.get("measurement_incomplete")
+            )
+            and measurement_incomplete_reason is None
+            and extracted.get("bitrate_kbps") is None
+        )
+    )
     width = row.resolution_width
     height = row.resolution_height
     if width is None or height is None:
         width, height = _extract_resolution(payload)
 
-    bitrate = row.bitrate_kbps
-    if bitrate is None:
+    # Telemetry can retain an older bitrate for ranking while the newest probe
+    # explicitly records an incomplete measurement. That historical value is
+    # not reusable as the current Last Quality Stats result.
+    bitrate = None if bitrate_measurement_incomplete else row.bitrate_kbps
+    if bitrate is None and not bitrate_measurement_incomplete:
         bitrate = parse_bitrate_value(
             payload.get("bitrate")
             or payload.get("ffmpeg_output_bitrate")
@@ -153,20 +179,9 @@ def _row_or_payload_stats(row: StreamTelemetry, payload: Dict[str, Any]) -> Dict
         "audio_codec": audio_codec.lower() if audio_codec else None,
         "bitrate_kbps": bitrate_int,
         "hdr": bool(row.is_hdr or payload.get("is_hdr") or payload.get("hdr_format")),
-        "measurement_incomplete": bool(
-            payload.get("measurement_incomplete")
-            or stream_stats.get("measurement_incomplete")
-            or payload.get("bitrate_recheck_required")
-            or stream_stats.get("bitrate_recheck_required")
-        ),
-        "measurement_incomplete_reason": (
-            _clean_string(payload.get("measurement_incomplete_reason"))
-            or _clean_string(stream_stats.get("measurement_incomplete_reason"))
-        ),
-        "bitrate_recheck_required": bool(
-            payload.get("bitrate_recheck_required")
-            or stream_stats.get("bitrate_recheck_required")
-        ),
+        "measurement_incomplete": bitrate_measurement_incomplete,
+        "measurement_incomplete_reason": measurement_incomplete_reason,
+        "bitrate_recheck_required": bitrate_recheck_required,
     }
 
 

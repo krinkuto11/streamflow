@@ -84,6 +84,7 @@ class TestSPARouting(unittest.TestCase):
         # Critical API routes that must exist
         required_routes = [
             '/api/health',
+            '/api/readiness',
             '/api/automation/status',
             '/api/stream-checker/status',
             '/api/setup-wizard',

@@ -1,14 +1,29 @@
 export const getInitializationStateFromStatus = (data = {}) => {
-  const hasCompletedCache = Boolean(data.last_refresh_time)
+  const readiness = typeof data.ready === 'boolean' ? data : null
+  const statusData = readiness?.initialization || data
+  const hasCompletedCache = Boolean(statusData.last_refresh_time)
+  const checks = readiness?.checks || null
+  const databaseBlocked = checks?.database?.ready === false
+  const dispatcharrBlocked = checks?.dispatcharr_config?.ready === false
+  const udiUnavailable = checks?.udi?.reason === 'udi_unavailable'
+  const udiBlocked = checks?.udi?.ready === false && (!hasCompletedCache || udiUnavailable)
+  const initializationPending = (
+    statusData.status === 'pending'
+    || statusData.status === 'in_progress'
+    || checks?.udi?.initialization_pending === true
+  ) && !hasCompletedCache
 
   return {
-    inProgress: data.status === 'in_progress' && !hasCompletedCache,
-    status: data.status || 'unknown',
-    percentage: data.percentage ?? 0,
-    message: data.message || '',
-    started_at: data.started_at || null,
-    elapsed_seconds: data.elapsed_seconds ?? null,
-    last_refresh_duration_seconds: data.last_refresh_duration_seconds ?? null,
+    inProgress: readiness
+      ? databaseBlocked || dispatcharrBlocked || udiBlocked || initializationPending
+      : statusData.status === 'in_progress' && !hasCompletedCache,
+    status: readiness?.status || statusData.status || 'unknown',
+    percentage: statusData.percentage ?? (readiness?.ready ? 100 : 0),
+    message: statusData.message || '',
+    started_at: statusData.started_at || null,
+    elapsed_seconds: statusData.elapsed_seconds ?? null,
+    last_refresh_duration_seconds: statusData.last_refresh_duration_seconds ?? null,
+    checks,
   }
 }
 

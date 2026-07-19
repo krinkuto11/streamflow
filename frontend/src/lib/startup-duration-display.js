@@ -19,11 +19,30 @@ export const formatStartupDuration = (seconds) => {
 }
 
 export const getStartupDurationDisplay = (initialization = {}) => {
-  const elapsedLabel = formatStartupDuration(initialization.elapsed_seconds)
+  const hasElapsedValue = initialization.elapsed_seconds !== null
+    && initialization.elapsed_seconds !== undefined
+    && initialization.elapsed_seconds !== ''
   const lastDuration = Number(initialization.last_refresh_duration_seconds)
-  const elapsed = Number(initialization.elapsed_seconds)
+  const elapsed = hasElapsedValue ? Number(initialization.elapsed_seconds) : Number.NaN
   const hasLastDuration = Number.isFinite(lastDuration) && lastDuration > 0
   const hasElapsed = Number.isFinite(elapsed) && elapsed >= 0
+  const completed = initialization.status === 'completed'
+    || Number(initialization.percentage) >= 100
+  const elapsedLabel = formatStartupDuration(
+    completed && !hasElapsed && hasLastDuration ? lastDuration : initialization.elapsed_seconds,
+  )
+
+  if (completed) {
+    return {
+      elapsedLabel,
+      remainingLabel: null,
+      estimateLabel: 'Status',
+      estimateValue: 'Complete',
+      estimateHint: 'Opening the dashboard.',
+      expectation: 'Startup complete. Opening the dashboard.',
+    }
+  }
+
   const remainingLabel = hasLastDuration && hasElapsed
     ? formatStartupDuration(Math.max(0, lastDuration - elapsed))
     : null

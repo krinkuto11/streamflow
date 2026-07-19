@@ -14,7 +14,12 @@ from unittest.mock import Mock, patch
 # Add parent directory to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from apps.udi.fetcher import UDIFetcher
+from apps.udi.fetcher import (
+    UDIFetcher,
+    ProxyStatusConfigurationError,
+    ProxyStatusPayloadError,
+    ProxyStatusTransportError,
+)
 
 
 class TestFetcherProxyStatusParsing(unittest.TestCase):
@@ -145,8 +150,8 @@ class TestFetcherProxyStatusParsing(unittest.TestCase):
             self.assertIsInstance(result, dict)
             self.assertEqual(len(result), 0)
     
-    def test_parse_missing_channel_id(self):
-        """Test that items without channel_id are skipped."""
+    def test_parse_missing_channel_id_is_not_authoritative(self):
+        """A partial channel list must never be mistaken for lower usage."""
         mock_response = {
             "channels": [
                 {
@@ -166,44 +171,71 @@ class TestFetcherProxyStatusParsing(unittest.TestCase):
         }
         
         with patch.object(self.fetcher, '_fetch_url', return_value=mock_response):
-            result = self.fetcher.fetch_proxy_status()
-            
-            # Should only include items with channel_id
-            self.assertIsInstance(result, dict)
-            self.assertEqual(len(result), 2)
-            self.assertIn("uuid-100", result)
-            self.assertIn("uuid-200", result)
+            with self.assertRaises(ProxyStatusPayloadError) as raised:
+                self.fetcher.fetch_proxy_status()
+
+        self.assertEqual(raised.exception.reason, "proxy_status_channel_id_invalid")
     
     def test_parse_invalid_response(self):
         """Test handling of invalid response format."""
         mock_response = "invalid response"
         
         with patch.object(self.fetcher, '_fetch_url', return_value=mock_response):
-            result = self.fetcher.fetch_proxy_status()
-            
-            # Should return empty dict for invalid format
-            self.assertIsInstance(result, dict)
-            self.assertEqual(len(result), 0)
+            with self.assertRaises(ProxyStatusPayloadError) as raised:
+                self.fetcher.fetch_proxy_status()
+
+        self.assertEqual(raised.exception.reason, "proxy_status_payload_not_mapping")
     
     def test_parse_error_handling(self):
         """Test error handling during fetch."""
         with patch.object(self.fetcher, '_fetch_url', side_effect=Exception("Network error")):
-            result = self.fetcher.fetch_proxy_status()
-            
-            # Should return empty dict on error
-            self.assertIsInstance(result, dict)
-            self.assertEqual(len(result), 0)
+            with self.assertRaises(ProxyStatusTransportError) as raised:
+                self.fetcher.fetch_proxy_status()
+
+        self.assertEqual(raised.exception.reason, "proxy_status_transport_failed")
+
+    def test_none_transport_result_is_not_authoritative_idle(self):
+        """The generic request helper's failure sentinel must remain unknown."""
+        with patch.object(self.fetcher, '_fetch_url', return_value=None):
+            with self.assertRaises(ProxyStatusTransportError) as raised:
+                self.fetcher.fetch_proxy_status()
+
+        self.assertEqual(raised.exception.reason, "proxy_status_transport_failed")
+
+    def test_count_mismatch_is_not_authoritative(self):
+        """A truncated channel list must not reduce provider usage."""
+        mock_response = {
+            "channels": [{"channel_id": "uuid-100", "state": "active"}],
+            "count": 2,
+        }
+
+        with patch.object(self.fetcher, '_fetch_url', return_value=mock_response):
+            with self.assertRaises(ProxyStatusPayloadError) as raised:
+                self.fetcher.fetch_proxy_status()
+
+        self.assertEqual(raised.exception.reason, "proxy_status_count_mismatch")
+
+    def test_missing_count_is_not_authoritative(self):
+        """Only the complete status envelope can prove provider idleness."""
+        with patch.object(
+            self.fetcher,
+            '_fetch_url',
+            return_value={"channels": []},
+        ):
+            with self.assertRaises(ProxyStatusPayloadError) as raised:
+                self.fetcher.fetch_proxy_status()
+
+        self.assertEqual(raised.exception.reason, "proxy_status_count_invalid")
     
     def test_no_base_url(self):
         """Test handling when base_url is not set."""
         fetcher = UDIFetcher()
         fetcher.base_url = None
         
-        result = fetcher.fetch_proxy_status()
-        
-        # Should return empty dict when base_url is not set
-        self.assertIsInstance(result, dict)
-        self.assertEqual(len(result), 0)
+        with self.assertRaises(ProxyStatusConfigurationError) as raised:
+            fetcher.fetch_proxy_status()
+
+        self.assertEqual(raised.exception.reason, "proxy_status_base_url_missing")
 
 
 if __name__ == '__main__':
