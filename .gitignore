@@ -17,6 +17,8 @@ csv/*.csv
 frontend/build/
 frontend/node_modules/
 backend/static/
+frontend/streamflow-evidence/
+streamflow-evidence/
 
 # Development data directory
 data/

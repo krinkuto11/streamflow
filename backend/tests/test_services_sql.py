@@ -9,7 +9,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from apps.database.connection import get_session, init_db
 from apps.database.models import SystemSetting
 from apps.automation.automated_stream_manager import RegexChannelMatcher, AutomatedStreamManager
-from apps.automation.scheduling_service import SchedulingService
+from apps.automation.scheduling_service import DEFAULT_UDI_REFRESH_INTERVAL_MINUTES, SchedulingService
 
 class TestServicesSQL(unittest.TestCase):
     
@@ -54,6 +54,15 @@ class TestServicesSQL(unittest.TestCase):
         # Test Save State
         now = datetime.now()
         manager.period_last_run = {"period_1": now}
+        manager._scheduler_retry_state = {
+            "period_1": {
+                "attempt": 1,
+                "max_attempts": 3,
+                "next_retry_at": (now + timedelta(minutes=5)).isoformat(),
+                "pending_channel_ids": [101],
+                "exhausted": False,
+            },
+        }
         manager._save_state()
         
         # Verify in DB
@@ -61,6 +70,10 @@ class TestServicesSQL(unittest.TestCase):
         setting = session.query(SystemSetting).filter(SystemSetting.key == 'automation_state').first()
         self.assertIsNotNone(setting)
         self.assertIn("period_1", setting.value['period_last_run'])
+        self.assertEqual(
+            setting.value['scheduler_retry_state']['period_1']['pending_channel_ids'],
+            [101],
+        )
         session.close()
         
         # Test Load State
@@ -69,6 +82,10 @@ class TestServicesSQL(unittest.TestCase):
         self.assertTrue(isinstance(loaded_runs["period_1"], datetime))
         # Account for microsecond truncation in string conversion if any, but should be close
         self.assertEqual(loaded_runs["period_1"].isoformat(), now.isoformat())
+        self.assertEqual(
+            manager._scheduler_retry_state["period_1"]["next_retry_at"],
+            (now + timedelta(minutes=5)).isoformat(),
+        )
 
     def test_scheduling_service_sql(self):
         service = SchedulingService()
@@ -102,6 +119,56 @@ class TestServicesSQL(unittest.TestCase):
         loaded_events = service._load_scheduled_events()
         self.assertEqual(len(loaded_events), 1)
         self.assertEqual(loaded_events[0]['id'], 'test-uuid-1')
+
+    def test_scheduling_service_defaults_udi_refresh_to_240_minutes(self):
+        service = SchedulingService()
+
+        self.assertEqual(
+            service.get_udi_refresh_schedule(),
+            {'type': 'interval', 'value': DEFAULT_UDI_REFRESH_INTERVAL_MINUTES}
+        )
+
+    def test_scheduling_service_migrates_missing_udi_refresh_default(self):
+        session = get_session()
+        setting = SystemSetting(
+            key='scheduling_config',
+            value={'epg_schedule': {'type': 'interval', 'value': 60}, 'enabled': True}
+        )
+        session.add(setting)
+        session.commit()
+        session.close()
+
+        service = SchedulingService()
+
+        self.assertEqual(
+            service.get_udi_refresh_schedule(),
+            {'type': 'interval', 'value': DEFAULT_UDI_REFRESH_INTERVAL_MINUTES}
+        )
+        session = get_session()
+        setting = session.query(SystemSetting).filter(SystemSetting.key == 'scheduling_config').first()
+        self.assertEqual(
+            setting.value['udi_refresh_schedule'],
+            {'type': 'interval', 'value': DEFAULT_UDI_REFRESH_INTERVAL_MINUTES}
+        )
+        session.close()
+
+    def test_scheduling_service_preserves_disabled_udi_refresh(self):
+        session = get_session()
+        setting = SystemSetting(
+            key='scheduling_config',
+            value={
+                'epg_schedule': {'type': 'interval', 'value': 60},
+                'udi_refresh_schedule': None,
+                'enabled': True
+            }
+        )
+        session.add(setting)
+        session.commit()
+        session.close()
+
+        service = SchedulingService()
+
+        self.assertIsNone(service.get_udi_refresh_schedule())
 
 if __name__ == '__main__':
     unittest.main()

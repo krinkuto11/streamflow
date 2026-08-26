@@ -28,6 +28,8 @@ from apps.automation.automation_events_scheduler import get_events_scheduler
 from apps.automation.regex_validation import is_dangerous_regex
 from apps.core.api_utils import _get_base_url
 from apps.stream.stream_checker_service import get_stream_checker_service
+from apps.stream.shadow_blank_monitor_service import get_shadow_blank_monitor_service
+from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
 from apps.automation.scheduling_service import get_scheduling_service
 from apps.background.scheduling_workers import (
     epg_refresh_processor_loop,
@@ -35,9 +37,7 @@ from apps.background.scheduling_workers import (
     udi_refresh_processor_loop,
 )
 from apps.stream.udp_proxy import UDPProxyManager
-
 from apps.config.dispatcharr_config import get_dispatcharr_config
-from apps.config.acestream_orchestrator_config import get_acestream_orchestrator_config
 from apps.channels.channel_order_manager import get_channel_order_manager
 from apps.channels.repository import UdiChannelRepository
 from apps.channels.service import ChannelService
@@ -49,9 +49,8 @@ from apps.api.channel_handlers import (
     get_channel_stats_response,
     get_channels_response,
 )
-# ── NEW: active profile resolution handler ──────────────────────────────────
+# Active profile resolution handler
 from apps.api.active_profile_handlers import get_channel_active_profile_response
-# ────────────────────────────────────────────────────────────────────────────
 from apps.api.regex_handlers import (
     add_bulk_regex_patterns_response,
     add_regex_pattern_response,
@@ -63,6 +62,7 @@ from apps.api.regex_handlers import (
     export_regex_patterns_response,
     get_group_regex_config_response,
     get_common_regex_patterns_response,
+    get_regex_global_settings_response,
     import_regex_patterns_response,
     get_regex_patterns_response,
     mass_edit_preview_response,
@@ -71,12 +71,14 @@ from apps.api.regex_handlers import (
     test_regex_pattern_response,
     update_channel_match_settings_response,
     update_group_match_settings_response,
+    update_regex_global_settings_response,
     upsert_group_regex_config_response,
 )
 from apps.api.automation_handlers import (
     assign_automation_profile_channel_response,
     assign_automation_profile_channels_response,
     assign_automation_profile_group_response,
+    assign_automation_profile_groups_response,
     assign_epg_scheduled_profile_channel_response,
     assign_epg_scheduled_profile_channels_response,
     assign_epg_scheduled_profile_group_response,
@@ -89,6 +91,7 @@ from apps.api.automation_handlers import (
     get_automation_status_response,
     get_channel_automation_periods_response,
     get_group_automation_periods_response,
+    get_group_configuration_summary_response,
     get_period_channels_response,
     get_upcoming_automation_events_response,
     handle_automation_period_response,
@@ -99,6 +102,7 @@ from apps.api.automation_handlers import (
     invalidate_automation_events_cache_response,
     remove_period_from_channels_response,
     remove_period_from_groups_response,
+    abort_automation_run_api_response,
     start_automation_service_api_response,
     stop_automation_service_api_response,
     trigger_automation_cycle_response,
@@ -110,6 +114,8 @@ from apps.api.channel_order_handlers import (
 )
 from apps.api.telemetry_handlers import (
     clear_all_dead_streams_response,
+    export_changelog_run_response,
+    export_dead_streams_response,
     get_changelog_response,
     get_dead_streams_response,
     revive_dead_stream_response,
@@ -128,6 +134,7 @@ from apps.api.match_preview_handlers import test_match_live_response, bulk_match
 from apps.api.stream_checker_handlers import (
     add_to_stream_checker_queue_response,
     check_single_channel_now_response,
+    check_single_stream_now_response,
     check_specific_channel_response,
     clear_stream_checker_queue_response,
     get_stream_checker_status_response,
@@ -135,11 +142,38 @@ from apps.api.stream_checker_handlers import (
     queue_all_channels_response,
     update_stream_checker_config_response,
     get_stream_checker_config_response,
+    get_stream_checker_hardware_status_response,
+    get_stream_last_quality_stats_response,
     get_stream_checker_progress_response,
     get_stream_checker_queue_response,
     start_stream_checker_response,
     stop_stream_checker_response,
 )
+from apps.api.quality_stats_v2_handlers import (
+    get_quality_stats_v2_provider_response,
+    get_quality_stats_v2_stream_response,
+    post_quality_stats_v2_bulk_response,
+)
+from apps.api.shadow_blank_monitor_handlers import (
+    get_shadow_blank_monitor_config_response,
+    get_shadow_blank_monitor_status_response,
+    learn_shadow_offline_image_response,
+    run_shadow_blank_monitor_once_response,
+    start_shadow_blank_monitor_response,
+    stop_shadow_blank_monitor_response,
+    update_shadow_blank_monitor_config_response,
+)
+from apps.api.teamarr_preflight_handlers import (
+    force_teamarr_preflight_event_response,
+    get_teamarr_preflight_config_response,
+    get_teamarr_preflight_status_response,
+    run_teamarr_preflight_once_response,
+    start_teamarr_preflight_response,
+    stop_teamarr_preflight_response,
+    update_teamarr_preflight_config_response,
+)
+from apps.api.job_arbiter_handlers import get_job_arbiter_status_response
+from apps.api.viewer_activity_handlers import get_viewer_activity_status_response
 from apps.api.scheduling_handlers import (
     create_auto_create_rule_response,
     create_scheduled_event_response,
@@ -169,26 +203,6 @@ from apps.api.scheduling_handlers import (
     update_auto_create_rule_response,
     update_scheduling_config_response,
     update_udi_refresh_schedule_response,
-)
-from apps.api.acestream_handlers import (
-    check_acestream_orchestrator_ready_response,
-    create_acestream_channel_session_response,
-    create_acestream_group_sessions_response,
-    delete_acestream_channel_session_response,
-    delete_acestream_monitor_entry_response,
-    get_acestream_channel_session_response,
-    get_acestream_monitor_session_response,
-    get_acestream_orchestrator_config_response,
-    list_acestream_channel_sessions_response,
-    list_acestream_monitor_sessions_response,
-    list_acestream_started_streams_response,
-    parse_acestream_m3u_response,
-    quarantine_acestream_channel_stream_response,
-    revive_acestream_channel_stream_response,
-    start_acestream_monitor_session_response,
-    stop_acestream_channel_session_response,
-    stop_acestream_monitor_session_response,
-    update_acestream_orchestrator_config_response,
 )
 from apps.api.legacy_automation_handlers import (
     assign_profile_to_channel_legacy_response,
@@ -234,11 +248,17 @@ from apps.api.stream_sessions_handlers import (
 from apps.api.meta_handlers import (
     get_environment_response,
     health_check_response,
+    readiness_check_response,
     get_version_response,
     root_response,
     serve_frontend_response,
 )
-from apps.api.middleware import API_RATE_LIMIT_ENABLED, api_rate_limiter
+from apps.api.middleware import (
+    API_RATE_LIMIT_ENABLED,
+    TRUSTED_PROXY_NETWORKS,
+    api_rate_limiter,
+    resolve_client_ip,
+)
 from apps.core.api_responses import error_response
 
 # Pre-compiled regex pattern for whitespace conversion (performance optimization)
@@ -267,6 +287,11 @@ except ImportError:
 from apps.core.logging_config import setup_logging, log_function_call, log_function_return, log_exception
 
 logger = setup_logging(__name__)
+STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES = 2 * 1024 * 1024
+
+
+def _reject_non_finite_json_constant(value):
+    raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
 # Configuration constants
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
@@ -305,11 +330,23 @@ def _apply_rate_limit():
     path = request.path or ""
     if not path.startswith('/api/'):
         return None
-    if path in {'/api/health', '/api/v1/health', '/api/version', '/api/environment'}:
+    if path in {
+        '/api/health',
+        '/api/v1/health',
+        '/api/readiness',
+        '/api/v1/readiness',
+        '/api/version',
+        '/api/environment',
+    }:
         return None
 
-    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown')
-    key = f"{client_ip}:{path}"
+    client_ip = resolve_client_ip(
+        request.remote_addr,
+        request.headers.get('X-Forwarded-For'),
+        TRUSTED_PROXY_NETWORKS,
+    )
+    route = request.url_rule.rule if request.url_rule is not None else path
+    key = f"{client_ip}:{request.method}:{route}"
     decision = api_rate_limiter.check(key)
     if decision.allowed:
         return None
@@ -374,6 +411,31 @@ def _set_epg_refresh_running(value: bool):
     global epg_refresh_running
     epg_refresh_running = bool(value)
 
+
+class _ThreadHandleProxy:
+    """Stable thread reference for legacy imports that bind module globals."""
+
+    def __init__(self):
+        self.thread = None
+
+    def set(self, thread):
+        self.thread = thread
+
+    def is_alive(self):
+        return bool(self.thread and self.thread.is_alive())
+
+    def join(self, timeout=None):
+        if self.thread:
+            return self.thread.join(timeout=timeout)
+        return None
+
+    def __bool__(self):
+        return self.is_alive()
+
+
+if scheduled_event_processor_thread is None:
+    scheduled_event_processor_thread = _ThreadHandleProxy()
+
 # Initialize the global proxy manager
 udp_proxy_manager = UDPProxyManager()
 
@@ -412,6 +474,12 @@ def check_wizard_complete():
     using the system even if they haven't configured any channel patterns yet.
     """
     try:
+        config_dir = Path(CONFIG_DIR)
+        automation_file = config_dir / 'automation_config.json'
+        regex_file = config_dir / 'channel_regex_config.json'
+        if str(config_dir) != "/app/data" and (automation_file.exists() or regex_file.exists()):
+            return automation_file.exists() and regex_file.exists()
+
         # SQL-backed readiness: require Dispatcharr credentials to be configured.
         dispatcharr_config = get_dispatcharr_config()
         return dispatcharr_config.is_configured()
@@ -444,7 +512,7 @@ def start_scheduled_event_processor():
     """Start the background thread for processing scheduled events."""
     global scheduled_event_processor_thread, scheduled_event_processor_running, scheduled_event_processor_wake
     
-    if scheduled_event_processor_thread is not None and scheduled_event_processor_thread.is_alive():
+    if scheduled_event_processor_thread.is_alive():
         logger.warning("Scheduled event processor is already running")
         return False
     
@@ -452,12 +520,13 @@ def start_scheduled_event_processor():
     scheduled_event_processor_wake = threading.Event()
     
     scheduled_event_processor_running = True
-    scheduled_event_processor_thread = threading.Thread(
+    thread = threading.Thread(
         target=scheduled_event_processor,
         name="ScheduledEventProcessor",
         daemon=True  # Daemon thread will exit when main program exits
     )
-    scheduled_event_processor_thread.start()
+    scheduled_event_processor_thread.set(thread)
+    thread.start()
     logger.info("Scheduled event processor started")
     return True
 
@@ -466,7 +535,7 @@ def stop_scheduled_event_processor():
     """Stop the background thread for processing scheduled events."""
     global scheduled_event_processor_thread, scheduled_event_processor_running, scheduled_event_processor_wake
     
-    if scheduled_event_processor_thread is None or not scheduled_event_processor_thread.is_alive():
+    if not scheduled_event_processor_thread.is_alive():
         logger.warning("Scheduled event processor is not running")
         return False
     
@@ -630,6 +699,147 @@ def health_check_stripped():
     """Health check endpoint for nginx proxy (stripped /api prefix)."""
     return health_check_response()
 
+
+def _required_services_readiness():
+    """Describe configured runtime workers without creating new singletons."""
+    if not check_wizard_complete():
+        return {}
+
+    from apps.stream import shadow_blank_monitor_service as shadow_module
+    from apps.stream import stream_checker_service as checker_module
+    from apps.stream import stream_monitoring_service as monitoring_module
+    from apps.stream import teamarr_preflight_service as preflight_module
+
+    def item(required, ready, state):
+        return {
+            "required": bool(required),
+            "ready": bool(ready) if required else True,
+            "state": state,
+        }
+
+    monitoring = monitoring_module._monitoring_instance
+    checker = checker_module._service_instance
+    shadow = shadow_module._shadow_monitor_instance
+    preflight = preflight_module._teamarr_preflight_instance
+
+    checker_controls = checker.config.get('automation_controls', {}) if checker else {}
+    checker_required = bool(
+        checker
+        and checker.config.get('enabled', True)
+        and (
+            checker_controls.get('auto_m3u_updates', True)
+            or checker_controls.get('auto_stream_matching', True)
+            or checker_controls.get('auto_quality_checking', True)
+            or checker_controls.get('scheduled_global_action', False)
+        )
+    )
+    automation_required = bool(
+        automation_manager
+        and get_automation_config_manager().get_global_settings().get(
+            'regular_automation_enabled',
+            False,
+        )
+    )
+    shadow_required = bool(shadow and shadow.get_config().get("enabled"))
+    preflight_required = bool(preflight and preflight.get_config().get("enabled"))
+    monitoring_threads_ready = bool(
+        monitoring
+        and monitoring._running
+        and all(
+            thread is not None and thread.is_alive()
+            for thread in (
+                monitoring._monitor_thread,
+                monitoring._refresh_thread,
+                monitoring._screenshot_thread,
+            )
+        )
+    )
+    checker_threads_ready = bool(
+        checker
+        and checker.running
+        and checker.worker_thread
+        and checker.worker_thread.is_alive()
+        and checker.scheduler_thread
+        and checker.scheduler_thread.is_alive()
+    )
+    automation_thread_ready = bool(
+        automation_manager
+        and automation_manager.automation_running
+        and automation_manager.automation_thread
+        and automation_manager.automation_thread.is_alive()
+    )
+
+    return {
+        "stream_monitoring": item(
+            True,
+            monitoring_threads_ready,
+            "running" if monitoring_threads_ready else "stopped",
+        ),
+        "stream_checker": item(
+            checker_required,
+            checker_threads_ready,
+            "running" if checker_threads_ready else (
+                "stopped" if checker_required else "disabled"
+            ),
+        ),
+        "automation": item(
+            automation_required,
+            automation_thread_ready,
+            "running" if automation_thread_ready else (
+                "stopped" if automation_required else "disabled"
+            ),
+        ),
+        "scheduled_events": item(
+            True,
+            scheduled_event_processor_thread.is_alive(),
+            "running" if scheduled_event_processor_thread.is_alive() else "stopped",
+        ),
+        "epg_refresh": item(
+            True,
+            bool(epg_refresh_thread and epg_refresh_thread.is_alive()),
+            "running" if epg_refresh_thread and epg_refresh_thread.is_alive() else "stopped",
+        ),
+        "udi_refresh": item(
+            True,
+            bool(udi_refresh_thread and udi_refresh_thread.is_alive()),
+            "running" if udi_refresh_thread and udi_refresh_thread.is_alive() else "stopped",
+        ),
+        "shadow_monitor": item(
+            shadow_required,
+            bool(shadow and shadow.get_status().get("running")),
+            "running" if shadow and shadow.get_status().get("running") else (
+                "stopped" if shadow_required else "disabled"
+            ),
+        ),
+        "teamarr_preflight": item(
+            preflight_required,
+            bool(preflight and preflight.get_status().get("running")),
+            "running" if preflight and preflight.get_status().get("running") else (
+                "stopped" if preflight_required else "disabled"
+            ),
+        ),
+    }
+
+
+@app.route('/api/readiness', methods=['GET'])
+@app.route('/api/v1/readiness', methods=['GET'])
+def readiness_check():
+    """Readiness gate for the UI and deployment verification."""
+    from apps.database.connection import get_engine
+
+    return readiness_check_response(
+        get_engine=get_engine,
+        get_dispatcharr_config=get_dispatcharr_config,
+        get_udi_manager=get_udi_manager,
+        get_required_services_status=_required_services_readiness,
+    )
+
+
+@app.route('/ready', methods=['GET'])
+def readiness_check_stripped():
+    """Readiness endpoint for a proxy with a stripped API prefix."""
+    return readiness_check()
+
 @app.route('/api/version', methods=['GET'])
 def get_version():
     """Get application version."""
@@ -759,6 +969,7 @@ def add_bulk_regex_patterns():
     return add_bulk_regex_patterns_response(
         payload=request.get_json(silent=True),
         get_regex_matcher=get_regex_matcher,
+        get_udi_manager=get_udi_manager,
     )
 
 # ==========================================
@@ -919,6 +1130,19 @@ def bulk_update_match_settings():
         get_regex_matcher=get_regex_matcher,
     )
 
+@app.route('/api/regex-patterns/global-settings', methods=['GET'])
+def get_regex_global_settings():
+    """Get global regex matching settings."""
+    return get_regex_global_settings_response()
+
+@app.route('/api/regex-patterns/global-settings', methods=['PUT'])
+def update_regex_global_settings():
+    """Update global regex matching settings."""
+    return update_regex_global_settings_response(
+        payload=request.get_json(silent=True),
+        get_regex_matcher=get_regex_matcher,
+    )
+
 @app.route('/api/settings/automation/global', methods=['GET', 'PUT'])
 def handle_global_automation_settings():
     """Get or update global automation settings."""
@@ -984,6 +1208,11 @@ def get_changelog():
     """Get recent changelog entries from the new telemetry database."""
     return get_changelog_response(request_args=request.args)
 
+@app.route('/api/changelog/<int:run_id>/export', methods=['GET'])
+def export_changelog_run(run_id):
+    """Export stream rows for one changelog run."""
+    return export_changelog_run_response(run_id=run_id, request_args=request.args)
+
 @app.route('/api/dead-streams', methods=['GET'])
 def get_dead_streams():
     """Get dead streams statistics and list with SQL-native pagination, sorting, and filtering."""
@@ -993,6 +1222,11 @@ def get_dead_streams():
         default_per_page=DEAD_STREAMS_DEFAULT_PER_PAGE,
         max_per_page=DEAD_STREAMS_MAX_PER_PAGE,
     )
+
+@app.route('/api/dead-streams/export', methods=['GET'])
+def export_dead_streams():
+    """Export dead streams as TXT, CSV, TSV or JSON."""
+    return export_dead_streams_response(request_args=request.args)
 
 @app.route('/api/dead-streams/revive', methods=['POST'])
 def revive_dead_stream():
@@ -1039,8 +1273,15 @@ def discover_streams():
 @app.route('/api/refresh-playlist', methods=['POST'])
 def refresh_playlist():
     """Trigger M3U playlist refresh (manual Quick Action)."""
+    raw_body = request.get_data(cache=True)
+    payload = None
+    if raw_body:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({"error": "Request body must be a valid JSON object"}), 400
+
     return refresh_playlist_response(
-        payload=request.get_json(silent=True),
+        payload=payload,
         get_automation_manager=get_automation_manager,
     )
 
@@ -1132,6 +1373,7 @@ def ensure_wizard_config():
     """
     return ensure_wizard_config_response(
         get_automation_config_manager=get_automation_config_manager,
+        config_dir=CONFIG_DIR,
     )
 
 @app.route('/api/setup-wizard/create-sample-patterns', methods=['POST'])
@@ -1220,12 +1462,43 @@ def add_to_stream_checker_queue():
 @app.route('/api/stream-checker/queue/clear', methods=['POST'])
 def clear_stream_checker_queue():
     """Clear the checking queue."""
-    return clear_stream_checker_queue_response(get_stream_checker_service=get_stream_checker_service)
+    content_length = request.content_length
+    if (
+        content_length is not None
+        and content_length > STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES
+    ):
+        return jsonify({"error": "queue clear request body is too large"}), 413
+    raw_body = request.stream.read(
+        STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES + 1
+    )
+    if len(raw_body) > STREAM_CHECKER_QUEUE_CLEAR_MAX_BODY_BYTES:
+        return jsonify({"error": "queue clear request body is too large"}), 413
+    if raw_body:
+        try:
+            payload = json.loads(
+                raw_body.decode('utf-8'),
+                parse_constant=_reject_non_finite_json_constant,
+            )
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            return jsonify({"error": "queue clear request body must be valid JSON"}), 400
+        if payload is None:
+            return jsonify({"error": "queue clear request body must be an object"}), 400
+    else:
+        payload = None
+    return clear_stream_checker_queue_response(
+        payload=payload,
+        get_stream_checker_service=get_stream_checker_service,
+    )
 
 @app.route('/api/stream-checker/config', methods=['GET'])
 def get_stream_checker_config():
     """Get stream checker configuration."""
     return get_stream_checker_config_response(get_stream_checker_service=get_stream_checker_service)
+
+@app.route('/api/stream-checker/hardware-status', methods=['GET'])
+def get_stream_checker_hardware_status():
+    """Get stream checker optional hardware acceleration runtime status."""
+    return get_stream_checker_hardware_status_response(get_stream_checker_service=get_stream_checker_service)
 
 @app.route('/api/stream-checker/config', methods=['PUT'])
 def update_stream_checker_config():
@@ -1253,6 +1526,56 @@ def get_stream_checker_progress():
     """Get current checking progress."""
     return get_stream_checker_progress_response(get_stream_checker_service=get_stream_checker_service)
 
+
+@app.route('/api/stream-checker/streams/<int:stream_id>/last-quality-stats', methods=['GET'])
+def get_stream_last_quality_stats(stream_id):
+    """Get the latest persisted quality stats for a stream without probing."""
+    stale_after_hours = request.args.get("stale_after_hours", type=float)
+    return get_stream_last_quality_stats_response(
+        stream_id=stream_id,
+        stale_after_hours=stale_after_hours,
+    )
+
+
+@app.route('/api/stream-checker/streams/<int:stream_id>/check', methods=['POST'])
+def check_single_stream_by_id_now(stream_id):
+    """Immediately check one stream synchronously and return measured stats."""
+    return check_single_stream_now_response(
+        payload=request.get_json(silent=True),
+        stream_id=stream_id,
+        get_stream_checker_service=get_stream_checker_service,
+        get_automation_manager=get_automation_manager,
+    )
+
+
+@app.route('/api/quality-stats/v2/streams/<int:stream_id>', methods=['GET'])
+def get_quality_stats_v2_stream(stream_id):
+    """Get normalized V2 quality stats and markers for one stream."""
+    return get_quality_stats_v2_stream_response(
+        stream_id=stream_id,
+        get_udi_manager=get_udi_manager,
+    )
+
+
+@app.route('/api/quality-stats/v2/providers/<int:provider_id>', methods=['GET'])
+def get_quality_stats_v2_provider(provider_id):
+    """Get normalized V2 quality stats for one provider."""
+    return get_quality_stats_v2_provider_response(
+        provider_id=provider_id,
+        request_args=request.args,
+        get_udi_manager=get_udi_manager,
+    )
+
+
+@app.route('/api/quality-stats/v2/bulk', methods=['POST'])
+def post_quality_stats_v2_bulk():
+    """Get normalized V2 quality stats for stream and provider batches."""
+    return post_quality_stats_v2_bulk_response(
+        payload=request.get_json(silent=True),
+        get_udi_manager=get_udi_manager,
+    )
+
+
 @app.route('/api/stream-checker/check-channel', methods=['POST'])
 def check_specific_channel():
     """Manually check a specific channel immediately (add to queue with high priority)."""
@@ -1267,6 +1590,16 @@ def check_single_channel_now():
     return check_single_channel_now_response(
         payload=request.get_json(silent=True),
         get_stream_checker_service=get_stream_checker_service,
+        get_automation_manager=get_automation_manager,
+    )
+
+@app.route('/api/stream-checker/check-stream', methods=['POST'])
+def check_single_stream_now():
+    """Immediately check one stream synchronously and return measured stats."""
+    return check_single_stream_now_response(
+        payload=request.get_json(silent=True),
+        get_stream_checker_service=get_stream_checker_service,
+        get_automation_manager=get_automation_manager,
     )
 
 @app.route('/api/stream-checker/mark-updated', methods=['POST'])
@@ -1281,8 +1614,129 @@ def mark_channels_updated():
 def queue_all_channels():
     """Queue all channels for checking (manual trigger for full check)."""
     return queue_all_channels_response(
+        payload=request.get_json(silent=True),
         get_stream_checker_service=get_stream_checker_service,
         get_udi_manager=get_udi_manager,
+    )
+
+
+# ===== Shadow Blank Monitor Endpoints =====
+
+@app.route('/api/shadow-blank-monitor/config', methods=['GET'])
+def get_shadow_blank_monitor_config():
+    """Get active-viewer shadow blank monitor configuration."""
+    return get_shadow_blank_monitor_config_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/config', methods=['PUT'])
+def update_shadow_blank_monitor_config():
+    """Update active-viewer shadow blank monitor configuration."""
+    return update_shadow_blank_monitor_config_response(
+        payload=request.get_json(silent=True),
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/status', methods=['GET'])
+def get_shadow_blank_monitor_status():
+    """Get active-viewer shadow blank monitor status."""
+    return get_shadow_blank_monitor_status_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/start', methods=['POST'])
+def start_shadow_blank_monitor():
+    """Start the active-viewer shadow blank monitor."""
+    return start_shadow_blank_monitor_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/stop', methods=['POST'])
+def stop_shadow_blank_monitor():
+    """Stop the active-viewer shadow blank monitor."""
+    return stop_shadow_blank_monitor_response(
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/run-once', methods=['POST'])
+def run_shadow_blank_monitor_once():
+    """Run one active-viewer shadow blank monitor scan."""
+    return run_shadow_blank_monitor_once_response(
+        payload=request.get_json(silent=True),
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+@app.route('/api/shadow-blank-monitor/offline-image/learn', methods=['POST'])
+def learn_shadow_offline_image():
+    """Learn an offline-image pHash from the current Shadow-watched frame."""
+    return learn_shadow_offline_image_response(
+        payload=request.get_json(silent=True),
+        get_service=get_shadow_blank_monitor_service,
+    )
+
+
+# ===== Viewer Activity Endpoints =====
+
+@app.route('/api/viewer-activity/status', methods=['GET'])
+def get_viewer_activity_status():
+    """Get active real-client and watcher-client playback status."""
+    return get_viewer_activity_status_response(
+        get_udi_manager=get_udi_manager,
+        get_shadow_monitor_service=get_shadow_blank_monitor_service,
+    )
+
+
+# ===== Teamarr Event Preflight Endpoints =====
+
+@app.route('/api/teamarr-preflight/config', methods=['GET'])
+def get_teamarr_preflight_config():
+    """Get Teamarr managed-event preflight configuration."""
+    return get_teamarr_preflight_config_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/config', methods=['PUT'])
+def update_teamarr_preflight_config():
+    """Update Teamarr managed-event preflight configuration."""
+    return update_teamarr_preflight_config_response(
+        payload=request.get_json(silent=True),
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/status', methods=['GET'])
+def get_teamarr_preflight_status():
+    """Get Teamarr managed-event preflight status."""
+    return get_teamarr_preflight_status_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/start', methods=['POST'])
+def start_teamarr_preflight():
+    """Start the Teamarr managed-event preflight service."""
+    return start_teamarr_preflight_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/stop', methods=['POST'])
+def stop_teamarr_preflight():
+    """Stop the Teamarr managed-event preflight service."""
+    return stop_teamarr_preflight_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/run-once', methods=['POST'])
+def run_teamarr_preflight_once():
+    """Run one Teamarr managed-event preflight scan."""
+    return run_teamarr_preflight_once_response(
+        get_service=get_teamarr_preflight_service,
+    )
+
+@app.route('/api/teamarr-preflight/events/force-check', methods=['POST'])
+def force_teamarr_preflight_event():
+    """Force a manual preflight check for one managed event."""
+    return force_teamarr_preflight_event_response(
+        payload=request.get_json(silent=True),
+        get_service=get_teamarr_preflight_service,
     )
 
 
@@ -1561,6 +2015,18 @@ def get_automation_status():
     )
 
 
+@app.route('/api/job-arbiter/status', methods=['GET'])
+@log_function_call
+def get_job_arbiter_status():
+    """Get the V6 runtime job arbiter snapshot."""
+    return get_job_arbiter_status_response(
+        get_automation_manager=get_automation_manager,
+        get_stream_checker_service=get_stream_checker_service,
+        get_shadow_monitor_service=get_shadow_blank_monitor_service,
+        get_teamarr_preflight_service=get_teamarr_preflight_service,
+    )
+
+
 @app.route('/api/automation/start', methods=['POST'])
 @log_function_call
 def start_automation_service_api():
@@ -1573,6 +2039,13 @@ def start_automation_service_api():
 def stop_automation_service_api():
     """Stop the automation background service."""
     return stop_automation_service_api_response(get_automation_manager=get_automation_manager)
+
+
+@app.route('/api/automation/abort-run', methods=['POST'])
+@log_function_call
+def abort_automation_run_api():
+    """Stop the active automation run without stopping the background scheduler."""
+    return abort_automation_run_api_response(get_automation_manager=get_automation_manager)
 
 
 @app.route('/api/automation/trigger', methods=['POST'])
@@ -1655,10 +2128,20 @@ def assign_automation_profile_channels():
 @app.route('/api/automation/assign/group', methods=['GET', 'POST'])
 @log_function_call
 def assign_automation_profile_group():
-    """GET: Return all group→automation-profile assignments.
+    """GET: Return all group-to-automation-profile assignments.
     POST: Assign (or remove) an automation profile for a channel group."""
     return assign_automation_profile_group_response(
         method=request.method,
+        payload=request.get_json(silent=True),
+        get_automation_config_manager=get_automation_config_manager,
+    )
+
+
+@app.route('/api/automation/assign/groups', methods=['POST'])
+@log_function_call
+def assign_automation_profile_groups():
+    """Assign or remove an automation profile for multiple channel groups."""
+    return assign_automation_profile_groups_response(
         payload=request.get_json(silent=True),
         get_automation_config_manager=get_automation_config_manager,
     )
@@ -1687,7 +2170,7 @@ def assign_epg_scheduled_profile_channels():
 @app.route('/api/automation/assign/epg-profile/group', methods=['GET', 'POST'])
 @log_function_call
 def assign_epg_scheduled_profile_group():
-    """GET: Return all group→EPG-profile assignments.
+    """GET: Return all group-to-EPG-profile assignments.
     POST: Assign (or remove) an EPG scheduled automation profile for a channel group."""
     return assign_epg_scheduled_profile_group_response(
         method=request.method,
@@ -1703,6 +2186,16 @@ def get_group_automation_periods(group_id):
     return get_group_automation_periods_response(
         group_id=group_id,
         get_automation_config_manager=get_automation_config_manager,
+    )
+
+
+@app.route('/api/channels/groups/config-summary', methods=['GET'])
+@log_function_call
+def get_group_configuration_summary():
+    """Return group-level automation and matching configuration in one response."""
+    return get_group_configuration_summary_response(
+        get_automation_config_manager=get_automation_config_manager,
+        get_regex_matcher=get_regex_matcher,
     )
 
 
@@ -1751,6 +2244,8 @@ def handle_automation_periods():
         get_automation_config_manager=get_automation_config_manager,
         croniter_available=CRONITER_AVAILABLE,
         croniter_module=globals().get('croniter'),
+        get_udi_manager=get_udi_manager,
+        get_automation_manager=get_automation_manager,
     )
 
 
@@ -1765,6 +2260,7 @@ def handle_automation_period(period_id):
         get_automation_config_manager=get_automation_config_manager,
         croniter_available=CRONITER_AVAILABLE,
         croniter_module=globals().get('croniter'),
+        get_automation_manager=get_automation_manager,
     )
 
 
@@ -1821,7 +2317,7 @@ def get_channel_automation_periods(channel_id):
         get_udi_manager=get_udi_manager,
     )
 
-# ── NEW: active profile resolution endpoint ─────────────────────────────────
+# Active profile resolution endpoint
 @app.route('/api/channels/<int:channel_id>/active-profile', methods=['GET'])
 @log_function_call
 def get_channel_active_profile(channel_id):
@@ -1836,7 +2332,6 @@ def get_channel_active_profile(channel_id):
         get_automation_config_manager=get_automation_config_manager,
         get_udi_manager=get_udi_manager,
     )
-# ────────────────────────────────────────────────────────────────────────────
 
 @app.route('/api/channels/batch/assign-periods', methods=['POST'])
 @log_function_call
@@ -1858,6 +2353,7 @@ def get_upcoming_automation_events():
         args=request.args,
         get_events_scheduler=get_events_scheduler,
         get_automation_config_manager=get_automation_config_manager,
+        get_udi_manager=get_udi_manager,
     )
 
 
@@ -1874,403 +2370,6 @@ def invalidate_automation_events_cache():
 
 from apps.stream.stream_session_manager import get_session_manager, REVIEW_DURATION
 from apps.stream.stream_monitoring_service import get_monitoring_service
-from apps.stream.acestream_monitoring_client import AceStreamMonitoringClient, normalize_content_id
-from apps.stream.acestream_session_service import (
-    annotate_monitors_with_playback as _service_annotate_monitors_with_playback,
-    _compute_ace_management_score as _service_compute_ace_management_score,
-    _evaluate_ace_entry_management as _service_evaluate_ace_entry_management,
-    _schedule_ace_ffprobe_recheck as _service_schedule_ace_ffprobe_recheck,
-    apply_ace_dispatcharr_sync as _service_apply_ace_dispatcharr_sync,
-    build_ace_channel_session_summary as _service_build_ace_channel_session_summary,
-    check_ace_session_epg_auto_stop as _service_check_ace_session_epg_auto_stop,
-    compact_ace_monitor_payload as _service_compact_ace_monitor_payload,
-    create_acestream_channel_session_impl as _service_create_acestream_channel_session_impl,
-    evaluate_ace_session_management as _service_evaluate_ace_session_management,
-    get_ace_management_settings as _service_get_ace_management_settings,
-    refresh_ace_session_streams as _service_refresh_ace_session_streams,
-    save_ace_session_telemetry_snapshot as _service_save_ace_session_telemetry_snapshot,
-)
-
-
-def _get_acestream_monitoring_client() -> AceStreamMonitoringClient:
-    """Build client for external AceStream orchestrator monitoring contract."""
-    return AceStreamMonitoringClient()
-
-
-def _acestream_client_or_error():
-    client = _get_acestream_monitoring_client()
-    if not client.is_configured():
-        return None, (
-            jsonify({
-                "error": "AceStream orchestrator is not configured",
-                "required_env": [
-                    "ACESTREAM_ORCHESTRATOR_BASE_URL",
-                    "ACESTREAM_ORCHESTRATOR_API_KEY"
-                ]
-            }),
-            500,
-        )
-    return client, None
-
-
-def _ping_orchestrator_ready(client=None):
-    """Ping the orchestrator /api/v1/version endpoint to verify it is running and reachable."""
-    if client is None:
-        client = _get_acestream_monitoring_client()
-    if not client.is_configured():
-        return False, "AceStream orchestrator is not configured"
-
-    base_url = client.base_url
-    version_url = f"{base_url.rstrip('/')}/api/v1/version"
-    try:
-        resp = requests.get(version_url, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        if not isinstance(data, dict):
-            return False, "Orchestrator /api/v1/version returned unexpected format"
-        title = str(data.get('title') or '')
-        if 'AceStream Orchestrator' not in title:
-            return False, f"Unexpected orchestrator title: '{title}'"
-        version = data.get('version', 'unknown')
-        return True, str(version)
-    except requests.exceptions.ConnectionError:
-        return False, f"Cannot connect to AceStream orchestrator at {base_url}"
-    except requests.exceptions.Timeout:
-        return False, f"Timeout connecting to AceStream orchestrator at {base_url}"
-    except requests.exceptions.HTTPError as exc:
-        return False, f"Orchestrator /api/v1/version returned HTTP {exc.response.status_code}"
-    except Exception as exc:
-        logger.error("Unexpected error while pinging AceStream orchestrator", exc_info=True)
-        return False, "Unexpected error while pinging orchestrator"
-
-
-def _parse_m3u_acestream_entries(m3u_content: str):
-    """Local parser fallback for acestream:// and /ace/getstream?id=<id> entries."""
-    items = []
-    pending_name = None
-
-    for idx, raw_line in enumerate((m3u_content or '').splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        if line.startswith('#EXTINF:'):
-            if ',' in line:
-                pending_name = line.split(',', 1)[1].strip() or None
-            else:
-                pending_name = None
-            continue
-
-        content_id = normalize_content_id(line)
-        if content_id:
-            items.append({
-                'content_id': content_id,
-                'name': pending_name,
-                'line_number': str(idx),
-            })
-            pending_name = None
-
-    merged = {}
-    for item in items:
-        key = item['content_id']
-        if key not in merged:
-            merged[key] = item
-        elif not merged[key].get('name') and item.get('name'):
-            merged[key]['name'] = item['name']
-
-    return list(merged.values())
-
-
-def _ace_channel_sessions_store():
-    from apps.database.manager import get_db_manager
-    db = get_db_manager()
-    store = db.get_system_setting('acestream_channel_sessions', {})
-    return store if isinstance(store, dict) else {}
-
-
-def _save_ace_channel_sessions_store(store):
-    from apps.database.manager import get_db_manager
-    db = get_db_manager()
-    return bool(db.set_system_setting('acestream_channel_sessions', store))
-
-
-def _get_ace_management_settings():
-    return _service_get_ace_management_settings()
-
-
-def _compute_ace_management_score(monitor, entry=None):
-    return _service_compute_ace_management_score(monitor, entry)
-
-
-def _evaluate_ace_entry_management(entry, monitor, now_ts, settings):
-    return _service_evaluate_ace_entry_management(entry, monitor, now_ts, settings)
-
-def _schedule_ace_ffprobe_recheck(entry, monitor):
-    return _service_schedule_ace_ffprobe_recheck(entry, monitor)
-
-
-def _evaluate_ace_session_management(raw_session, monitors_by_id, settings):
-    return _service_evaluate_ace_session_management(raw_session, monitors_by_id, settings)
-
-
-def _check_ace_session_epg_auto_stop(raw_session, client):
-    return _service_check_ace_session_epg_auto_stop(raw_session, client)
-
-
-def _apply_ace_dispatcharr_sync(raw_session):
-    return _service_apply_ace_dispatcharr_sync(raw_session)
-
-
-def _save_ace_session_telemetry_snapshot(raw_session, monitors_by_id):
-    return _service_save_ace_session_telemetry_snapshot(raw_session, monitors_by_id)
-
-
-def _build_ace_channel_session_summary(raw_session, monitors_by_id):
-    return _service_build_ace_channel_session_summary(raw_session, monitors_by_id)
-
-
-def _annotate_monitors_with_playback(client, monitors_by_id):
-    return _service_annotate_monitors_with_playback(client, monitors_by_id)
-
-
-def _compact_ace_monitor_payload(monitor, recent_limit=8):
-    return _service_compact_ace_monitor_payload(monitor, recent_limit=recent_limit)
-
-
-@app.route('/api/acestream-channel-sessions', methods=['GET'])
-def list_acestream_channel_sessions():
-    """List channel-scoped AceStream monitoring sessions."""
-    return list_acestream_channel_sessions_response(
-        args=request.args,
-        get_client_or_error=_acestream_client_or_error,
-        load_store=_ace_channel_sessions_store,
-        get_management_settings=_get_ace_management_settings,
-        save_store=_save_ace_channel_sessions_store,
-        annotate_playback=_annotate_monitors_with_playback,
-        evaluate_management=_evaluate_ace_session_management,
-        save_telemetry_snapshot=_save_ace_session_telemetry_snapshot,
-        check_epg_auto_stop=_check_ace_session_epg_auto_stop,
-        refresh_session_streams=_refresh_ace_session_streams,
-        apply_dispatcharr_sync=_apply_ace_dispatcharr_sync,
-        build_summary=_build_ace_channel_session_summary,
-    )
-
-
-def _refresh_ace_session_streams(raw_session, client, interval_s=1.0, run_seconds=0, per_sample_timeout_s=1.0):
-    return _service_refresh_ace_session_streams(
-        raw_session,
-        client,
-        interval_s=interval_s,
-        run_seconds=run_seconds,
-        per_sample_timeout_s=per_sample_timeout_s,
-    )
-
-
-def create_acestream_channel_session_impl(
-    channel_id,
-    interval_s=1.0,
-    run_seconds=0,
-    per_sample_timeout_s=1.0,
-    engine_container_id=None,
-    epg_event_title=None,
-    epg_event_description=None,
-    epg_event_start=None,
-    epg_event_end=None,
-    epg_event_id=None,
-):
-    return _service_create_acestream_channel_session_impl(
-        channel_id,
-        interval_s=interval_s,
-        run_seconds=run_seconds,
-        per_sample_timeout_s=per_sample_timeout_s,
-        engine_container_id=engine_container_id,
-        epg_event_title=epg_event_title,
-        epg_event_description=epg_event_description,
-        epg_event_start=epg_event_start,
-        epg_event_end=epg_event_end,
-        epg_event_id=epg_event_id,
-        get_client_or_error=_acestream_client_or_error,
-        ping_orchestrator_ready=_ping_orchestrator_ready,
-        load_store=_ace_channel_sessions_store,
-        save_store=_save_ace_channel_sessions_store,
-    )
-
-
-@app.route('/api/acestream-channel-sessions', methods=['POST'])
-def create_acestream_channel_session():
-    """Create and start AceStream monitoring for all AceStream streams in a channel."""
-    return create_acestream_channel_session_response(
-        payload=request.get_json(silent=True),
-        create_session_impl=create_acestream_channel_session_impl,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/group/start', methods=['POST'])
-def create_acestream_group_sessions():
-    """Create AceStream channel sessions for all channels in a group."""
-    return create_acestream_group_sessions_response(
-        payload=request.get_json(silent=True),
-        get_client_or_error=_acestream_client_or_error,
-        ping_orchestrator_ready=_ping_orchestrator_ready,
-        get_udi_manager=get_udi_manager,
-        create_session_impl=create_acestream_channel_session_impl,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>', methods=['GET'])
-def get_acestream_channel_session(session_id):
-    """Get detailed channel-scoped AceStream monitoring session."""
-    return get_acestream_channel_session_response(
-        session_id=session_id,
-        get_client_or_error=_acestream_client_or_error,
-        load_store=_ace_channel_sessions_store,
-        get_management_settings=_get_ace_management_settings,
-        save_store=_save_ace_channel_sessions_store,
-        annotate_playback=_annotate_monitors_with_playback,
-        evaluate_management=_evaluate_ace_session_management,
-        save_telemetry_snapshot=_save_ace_session_telemetry_snapshot,
-        check_epg_auto_stop=_check_ace_session_epg_auto_stop,
-        apply_dispatcharr_sync=_apply_ace_dispatcharr_sync,
-        build_summary=_build_ace_channel_session_summary,
-        compact_monitor_payload=_compact_ace_monitor_payload,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>/stop', methods=['POST'])
-def stop_acestream_channel_session(session_id):
-    """Stop all orchestrator monitor sessions attached to a channel session."""
-    return stop_acestream_channel_session_response(
-        session_id=session_id,
-        get_client_or_error=_acestream_client_or_error,
-        load_store=_ace_channel_sessions_store,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>', methods=['DELETE'])
-def delete_acestream_channel_session(session_id):
-    """Delete channel session and all orchestrator monitor entries."""
-    return delete_acestream_channel_session_response(
-        session_id=session_id,
-        get_client_or_error=_acestream_client_or_error,
-        load_store=_ace_channel_sessions_store,
-        save_store=_save_ace_channel_sessions_store,
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>/streams/<int:stream_id>/quarantine', methods=['POST'])
-def quarantine_acestream_channel_stream(session_id, stream_id):
-    """Manually quarantine one Ace stream entry within a channel session."""
-    return quarantine_acestream_channel_stream_response(
-        session_id=session_id,
-        stream_id=stream_id,
-        load_store=_ace_channel_sessions_store,
-        save_store=_save_ace_channel_sessions_store,
-        now_ts=time.time(),
-    )
-
-
-@app.route('/api/acestream-channel-sessions/<session_id>/streams/<int:stream_id>/revive', methods=['POST'])
-def revive_acestream_channel_stream(session_id, stream_id):
-    """Revive one manually quarantined Ace stream entry back to review."""
-    return revive_acestream_channel_stream_response(
-        session_id=session_id,
-        stream_id=stream_id,
-        load_store=_ace_channel_sessions_store,
-        save_store=_save_ace_channel_sessions_store,
-        now_ts=time.time(),
-    )
-
-
-@app.route('/api/acestream-orchestrator/config', methods=['GET'])
-def get_acestream_orchestrator_config_endpoint():
-    """Get AceStream orchestrator configuration (without exposing API key)."""
-    return get_acestream_orchestrator_config_response(
-        get_acestream_orchestrator_config=get_acestream_orchestrator_config,
-    )
-
-
-@app.route('/api/acestream-orchestrator/config', methods=['PUT'])
-def update_acestream_orchestrator_config_endpoint():
-    """Update AceStream orchestrator host, port, and API key."""
-    return update_acestream_orchestrator_config_response(
-        payload=request.get_json(silent=True),
-        get_acestream_orchestrator_config=get_acestream_orchestrator_config,
-    )
-
-
-@app.route('/api/acestream-orchestrator/ready', methods=['GET'])
-def check_acestream_orchestrator_ready():
-    """Check if the AceStream orchestrator is configured and reachable."""
-    return check_acestream_orchestrator_ready_response(
-        make_client=_get_acestream_monitoring_client,
-        ping_orchestrator_ready=_ping_orchestrator_ready,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/start', methods=['POST'])
-def start_acestream_monitor_session():
-    """Start AceStream monitoring session via external orchestrator contract."""
-    return start_acestream_monitor_session_response(
-        payload=request.get_json(silent=True),
-        get_client_or_error=_acestream_client_or_error,
-        normalize_content_id=normalize_content_id,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions', methods=['GET'])
-def list_acestream_monitor_sessions():
-    """List AceStream monitoring sessions with optional playback correlation."""
-    return list_acestream_monitor_sessions_response(
-        args=request.args,
-        get_client_or_error=_acestream_client_or_error,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/<monitor_id>', methods=['GET'])
-def get_acestream_monitor_session(monitor_id):
-    """Get one AceStream monitoring session with detailed history."""
-    return get_acestream_monitor_session_response(
-        monitor_id=monitor_id,
-        args=request.args,
-        get_client_or_error=_acestream_client_or_error,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/<monitor_id>', methods=['DELETE'])
-def stop_acestream_monitor_session(monitor_id):
-    """Stop AceStream monitoring session lifecycle."""
-    return stop_acestream_monitor_session_response(
-        monitor_id=monitor_id,
-        get_client_or_error=_acestream_client_or_error,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/<monitor_id>/entry', methods=['DELETE'])
-def delete_acestream_monitor_entry(monitor_id):
-    """Delete AceStream monitoring entry and ensure it is stopped."""
-    return delete_acestream_monitor_entry_response(
-        monitor_id=monitor_id,
-        get_client_or_error=_acestream_client_or_error,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/parse-m3u', methods=['POST'])
-def parse_acestream_m3u():
-    """Parse M3U and extract AceStream IDs and names via orchestrator contract."""
-    return parse_acestream_m3u_response(
-        payload=request.get_json(silent=True),
-        get_client_or_error=_acestream_client_or_error,
-        parse_m3u_fallback=_parse_m3u_acestream_entries,
-        normalize_content_id=normalize_content_id,
-    )
-
-
-@app.route('/api/acestream-monitor-sessions/streams/started', methods=['GET'])
-def list_acestream_started_streams():
-    """Optional playback correlation source from orchestrator proxy streams endpoint."""
-    return list_acestream_started_streams_response(
-        get_client_or_error=_acestream_client_or_error,
-    )
 
 
 @app.route('/api/stream-sessions', methods=['GET'])
@@ -2465,15 +2564,16 @@ def handle_session_settings():
     )
 
 
+# --- Telemetry API ---
+from apps.telemetry.telemetry_api import telemetry_bp
+app.register_blueprint(telemetry_bp, url_prefix='/api/telemetry')
+
+
 # Serve React app for all frontend routes (catch-all - must be last!)
 @app.route('/<path:path>')
 def serve_frontend(path):
     """Serve React frontend files or return index.html for client-side routing."""
     return serve_frontend_response(static_folder=static_folder, path=path)
-
-# --- Telemetry API ---
-from apps.telemetry.telemetry_api import telemetry_bp
-app.register_blueprint(telemetry_bp, url_prefix='/api/telemetry')
 
 
 
@@ -2548,6 +2648,24 @@ if __name__ == '__main__':
                         checker.stop()
                 except Exception as e:
                     logger.error(f"Error stopping stream checker service: {e}")
+
+                try:
+                    from apps.stream.shadow_blank_monitor_service import get_shadow_blank_monitor_service
+                    shadow_monitor = get_shadow_blank_monitor_service()
+                    if shadow_monitor:
+                        logger.info("Stopping Shadow Blank Monitor Service...")
+                        shadow_monitor.stop(persist=False)
+                except Exception as e:
+                    logger.error(f"Error stopping shadow blank monitor service: {e}")
+
+                try:
+                    from apps.stream.teamarr_preflight_service import get_teamarr_preflight_service
+                    teamarr_preflight = get_teamarr_preflight_service()
+                    if teamarr_preflight:
+                        logger.info("Stopping Teamarr Preflight Service...")
+                        teamarr_preflight.stop(persist=False)
+                except Exception as e:
+                    logger.error(f"Error stopping Teamarr preflight service: {e}")
                     
                 try:
                     stop_scheduled_event_processor()
@@ -2618,6 +2736,32 @@ if __name__ == '__main__':
             logger.info("Stream monitoring service auto-started")
         except Exception as e:
             logger.error(f"Failed to auto-start stream monitoring service: {e}")
+
+        try:
+            if not check_wizard_complete():
+                logger.info("Shadow blank monitor will not start - setup wizard has not been completed")
+            else:
+                shadow_monitor = get_shadow_blank_monitor_service()
+                if shadow_monitor.get_config().get("enabled"):
+                    shadow_monitor.start(persist=False)
+                    logger.info("Shadow blank monitor auto-started")
+                else:
+                    logger.info("Shadow blank monitor is disabled in configuration")
+        except Exception as e:
+            logger.error(f"Failed to auto-start shadow blank monitor: {e}")
+
+        try:
+            if not check_wizard_complete():
+                logger.info("Teamarr preflight will not start - setup wizard has not been completed")
+            else:
+                teamarr_preflight = get_teamarr_preflight_service()
+                if teamarr_preflight.get_config().get("enabled"):
+                    teamarr_preflight.start(persist=False)
+                    logger.info("Teamarr preflight auto-started")
+                else:
+                    logger.info("Teamarr preflight is disabled in configuration")
+        except Exception as e:
+            logger.error(f"Failed to auto-start Teamarr preflight: {e}")
             
         try:
             if check_wizard_complete():
@@ -2640,11 +2784,11 @@ if __name__ == '__main__':
                     while elapsed < MAX_WAIT_SECONDS:
                         if fetcher.test_connection():
                             logger.info(
-                                f"Dispatcharr ready after {elapsed}s — starting UDI refresh..."
+                                f"Dispatcharr ready after {elapsed}s - starting UDI refresh..."
                             )
                             break
                         logger.info(
-                            f"Dispatcharr not ready yet ({elapsed}s elapsed) — "
+                            f"Dispatcharr not ready yet ({elapsed}s elapsed) - "
                             f"retrying in {POLL_INTERVAL_SECONDS}s..."
                         )
                         time.sleep(POLL_INTERVAL_SECONDS)
@@ -2652,7 +2796,7 @@ if __name__ == '__main__':
                     else:
                         logger.error(
                             f"Dispatcharr did not become ready within {MAX_WAIT_SECONDS}s. "
-                            "Skipping startup UDI refresh — use 'Reload UDI' on the dashboard."
+                            "Skipping startup UDI refresh - use 'Reload UDI' on the dashboard."
                         )
                         return
 

@@ -29,15 +29,33 @@ def discover_streams_response(*, get_automation_manager: Callable[[], Any]):
 def refresh_playlist_response(*, payload: Any, get_automation_manager: Callable[[], Any]):
     """Handle manual M3U refresh quick action."""
     try:
+        if payload is not None and not isinstance(payload, dict):
+            return jsonify({"error": "Request body must be a valid JSON object"}), 400
+
         data = payload or {}
-        _account_id = data.get("account_id")
+        account_id = data.get("account_id")
+        if account_id is not None and (
+            isinstance(account_id, bool)
+            or not isinstance(account_id, int)
+            or account_id <= 0
+        ):
+            return jsonify({"error": "account_id must be a positive integer"}), 400
 
         manager = get_automation_manager()
-        success, _ = manager.refresh_playlists(force=True)
+        if account_id is None:
+            result = manager.refresh_playlists(force=True)
+        else:
+            result = manager.refresh_playlists(force=True, account_id=account_id)
+        success, _ = result
 
         if success:
-            return jsonify({"message": "Playlist refresh completed successfully"})
-        return jsonify({"error": "Playlist refresh failed"}), 500
+            return jsonify({"message": "Playlist refresh request accepted"})
+        if account_id is None:
+            return jsonify({"error": "Playlist refresh failed"}), 500
+        return jsonify({
+            "error": "Playlist refresh request was not accepted",
+            "outcome": getattr(result, "outcome", "failed"),
+        }), 500
     except Exception as exc:
         logger.error(f"Error refreshing playlist: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500

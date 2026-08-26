@@ -14,6 +14,7 @@ import tempfile
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta
@@ -27,7 +28,16 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from apps.udi.models import Channel, Stream, ChannelGroup, Logo, M3UAccount, UDIMetadata
 from apps.udi.storage import UDIStorage
 from apps.udi.cache import UDICache
+from apps.udi.fetcher import FetchResult
 from apps.udi.manager import UDIManager
+
+
+class FakeSettingsDb:
+    def __init__(self, settings=None):
+        self.settings = settings or {}
+
+    def get_system_setting(self, key, default=None):
+        return self.settings.get(key, default)
 
 
 class TestModels(unittest.TestCase):
@@ -190,6 +200,7 @@ class TestUDIStorage(unittest.TestCase):
         
         self.assertEqual(self.storage.load_channels(), [])
         self.assertEqual(self.storage.load_streams(), [])
+        self.assertEqual(list(self.storage.storage_dir.glob("*.last-good")), [])
     
     def test_is_initialized(self):
         """Test checking if storage is initialized."""
@@ -320,6 +331,101 @@ class TestUDIManager(unittest.TestCase):
         self.assertEqual(len(self.manager._streams_by_id), 2)
         self.assertEqual(len(self.manager._streams_by_url), 2)
         self.assertEqual(len(self.manager._valid_stream_ids), 2)
+
+    def test_account_authority_lease_blocks_refresh_pointer_swap(self):
+        """A refresh cannot replace account authority during final admission."""
+
+        class ObservedRLock:
+            def __init__(self):
+                self._inner = threading.RLock()
+                self.contention = threading.Event()
+
+            def acquire(self, blocking=True, timeout=-1):
+                if self._inner.acquire(blocking=False):
+                    return True
+                self.contention.set()
+                if not blocking:
+                    return False
+                if timeout == -1:
+                    return self._inner.acquire()
+                return self._inner.acquire(timeout=timeout)
+
+            def release(self):
+                self._inner.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb):
+                self.release()
+
+        old_account = {
+            "id": 7,
+            "name": "Before refresh",
+            "profiles": [{"id": 70, "max_streams": 1}],
+        }
+        new_account = {
+            "id": 7,
+            "name": "After refresh",
+            "profiles": [{"id": 70, "max_streams": 2}],
+        }
+        self.manager._initialized = True
+        self.manager._m3u_accounts_cache = [old_account]
+        self.manager._build_indexes()
+        observed_lock = ObservedRLock()
+        self.manager._lock = observed_lock
+        self.manager.fetcher.fetch_m3u_accounts = Mock(return_value=[new_account])
+
+        lease_entered = threading.Event()
+        release_lease = threading.Event()
+        refresh_finished = threading.Event()
+        snapshots = []
+        refresh_results = []
+        thread_errors = []
+
+        def hold_lease():
+            try:
+                with self.manager.account_authority_lease(7) as snapshot:
+                    snapshots.append(snapshot)
+                    lease_entered.set()
+                    if not release_lease.wait(timeout=2):
+                        raise AssertionError("lease release timed out")
+            except BaseException as exc:  # surfaced in the parent test thread
+                thread_errors.append(exc)
+
+        def refresh_accounts():
+            try:
+                refresh_results.append(self.manager.refresh_m3u_accounts())
+            except BaseException as exc:  # surfaced in the parent test thread
+                thread_errors.append(exc)
+            finally:
+                refresh_finished.set()
+
+        holder = threading.Thread(target=hold_lease)
+        refresher = threading.Thread(target=refresh_accounts)
+        holder.start()
+        self.assertTrue(lease_entered.wait(timeout=2))
+        refresher.start()
+
+        self.assertTrue(observed_lock.contention.wait(timeout=2))
+        self.assertFalse(refresh_finished.is_set())
+        self.assertEqual(snapshots[0]["name"], "Before refresh")
+        self.assertEqual(snapshots[0]["profiles"][0]["max_streams"], 1)
+
+        release_lease.set()
+        holder.join(timeout=2)
+        refresher.join(timeout=2)
+
+        self.assertFalse(holder.is_alive())
+        self.assertFalse(refresher.is_alive())
+        self.assertEqual(thread_errors, [])
+        self.assertEqual(refresh_results, [True])
+        self.assertEqual(
+            self.manager.get_m3u_account_by_id(7)["name"],
+            "After refresh",
+        )
+        self.assertIs(UDIManager.supports_account_authority_lease, True)
     
     def test_get_channel_by_id(self):
         """Test getting channel by ID."""
@@ -586,6 +692,186 @@ class TestUDIManager(unittest.TestCase):
         result = self.manager.refresh_channel_by_id(1)
         
         self.assertFalse(result)
+
+    def test_refresh_all_preserves_existing_cache_on_empty_unknown_fetch(self):
+        """A transient fetch failure must not replace a good cache with empties."""
+        self.manager._initialized = True
+        self.manager._network_ready = True
+        self.manager._channels_cache = [{'id': 1, 'name': 'Existing Channel'}]
+        self.manager._streams_cache = [{'id': 10, 'name': 'Existing Stream'}]
+        self.manager._build_indexes()
+
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.refresh_config.return_value = None
+        self.manager.fetcher.fetch_all_ids.return_value = {}
+        self.manager.fetcher.fetch_channels.return_value = FetchResult()
+        self.manager.fetcher.fetch_streams.return_value = FetchResult()
+        self.manager.fetcher.fetch_channel_groups.return_value = []
+        self.manager.fetcher.fetch_logos.return_value = FetchResult()
+        self.manager.fetcher.fetch_m3u_accounts.return_value = []
+        self.manager.fetcher.fetch_channel_profiles.return_value = []
+
+        with patch('apps.udi.manager.get_dispatcharr_config') as mock_config:
+            mock_config.return_value.is_configured.return_value = True
+            result = self.manager.refresh_all()
+
+        self.assertFalse(result)
+        self.assertEqual(self.manager._channels_cache, [{'id': 1, 'name': 'Existing Channel'}])
+        self.assertEqual(self.manager._streams_cache, [{'id': 10, 'name': 'Existing Stream'}])
+        self.assertTrue(self.manager.is_network_ready())
+
+    def test_refresh_streams_preserves_existing_cache_on_partial_fetch(self):
+        """A page timeout during refresh_streams must not replace a good cache."""
+        existing_stream = {'id': 10, 'name': 'Existing Stream', 'url': 'http://x/old'}
+        self.manager._initialized = True
+        self.manager._streams_cache = [existing_stream]
+        self.manager._build_indexes()
+
+        partial_streams = [
+            {'id': idx, 'name': f'Partial {idx}', 'url': f'http://x/{idx}'}
+            for idx in range(1, 11)
+        ]
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.fetch_streams.return_value = FetchResult(
+            items=partial_streams,
+            expected_count=20,
+        )
+
+        result = self.manager.refresh_streams()
+
+        self.assertFalse(result)
+        self.assertEqual(self.manager._streams_cache, [existing_stream])
+        self.assertEqual(self.manager._streams_by_id, {10: existing_stream})
+
+    def test_refresh_streams_allows_confirmed_empty_dispatcharr(self):
+        """A real zero-count stream response may replace the stream cache."""
+        self.manager._initialized = True
+        self.manager._streams_cache = [{'id': 10, 'name': 'Existing Stream'}]
+        self.manager._build_indexes()
+
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.fetch_streams.return_value = FetchResult(
+            items=[],
+            expected_count=0,
+        )
+
+        result = self.manager.refresh_streams()
+
+        self.assertTrue(result)
+        self.assertEqual(self.manager._streams_cache, [])
+        self.assertEqual(self.manager._streams_by_id, {})
+
+    def test_refresh_all_allows_confirmed_empty_dispatcharr(self):
+        """A real zero-count Dispatcharr response remains valid."""
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.refresh_config.return_value = None
+        self.manager.fetcher.fetch_all_ids.return_value = {'channels': set(), 'streams': set()}
+        self.manager.fetcher.fetch_channels.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_streams.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_channel_groups.return_value = []
+        self.manager.fetcher.fetch_logos.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_m3u_accounts.return_value = []
+        self.manager.fetcher.fetch_channel_profiles.return_value = []
+
+        with patch('apps.udi.manager.get_dispatcharr_config') as mock_config:
+            mock_config.return_value.is_configured.return_value = True
+            result = self.manager.refresh_all()
+
+        self.assertTrue(result)
+        self.assertEqual(self.manager._channels_cache, [])
+        self.assertEqual(self.manager._streams_cache, [])
+        self.assertTrue(self.manager.is_network_ready())
+
+    def test_rehydrate_managed_hidden_channels_fetches_missing_ids(self):
+        """StreamFlow-owned hidden channels remain visible to UDI if list APIs omit them."""
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.fetch_channels_by_ids.return_value = [
+            {'id': 42, 'name': 'Hidden News', 'hidden_from_output': True},
+        ]
+        fake_db = FakeSettingsDb({
+            "streamflow_channel_visibility_state": {
+                "42": {"hidden_by": "streamflow", "channel_id": 42},
+            },
+        })
+
+        with patch('apps.database.manager.get_db_manager', return_value=fake_db):
+            channels, count = self.manager._rehydrate_managed_hidden_channels([
+                {'id': 1, 'name': 'Visible Channel'},
+            ])
+
+        self.assertEqual(count, 1)
+        self.assertEqual({channel['id'] for channel in channels}, {1, 42})
+        self.manager.fetcher.fetch_channels_by_ids.assert_called_once_with([42])
+
+    def test_refresh_all_rehydrates_hidden_channels_from_ids_oracle_without_state(self):
+        """Hidden channels remain in UDI after a reinstall when /ids/?all exposes them."""
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.refresh_config.return_value = None
+        self.manager.fetcher.fetch_all_ids.return_value = {
+            'channels': {1, 42},
+            'streams': set(),
+        }
+        self.manager.fetcher.fetch_channels.return_value = FetchResult(
+            items=[{'id': 1, 'name': 'Visible Channel', 'streams': []}],
+            expected_count=1,
+        )
+        self.manager.fetcher.fetch_channels_by_ids.return_value = [
+            {'id': 42, 'name': 'Hidden News', 'hidden_from_output': True, 'streams': []},
+        ]
+        self.manager.fetcher.fetch_streams.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_channel_groups.return_value = []
+        self.manager.fetcher.fetch_logos.return_value = FetchResult(items=[], expected_count=0)
+        self.manager.fetcher.fetch_m3u_accounts.return_value = []
+        self.manager.fetcher.fetch_channel_profiles.return_value = [
+            {'id': 7, 'name': 'News Profile', 'channels': [42]},
+        ]
+
+        with patch('apps.udi.manager.get_dispatcharr_config') as mock_config:
+            mock_config.return_value.is_configured.return_value = True
+            result = self.manager.refresh_all()
+
+        self.assertTrue(result)
+        self.assertTrue(self.manager.is_initialized())
+        self.assertEqual({channel['id'] for channel in self.manager.get_channels()}, {1, 42})
+        self.assertEqual(self.manager.get_channel_by_id(42)['name'], 'Hidden News')
+        self.assertEqual(self.manager.get_profile_channels(7)['channels'], [42])
+        entity_counts = self.manager.get_init_progress()['entity_counts']
+        self.assertEqual(entity_counts['channels']['received'], 2)
+        self.assertEqual(entity_counts['channels']['expected'], 2)
+        self.assertEqual(entity_counts['channels']['rehydrated_missing'], 1)
+        self.manager.fetcher.fetch_channels_by_ids.assert_called_once_with([42])
+
+    def test_delta_refresh_keeps_streamflow_hidden_channel_omitted_by_ids(self):
+        """Older Dispatcharr IDs responses must not delete StreamFlow-hidden channels from UDI."""
+        hidden_channel = {'id': 42, 'name': 'Old Hidden', 'hidden_from_output': True, 'streams': []}
+        self.manager._initialized = True
+        self.manager._network_ready = True
+        self.manager._channels_cache = [
+            {'id': 1, 'name': 'Visible Channel', 'streams': []},
+            hidden_channel,
+        ]
+        self.manager._streams_cache = []
+        self.manager._build_indexes()
+        self.manager.fetcher = Mock()
+        self.manager.fetcher.fetch_all_ids.return_value = {'channels': {1}, 'streams': set()}
+        self.manager.fetcher.fetch_channels_by_ids.return_value = [
+            {'id': 42, 'name': 'Hidden News', 'hidden_from_output': True, 'streams': []},
+        ]
+        fake_db = FakeSettingsDb({
+            "streamflow_channel_visibility_state": {
+                "42": {"hidden_by": "streamflow", "channel_id": 42},
+            },
+        })
+
+        with patch('apps.udi.manager.get_dispatcharr_config') as mock_config, \
+                patch('apps.database.manager.get_db_manager', return_value=fake_db):
+            mock_config.return_value.is_configured.return_value = True
+            result = self.manager.refresh_delta()
+
+        self.assertTrue(result)
+        self.assertIn(42, self.manager._channels_by_id)
+        self.assertEqual(self.manager._channels_by_id[42]['name'], 'Hidden News')
+        self.manager.fetcher.fetch_channels_by_ids.assert_called_once_with([42])
 
 
 if __name__ == '__main__':

@@ -5,6 +5,8 @@ import sys
 import os
 import time
 import random
+import tempfile
+from pathlib import Path
 
 # Add backend to path
 sys.path.append(os.path.abspath('backend'))
@@ -15,11 +17,10 @@ sys.modules['dotenv'] = MagicMock()
 
 from apps.automation.automated_stream_manager import RegexChannelMatcher
 
-# Mock config file
-TEST_CONFIG_FILE = 'test_race_config.json'
-
 class TestRaceCondition(unittest.TestCase):
     def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.config_file = Path(self.temp_dir.name) / 'test_race_config.json'
         # Initial config
         self.channel_id = '100'
         self.initial_config = {
@@ -32,14 +33,13 @@ class TestRaceCondition(unittest.TestCase):
             }
         }
         # Create matcher
-        self.matcher = RegexChannelMatcher(config_file=TEST_CONFIG_FILE)
+        self.matcher = RegexChannelMatcher(config_file=self.config_file)
         # Reset state
         self.matcher.channel_patterns = self.initial_config
         self.matcher._save_patterns(self.initial_config)
 
     def tearDown(self):
-        if os.path.exists(TEST_CONFIG_FILE):
-            os.remove(TEST_CONFIG_FILE)
+        self.temp_dir.cleanup()
 
     def test_concurrent_bulk_adds(self):
         """Simulate concurrent bulk add requests to the same channel"""

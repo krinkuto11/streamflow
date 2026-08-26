@@ -1,6 +1,6 @@
 import os
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.orm import sessionmaker
 
 from apps.core.logging_config import setup_logging
@@ -9,6 +9,46 @@ logger = setup_logging(__name__)
 # Re-exports from main database context
 from apps.database.connection import get_session
 from apps.database.models import Run, ChannelHealth, StreamTelemetry
+from apps.telemetry.run_classification import classify_run_metadata
+
+CHANGELOG_RETENTION_DAYS = 7
+TELEMETRY_CLEANUP_BATCH_SIZE = 500
+
+
+def _cleanup_old_telemetry(days: int = CHANGELOG_RETENTION_DAYS) -> int:
+    """Delete old changelog/telemetry runs and their dependent rows."""
+    cutoff = datetime.utcnow() - timedelta(days=max(1, int(days or CHANGELOG_RETENTION_DAYS)))
+    deleted = 0
+    session = get_session()
+    try:
+        while True:
+            old_runs = (
+                session.query(Run)
+                .filter(Run.timestamp < cutoff)
+                .order_by(Run.timestamp.asc())
+                .limit(TELEMETRY_CLEANUP_BATCH_SIZE)
+                .all()
+            )
+            if not old_runs:
+                break
+            for run in old_runs:
+                session.delete(run)
+                deleted += 1
+            session.flush()
+        session.commit()
+        if deleted:
+            logger.info(
+                "Pruned %s changelog/telemetry run(s) older than %s day(s)",
+                deleted,
+                days,
+            )
+        return deleted
+    except Exception as exc:
+        session.rollback()
+        logger.warning(f"Failed to prune old telemetry runs: {exc}", exc_info=True)
+        return 0
+    finally:
+        session.close()
 
 def _sanitize_bitrate(bitrate_str):
     if not bitrate_str:
@@ -69,6 +109,9 @@ def save_automation_run_telemetry(action, details, subentries=None, timestamp=No
             except:
                 pass
 
+        details = details or {}
+        job_metadata = classify_run_metadata(action, details, subentries)
+
         # Create Run record
         duration = details.get('duration_seconds', details.get('duration', 0.0))
         if isinstance(duration, str):
@@ -91,6 +134,10 @@ def save_automation_run_telemetry(action, details, subentries=None, timestamp=No
             global_dead_count=dead_count,
             global_revived_count=revived_count,
             run_type=action,
+            job_category=job_metadata["job_category"],
+            job_outcome=job_metadata["job_outcome"],
+            job_subject_ref=job_metadata["job_subject_ref"],
+            job_correlation_id=job_metadata["job_correlation_id"],
             raw_details=json.dumps(details) if details else None,
             raw_subentries=json.dumps(subentries) if subentries else None
         )
@@ -177,6 +224,7 @@ def save_automation_run_telemetry(action, details, subentries=None, timestamp=No
                             session.add(dtel)
                             
         session.commit()
+        _cleanup_old_telemetry()
     except Exception as e:
         session.rollback()
         logger.error(f"Error saving telemetry data: {e}", exc_info=True)
@@ -196,6 +244,9 @@ def save_generic_telemetry(action, details, subentries=None, timestamp=None):
                 run_ts = datetime.fromisoformat(timestamp)
             except: pass
 
+        details = details or {}
+        job_metadata = classify_run_metadata(action, details, subentries)
+
         run = Run(
             timestamp=run_ts,
             duration_seconds=details.get('duration_seconds', details.get('duration', 0.0)),
@@ -204,6 +255,10 @@ def save_generic_telemetry(action, details, subentries=None, timestamp=None):
             global_dead_count=details.get('total_dead_streams', 0) or details.get('dead_streams', 0),
             global_revived_count=details.get('total_revived_streams', 0),
             run_type=action,
+            job_category=job_metadata["job_category"],
+            job_outcome=job_metadata["job_outcome"],
+            job_subject_ref=job_metadata["job_subject_ref"],
+            job_correlation_id=job_metadata["job_correlation_id"],
             raw_details=json.dumps(details) if details else None,
             raw_subentries=json.dumps(subentries) if subentries else None
         )
@@ -251,6 +306,7 @@ def save_generic_telemetry(action, details, subentries=None, timestamp=None):
                             session.add(dtel)
 
         session.commit()
+        _cleanup_old_telemetry()
     except Exception as e:
         session.rollback()
         logger.error(f"Error saving generic telemetry: {e}", exc_info=True)

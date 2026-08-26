@@ -105,6 +105,46 @@ class TestCaseSensitiveRegex(unittest.TestCase):
         case_sensitive = test_data_with_true.get('case_sensitive', True)
         self.assertTrue(case_sensitive, "Web API should respect explicit True")
 
+    def test_single_regex_test_defaults_case_sensitive(self):
+        """Test that the single regex test endpoint defaults to case-sensitive."""
+        from flask import Flask
+        from apps.api.regex_handlers import test_regex_pattern_response
+
+        app = Flask(__name__)
+        whitespace_pattern = __import__('re').compile(r'(?<!\\\\) +')
+
+        with app.app_context():
+            response = test_regex_pattern_response(
+                payload={"pattern": "CNN", "stream_name": "cnn"},
+                is_dangerous_regex=lambda _pattern: False,
+                whitespace_pattern=whitespace_pattern,
+            )
+
+        data = json.loads(response.get_data(as_text=True))
+        self.assertFalse(data["matches"], "Single regex test should default to case-sensitive")
+
+    def test_case_insensitive_regex_test_preserves_regex_syntax(self):
+        """Test that explicit case-insensitive mode does not lowercase regex syntax."""
+        from flask import Flask
+        from apps.api.regex_handlers import test_regex_pattern_response
+
+        app = Flask(__name__)
+        whitespace_pattern = __import__('re').compile(r'(?<!\\\\) +')
+
+        with app.app_context():
+            response = test_regex_pattern_response(
+                payload={
+                    "pattern": r"(?P<label>HD)",
+                    "stream_name": "hd",
+                    "case_sensitive": False,
+                },
+                is_dangerous_regex=lambda _pattern: False,
+                whitespace_pattern=whitespace_pattern,
+            )
+
+        data = json.loads(response.get_data(as_text=True))
+        self.assertTrue(data["matches"], "Case-insensitive mode should use re.IGNORECASE")
+
 
 if __name__ == '__main__':
     unittest.main()

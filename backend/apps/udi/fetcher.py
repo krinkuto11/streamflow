@@ -5,12 +5,13 @@ Handles fetching data from the Dispatcharr API for initial load and refresh oper
 """
 
 import math
+import os
 import threading
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any, Set
+from typing import Callable, Dict, List, Optional, Any, Set
 import requests
 
 from apps.core.logging_config import setup_logging, log_api_request, log_api_response
@@ -21,6 +22,7 @@ from apps.config.dispatcharr_config import get_dispatcharr_config
 from apps.core.auth import (
     _get_base_url,
     _get_auth_headers,
+    _validate_auth_headers,
     _validate_token,
     _refresh_token,
     _token_refresh_lock,
@@ -30,6 +32,10 @@ from apps.core.auth import (
 )
 
 logger = setup_logging(__name__)
+
+GET_TIMEOUT_SECONDS = 45
+GET_RETRY_ATTEMPTS = 3
+GET_RETRY_BACKOFF_SECONDS = 2
 
 
 @dataclass
@@ -67,12 +73,99 @@ class FetchResult:
         return self.items[index]
 
 
+class FetchCancelled(Exception):
+    """Raised when a long Dispatcharr fetch is cancelled by the caller."""
+
+
+class ProxyStatusError(RuntimeError):
+    """Base class for secret-free proxy-status authority failures."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+class ProxyStatusConfigurationError(ProxyStatusError):
+    """Raised when proxy status cannot be queried due to local configuration."""
+
+
+class ProxyStatusTransportError(ProxyStatusError):
+    """Raised when Dispatcharr proxy status could not be fetched."""
+
+
+class ProxyStatusPayloadError(ProxyStatusError):
+    """Raised when Dispatcharr returned a non-authoritative status payload."""
+
+
 class UDIFetcher:
     """Fetches data from the Dispatcharr API for the UDI system."""
     
     def __init__(self):
         """Initialize the UDI fetcher."""
         self.base_url = _get_base_url()
+        self._timing_lock = threading.Lock()
+        self._request_timings: List[Dict[str, Any]] = []
+
+    def refresh_config(self) -> None:
+        """Refresh cached Dispatcharr connection settings after setup changes."""
+        self.base_url = _get_base_url()
+
+    def _record_request_timing(
+        self,
+        *,
+        method: str,
+        url: str,
+        elapsed: float,
+        status_code: Optional[int] = None,
+        success: bool = True,
+    ) -> None:
+        path = url
+        if self.base_url and path.startswith(self.base_url):
+            path = path[len(self.base_url):] or "/"
+
+        entry = {
+            "method": method,
+            "path": path.split("?", 1)[0],
+            "elapsed_seconds": round(float(elapsed), 4),
+            "status_code": status_code,
+            "success": success,
+            "timestamp": time.time(),
+        }
+        with self._timing_lock:
+            self._request_timings.append(entry)
+            if len(self._request_timings) > 500:
+                self._request_timings = self._request_timings[-500:]
+
+    @staticmethod
+    def _percentile(values: List[float], percentile: float) -> Optional[float]:
+        if not values:
+            return None
+        ordered = sorted(values)
+        if len(ordered) == 1:
+            return round(ordered[0], 4)
+        index = (len(ordered) - 1) * percentile
+        lower = math.floor(index)
+        upper = math.ceil(index)
+        if lower == upper:
+            return round(ordered[int(index)], 4)
+        weight = index - lower
+        return round(ordered[lower] * (1 - weight) + ordered[upper] * weight, 4)
+
+    def get_api_timing_summary(self) -> Dict[str, Any]:
+        """Return a URL-sanitized latency summary for recent Dispatcharr API calls."""
+        with self._timing_lock:
+            timings = list(self._request_timings)
+
+        latencies = [entry["elapsed_seconds"] for entry in timings]
+        failures = [entry for entry in timings if not entry.get("success")]
+        slowest = sorted(timings, key=lambda entry: entry.get("elapsed_seconds", 0), reverse=True)[:5]
+        return {
+            "sample_count": len(timings),
+            "failure_count": len(failures),
+            "p95_seconds": self._percentile(latencies, 0.95),
+            "p99_seconds": self._percentile(latencies, 0.99),
+            "slowest": slowest,
+        }
         
     def test_connection(self) -> bool:
         """Test connection to Dispatcharr API with short timeout.
@@ -80,12 +173,15 @@ class UDIFetcher:
         Returns:
             True if connection and auth successful
         """
+        self.refresh_config()
         if not self.base_url:
             return False
             
         try:
             # Uses 5 second timeout in _validate_token
             headers = _get_auth_headers()
+            if headers.get("X-API-Key") or headers.get("Authorization", "").startswith("ApiKey "):
+                return _validate_auth_headers(headers)
             token = headers.get("Authorization", "").replace("Bearer ", "")
             return _validate_token(token)
         except Exception:
@@ -117,7 +213,10 @@ class UDIFetcher:
 
         result: Dict[str, Set[int]] = {}
         with ThreadPoolExecutor(max_workers=2) as ex:
-            ch_future = ex.submit(_ids_from_url, f"{self.base_url}/api/channels/channels/ids/")
+            ch_future = ex.submit(
+                _ids_from_url,
+                f"{self.base_url}/api/channels/channels/ids/?visibility_filter=all",
+            )
             st_future = ex.submit(_ids_from_url, f"{self.base_url}/api/channels/streams/ids/")
             ch_ids = ch_future.result()
             st_ids = st_future.result()
@@ -228,27 +327,68 @@ class UDIFetcher:
         Returns:
             JSON response data or None if failed
         """
-        try:
-            start_time = time.time()
-            log_api_request(logger, "GET", url)
-            resp = requests.get(url, headers=_get_auth_headers(), timeout=30)
-            elapsed = time.time() - start_time
-            log_api_response(logger, "GET", url, resp.status_code, elapsed)
-            
-            resp.raise_for_status()
-            return resp.json()
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 401:
-                if _refresh_token():
-                    logger.info("Retrying request with new token...")
-                    resp = requests.get(url, headers=_get_auth_headers(), timeout=30)
-                    resp.raise_for_status()
-                    return resp.json()
-            logger.error(f"Error fetching {url}: {e}")
-            return None
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching {url}: {e}")
-            return None
+        for attempt in range(1, GET_RETRY_ATTEMPTS + 1):
+            try:
+                start_time = time.time()
+                log_api_request(logger, "GET", url)
+                resp = requests.get(url, headers=_get_auth_headers(), timeout=GET_TIMEOUT_SECONDS)
+                elapsed = time.time() - start_time
+                log_api_response(logger, "GET", url, resp.status_code, elapsed)
+                self._record_request_timing(
+                    method="GET",
+                    url=url,
+                    elapsed=elapsed,
+                    status_code=resp.status_code,
+                    success=resp.status_code < 400,
+                )
+
+                resp.raise_for_status()
+                return resp.json()
+            except requests.exceptions.HTTPError as e:
+                status_code = e.response.status_code if e.response is not None else None
+                if status_code == 401:
+                    if _refresh_token():
+                        logger.info("Retrying request with new token...")
+                        retry_start = time.time()
+                        resp = requests.get(url, headers=_get_auth_headers(), timeout=GET_TIMEOUT_SECONDS)
+                        retry_elapsed = time.time() - retry_start
+                        self._record_request_timing(
+                            method="GET",
+                            url=url,
+                            elapsed=retry_elapsed,
+                            status_code=resp.status_code,
+                            success=resp.status_code < 400,
+                        )
+                        resp.raise_for_status()
+                        return resp.json()
+
+                retryable = status_code in {429, 500, 502, 503, 504}
+                if retryable and attempt < GET_RETRY_ATTEMPTS:
+                    logger.warning(
+                        f"Transient HTTP {status_code} fetching {url}; retrying "
+                        f"({attempt}/{GET_RETRY_ATTEMPTS})"
+                    )
+                    time.sleep(GET_RETRY_BACKOFF_SECONDS * attempt)
+                    continue
+                logger.error(f"Error fetching {url}: {e}")
+                return None
+            except requests.exceptions.RequestException as e:
+                self._record_request_timing(
+                    method="GET",
+                    url=url,
+                    elapsed=time.time() - start_time if 'start_time' in locals() else 0,
+                    status_code=None,
+                    success=False,
+                )
+                if attempt < GET_RETRY_ATTEMPTS:
+                    logger.warning(
+                        f"Transient error fetching {url}: {e}; retrying "
+                        f"({attempt}/{GET_RETRY_ATTEMPTS})"
+                    )
+                    time.sleep(GET_RETRY_BACKOFF_SECONDS * attempt)
+                    continue
+                logger.error(f"Error fetching {url}: {e}")
+                return None
     
     def _post_url(self, url: str, json_body: Any) -> Optional[Any]:
         """POST JSON to a URL with authentication and one auto-retry on 401.
@@ -266,6 +406,13 @@ class UDIFetcher:
             resp = requests.post(url, headers=_get_auth_headers(), json=json_body, timeout=30)
             elapsed = time.time() - start_time
             log_api_response(logger, "POST", url, resp.status_code, elapsed)
+            self._record_request_timing(
+                method="POST",
+                url=url,
+                elapsed=elapsed,
+                status_code=resp.status_code,
+                success=resp.status_code < 400,
+            )
 
             resp.raise_for_status()
             return resp.json()
@@ -273,16 +420,39 @@ class UDIFetcher:
             if e.response is not None and e.response.status_code == 401:
                 if _refresh_token():
                     logger.info("Retrying POST request with new token...")
+                    retry_start = time.time()
                     resp = requests.post(url, headers=_get_auth_headers(), json=json_body, timeout=30)
+                    retry_elapsed = time.time() - retry_start
+                    self._record_request_timing(
+                        method="POST",
+                        url=url,
+                        elapsed=retry_elapsed,
+                        status_code=resp.status_code,
+                        success=resp.status_code < 400,
+                    )
                     resp.raise_for_status()
                     return resp.json()
             logger.error(f"Error POSTing to {url}: {e}")
             return None
         except requests.exceptions.RequestException as e:
+            self._record_request_timing(
+                method="POST",
+                url=url,
+                elapsed=time.time() - start_time if 'start_time' in locals() else 0,
+                status_code=None,
+                success=False,
+            )
             logger.error(f"Error POSTing to {url}: {e}")
             return None
 
-    def _fetch_paginated(self, base_url: str, page_size: int = 1000) -> FetchResult:
+    def _fetch_paginated(
+        self,
+        base_url: str,
+        page_size: int = 1000,
+        max_workers: int = 10,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> FetchResult:
         """Fetch paginated data from an API endpoint.
 
         Page 1 is fetched synchronously to capture the total ``count``.  All
@@ -290,17 +460,36 @@ class UDIFetcher:
         dataset completes in roughly one round-trip rather than 1 000.
 
         Args:
-            base_url:  The base URL for the endpoint (no query string).
+            base_url:  The base URL for the endpoint. May include query params.
             page_size: Number of items per page.
+            max_workers: Maximum number of concurrent page requests.
 
         Returns:
             FetchResult with all collected items and the expected_count
             reported by the API on the first page (None if not present).
         """
+        try:
+            page_size = int(page_size or 1000)
+        except (TypeError, ValueError):
+            page_size = 1000
+        try:
+            max_workers = int(max_workers or 10)
+        except (TypeError, ValueError):
+            max_workers = 10
+        page_size = max(1, page_size)
+        max_workers = max(1, max_workers)
+
+        def raise_if_cancelled() -> None:
+            if cancel_check and cancel_check():
+                raise FetchCancelled("Paginated fetch cancelled")
+
         # Include page=1 explicitly so ChannelPagination does not short-circuit
         # into bare-list mode (it disables pagination when no 'page' param is
         # present, which drops the DRF count/results envelope).
-        response = self._fetch_url(f"{base_url}?page_size={page_size}&page=1")
+        query_joiner = '&' if '?' in base_url else '?'
+        raise_if_cancelled()
+        response = self._fetch_url(f"{base_url}{query_joiner}page_size={page_size}&page=1")
+        raise_if_cancelled()
         if not response:
             return FetchResult()
 
@@ -312,6 +501,7 @@ class UDIFetcher:
             return FetchResult()
 
         all_items: List[Dict[str, Any]] = list(response.get('results', []))
+        items_fetched = len(all_items)
         expected_count: Optional[int] = None
 
         raw_count = response.get('count')
@@ -325,37 +515,77 @@ class UDIFetcher:
 
         # If we already have everything (or count is unknown), return early.
         if expected_count is None or expected_count <= page_size:
+            if progress_callback:
+                progress_callback({
+                    "completed_pages": 1,
+                    "total_pages": 1,
+                    "items_fetched": items_fetched,
+                    "expected_count": expected_count,
+                })
+            raise_if_cancelled()
             return FetchResult(items=all_items, expected_count=expected_count)
 
         total_pages = math.ceil(expected_count / page_size)
+        if progress_callback:
+            progress_callback({
+                "completed_pages": 1,
+                "total_pages": total_pages,
+                "items_fetched": items_fetched,
+                "expected_count": expected_count,
+            })
+        raise_if_cancelled()
         remaining = range(2, total_pages + 1)
         logger.debug(
             f"Fetching {total_pages - 1} remaining pages of {base_url} concurrently "
-            f"(page_size={page_size}, expected={expected_count})"
+            f"(page_size={page_size}, max_workers={max_workers}, expected={expected_count})"
         )
 
-        # Fetch remaining pages concurrently.  Cap at 10 workers to avoid
-        # overwhelming Dispatcharr; auth retries inside _fetch_url are
+        # Fetch remaining pages concurrently. Auth retries inside _fetch_url are
         # serialised by _token_refresh_lock so 401 bursts are safe.
         page_results: Dict[int, List] = {}
-        with ThreadPoolExecutor(max_workers=min(10, len(remaining))) as executor:
-            future_to_page = {
-                executor.submit(
+        executor = ThreadPoolExecutor(max_workers=min(max_workers, len(remaining)))
+        future_to_page = {}
+        try:
+            for p in remaining:
+                raise_if_cancelled()
+                future = executor.submit(
                     self._fetch_url,
-                    f"{base_url}?page_size={page_size}&page={p}",
-                ): p
-                for p in remaining
-            }
+                    f"{base_url}{query_joiner}page_size={page_size}&page={p}",
+                )
+                future_to_page[future] = p
             for future in as_completed(future_to_page):
+                raise_if_cancelled()
                 page_num = future_to_page[future]
                 try:
                     result = future.result()
+                    raise_if_cancelled()
                     if result and isinstance(result, dict) and 'results' in result:
                         page_results[page_num] = result['results']
+                        items_fetched += len(result['results'])
                     elif result and isinstance(result, list):
                         page_results[page_num] = result
+                        items_fetched += len(result)
                 except Exception as e:
                     logger.error(f"Error fetching page {page_num} of {base_url}: {e}")
+                if progress_callback:
+                    completed_pages = 1 + len(page_results)
+                    progress_callback({
+                        "completed_pages": completed_pages,
+                        "total_pages": total_pages,
+                        "items_fetched": items_fetched,
+                        "expected_count": expected_count,
+                    })
+                raise_if_cancelled()
+        except FetchCancelled:
+            for future in future_to_page:
+                future.cancel()
+            try:
+                executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=False)
+            raise
+        else:
+            executor.shutdown(wait=True)
 
         # Merge pages in page-number order so item ordering is deterministic.
         for page_num in sorted(page_results):
@@ -373,7 +603,7 @@ class UDIFetcher:
             logger.error("DISPATCHARR_BASE_URL not set")
             return FetchResult()
         
-        url = f"{self.base_url}/api/channels/channels/"
+        url = f"{self.base_url}/api/channels/channels/?visibility_filter=all"
         result = self._fetch_paginated(url)
         logger.info(
             f"Fetched {len(result)} channels"
@@ -412,7 +642,11 @@ class UDIFetcher:
         streams = self._fetch_url(url)
         return streams if isinstance(streams, list) else []
     
-    def fetch_streams(self) -> FetchResult:
+    def fetch_streams(
+        self,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
+    ) -> FetchResult:
         """Fetch all streams from Dispatcharr.
         
         Returns:
@@ -423,10 +657,19 @@ class UDIFetcher:
             return FetchResult()
         
         url = f"{self.base_url}/api/channels/streams/"
-        result = self._fetch_paginated(url)
+        config = get_dispatcharr_config()
+        page_size = config.get_stream_fetch_page_size()
+        max_workers = config.get_stream_fetch_max_workers()
+        fetch_kwargs = {"page_size": page_size, "max_workers": max_workers}
+        if progress_callback is not None:
+            fetch_kwargs["progress_callback"] = progress_callback
+        if cancel_check is not None:
+            fetch_kwargs["cancel_check"] = cancel_check
+        result = self._fetch_paginated(url, **fetch_kwargs)
         logger.info(
             f"Fetched {len(result)} streams"
             + (f" (expected {result.expected_count})" if result.expected_count is not None else "")
+            + f" with page_size={page_size}, max_workers={max_workers}"
         )
         return result
     
@@ -627,7 +870,7 @@ class UDIFetcher:
         return profile_channels
     
     def _process_channels_from_response(self, status_data: Any) -> Dict[str, Any]:
-        """Process proxy status response and extract channels as a dict.
+        """Validate proxy status and extract channels as a keyed mapping.
         
         Handles the API response format:
         - Standard format: {"channels": [...], "count": N}
@@ -637,20 +880,40 @@ class UDIFetcher:
             
         Returns:
             Dictionary with channel_id -> status mapping
+
+        Raises:
+            ProxyStatusPayloadError: The response cannot authoritatively
+                distinguish an idle provider from an incomplete payload.
         """
-        result = {}
-        
-        # Handle the API response format with nested channels array
-        if isinstance(status_data, dict) and 'channels' in status_data:
-            channels_list = status_data.get('channels', [])
-            if isinstance(channels_list, list):
-                for item in channels_list:
-                    if isinstance(item, dict) and 'channel_id' in item:
-                        result[str(item['channel_id'])] = item
-                logger.debug(f"Processed {len(result)} channels from proxy status")
-                return result
-        
-        logger.warning(f"Unexpected proxy status format: {type(status_data)}")
+        if not isinstance(status_data, dict):
+            raise ProxyStatusPayloadError("proxy_status_payload_not_mapping")
+
+        channels_list = status_data.get("channels")
+        declared_count = status_data.get("count")
+        if not isinstance(channels_list, list):
+            raise ProxyStatusPayloadError("proxy_status_channels_not_list")
+        if (
+            isinstance(declared_count, bool)
+            or not isinstance(declared_count, int)
+            or declared_count < 0
+        ):
+            raise ProxyStatusPayloadError("proxy_status_count_invalid")
+        if declared_count != len(channels_list):
+            raise ProxyStatusPayloadError("proxy_status_count_mismatch")
+
+        result: Dict[str, Any] = {}
+        for item in channels_list:
+            if not isinstance(item, dict):
+                raise ProxyStatusPayloadError("proxy_status_channel_not_mapping")
+            channel_id = item.get("channel_id")
+            if channel_id in (None, "") or isinstance(channel_id, bool):
+                raise ProxyStatusPayloadError("proxy_status_channel_id_invalid")
+            channel_key = str(channel_id)
+            if channel_key in result:
+                raise ProxyStatusPayloadError("proxy_status_channel_id_duplicate")
+            result[channel_key] = item
+
+        logger.debug(f"Processed {len(result)} channels from proxy status")
         return result
     
     def fetch_proxy_status(self) -> Dict[str, Any]:
@@ -663,20 +926,33 @@ class UDIFetcher:
         - Standard format: {"channels": [...], "count": N}
         
         Returns:
-            Dictionary with channel_id -> status mapping, or empty dict if unavailable
+            Authoritative dictionary with channel_id -> status mapping. A valid
+            idle response is represented by an empty dictionary.
+
+        Raises:
+            ProxyStatusConfigurationError: Dispatcharr has no configured base URL.
+            ProxyStatusTransportError: The status endpoint was unreachable.
+            ProxyStatusPayloadError: The endpoint returned an invalid payload.
         """
         if not self.base_url:
-            logger.debug("DISPATCHARR_BASE_URL not set, cannot fetch proxy status")
-            return {}
+            logger.warning("Proxy status unavailable: base URL is not configured")
+            raise ProxyStatusConfigurationError("proxy_status_base_url_missing")
         
         url = f"{self.base_url}/proxy/ts/status"
         try:
             status_data = self._fetch_url(url)
-            return self._process_channels_from_response(status_data)
-        except Exception as e:
-            logger.debug(f"Could not fetch proxy status: {e}")
-        
-        return {}
+        except ProxyStatusError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Proxy status transport failed (%s)",
+                type(exc).__name__,
+            )
+            raise ProxyStatusTransportError("proxy_status_transport_failed") from None
+
+        if status_data is None:
+            raise ProxyStatusTransportError("proxy_status_transport_failed")
+        return self._process_channels_from_response(status_data)
     
     def refresh_all(self) -> Dict[str, List[Dict[str, Any]]]:
         """Fetch all data from Dispatcharr.

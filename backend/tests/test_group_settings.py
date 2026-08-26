@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import shutil
+import importlib
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -16,7 +17,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 test_config_dir = tempfile.mkdtemp()
 os.environ['CONFIG_DIR'] = test_config_dir
 
-from channel_settings_manager import ChannelSettingsManager
+sys.modules.pop('channel_settings_manager', None)
+ChannelSettingsManager = importlib.import_module('channel_settings_manager').ChannelSettingsManager
 
 
 def test_group_settings_basic():

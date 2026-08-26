@@ -5,7 +5,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts'
 import { api } from '@/services/api.js'
 import { useToast } from '@/hooks/use-toast.js'
-import { Switch } from '@/components/ui/switch.jsx'
+import { TELEMETRY_DATE_RANGES } from '@/lib/telemetry-retention.js'
 
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884D8', '#82ca9d', '#ffc658'];
 
@@ -14,7 +14,6 @@ export default function StatsDashboard() {
   const [providerData, setProviderData] = useState([])
   const [loading, setLoading] = useState(true)
   const [days, setDays] = useState('7')
-  const [useMaximums, setUseMaximums] = useState(false)
   const [providerMetric, setProviderMetric] = useState('quality')
   const [channelsList, setChannelsList] = useState([])
   const [selectedChannel, setSelectedChannel] = useState('')
@@ -86,9 +85,6 @@ export default function StatsDashboard() {
     }
   }
 
-  // Pre-process data based on toggles
-  const lineDataKey = useMaximums ? 'duration_seconds' : 'duration_seconds' // In a real app we might query MAX vs AVG, here we use raw for demo
-
   return (
     <div className="space-y-6 animate-in fade-in duration-500">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -100,25 +96,14 @@ export default function StatsDashboard() {
         </div>
         
         <div className="flex items-center gap-4">
-          <div className="flex items-center space-x-2">
-            <Switch
-              id="maximums"
-              checked={useMaximums}
-              onCheckedChange={setUseMaximums}
-            />
-            <label htmlFor="maximums" className="text-sm font-medium leading-none cursor-pointer">
-              Show Maximums
-            </label>
-          </div>
-          
           <Select value={days} onValueChange={setDays}>
             <SelectTrigger className="w-[180px]">
               <SelectValue placeholder="Date Range" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="1">Last 24 Hours</SelectItem>
-              <SelectItem value="7">Last 7 Days</SelectItem>
-              <SelectItem value="30">Last 30 Days</SelectItem>
+              {TELEMETRY_DATE_RANGES.map((range) => (
+                <SelectItem key={range.value} value={range.value}>{range.label}</SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -149,7 +134,7 @@ export default function StatsDashboard() {
                       <YAxis label={{ value: 'Seconds', angle: -90, position: 'insideLeft' }} />
                       <RechartsTooltip cursor={{fill: 'transparent', stroke: 'rgba(255,255,255,0.1)'}} contentStyle={{borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)'}} />
                       <Legend />
-                      <Line type="monotone" dataKey={lineDataKey} name="Duration (s)" stroke="#8884d8" strokeWidth={3} activeDot={{ r: 8 }} animationDuration={1000} />
+                      <Line type="monotone" dataKey="duration_seconds" name="Duration (s)" stroke="#8884d8" strokeWidth={3} activeDot={{ r: 8 }} animationDuration={1000} />
                     </LineChart>
                   </ResponsiveContainer>
                 )}

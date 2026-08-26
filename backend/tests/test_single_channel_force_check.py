@@ -79,7 +79,85 @@ class TestSingleChannelForceCheck(unittest.TestCase):
             "Channel should not be marked for force check"
         
         # Verify _check_channel was called
-        service._check_channel.assert_called_once_with(16, skip_batch_changelog=True)
+        service._check_channel.assert_called_once_with(
+            16,
+            skip_batch_changelog=True,
+            run_mode='single_channel_check',
+            is_single_channel_check=True,
+            expected_progress_generation=0,
+            force_check_override=False,
+            force_check_generation=None,
+        )
+
+    @patch('stream_checker_service.StreamCheckConfig')
+    @patch('stream_checker_service.get_udi_manager')
+    @patch('stream_checker_service.fetch_channel_streams')
+    @patch('automated_stream_manager.AutomatedStreamManager')
+    @patch('api_utils.refresh_m3u_playlists')
+    def test_single_channel_force_check_uses_owned_override_without_consuming_queue_intent(
+        self, mock_refresh, mock_automation_class, mock_fetch_streams, mock_udi, mock_config_class
+    ):
+        """Explicit force_check should make the synchronous check re-analyze all streams."""
+        from apps.stream.stream_checker_service import StreamCheckerService
+
+        mock_config = Mock()
+        mock_config.get = Mock(side_effect=lambda key, default=None: default)
+        mock_config_class.return_value = mock_config
+
+        mock_udi_instance = Mock()
+        mock_udi.return_value = mock_udi_instance
+        mock_udi_instance.get_channel_by_id.return_value = {
+            'id': 16,
+            'name': 'DAZN F1',
+            'logo_id': None
+        }
+
+        mock_streams = [
+            {'id': 1, 'name': 'Stream 1', 'url': 'http://example.com/1', 'm3u_account': 1,
+             'stream_stats': {'status': 'ok'}},
+            {'id': 2, 'name': 'Stream 2', 'url': 'http://example.com/2', 'm3u_account': 1,
+             'stream_stats': {'status': 'ok'}},
+        ]
+        mock_fetch_streams.return_value = mock_streams
+        mock_udi_instance.refresh_streams = Mock()
+        mock_udi_instance.refresh_channels = Mock()
+        mock_udi_instance.get_streams = Mock(return_value=mock_streams)
+
+        mock_automation_instance = Mock()
+        mock_automation_class.return_value = mock_automation_instance
+        mock_automation_instance.discover_and_assign_streams = Mock(return_value={})
+
+        service = StreamCheckerService()
+
+        # A separately queued force intent belongs to the future worker run.
+        # This direct operation must neither rely on nor consume that marker.
+        service.update_tracker.mark_channel_for_force_check(16)
+
+        def fake_check(channel_id, **kwargs):
+            assert kwargs['force_check_override'] is True
+            assert service.update_tracker.should_force_check(channel_id)
+            return {
+                'dead_streams_count': 0,
+                'revived_streams_count': 0,
+                'analyzed_streams': [],
+            }
+
+        service._check_channel = Mock(side_effect=fake_check)
+
+        result = service.check_single_channel(channel_id=16, force_check=True)
+
+        self.assertTrue(result['success'])
+        self.assertTrue(service.update_tracker.should_force_check(16))
+        service._check_channel.assert_called_once_with(
+            16,
+            skip_batch_changelog=True,
+            run_mode='single_channel_check',
+            is_single_channel_check=True,
+            expected_progress_generation=0,
+            force_check_override=True,
+            force_check_generation=None,
+        )
+        service.update_tracker.clear_force_check(16)
     
     @patch('stream_checker_service.StreamCheckConfig')
     @patch('stream_checker_service.get_udi_manager')

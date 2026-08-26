@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Optional, Callable, Dict, Any
 
 from apps.core.logging_config import setup_logging
+from apps.core.log_sanitizer import scrub_urls, url_ref
 
 logger = setup_logging(__name__)
 
@@ -287,7 +288,7 @@ class FFmpegStreamMonitor:
             try:
                 # Validate URL to prevent command injection
                 if not self._validate_url(self.url):
-                    logger.error(f"Invalid or unsafe URL: {self.url}")
+                    logger.error(f"Invalid or unsafe URL: {url_ref(self.url)}")
                     self.stats.error_message = "Invalid URL"
                     return False
                 
@@ -337,14 +338,14 @@ class FFmpegStreamMonitor:
                 )
                 self._monitor_thread.start()
                 
-                logger.info(f"Started monitoring stream: {self.url[:100]}")
+                logger.info(f"Started monitoring stream: {url_ref(self.url)}")
                 return True
                 
             except Exception as e:
-                logger.error(f"Failed to start FFmpeg monitor: {e}")
+                logger.error(f"Failed to start FFmpeg monitor: {scrub_urls(e)}")
                 self._running = False
                 self.stats.is_alive = False
-                self.stats.error_message = str(e)
+                self.stats.error_message = scrub_urls(e)
                 return False
     
     def _validate_url(self, url: str) -> bool:
@@ -363,15 +364,15 @@ class FFmpegStreamMonitor:
         # Check for command injection attempts
         dangerous_chars = ['`', '$', ';', '|', '&', '\n', '\r']
         if any(char in url for char in dangerous_chars):
-            logger.warning(f"Rejected URL with dangerous characters: {url[:50]}")
+            logger.warning(f"Rejected URL with dangerous characters: {url_ref(url)}")
             return False
         
         # Check for supported protocols
         import re
-        # Allow http(s), acestream, rtmp(s), etc.
-        protocol_pattern = r'^(https?|acestream|rtmp|rtmps|rtp|rtsp|udp|tcp)://'
+        # Allow common stream transport protocols.
+        protocol_pattern = r'^(https?|rtmp|rtmps|rtp|rtsp|udp|tcp)://'
         if not re.match(protocol_pattern, url, re.IGNORECASE):
-            logger.warning(f"Rejected URL with unsupported protocol: {url[:50]}")
+            logger.warning(f"Rejected URL with unsupported protocol: {url_ref(url)}")
             return False
         
         # Basic length check
@@ -402,14 +403,14 @@ class FFmpegStreamMonitor:
                 except subprocess.TimeoutExpired:
                     self._process.kill()
             except Exception as e:
-                logger.error(f"Error stopping FFmpeg process: {e}")
+                logger.error(f"Error stopping FFmpeg process: {scrub_urls(e)}")
             finally:
                 self._process = None
         
         # Cleanup process
         self.stats.is_alive = False
         
-        logger.info(f"Stopped monitoring stream: {self.url[:100]}")
+        logger.info(f"Stopped monitoring stream: {url_ref(self.url)}")
     
     def _monitor_output(self):
         """Monitor FFmpeg stderr output for statistics"""
@@ -438,7 +439,7 @@ class FFmpegStreamMonitor:
                 if self._REGEX_GENERAL_ERROR.search(line):
                     if is_non_fatal_error:
                         # Log non-fatal errors at debug level to avoid spam
-                        logger.debug(f"FFmpeg non-fatal error for {self.url[:50]}: {line.strip()}")
+                        logger.debug(f"FFmpeg non-fatal error for {url_ref(self.url)}: {scrub_urls(line.strip())}")
                         
                         # Track non-fatal error frequency for health checks
                         current_time = time.time()
@@ -447,7 +448,7 @@ class FFmpegStreamMonitor:
                         # If more than 50 errors in 30 seconds, consider it a stalled stream that needs restart
                         recent_errors = [t for t in self._error_history if current_time - t < 30]
                         if len(recent_errors) > 50:
-                            logger.debug(f"Excessive decoding errors ({len(recent_errors)} in 30s) for {self.url[:50]}. Triggering restart.")
+                            logger.debug(f"Excessive decoding errors ({len(recent_errors)} in 30s) for {url_ref(self.url)}. Triggering restart.")
                             self.stats.error_message = "Excessive decoding errors"
                             self.stats.is_alive = False
                             self.stats.is_fatal = False # Explicitly non-fatal, just needs restart
@@ -455,14 +456,14 @@ class FFmpegStreamMonitor:
                             break
                     else:
                         # Log other errors at warning level
-                        logger.warning(f"FFmpeg error for {self.url[:50]}: {line.strip()}")
+                        logger.warning(f"FFmpeg error for {url_ref(self.url)}: {scrub_urls(line.strip())}")
                     
                     if is_fatal or self._REGEX_FATAL_WORD.search(line):
-                        self.stats.error_message = line.strip()
+                        self.stats.error_message = scrub_urls(line.strip())
                         self.stats.is_alive = False
                         self.stats.is_fatal = True # Fatal error, stop and quarantine
                         # Stop monitoring on fatal error
-                        logger.warning(f"Fatal FFmpeg error detected, stopping monitor for {self.url[:50]}")
+                        logger.warning(f"Fatal FFmpeg error detected, stopping monitor for {url_ref(self.url)}")
                         self._running = False
                         break
                 
@@ -471,10 +472,10 @@ class FFmpegStreamMonitor:
                     try:
                         self.on_stats_update(self.stats)
                     except Exception as e:
-                        logger.error(f"Error in stats callback: {e}")
+                        logger.error(f"Error in stats callback: {scrub_urls(e)}")
         
         except Exception as e:
-            logger.error(f"Error monitoring FFmpeg output: {e}")
+            logger.error(f"Error monitoring FFmpeg output: {scrub_urls(e)}")
         
         finally:
             # Check if process exited unexpectedly
@@ -482,10 +483,10 @@ class FFmpegStreamMonitor:
                 try:
                     exit_code = self._process.poll()
                     if exit_code is not None and exit_code != 0:
-                        logger.warning(f"FFmpeg process exited with code {exit_code} for {self.url[:50]}")
+                        logger.warning(f"FFmpeg process exited with code {exit_code} for {url_ref(self.url)}")
                         self.stats.error_message = f"FFmpeg exited with code {exit_code}"
                 except Exception as e:
-                    logger.error(f"Error checking FFmpeg exit code: {e}")
+                    logger.error(f"Error checking FFmpeg exit code: {scrub_urls(e)}")
             
             with self._lock:
                 self._running = False
@@ -511,7 +512,7 @@ class FFmpegStreamMonitor:
             lang_match = self._REGEX_AUDIO_LANG.search(output)
             if lang_match:
                 self.stats.audio_language = lang_match.group(1)
-                logger.debug(f"Detected audio language for {self.url[:50]}: {self.stats.audio_language}")
+                logger.debug(f"Detected audio language for {url_ref(self.url)}: {self.stats.audio_language}")
     
     def _parse_stats(self, output: str):
         """Parse real-time statistics from FFmpeg output"""

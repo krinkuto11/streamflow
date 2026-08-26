@@ -75,6 +75,8 @@ class TestDeadStreamRemovalSwitchComprehensive(unittest.TestCase):
         config_file = self.config_dir / 'stream_checker_config.json'
         with open(config_file, 'w') as f:
             json.dump(config, f)
+        from apps.database.manager import get_db_manager
+        get_db_manager().set_system_setting('stream_checker_config', config)
     
     def test_single_channel_check_respects_removal_disabled(self):
         """Test that single channel check respects removal disabled setting."""

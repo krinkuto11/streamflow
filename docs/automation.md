@@ -54,6 +54,7 @@ Profiles live in `automation_config.json` under `profiles`. A profile has three 
   "min_fps": 0,
   "min_bitrate": 0,
   "require_hdr": "any",
+  "blank_check_enabled": false,
   "m3u_priority": [],
   "m3u_priority_mode": "absolute",
   "grace_period": false
@@ -69,9 +70,19 @@ Profiles live in `automation_config.json` under `profiles`. A profile has three 
 | `min_fps`           | Discard streams below this FPS                                        |
 | `min_bitrate`       | Discard streams below this bitrate (kbps)                             |
 | `require_hdr`       | `"any"` / `"hdr"` / `"sdr"`                                           |
-| `m3u_priority`      | Ordered list of M3U account IDs — higher index = lower priority       |
-| `m3u_priority_mode` | `"absolute"` (strict ordering) or `"equal"` (quality score only)      |
+| `blank_check_enabled` | Run blank-screen detection during the quality probe                 |
+| `m3u_priority`      | Ordered list of M3U account IDs; earlier IDs have higher playlist rank |
+| `m3u_priority_mode` | Stream ordering mode: `"absolute"`, `"same_resolution"`, `"playlist_score"`, `"score_playlist"`, `"equal"`, or `"quality"` |
 | `grace_period`      | If `true`, skip recently-checked streams within the grace window      |
+
+Priority modes:
+
+- `absolute`: playlist rank first, then resolution, then score.
+- `same_resolution`: resolution first, then playlist rank, then score.
+- `playlist_score`: playlist rank first, then score within the same playlist.
+- `score_playlist`: score first; playlist rank only breaks equal-score ties.
+- `equal`: resolution and score only; playlist rank is ignored.
+- `quality`: score only; playlist rank and resolution tier are ignored.
 
 ### `scoring_weights`
 
@@ -118,6 +129,16 @@ Periods define **when** to run. They have no profile attached; the profile is sp
 ```json
 { "type": "cron", "value": "0 */4 * * *" }
 ```
+
+### Catch-up policies
+
+Automatic scheduler passes handle only the highest-priority due period by default.
+Enable `Run all due periods` in Settings -> Scheduling -> Automation Run Policy
+when missed periods should catch up together after downtime.
+
+Use `Catch-up cap` with that option to bound load. A cap of `0` means unlimited
+only when `Run all due periods` is enabled. Manual forced runs are not limited by
+these automatic-run policies.
 
 ---
 

@@ -1,0 +1,968 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
+import { Button } from '@/components/ui/button.jsx'
+import { Badge } from '@/components/ui/badge.jsx'
+import { Input } from '@/components/ui/input.jsx'
+import { Label } from '@/components/ui/label.jsx'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
+import { Switch } from '@/components/ui/switch.jsx'
+import { Separator } from '@/components/ui/separator.jsx'
+import { useToast } from '@/hooks/use-toast.js'
+import { shadowBlankMonitorAPI } from '@/services/api.js'
+import {
+  formatViewerClientCount,
+  formatWatcherClientCount,
+  getProgramDisplayLabel,
+} from '@/lib/viewer-activity-display.js'
+import {
+  shadowMonitorNumberFields,
+} from '@/lib/shadow-monitor-config-fields.js'
+import {
+  buildShadowMonitorConfigPayload,
+  isShadowConfigRevisionConflict,
+} from '@/lib/shadow-monitor-config-payload.js'
+import {
+  CUSTOM_WATCHER_USER_AGENT_TEMPLATE,
+  CUSTOM_WATCHER_USER_AGENT_VALUE,
+  SHADOW_WATCHER_USER_AGENT_MARKER,
+  getWatcherUserAgentPreset,
+  getWatcherUserAgentSelectValue,
+  watcherUserAgentPresets,
+} from '@/lib/shadow-monitor-user-agent-presets.js'
+import {
+  getShadowMonitorDisplayState,
+  syncShadowMonitorConfigFromStatus,
+} from '@/lib/shadow-monitor-status.js'
+import {
+  filterShadowDecisionEvents,
+  formatShadowEventReason,
+  formatShadowEventType,
+  formatShadowPreProbeStatus,
+  getShadowEventDecisionGroup,
+  getShadowEventDetailParts,
+  shadowDecisionFilters,
+} from '@/lib/shadow-monitor-decision-history.js'
+import {
+  Activity,
+  AlertCircle,
+  Camera,
+  CheckCircle2,
+  Eye,
+  Loader2,
+  PlayCircle,
+  RefreshCw,
+  Save,
+  Shield,
+  StopCircle,
+} from 'lucide-react'
+
+const formatTime = (timestamp) => {
+  if (!timestamp) return 'Never'
+  return new Date(timestamp * 1000).toLocaleTimeString()
+}
+
+const formatDuration = (seconds) => {
+  const value = Number(seconds)
+  if (!Number.isFinite(value) || value < 0) return null
+  if (value < 60) return `${Math.floor(value)}s`
+  const minutes = Math.floor(value / 60)
+  const hours = Math.floor(minutes / 60)
+  if (hours > 0) return `${hours}h ${minutes % 60}m`
+  return `${minutes}m`
+}
+
+const formatEvent = (event) => formatShadowEventType(event)
+
+const offlineImageWarningLabels = {
+  missing_reference_hash: 'Offline image detection has no reference pHash.',
+  invalid_reference_hash: 'One or more offline image pHashes are invalid.',
+  no_valid_reference_hash: 'Offline image detection has no valid reference pHash.',
+}
+
+export default function ShadowBlankMonitor() {
+  const [config, setConfig] = useState(null)
+  const [editedConfig, setEditedConfig] = useState(null)
+  const [status, setStatus] = useState(null)
+  const [includedIds, setIncludedIds] = useState('')
+  const [includedUuids, setIncludedUuids] = useState('')
+  const [excludedIds, setExcludedIds] = useState('')
+  const [excludedUuids, setExcludedUuids] = useState('')
+  const [offlineImageHashes, setOfflineImageHashes] = useState('')
+  const [historyFilter, setHistoryFilter] = useState('all')
+  const [loading, setLoading] = useState(true)
+  const [actionLoading, setActionLoading] = useState('')
+  const configRef = useRef(null)
+  const editedConfigRef = useRef(null)
+  const dirtyFieldsRef = useRef(new Set())
+  const { toast } = useToast()
+
+  useEffect(() => {
+    loadData()
+    const interval = setInterval(loadStatus, 5000)
+    return () => clearInterval(interval)
+  }, [])
+
+  const watchedChannels = status?.watched_channels || []
+  const excludedActiveChannels = status?.excluded_active_channels || []
+  const excludedActiveCount = Number(status?.excluded_active_count || excludedActiveChannels.length || 0)
+  const recentEvents = status?.recent_events || []
+  const decisionHistory = status?.decision_history || recentEvents
+  const lastPreProbe = status?.pre_probe?.last || null
+  const offlineImageStatus = status?.offline_image || {}
+  const offlineImageWarnings = offlineImageStatus.warnings || []
+  const switchSummary = status?.switch_summary || {}
+  const cooldownCount = status?.cooldowns?.length || 0
+
+  const lastEvent = useMemo(() => recentEvents[0] || null, [recentEvents])
+  const filteredDecisionHistory = useMemo(
+    () => filterShadowDecisionEvents(decisionHistory, historyFilter),
+    [decisionHistory, historyFilter],
+  )
+  const lastSwitchEvent = useMemo(
+    () => decisionHistory.find(event => getShadowEventDecisionGroup(event) === 'switch') || null,
+    [decisionHistory],
+  )
+  const lastSwitchReason = lastSwitchEvent
+    ? formatShadowEventReason(
+      lastSwitchEvent.details?.trigger_reason
+      || lastSwitchEvent.trigger_reason
+      || lastSwitchEvent.details?.reason,
+    )
+    : null
+
+  const loadData = async () => {
+    try {
+      const [configResponse, statusResponse] = await Promise.all([
+        shadowBlankMonitorAPI.getConfig(),
+        shadowBlankMonitorAPI.getStatus(),
+      ])
+      const nextConfig = configResponse.data || {}
+      configRef.current = nextConfig
+      editedConfigRef.current = nextConfig
+      dirtyFieldsRef.current = new Set()
+      setConfig(nextConfig)
+      setEditedConfig(nextConfig)
+      setIncludedIds((nextConfig.included_channel_ids || []).join(', '))
+      setIncludedUuids((nextConfig.included_channel_uuids || []).join(', '))
+      setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
+      setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
+      setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
+      setStatus(statusResponse.data || {})
+      return true
+    } catch (err) {
+      console.error('Failed to load shadow monitor data:', err)
+      toast({
+        title: 'Error',
+        description: 'Failed to load shadow monitor status',
+        variant: 'destructive',
+      })
+      return false
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const loadStatus = async () => {
+    try {
+      const response = await shadowBlankMonitorAPI.getStatus()
+      const nextStatus = response.data || {}
+      setStatus(nextStatus)
+
+      const currentConfig = configRef.current || {}
+      const currentEditedConfig = editedConfigRef.current || {}
+      const synced = syncShadowMonitorConfigFromStatus({
+        status: nextStatus,
+        config: currentConfig,
+        editedConfig: currentEditedConfig,
+        dirtyFields: dirtyFieldsRef.current,
+      })
+
+      if (synced.changedConfig) {
+        configRef.current = synced.config
+        setConfig(synced.config)
+      }
+      if (synced.changedEditedConfig) {
+        editedConfigRef.current = synced.editedConfig
+        setEditedConfig(synced.editedConfig)
+      }
+    } catch (err) {
+      console.error('Failed to load shadow monitor status:', err)
+    }
+  }
+
+  const updateConfigValue = (field, value) => {
+    dirtyFieldsRef.current = new Set(dirtyFieldsRef.current).add(field)
+    setEditedConfig(prev => ({
+      ...(prev || {}),
+      [field]: value,
+    }))
+    editedConfigRef.current = {
+      ...(editedConfigRef.current || editedConfig || {}),
+      [field]: value,
+    }
+  }
+
+  const saveConfig = async (extra = {}) => {
+    try {
+      setActionLoading('save')
+      const sourceConfig = editedConfigRef.current || editedConfig || {}
+      const payload = buildShadowMonitorConfigPayload({
+        sourceConfig,
+        configRevision: configRef.current?.config_revision,
+        includedIds,
+        includedUuids,
+        excludedIds,
+        excludedUuids,
+        offlineImageHashes,
+        extra,
+      })
+      const response = await shadowBlankMonitorAPI.updateConfig(payload)
+      const nextConfig = response.data || {}
+      configRef.current = nextConfig
+      editedConfigRef.current = nextConfig
+      dirtyFieldsRef.current = new Set()
+      setConfig(nextConfig)
+      setEditedConfig(nextConfig)
+      setIncludedIds((nextConfig.included_channel_ids || []).join(', '))
+      setIncludedUuids((nextConfig.included_channel_uuids || []).join(', '))
+      setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
+      setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
+      setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
+      await loadStatus()
+      toast({ title: 'Saved', description: 'Shadow monitor configuration updated' })
+    } catch (err) {
+      if (isShadowConfigRevisionConflict(err)) {
+        const reloaded = await loadData()
+        if (reloaded) {
+          toast({
+            title: 'Configuration changed',
+            description: 'A newer Shadow Monitor configuration was loaded. Review your changes and save again.',
+            variant: 'destructive',
+          })
+        }
+        return
+      }
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Failed to save shadow monitor configuration',
+        variant: 'destructive',
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
+  const learnOfflineImage = async (channelRef = null) => {
+    try {
+      setActionLoading('learn-offline-image')
+      const response = await shadowBlankMonitorAPI.learnOfflineImage({
+        ...(channelRef ? { channel_ref: channelRef } : {}),
+      })
+      const result = response.data || {}
+      const nextConfig = result.config || config || {}
+      configRef.current = nextConfig
+      editedConfigRef.current = nextConfig
+      dirtyFieldsRef.current = new Set()
+      setConfig(nextConfig)
+      setEditedConfig(nextConfig)
+      setIncludedIds((nextConfig.included_channel_ids || []).join(', '))
+      setIncludedUuids((nextConfig.included_channel_uuids || []).join(', '))
+      setExcludedIds((nextConfig.excluded_channel_ids || []).join(', '))
+      setExcludedUuids((nextConfig.excluded_channel_uuids || []).join(', '))
+      setOfflineImageHashes((nextConfig.offline_image_reference_hashes || []).join(', '))
+      setStatus(result.status || status || {})
+      toast({
+        title: result.deduplicated ? 'Already learned' : 'Learned',
+        description: result.deduplicated
+          ? 'Current frame already matches an offline reference pHash'
+          : 'Current frame pHash added to offline image references',
+      })
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Failed to learn offline image from current frame',
+        variant: 'destructive',
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
+  const runAction = async (name, action, success) => {
+    try {
+      setActionLoading(name)
+      await action()
+      await loadData()
+      toast({ title: 'Success', description: success })
+    } catch (err) {
+      toast({
+        title: 'Error',
+        description: err.response?.data?.error || 'Shadow monitor action failed',
+        variant: 'destructive',
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
+  if (loading || !editedConfig) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    )
+  }
+
+  const displayState = getShadowMonitorDisplayState({ status, config, editedConfig, actionLoading })
+  const {
+    backendRunning,
+    running,
+    formEnabled,
+    formDryRun,
+    serviceDryRun,
+    hasKey,
+    configurationRequired,
+    configurationMessage,
+    canStartWatcher,
+    canUseWatcher,
+    canStopWatcher,
+    continuousWatcherActive,
+    staleRunning,
+    serviceLabel,
+    serviceDescription,
+    loopDetectionEnabled,
+    loopSwitchGateSatisfied,
+  } = displayState
+  const canLearnOfflineImage = actionLoading === '' && watchedChannels.length > 0
+  const watcherUserAgent = String(editedConfig.watcher_user_agent || '')
+  const watcherUserAgentSelectValue = getWatcherUserAgentSelectValue(watcherUserAgent)
+  const watcherUserAgentPreset = getWatcherUserAgentPreset(watcherUserAgent)
+  const watcherUserAgentIsCustom = watcherUserAgentSelectValue === CUSTOM_WATCHER_USER_AGENT_VALUE
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Shadow Monitor</h1>
+          <p className="text-muted-foreground">Continuously tracks viewers and performs periodic low-impact media probes</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            onClick={() => saveConfig()}
+            disabled={actionLoading !== ''}
+          >
+            {actionLoading === 'save' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+            Save
+          </Button>
+          {backendRunning ? (
+            <Button
+              variant="outline"
+              onClick={() => runAction('stop', shadowBlankMonitorAPI.stop, 'Shadow monitor stopped')}
+              disabled={!canStopWatcher}
+            >
+              {actionLoading === 'stop' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <StopCircle className="mr-2 h-4 w-4" />}
+              Stop
+            </Button>
+          ) : (
+            <Button
+              variant="outline"
+              onClick={() => runAction('start', shadowBlankMonitorAPI.start, 'Shadow monitor started')}
+              disabled={!canStartWatcher}
+            >
+              {actionLoading === 'start' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlayCircle className="mr-2 h-4 w-4" />}
+              Start
+            </Button>
+          )}
+          {!continuousWatcherActive && (
+            <Button
+              variant="outline"
+              onClick={() => runAction('scan', shadowBlankMonitorAPI.runOnce, 'Shadow monitor scan completed')}
+              disabled={!canUseWatcher}
+            >
+              {actionLoading === 'scan' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+              Scan Now
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {configurationRequired ? (
+        <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-100">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">Watcher setup required</p>
+            <p className="mt-1">{configurationMessage}</p>
+          </div>
+        </div>
+      ) : null}
+
+      {staleRunning ? (
+        <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-100">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">Watcher thread is stopping</p>
+            <p className="mt-1">The backend still reports an active watcher thread while the saved service config is disabled.</p>
+          </div>
+        </div>
+      ) : null}
+
+      {excludedActiveCount > 0 ? (
+        <div className="flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 p-4 text-sm text-amber-900 dark:text-amber-100">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">Active viewer channels are outside monitor scope</p>
+            <p className="mt-1">
+              {excludedActiveCount} active real-viewer {excludedActiveCount === 1 ? 'channel is' : 'channels are'} outside the configured Shadow Monitor scope.
+            </p>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Service</CardTitle>
+            <Activity className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <Badge
+              variant={configurationRequired || staleRunning ? 'outline' : running ? 'default' : 'secondary'}
+              className={running ? 'bg-green-500' : configurationRequired || staleRunning ? 'border-amber-500/50 text-amber-700 dark:text-amber-200' : ''}
+            >
+              {configurationRequired || staleRunning ? <AlertCircle className="mr-1 h-3 w-3" /> : running ? <CheckCircle2 className="mr-1 h-3 w-3" /> : null}
+              {serviceLabel}
+            </Badge>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {serviceDescription}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Watched Channels</CardTitle>
+            <Eye className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{status?.watched_count || watchedChannels.length}</div>
+            <p className="text-xs text-muted-foreground">
+              {excludedActiveCount > 0 ? `${excludedActiveCount} active out of scope` : 'Active channels with viewers'}
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Switching</CardTitle>
+            <Shield className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <Badge variant={serviceDryRun ? 'outline' : 'default'}>{serviceDryRun ? 'Dry Run' : 'Live'}</Badge>
+            <p className="mt-2 truncate text-xs text-muted-foreground">
+              {lastSwitchEvent ? `${formatEvent(lastSwitchEvent)}: ${lastSwitchReason}` : `${cooldownCount} channel cooldowns`}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {switchSummary.successful_switches || 0} switches / {switchSummary.prevented_false_switches || 0} prevented risk
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">{cooldownCount} channel cooldowns</p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Last Scan</CardTitle>
+            {status?.last_error ? (
+              <AlertCircle className="h-4 w-4 text-destructive" />
+            ) : (
+              <RefreshCw className="h-4 w-4 text-muted-foreground" />
+            )}
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">{formatTime(status?.last_scan_at)}</div>
+            <p className="text-xs text-muted-foreground truncate">
+              {status?.last_error || (lastEvent ? formatEvent(lastEvent) : 'No events')}
+            </p>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+        <Card className="w-[calc(100vw-3rem)] min-w-0 max-w-full overflow-hidden sm:w-full">
+          <CardHeader>
+            <CardTitle>Configuration</CardTitle>
+            <CardDescription>Detection, switching, and watcher identity</CardDescription>
+          </CardHeader>
+          <CardContent className="min-w-0 space-y-6 overflow-hidden">
+            <div className="grid min-w-0 gap-4 md:grid-cols-2">
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3">
+                <div className="min-w-0 flex-1">
+                  <Label className="text-sm font-medium">Enabled</Label>
+                  <p className="text-xs text-muted-foreground">Auto-starts with the backend</p>
+                </div>
+                <Switch checked={formEnabled} onCheckedChange={(value) => updateConfigValue('enabled', value)} />
+              </div>
+
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3">
+                <div className="min-w-0 flex-1">
+                  <Label className="text-sm font-medium">Dry Run</Label>
+                  <p className="text-xs text-muted-foreground">Records intended switches only</p>
+                </div>
+                <Switch checked={formDryRun} onCheckedChange={(value) => updateConfigValue('dry_run', value)} />
+              </div>
+
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3 md:col-span-2">
+                <div className="min-w-0 flex-1">
+                  <Label className="text-sm font-medium">Freeze Detection</Label>
+                  <p className="text-xs text-muted-foreground">Switch when the active picture is stuck but not black</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.freeze_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('freeze_detection_enabled', value)}
+                />
+              </div>
+
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3">
+                <div className="min-w-0 flex-1">
+                  <Label className="text-sm font-medium">Garbled Audio</Label>
+                  <p className="text-xs text-muted-foreground">Treat repeated audio decode errors as a media fault</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.garbled_audio_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('garbled_audio_detection_enabled', value)}
+                />
+              </div>
+
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3">
+                <div className="min-w-0 flex-1">
+                  <Label className="text-sm font-medium">Silent Audio</Label>
+                  <p className="text-xs text-muted-foreground">Treat long audio silence as a media fault</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.silent_audio_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('silent_audio_detection_enabled', value)}
+                />
+              </div>
+
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3 md:col-span-2">
+                <div className="min-w-0 flex-1">
+                  <Label className="text-sm font-medium">Offline Image</Label>
+                  <p className="text-xs text-muted-foreground">Detect provider offline slates by reference pHash</p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.offline_image_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('offline_image_detection_enabled', value)}
+                />
+              </div>
+
+              <div className={`flex min-w-0 items-center justify-between gap-3 rounded-md border p-3 md:col-span-2 ${
+                loopDetectionEnabled && !loopSwitchGateSatisfied
+                  ? 'border-amber-500/50 bg-amber-500/5'
+                  : ''
+              }`}>
+                <div className="min-w-0 flex-1">
+                  <Label className="text-sm font-medium">Loop Detection</Label>
+                  <p className="text-xs text-muted-foreground">
+                    {loopDetectionEnabled && !loopSwitchGateSatisfied
+                      ? 'Detects loops; switching is blocked until next-stream pre-probe is enabled'
+                      : 'Switch when active video content repeats in a loop'}
+                  </p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.loop_detection_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('loop_detection_enabled', value)}
+                />
+              </div>
+
+              <div className="flex min-w-0 items-center justify-between gap-3 rounded-md border p-3 md:col-span-2">
+                <div className="min-w-0 flex-1">
+                  <Label className="text-sm font-medium">Next Stream Pre-Probe</Label>
+                  <p className="text-xs text-muted-foreground">Validate the next candidate before switching</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {formatShadowPreProbeStatus(lastPreProbe)}
+                  </p>
+                </div>
+                <Switch
+                  checked={Boolean(editedConfig.next_stream_pre_probe_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('next_stream_pre_probe_enabled', value)}
+                />
+              </div>
+
+              <div className="rounded-md border p-3 md:col-span-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <Label className="text-sm font-medium">Continuous Monitoring</Label>
+                  <Badge variant="secondary">Only mode</Badge>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Continuously tracks viewers and performs periodic low-impact media probes. A healthy channel waits between probes; Shadow is not a permanently connected viewer unless Persistent Watcher is explicitly enabled.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              {shadowMonitorNumberFields.map(field => (
+                <div key={field.key} className="space-y-2">
+                  <Label htmlFor={field.key}>{field.label}</Label>
+                  <div className="flex items-center gap-2">
+                    <Input
+                      id={field.key}
+                      type="number"
+                      min={field.min}
+                      max={field.max}
+                      value={editedConfig[field.key] ?? ''}
+                      onChange={(event) => updateConfigValue(field.key, Number(event.target.value))}
+                    />
+                    <span className="w-16 shrink-0 text-xs text-muted-foreground">{field.suffix}</span>
+                  </div>
+                  {field.help ? (
+                    <p className="text-xs text-muted-foreground">{field.help}</p>
+                  ) : null}
+                </div>
+              ))}
+            </div>
+
+            <Separator />
+
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-end justify-between gap-2">
+                <div className="space-y-1">
+                  <Label htmlFor="offline_image_reference_hashes">Offline Image Reference pHashes</Label>
+                  <p className="text-xs text-muted-foreground">
+                    {offlineImageStatus.valid_reference_count || 0}/{offlineImageStatus.reference_count || 0} valid references
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => learnOfflineImage()}
+                  disabled={!canLearnOfflineImage}
+                >
+                  {actionLoading === 'learn-offline-image' ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Camera className="mr-2 h-4 w-4" />}
+                  Learn Current Frame
+                </Button>
+              </div>
+              <Input
+                id="offline_image_reference_hashes"
+                placeholder="comma-separated pHash values"
+                value={offlineImageHashes}
+                onChange={(event) => setOfflineImageHashes(event.target.value)}
+              />
+              {offlineImageWarnings.length > 0 ? (
+                <div className="space-y-1">
+                  {offlineImageWarnings.map(warning => (
+                    <p key={warning} className="flex items-center gap-2 text-xs font-medium text-amber-600 dark:text-amber-300">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span>{offlineImageWarningLabels[warning] || warning}</span>
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  Offline-image switching stays disabled unless at least one reference hash is configured.
+                </p>
+              )}
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+              <div className="space-y-2">
+                <Label htmlFor="watcher_api_key">Watcher API Key</Label>
+                <Input
+                  id="watcher_api_key"
+                  type="password"
+                  value={editedConfig.watcher_api_key || ''}
+                  placeholder={hasKey ? 'Configured' : ''}
+                  onChange={(event) => updateConfigValue('watcher_api_key', event.target.value)}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Use a dedicated watcher or playback user key here, not an admin or primary account key.
+                </p>
+                {!hasKey ? (
+                  <p className="text-xs font-medium text-destructive">
+                    Required before Start or Scan Now can run.
+                  </p>
+                ) : null}
+              </div>
+              <Button
+                variant="outline"
+                onClick={() => saveConfig({ watcher_api_key: '', clear_watcher_api_key: true })}
+                disabled={actionLoading !== '' || !hasKey}
+              >
+                Clear Key
+              </Button>
+            </div>
+
+            <div className="space-y-3">
+              <div className="space-y-2">
+                <Label htmlFor="watcher_user_agent_preset">Watcher User Agent</Label>
+                <Select
+                  value={watcherUserAgentSelectValue}
+                  onValueChange={(value) => {
+                    if (value === CUSTOM_WATCHER_USER_AGENT_VALUE) {
+                      updateConfigValue('watcher_user_agent', CUSTOM_WATCHER_USER_AGENT_TEMPLATE)
+                      return
+                    }
+                    updateConfigValue('watcher_user_agent', value)
+                  }}
+                >
+                  <SelectTrigger id="watcher_user_agent_preset">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {watcherUserAgentPresets.map(preset => (
+                      <SelectItem key={preset.value} value={preset.value}>
+                        {preset.label}
+                      </SelectItem>
+                    ))}
+                    <SelectItem value={CUSTOM_WATCHER_USER_AGENT_VALUE}>Custom</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {watcherUserAgentPreset?.description || 'Use a custom playback user agent for the watcher.'}
+                </p>
+              </div>
+              {watcherUserAgentIsCustom ? (
+                <div className="space-y-2">
+                  <Label htmlFor="watcher_user_agent">Custom User Agent</Label>
+                  <Input
+                    id="watcher_user_agent"
+                    value={watcherUserAgent}
+                    onChange={(event) => updateConfigValue('watcher_user_agent', event.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    Keep <span className="font-mono">{SHADOW_WATCHER_USER_AGENT_MARKER}</span> in the value so Shadow can separate its watcher from real viewers.
+                  </p>
+                </div>
+              ) : null}
+            </div>
+
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Monitor Scope</p>
+              <p className="text-xs text-muted-foreground">
+                Leave both include fields empty to follow every active viewer channel. When either field is set, Shadow monitors only matching channels; excludes still win.
+              </p>
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="included_channel_ids">Include Only Channel IDs</Label>
+                <Input
+                  id="included_channel_ids"
+                  placeholder="All channels"
+                  value={includedIds}
+                  onChange={(event) => setIncludedIds(event.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="included_channel_uuids">Include Only Channel UUIDs</Label>
+                <Input
+                  id="included_channel_uuids"
+                  placeholder="All channels"
+                  value={includedUuids}
+                  onChange={(event) => setIncludedUuids(event.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="excluded_channel_ids">Exclude Channel IDs</Label>
+                <Input
+                  id="excluded_channel_ids"
+                  placeholder="None"
+                  value={excludedIds}
+                  onChange={(event) => setExcludedIds(event.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="excluded_channel_uuids">Exclude Channel UUIDs</Label>
+                <Input
+                  id="excluded_channel_uuids"
+                  placeholder="None"
+                  value={excludedUuids}
+                  onChange={(event) => setExcludedUuids(event.target.value)}
+                />
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        <div className="space-y-4">
+          <Card>
+            <CardHeader>
+              <CardTitle>Watched Now</CardTitle>
+              <CardDescription>Channels with active non-watcher clients</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {watchedChannels.length === 0 ? (
+                excludedActiveCount > 0 ? (
+                  <div className="space-y-3">
+                    <p className="text-sm font-medium text-amber-700 dark:text-amber-200">
+                      Active viewer channels are outside the monitor scope.
+                    </p>
+                    {excludedActiveChannels.map(channel => (
+                      <div key={channel.channel_ref} className="rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">
+                              {channel.channel_name || channel.channel_ref}
+                            </p>
+                            <p className="mt-1 font-mono text-xs text-muted-foreground">{channel.channel_ref}</p>
+                          </div>
+                          <Badge variant="outline">{formatViewerClientCount(channel.real_client_count)}</Badge>
+                        </div>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          {channel.exclude_reason === 'channel_not_included'
+                            ? 'Add this channel to an Include Only field, or clear both include fields, to let Shadow start its watcher.'
+                            : 'Remove this channel from Exclude Channel IDs/UUIDs to let Shadow start its watcher.'}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">No watched channels</p>
+                )
+              ) : (
+                <div className="space-y-3">
+                  {watchedChannels.map(channel => {
+                    const programLabel = getProgramDisplayLabel(channel.current_program)
+                    const lastProbeAt = channel.last_probe?.completed_at
+                    const nextProbeAt = channel.next_probe_at
+                    return (
+                      <div key={channel.channel_ref} className="rounded-md border p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium">{channel.channel_name || channel.channel_ref}</p>
+                            <p className="mt-1 truncate font-mono text-xs text-muted-foreground">{channel.channel_ref}</p>
+                          </div>
+                          <div className="flex shrink-0 flex-wrap justify-end gap-2">
+                            <Badge variant="outline">{formatViewerClientCount(channel.real_client_count)}</Badge>
+                            {(channel.watcher_client_count || 0) > 0 && (
+                              <Badge variant="secondary">{formatWatcherClientCount(channel.watcher_client_count)}</Badge>
+                            )}
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="h-7 px-2"
+                              onClick={() => learnOfflineImage(channel.channel_ref)}
+                              disabled={actionLoading !== ''}
+                            >
+                              {actionLoading === 'learn-offline-image' ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Camera className="h-3.5 w-3.5" />
+                              )}
+                              <span className="sr-only">Learn offline image from this channel</span>
+                            </Button>
+                          </div>
+                        </div>
+                        {programLabel && (
+                          <div className="mt-2 min-w-0 text-sm font-medium">
+                            {programLabel}
+                          </div>
+                        )}
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <span>{channel.stream_ref}</span>
+                          {channel.probe_active && <Badge>Probe active</Badge>}
+                          {channel.probe_state === 'waiting' && (
+                            <Badge variant="outline">Waiting for healthy interval</Badge>
+                          )}
+                          {lastProbeAt && <span>Last probe {formatTime(lastProbeAt)}</span>}
+                          {nextProbeAt && channel.probe_state === 'waiting' && (
+                            <span>Next probe {formatTime(nextProbeAt)}</span>
+                          )}
+                          {channel.watcher_client_ref && <span>{channel.watcher_client_ref}</span>}
+                          {formatDuration(channel.watcher_uptime_seconds) && (
+                            <span>watching for {formatDuration(channel.watcher_uptime_seconds)}</span>
+                          )}
+                          {channel.watcher_state === 'reconnecting' && (
+                            <Badge variant="outline">Watcher reconnecting</Badge>
+                          )}
+                          {channel.watcher_state === 'reconnecting' && formatDuration(channel.watcher_absent_seconds) && (
+                            <span>missing for {formatDuration(channel.watcher_absent_seconds)}</span>
+                          )}
+                          {channel.last_event?.type === 'watcher_recovered' && (
+                            <Badge variant="secondary">Watcher recovered</Badge>
+                          )}
+                          {channel.last_event && !['watcher_reconnecting', 'watcher_recovered'].includes(channel.last_event.type) && (
+                            <Badge variant="secondary">{formatEvent(channel.last_event)}</Badge>
+                          )}
+                          {channel.last_probe?.freeze_detected && <Badge variant="outline">Frozen</Badge>}
+                          {channel.last_probe?.blank_detected && <Badge variant="outline">Blank</Badge>}
+                          {channel.last_probe?.garbled_audio_detected && <Badge variant="outline">Garbled Audio</Badge>}
+                          {channel.last_probe?.silent_audio_detected && <Badge variant="outline">Silent Audio</Badge>}
+                          {channel.last_probe?.audio_stream_present === false && <Badge variant="outline">No Audio Stream</Badge>}
+                          {channel.last_probe?.offline_image_detected && <Badge variant="outline">Offline Image</Badge>}
+                          {channel.last_probe?.loop_detected && <Badge variant="outline">Loop</Badge>}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Decision History</CardTitle>
+              <CardDescription>Latest monitor decisions and switch reasons</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="flex flex-wrap gap-2">
+                {shadowDecisionFilters.map(filter => (
+                  <Button
+                    key={filter.key}
+                    type="button"
+                    size="sm"
+                    variant={historyFilter === filter.key ? 'default' : 'outline'}
+                    onClick={() => setHistoryFilter(filter.key)}
+                  >
+                    {filter.label}
+                  </Button>
+                ))}
+              </div>
+
+              {filteredDecisionHistory.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No events recorded</p>
+              ) : (
+                <div className="space-y-3">
+                  {filteredDecisionHistory.slice(0, 12).map((event, index) => {
+                    const detailParts = getShadowEventDetailParts(event)
+                    const isSwitch = getShadowEventDecisionGroup(event) === 'switch'
+                    return (
+                      <div key={`${event.timestamp}-${index}`} className="rounded-md border p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <Badge variant={isSwitch ? 'default' : 'secondary'}>
+                                {formatEvent(event)}
+                              </Badge>
+                              <span className="text-xs text-muted-foreground">{formatTime(event.timestamp)}</span>
+                            </div>
+                            <p className="mt-2 truncate font-mono text-xs text-muted-foreground">
+                              {event.channel_ref} / {event.stream_ref}
+                            </p>
+                          </div>
+                          <span className="shrink-0 text-xs text-muted-foreground">{formatViewerClientCount(event.real_client_count)}</span>
+                        </div>
+                        {detailParts.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {detailParts.slice(0, 5).map((part, partIndex) => (
+                              <Badge key={`${part}-${partIndex}`} variant="outline" className="max-w-full truncate">
+                                {part}
+                              </Badge>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  )
+}

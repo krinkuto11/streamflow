@@ -9,9 +9,27 @@ import { Input } from '@/components/ui/input.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Pagination, PaginationContent, PaginationItem, PaginationLink, PaginationNext, PaginationPrevious } from '@/components/ui/pagination.jsx'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
 import { useToast } from '@/hooks/use-toast.js'
-import { streamCheckerAPI, deadStreamsAPI } from '@/services/api.js'
+import { streamCheckerAPI, deadStreamsAPI, channelsAPI } from '@/services/api.js'
+import { formatDuration } from '@/lib/time-format.js'
+import { getExternalStaleDiagnosticsDisplay } from '@/lib/external-stale-diagnostics-display.js'
+import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
+import { getCurrentProgressDisplay } from '@/lib/stream-checker-progress-display.js'
+import { getHardwareAnalysisPathDisplay, getHardwareOperatorNote, getHardwareRuntimeDeviceLabel } from '@/lib/hardware-status-display.js'
+import {
+  getParallelProgressBadgeText,
+  getProfileSlotDisplay,
+  getProfileSlotMatrixRows,
+  getProviderCapacityExplanationDisplay,
+  getProviderWaitReasonDisplay,
+} from '@/lib/provider-progress-display.js'
+import {
+  getIncompleteBitrateBadgeLabel,
+  getQualityReasonDisplay,
+} from '@/lib/quality-reason-display.js'
 import {
   Activity,
   CheckCircle2,
@@ -22,8 +40,12 @@ import {
   Settings,
   Trash2,
   AlertCircle,
+  ShieldAlert,
+  ShieldCheck,
   RefreshCw,
-  List
+  Info,
+  List,
+  Save
 } from 'lucide-react'
 
 // Pagination constants
@@ -34,6 +56,7 @@ export default function StreamChecker() {
   const [status, setStatus] = useState(null)
   const [progress, setProgress] = useState(null)
   const [config, setConfig] = useState(null)
+  const [hardwareStatus, setHardwareStatus] = useState(null)
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
   const [tick, setTick] = useState(0) // drives countdown re-renders — value never rendered
@@ -49,17 +72,30 @@ export default function StreamChecker() {
     has_prev: false
   })
   const [totalDeadStreams, setTotalDeadStreams] = useState(0)
+  const [startChannels, setStartChannels] = useState([])
+  const [queueStartMode, setQueueStartMode] = useState('first')
+  const [queueStartChannelId, setQueueStartChannelId] = useState('')
+  const [queueStartInitialized, setQueueStartInitialized] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
     loadData()
     // Poll for updates - use shorter interval when checking is active
-    const pollInterval = (status?.checking || (status?.queue?.queue_size > 0)) ? 1000 : 3000
+    const pollInterval = (
+      status?.stream_checking_mode ||
+      status?.checking ||
+      (status?.queue?.queue_size > 0) ||
+      (status?.queue?.in_progress > 0)
+    ) ? 1000 : 3000
     const interval = setInterval(() => {
       loadData()
     }, pollInterval)
     return () => clearInterval(interval)
-  }, [status?.checking, status?.queue?.queue_size])
+  }, [status?.stream_checking_mode, status?.checking, status?.queue?.queue_size, status?.queue?.in_progress])
+
+  useEffect(() => {
+    loadStartChannels()
+  }, [])
 
   // Tick every second to drive per-stream countdown cells
   // The tick value itself is never rendered — it triggers re-renders so
@@ -71,21 +107,90 @@ export default function StreamChecker() {
 
   const loadData = async () => {
     try {
-      const [statusResponse, progressResponse, configResponse] = await Promise.all([
+      const [statusResponse, progressResponse, configResponse, hardwareStatusResponse] = await Promise.all([
         streamCheckerAPI.getStatus(),
         streamCheckerAPI.getProgress(),
-        streamCheckerAPI.getConfig()
+        streamCheckerAPI.getConfig(),
+        streamCheckerAPI.getHardwareStatus()
       ])
       setStatus(statusResponse.data)
       setProgress(progressResponse.data)
       setConfig(configResponse.data)
+      setHardwareStatus(hardwareStatusResponse.data)
       if (!editedConfig && configResponse.data) {
         setEditedConfig(configResponse.data)
+      }
+      if (!queueStartInitialized && configResponse.data?.queue) {
+        const savedMode = configResponse.data.queue.start_mode || 'first'
+        const savedChannelId = configResponse.data.queue.start_channel_id
+        setQueueStartMode(savedMode)
+        if (savedChannelId !== null && savedChannelId !== undefined) {
+          setQueueStartChannelId(String(savedChannelId))
+        }
+        setQueueStartInitialized(true)
       }
     } catch (err) {
       console.error('Failed to load stream checker data:', err)
     } finally {
       setLoading(false)
+    }
+  }
+
+  const loadStartChannels = async () => {
+    try {
+      const response = await channelsAPI.getChannels({
+        sort_by: 'channel_number',
+        sort_dir: 'asc',
+        per_page: 500
+      })
+      const channelItems = Array.isArray(response.data)
+        ? response.data
+        : (response.data?.items || [])
+      const usableChannels = channelItems.filter(channel => channel?.id != null)
+      setStartChannels(usableChannels)
+      if (!queueStartChannelId && usableChannels.length > 0) {
+        setQueueStartChannelId(String(usableChannels[0].id))
+      }
+    } catch (err) {
+      console.error('Failed to load queue start channels:', err)
+    }
+  }
+
+  const mergeQueueStartConfig = (queueUpdate) => {
+    const merge = (current) => current
+      ? { ...current, queue: { ...(current.queue || {}), ...queueUpdate } }
+      : current
+    setConfig(merge)
+    setEditedConfig(merge)
+  }
+
+  const persistQueueStart = async (nextMode, nextChannelId = queueStartChannelId) => {
+    const selectedChannelId = nextMode === 'channel'
+      ? (nextChannelId || startChannels[0]?.id || null)
+      : null
+    const queueUpdate = {
+      start_mode: nextMode,
+      start_channel_id: selectedChannelId != null ? Number(selectedChannelId) : null
+    }
+
+    setQueueStartMode(nextMode)
+    if (nextMode === 'channel' && queueUpdate.start_channel_id != null) {
+      setQueueStartChannelId(String(queueUpdate.start_channel_id))
+    }
+    mergeQueueStartConfig(queueUpdate)
+
+    try {
+      setActionLoading('queue-start')
+      await streamCheckerAPI.updateConfig({ queue: queueUpdate })
+      await loadData()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to save run start",
+        variant: "destructive"
+      })
+    } finally {
+      setActionLoading('')
     }
   }
 
@@ -110,6 +215,33 @@ export default function StreamChecker() {
     }
   }
 
+  const handleQueueAllChannels = async () => {
+    try {
+      setActionLoading('queue-all')
+      const payload = { start_mode: queueStartMode }
+      if (queueStartMode === 'channel') {
+        payload.start_channel_id = queueStartChannelId
+      }
+      const response = await streamCheckerAPI.queueAllChannels(payload)
+      const startName = response.data?.start?.start_channel_name
+      toast({
+        title: "Success",
+        description: startName
+          ? `Queued full check starting at ${startName}`
+          : response.data?.message || "Queued full check"
+      })
+      await loadData()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to queue full check",
+        variant: "destructive"
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
   const handleSaveConfig = async () => {
     try {
       setActionLoading('save-config')
@@ -119,6 +251,10 @@ export default function StreamChecker() {
         description: "Configuration saved successfully"
       })
       setConfigEditing(false)
+      setQueueStartMode(editedConfig?.queue?.start_mode || 'first')
+      if (editedConfig?.queue?.start_channel_id !== null && editedConfig?.queue?.start_channel_id !== undefined) {
+        setQueueStartChannelId(String(editedConfig.queue.start_channel_id))
+      }
       await loadData()
     } catch (err) {
       toast({
@@ -245,26 +381,134 @@ export default function StreamChecker() {
     )
   }
 
-  const isChecking = status?.checking || (status?.queue?.queue_size > 0)
-  const queueSize = status?.queue?.queue_size || 0
-  const inProgress = status?.queue?.in_progress || 0
+  const currentProgressDisplay = getCurrentProgressDisplay(status, progress)
+  const {
+    queueSize,
+    inProgress,
+    progressStale,
+    progressStaleAge,
+    isChecking,
+    statusLabel,
+    staleNoticeTitle,
+    staleNoticeText,
+    progressRunMode,
+    runProfileName,
+    runProfileSource,
+    qualityProfileName,
+    qualityProfileSource,
+    capacityProfileName,
+    showQualityRules,
+    showCurrentProgress,
+  } = currentProgressDisplay
   const completed = status?.queue?.completed || 0
   const failed = status?.queue?.failed || 0
   const queued = status?.queue?.queued || 0
   const totalBatch = queued + inProgress + completed + failed
   const batchProgress = totalBatch > 0 ? ((completed + failed) / totalBatch) * 100 : 0
+  const providerProgress = progress?.provider_progress || []
+  const providerSummary = progress?.provider_summary || {}
+  const parallelProgressBadgeText = getParallelProgressBadgeText(status, providerSummary)
+  const connectivityGuardFailed = status?.connectivity_guard?.active_failure === true
+  const selectedStartChannel = startChannels.find(channel => String(channel.id) === String(queueStartChannelId))
+  const firstStartChannel = startChannels[0]
+  const lastStartChannel = startChannels[startChannels.length - 1]
+  const queueStartLabel = queueStartMode === 'last'
+    ? (lastStartChannel?.name || 'Last channel')
+    : queueStartMode === 'channel'
+      ? (selectedStartChannel?.name || 'Select a channel')
+      : (firstStartChannel?.name || 'First channel')
+  const queueAllDisabled = isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || (queueStartMode === 'channel' && !queueStartChannelId)
+  const runtimeDeviceLabel = getHardwareRuntimeDeviceLabel(hardwareStatus)
+  const ffmpegModeLabel = hardwareStatus?.config?.enabled
+    ? (hardwareStatus?.mode_supported ? 'Reported' : 'Not reported')
+    : 'Disabled'
+  const ffmpegMethodsLabel = Array.isArray(hardwareStatus?.ffmpeg_hwaccels) && hardwareStatus.ffmpeg_hwaccels.length > 0
+    ? hardwareStatus.ffmpeg_hwaccels.join(', ')
+    : (hardwareStatus?.config?.enabled ? 'No methods reported' : 'Not checked')
+  const analysisPathDisplay = getHardwareAnalysisPathDisplay(hardwareStatus)
+  const hardwareOperatorNote = getHardwareOperatorNote(hardwareStatus)
+  const queueEtaDisplay = getQueueEtaDisplay(status?.queue)
+  const externalStaleDisplay = getExternalStaleDiagnosticsDisplay(status?.external_stale_diagnostics)
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-start">
-        <div>
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
           <h1 className="text-3xl font-bold tracking-tight">Stream Checker</h1>
           <p className="text-muted-foreground">
             Monitor and manage stream quality checking
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex w-full min-w-0 flex-col gap-2 sm:flex-row sm:items-end lg:w-auto lg:flex-nowrap">
+          <div className="w-full sm:w-44 space-y-1">
+            <Label htmlFor="queue-start-mode" className="text-xs text-muted-foreground">Run Start</Label>
+            <Select
+              value={queueStartMode}
+              onValueChange={(value) => persistQueueStart(value)}
+              disabled={isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start'}
+            >
+              <SelectTrigger id="queue-start-mode">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="first">First channel</SelectItem>
+                <SelectItem value="last">Last channel</SelectItem>
+                <SelectItem value="channel">Selected channel</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          {queueStartMode === 'channel' && (
+            <div className="w-full sm:w-64 space-y-1">
+              <Label htmlFor="queue-start-channel" className="text-xs text-muted-foreground">Channel</Label>
+              <Select
+                value={queueStartChannelId}
+                onValueChange={(value) => persistQueueStart('channel', value)}
+                disabled={isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start' || startChannels.length === 0}
+              >
+                <SelectTrigger id="queue-start-channel">
+                  <SelectValue placeholder="Select channel" />
+                </SelectTrigger>
+                <SelectContent>
+                  {startChannels.map(channel => (
+                    <SelectItem key={channel.id} value={String(channel.id)}>
+                      {channel.name || `Channel ${channel.id}`}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => persistQueueStart(queueStartMode, queueStartChannelId)}
+            disabled={isChecking || actionLoading === 'queue-all' || actionLoading === 'queue-start'}
+            className="w-full gap-2 sm:w-auto"
+          >
+            {actionLoading === 'queue-start' ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="h-4 w-4" />
+            )}
+            Save Start
+          </Button>
+          <Button
+            onClick={handleQueueAllChannels}
+            disabled={queueAllDisabled}
+            className="w-full sm:w-auto sm:min-w-44"
+          >
+            {actionLoading === 'queue-all' ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <PlayCircle className="mr-2 h-4 w-4" />
+            )}
+            Check All
+          </Button>
         </div>
+      </div>
+      <div className="text-sm text-muted-foreground">
+        Next run starts at <span className="font-medium text-foreground">{queueStartLabel}</span>
+        {actionLoading === 'queue-start' && <span className="ml-2">Saving...</span>}
       </div>
 
       {/* Status Overview */}
@@ -277,7 +521,7 @@ export default function StreamChecker() {
           <CardContent>
             <div className="flex items-center gap-2">
               <Badge variant={isChecking ? "default" : "secondary"}>
-                {isChecking ? "Active" : "Idle"}
+                {statusLabel}
               </Badge>
             </div>
             <p className="text-xs text-muted-foreground mt-2">
@@ -326,6 +570,61 @@ export default function StreamChecker() {
         </Card>
       </div>
 
+      {connectivityGuardFailed && (
+        <Alert variant="destructive">
+          <ShieldAlert className="h-4 w-4" />
+          <AlertTitle>Connectivity Check Failed</AlertTitle>
+          <AlertDescription>
+            {status?.connectivity_guard?.message || 'Quality checking was stopped before channel streams were changed.'}
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {progressStale && (
+        <div
+          className="min-w-0 w-full overflow-hidden rounded-md border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground"
+          style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
+        >
+          <div className="flex min-w-0 items-start gap-2">
+            <Info className="mt-0.5 h-4 w-4 flex-none text-muted-foreground" />
+            <div className="min-w-0 space-y-1">
+              <p className="min-w-0 max-w-full break-words font-medium text-foreground">{staleNoticeTitle}</p>
+              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+                {staleNoticeText}
+                {Number.isFinite(Number(progressStaleAge)) && (
+                  <span className="ml-1">Last update age: {formatDuration(Number(progressStaleAge))}.</span>
+                )}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {externalStaleDisplay && (
+        <div
+          className="min-w-0 w-fit max-w-full overflow-hidden rounded-md border border-border/60 bg-transparent px-3 py-2 text-xs text-muted-foreground"
+          style={{ maxWidth: 'min(100%, calc(100vw - 3rem))' }}
+        >
+          <div className="flex min-w-0 items-start gap-2">
+            <Info className="mt-0.5 h-3.5 w-3.5 flex-none text-muted-foreground" />
+            <div className="min-w-0 space-y-1">
+              <p className="min-w-0 max-w-full whitespace-normal [overflow-wrap:anywhere]">
+                <span className="font-medium text-foreground">{externalStaleDisplay.title}.</span>{' '}
+                {externalStaleDisplay.text}
+              </p>
+              {externalStaleDisplay.detail && (
+                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">{externalStaleDisplay.detail}</p>
+              )}
+              {externalStaleDisplay.accounts.length > 0 && (
+                <p className="min-w-0 max-w-full whitespace-normal text-xs [overflow-wrap:anywhere]">
+                  {externalStaleDisplay.accounts.join(' | ')}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Batch Progress — hidden during single channel checks to avoid showing
            stale counters from the previous automation run */}
       {isChecking && totalBatch > 0 && !progress?.is_single_channel_check && (
@@ -333,16 +632,15 @@ export default function StreamChecker() {
           <CardHeader className="pb-2">
             <div className="flex justify-between items-center">
               <CardTitle>Batch Progress</CardTitle>
-              {status?.queue?.eta_seconds > 0 ? (
-                <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md">
-                  ~{status.queue.eta_seconds > 60
-                    ? `${Math.floor(status.queue.eta_seconds / 60)}m ${status.queue.eta_seconds % 60}s`
-                    : `${status.queue.eta_seconds}s`} remaining
+              {queueEtaDisplay.label ? (
+                <span
+                  className={`text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md ${queueEtaDisplay.pulse ? 'animate-pulse text-primary/70' : ''}`}
+                  title={queueEtaDisplay.title}
+                >
+                  {queueEtaDisplay.label}
                 </span>
               ) : (
-                <span className="text-sm text-muted-foreground font-medium bg-secondary/50 px-2 py-1 rounded-md animate-pulse">
-                  Calculating ETA...
-                </span>
+                null
               )}
             </div>
             <CardDescription>Checking {totalBatch} channels</CardDescription>
@@ -360,7 +658,7 @@ export default function StreamChecker() {
       )}
 
       {/* Current Progress */}
-      {progress && isChecking && (
+      {showCurrentProgress && (
         <Card>
           <CardHeader>
             <CardTitle>Current Progress</CardTitle>
@@ -378,14 +676,233 @@ export default function StreamChecker() {
               <p className="text-xs text-muted-foreground">{progress.step_detail}</p>
             </div>
 
-            <div className="flex items-center gap-2 text-sm pb-2 border-b">
+            <div className="flex flex-wrap items-center gap-2 text-sm pb-2 border-b">
               <Badge variant="outline">{progress.status}</Badge>
-              {status?.parallel?.enabled && (
+              {progressRunMode && (
                 <Badge variant="secondary">
-                  Parallel ({status.parallel.max_workers} workers)
+                  Run Mode: {progressRunMode}
+                </Badge>
+              )}
+              {runProfileName && (
+                <Badge variant={runProfileSource === 'forced' ? 'default' : 'outline'}>
+                  Run Profile: {runProfileName}
+                </Badge>
+              )}
+              {showQualityRules && (
+                <Badge variant={qualityProfileSource === 'forced' ? 'default' : 'outline'}>
+                  Quality Rules: {qualityProfileName}
+                </Badge>
+              )}
+              {capacityProfileName && (
+                <Badge variant="outline">
+                  Capacity Profile: {capacityProfileName}
+                </Badge>
+              )}
+              {parallelProgressBadgeText && (
+                <Badge variant="secondary">
+                  {parallelProgressBadgeText}
                 </Badge>
               )}
             </div>
+
+            {providerProgress.length > 0 && (
+              <div className="space-y-3">
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Accounts</div>
+                    <div className="text-lg font-semibold">{providerSummary.total_providers || providerProgress.length}</div>
+                  </div>
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Checking</div>
+                    <div className="text-lg font-semibold">{providerSummary.checking_streams || 0}</div>
+                  </div>
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Waiting</div>
+                    <div className="text-lg font-semibold text-amber-600 dark:text-amber-400">{providerSummary.waiting_streams || 0}</div>
+                  </div>
+                  <div className="rounded-md border px-3 py-2">
+                    <div className="text-xs text-muted-foreground">Skipped</div>
+                    <div className="text-lg font-semibold">{providerSummary.skipped_streams || 0}</div>
+                  </div>
+                </div>
+                <div className="rounded-md border overflow-hidden">
+                  <div className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 bg-muted px-3 py-2 text-xs font-medium uppercase text-muted-foreground">
+                    <span>Account</span>
+                    <span className="justify-self-end text-right">Checking</span>
+                    <span className="justify-self-end text-right">Waiting</span>
+                    <span className="justify-self-end text-right">Done</span>
+                  </div>
+                  <div className="divide-y">
+                    {providerProgress.map((provider) => {
+                      const finishedPercent = provider.total > 0 ? Math.round((provider.finished / provider.total) * 100) : 0
+                      const waitReason = getProviderWaitReasonDisplay(provider)
+                      const profileSlots = (provider.profile_slots || []).map(getProfileSlotDisplay)
+                      const capacityExplanation = getProviderCapacityExplanationDisplay(provider)
+                      return (
+                        <div key={provider.account_id ?? provider.name} className="grid grid-cols-[minmax(0,1fr)_4rem_4rem_5rem] items-center gap-4 px-3 py-2 text-sm">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="truncate font-medium" title={provider.name}>{provider.name}</span>
+                              {provider.state === 'waiting_provider_limit' && (
+                                <Badge variant="outline" className="border-amber-500/40 bg-amber-100 text-[10px] text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+                                  Waiting
+                                </Badge>
+                              )}
+                              {provider.state === 'checking' && (
+                                <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">
+                                  Active
+                                </Badge>
+                              )}
+                              {waitReason && (
+                                <Badge
+                                  variant="outline"
+                                  className="shrink-0 text-[10px] text-muted-foreground"
+                                  title={waitReason.title}
+                                >
+                                  {waitReason.text}
+                                </Badge>
+                              )}
+                            </div>
+                            <div className="mt-1 h-1.5 rounded-full bg-muted">
+                              <div className="h-1.5 rounded-full bg-primary" style={{ width: `${finishedPercent}%` }} />
+                            </div>
+                            {profileSlots.length > 0 && (
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {profileSlots.slice(0, 5).map((slot) => (
+                                  <span
+                                    key={slot.id ?? slot.name}
+                                    className={`max-w-[12rem] truncate rounded border px-1.5 py-0.5 text-[10px] leading-none ${
+                                      slot.full
+                                        ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                                        : slot.checking > 0
+                                          ? 'border-blue-500/30 bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
+                                          : 'border-border text-muted-foreground'
+                                    }`}
+                                    title={slot.title}
+                                  >
+                                    {slot.text}
+                                  </span>
+                                ))}
+                                {profileSlots.length > 5 && (
+                                  <span className="rounded border px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+                                    +{profileSlots.length - 5}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            {capacityExplanation && (
+                              <div
+                                className="mt-1 max-w-full text-[10px] leading-snug text-muted-foreground"
+                                title={capacityExplanation.title}
+                              >
+                                <span className="font-medium text-foreground/80">{capacityExplanation.text}</span>
+                                {capacityExplanation.detail && (
+                                  <span className="ml-1">{capacityExplanation.detail}</span>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                          <span className="justify-self-end text-right font-mono tabular-nums">{provider.checking}</span>
+                          <span className="justify-self-end text-right font-mono tabular-nums text-amber-600 dark:text-amber-400">{provider.waiting}</span>
+                          <span className="justify-self-end text-right font-mono tabular-nums">{provider.finished}/{provider.total}</span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+                {(() => {
+                  const profileMatrixRows = getProfileSlotMatrixRows(providerProgress)
+                  if (profileMatrixRows.length === 0) return null
+
+                  return (
+                    <Accordion type="single" collapsible className="rounded-md border px-3">
+                      <AccordionItem value="profile-slot-matrix" className="border-b-0">
+                        <AccordionTrigger className="py-3 text-sm hover:no-underline">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="font-medium">Profile Matrix</span>
+                            <Badge variant="secondary" className="shrink-0 text-[10px]">
+                              {profileMatrixRows.length} profiles
+                            </Badge>
+                          </span>
+                        </AccordionTrigger>
+                        <AccordionContent>
+                          <div className="overflow-x-auto pb-3">
+                            <table className="w-full min-w-[760px] text-sm">
+                              <thead className="border-b text-xs uppercase text-muted-foreground">
+                                <tr>
+                                  <th className="px-2 py-2 text-left font-medium">Account</th>
+                                  <th className="px-2 py-2 text-left font-medium">Profile</th>
+                                  <th className="px-2 py-2 text-right font-medium">ID</th>
+                                  <th className="px-2 py-2 text-right font-medium">Used / Limit</th>
+                                  <th className="px-2 py-2 text-right font-medium">Real Viewers</th>
+                                  <th className="px-2 py-2 text-right font-medium">Checking</th>
+                                  <th className="px-2 py-2 text-right font-medium">Free</th>
+                                  <th className="px-2 py-2 text-left font-medium">Status</th>
+                                </tr>
+                              </thead>
+                              <tbody className="divide-y">
+                                {profileMatrixRows.map((slot) => (
+                                  <tr key={slot.key}>
+                                    <td className="max-w-[12rem] truncate px-2 py-2" title={slot.accountName}>
+                                      {slot.accountName}
+                                    </td>
+                                    <td className="max-w-[18rem] px-2 py-2 font-medium" title={slot.title}>
+                                      <div className="flex min-w-0 items-center gap-1.5">
+                                        <span className="truncate">{slot.name}</span>
+                                        {slot.sharedRoute && (
+                                          <Badge
+                                            variant="outline"
+                                            className="shrink-0 text-[9px] font-normal text-muted-foreground"
+                                          >
+                                            {slot.sharedRouteLabel}
+                                          </Badge>
+                                        )}
+                                      </div>
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums text-muted-foreground">
+                                      {slot.id ?? 'N/A'}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.usageText}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.realViewers}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.checking}
+                                    </td>
+                                    <td className="px-2 py-2 text-right font-mono tabular-nums">
+                                      {slot.availableText}
+                                    </td>
+                                    <td className="px-2 py-2">
+                                      <Badge
+                                        variant="outline"
+                                        className={`text-[10px] ${
+                                          slot.routeUnavailable
+                                            ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                                            : slot.full
+                                            ? 'border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300'
+                                            : slot.checking > 0
+                                              ? 'border-blue-500/30 bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300'
+                                              : 'text-muted-foreground'
+                                        }`}
+                                        title={slot.routeUnavailableHint || slot.title}
+                                      >
+                                        {slot.status}
+                                      </Badge>
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </AccordionContent>
+                      </AccordionItem>
+                    </Accordion>
+                  )
+                })()}
+              </div>
+            )}
 
             {/* Streams Detail Progress List */}
             {progress.streams_detail && progress.streams_detail.length > 0 && (() => {
@@ -393,8 +910,8 @@ export default function StreamChecker() {
               // normal analysis phase floats completed streams to top by score.
               const isLoopPhase = progress.step === 'Loop testing'
               const STATUS_ORDER = isLoopPhase
-                ? { probing: 0, loop_detected: 1, completed: 2, checking: 3, pending: 4, error: 5, low_quality: 6, dead: 7 }
-                : { completed: 0, checking: 1, pending: 2, error: 3, low_quality: 4, dead: 5 }
+                ? { probing: 0, loop_detected: 1, completed: 2, incomplete_bitrate: 3, rechecking_bitrate: 4, checking: 5, pending: 6, error: 7, low_quality: 8, blank: 9, freeze: 10, dead: 11 }
+                : { checking: 0, rechecking_bitrate: 1, waiting_provider_limit: 2, pending: 3, completed: 4, incomplete_bitrate: 5, viewer_preempted: 6, provider_limit_wait_timeout: 7, error: 8, low_quality: 9, blank: 10, freeze: 11, dead: 12 }
 
               // Dynamic height: sized to min(max_workers, stream count), floor 6 rows
               const maxWorkers = status?.parallel?.max_workers || 6
@@ -439,16 +956,20 @@ export default function StreamChecker() {
                             if (remaining === 0) {
                               countdownCell = <span className="text-muted-foreground/50">--</span>
                             } else {
-                              const m = Math.floor(remaining / 60)
-                              const s = remaining % 60
-                              const timeStr = m > 0 ? `${m}m ${String(s).padStart(2, '0')}s` : `${s}s`
                               countdownCell = (
                                 <span className={remaining <= 10 ? 'text-amber-500 font-mono text-xs' : 'text-muted-foreground font-mono text-xs'}>
-                                  {timeStr}
+                                  {formatDuration(remaining)}
                                 </span>
                               )
                             }
                           }
+                          const qualityReason = getQualityReasonDisplay(stream)
+                          const showMeasuredSpecs = ['completed', 'incomplete_bitrate', 'loop_detected', 'low_quality', 'dead', 'blank', 'freeze'].includes(stream.status)
+                          const reservedProfileTitle = [
+                            stream.reserved_profile_name ? `Profile: ${stream.reserved_profile_name}` : null,
+                            stream.reserved_profile_id != null ? `ID: ${stream.reserved_profile_id}` : null,
+                            stream.reserved_profile_limit != null ? `Limit: ${stream.reserved_profile_limit || 'unlimited'}` : null,
+                          ].filter(Boolean).join(' | ')
 
                           return (
                             <tr key={stream.id} className="hover:bg-muted/50 transition-colors bg-card">
@@ -456,31 +977,69 @@ export default function StreamChecker() {
                                 <div className="font-medium max-w-[200px] truncate" title={stream.name}>
                                   {stream.name}
                                 </div>
+                                {qualityReason && (
+                                  <div className="max-w-[200px] truncate text-[10px] text-muted-foreground" title={qualityReason.title}>
+                                    {qualityReason.text}
+                                  </div>
+                                )}
                               </td>
                               <td className="px-3 py-1.5 align-middle">
                                 <div className="text-xs text-muted-foreground max-w-[150px] truncate" title={stream.m3u_account}>
                                   {stream.m3u_account}
                                 </div>
+                                {stream.reserved_profile_name && (
+                                  <div
+                                    className="text-[10px] text-muted-foreground/80 max-w-[150px] truncate"
+                                    title={reservedProfileTitle}
+                                  >
+                                    {stream.reserved_profile_name}
+                                  </div>
+                                )}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-center">
                                 {stream.status === 'pending' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Pending</Badge>}
                                 {stream.status === 'checking' && <Badge variant="secondary" className="text-[10px] bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">Checking</Badge>}
+                                {stream.status === 'rechecking_bitrate' && <Badge variant="outline" className="text-[10px] border-cyan-500/40 bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300 animate-pulse">Bitrate Recheck</Badge>}
+                                {stream.status === 'waiting_provider_limit' && <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">Waiting</Badge>}
+                                {stream.status === 'viewer_preempted' && <Badge variant="outline" className="text-[10px] border-cyan-500/40 bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300">Preempted</Badge>}
+                                {stream.status === 'provider_limit_wait_timeout' && <Badge variant="outline" className="text-[10px] text-muted-foreground">Skipped</Badge>}
                                 {stream.status === 'completed' && <Badge variant="outline" className="text-[10px] bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400">Completed</Badge>}
+                                {stream.status === 'incomplete_bitrate' && (
+                                  <div className="mx-auto flex max-w-[180px] flex-col items-center gap-1" title={qualityReason?.title}>
+                                    <Badge variant="outline" className="text-[10px] border-amber-500/40 bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300">
+                                      {getIncompleteBitrateBadgeLabel(stream)}
+                                    </Badge>
+                                    {qualityReason && (
+                                      <span className="max-w-full truncate text-[10px] leading-tight text-amber-700 dark:text-amber-300">
+                                        {qualityReason.text}
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
                                 {stream.status === 'error' && <Badge variant="destructive" className="text-[10px]">Error</Badge>}
                                 {stream.status === 'dead' && <Badge variant="destructive" className="text-[10px]">Dead</Badge>}
+                                {stream.status === 'blank' && <Badge variant="destructive" className="text-[10px]">Blank</Badge>}
+                                {stream.status === 'freeze' && <Badge variant="destructive" className="text-[10px]">Frozen</Badge>}
                                 {stream.status === 'probing' && <Badge variant="outline" className="text-[10px] bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400 animate-pulse">Probing</Badge>}
-                                {stream.status === 'loop_detected' && <Badge variant="outline" className="text-[10px] bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">⚠ {stream.loop_duration_secs ? `${stream.loop_duration_secs.toFixed(1)}s` : ''} Loop Found</Badge>}
+                                {stream.status === 'loop_detected' && <Badge variant="outline" className="text-[10px] bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400">⚠ {stream.loop_duration_secs ? formatDuration(stream.loop_duration_secs) : ''} Loop Found</Badge>}
                                 {stream.status === 'low_quality' && (
-                                  <Badge variant="outline" className="text-[10px] bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
-                                    Low Quality
-                                  </Badge>
+                                  <div className="mx-auto flex max-w-[180px] flex-col items-center gap-1" title={qualityReason?.title}>
+                                    <Badge variant="outline" className="text-[10px] bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400">
+                                      Low Quality
+                                    </Badge>
+                                    {qualityReason && (
+                                      <span className="max-w-full truncate text-[10px] leading-tight text-orange-700 dark:text-orange-300">
+                                        {qualityReason.text}
+                                      </span>
+                                    )}
+                                  </div>
                                 )}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right">
                                 {countdownCell}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right text-xs text-muted-foreground whitespace-nowrap">
-                                {stream.status === 'completed' || stream.status === 'loop_detected' ? (
+                                {showMeasuredSpecs ? (
                                   <div className="flex flex-col items-end gap-0.5">
                                     <span>{stream.video_codec || 'N/A'} • <span className="text-foreground">{stream.fps || 0} fps </span></span>
                                     {(stream.resolution || stream.bitrate) && (
@@ -495,7 +1054,7 @@ export default function StreamChecker() {
                                 ) : '-'}
                               </td>
                               <td className="px-3 py-1.5 align-middle text-right text-xs font-mono">
-                                {(stream.status === 'completed' || stream.status === 'loop_detected') && stream.score !== undefined ? stream.score.toFixed(2) : '-'}
+                                {(['completed', 'incomplete_bitrate', 'loop_detected'].includes(stream.status)) && stream.score !== undefined ? stream.score.toFixed(2) : '-'}
                               </td>
                             </tr>
                           )
@@ -541,8 +1100,8 @@ export default function StreamChecker() {
 
       {/* Configuration Section */}
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between">
-          <div>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
             <CardTitle>Stream Checker Configuration</CardTitle>
             <CardDescription>
               Configure stream analysis and checking parameters
@@ -552,6 +1111,7 @@ export default function StreamChecker() {
             variant="outline"
             size="sm"
             onClick={() => setConfigEditing(!configEditing)}
+            className="self-start sm:shrink-0"
           >
             <Settings className="mr-2 h-4 w-4" />
             {configEditing ? 'Cancel' : 'Edit'}
@@ -573,14 +1133,16 @@ export default function StreamChecker() {
 
               {/* Tabs for Configuration Sections */}
               <Tabs defaultValue="analysis" className="w-full">
-                <TabsList className="grid w-full grid-cols-3">
+                <TabsList className="grid h-auto min-h-10 w-full grid-cols-1 gap-1 sm:grid-cols-2 lg:grid-cols-5">
                   <TabsTrigger value="analysis">Stream Analysis</TabsTrigger>
+                  <TabsTrigger value="queue">Queue</TabsTrigger>
                   <TabsTrigger value="concurrent">Concurrent Checking</TabsTrigger>
+                  <TabsTrigger value="safety">Safety</TabsTrigger>
                   <TabsTrigger value="dead-streams">Dead Streams</TabsTrigger>
                 </TabsList>
 
                 {/* Stream Analysis Tab */}
-                <TabsContent value="analysis" className="space-y-4">
+                <TabsContent value="analysis" className="mt-4 space-y-4">
                   <div className="grid gap-4 md:grid-cols-2">
                     <div className="space-y-2">
                       <Label htmlFor="ffmpeg_duration">FFmpeg Duration (seconds)</Label>
@@ -594,7 +1156,7 @@ export default function StreamChecker() {
                         max={120}
                       />
                       <p className="text-xs text-muted-foreground">
-                        Duration to analyze each stream (5-120 seconds)
+                        Basis analysis duration (5-120 seconds). Blank/freeze profiles use a separate visual probe that is automatically extended to at least the detector threshold plus 1 second; Changelog shows its effective duration and completion state.
                       </p>
                     </div>
 
@@ -692,11 +1254,220 @@ export default function StreamChecker() {
                         User agent string for ffmpeg/ffprobe (for strict stream providers)
                       </p>
                     </div>
+
+                    <div className="space-y-4 rounded-md border border-border p-4 md:col-span-2">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="hardware_acceleration_enabled">Hardware Acceleration</Label>
+                          <p className="text-xs text-muted-foreground">
+                            Optional ffmpeg acceleration; CPU is used by default
+                          </p>
+                        </div>
+                        <Switch
+                          id="hardware_acceleration_enabled"
+                          checked={editedConfig?.stream_analysis?.hardware_acceleration?.enabled === true}
+                          onCheckedChange={(checked) => updateConfigValue('stream_analysis.hardware_acceleration.enabled', checked)}
+                          disabled={!configEditing}
+                        />
+                      </div>
+
+                      <div className="grid gap-4 md:grid-cols-3">
+                        <div className="space-y-2">
+                          <Label htmlFor="hardware_acceleration_mode">Mode</Label>
+                          <Select
+                            value={editedConfig?.stream_analysis?.hardware_acceleration?.mode || 'auto'}
+                            onValueChange={(value) => updateConfigValue('stream_analysis.hardware_acceleration.mode', value)}
+                            disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
+                          >
+                            <SelectTrigger id="hardware_acceleration_mode">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="auto">Auto</SelectItem>
+                              <SelectItem value="cuda">CUDA</SelectItem>
+                              <SelectItem value="vaapi">VAAPI</SelectItem>
+                              <SelectItem value="qsv">QSV</SelectItem>
+                              <SelectItem value="d3d11va">D3D11VA</SelectItem>
+                              <SelectItem value="dxva2">DXVA2</SelectItem>
+                              <SelectItem value="vdpau">VDPAU</SelectItem>
+                              <SelectItem value="videotoolbox">VideoToolbox</SelectItem>
+                            </SelectContent>
+                          </Select>
+                          <p className="text-xs text-muted-foreground">
+                            Auto resolves DRI devices to VAAPI; use QSV only after a probe proves it initializes on this host
+                          </p>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="hardware_acceleration_device">Device</Label>
+                          <Input
+                            id="hardware_acceleration_device"
+                            type="text"
+                            value={editedConfig?.stream_analysis?.hardware_acceleration?.device || ''}
+                            onChange={(e) => updateConfigValue('stream_analysis.hardware_acceleration.device', e.target.value)}
+                            disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
+                            maxLength={200}
+                            placeholder="Default"
+                          />
+                          <p className="text-xs text-muted-foreground">
+                            Optional ffmpeg device path or index
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Runtime device: {runtimeDeviceLabel}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-4 rounded-md border border-border px-3 py-2">
+                          <div className="space-y-0.5">
+                            <Label htmlFor="hardware_acceleration_fallback">CPU Fallback</Label>
+                            <p className="text-xs text-muted-foreground">
+                              Retry without acceleration if ffmpeg rejects it
+                            </p>
+                          </div>
+                          <Switch
+                            id="hardware_acceleration_fallback"
+                            checked={editedConfig?.stream_analysis?.hardware_acceleration?.allow_fallback !== false}
+                            onCheckedChange={(checked) => updateConfigValue('stream_analysis.hardware_acceleration.allow_fallback', checked)}
+                            disabled={!configEditing || editedConfig?.stream_analysis?.hardware_acceleration?.enabled !== true}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="grid gap-3 text-xs md:grid-cols-4">
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">Runtime Device</div>
+                          <div className="mt-1 font-medium text-foreground">{runtimeDeviceLabel}</div>
+                        </div>
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">Selected Mode</div>
+                          <div className="mt-1 flex flex-wrap items-center gap-2">
+                            <span className="font-medium text-foreground">
+                              {hardwareStatus?.config?.mode || 'auto'}
+                            </span>
+                            <Badge variant={hardwareStatus?.mode_supported ? 'default' : 'secondary'}>
+                              {ffmpegModeLabel}
+                            </Badge>
+                          </div>
+                        </div>
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">FFmpeg Reported Methods</div>
+                          <div className="mt-1 font-medium text-foreground">{ffmpegMethodsLabel}</div>
+                        </div>
+                        <div className="rounded-md border border-border px-3 py-2">
+                          <div className="text-muted-foreground">Analysis Path</div>
+                          <div className="mt-1 flex flex-col gap-1">
+                            <Badge variant={analysisPathDisplay.variant} className="w-fit">
+                              {analysisPathDisplay.label}
+                            </Badge>
+                            <div className="text-muted-foreground">
+                              {analysisPathDisplay.description}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <Alert variant={hardwareOperatorNote.variant === 'destructive' ? 'destructive' : undefined}>
+                        {hardwareOperatorNote.variant === 'destructive' ? (
+                          <ShieldAlert className="h-4 w-4" />
+                        ) : (
+                          <ShieldCheck className="h-4 w-4" />
+                        )}
+                        <AlertTitle>{hardwareOperatorNote.title}</AlertTitle>
+                        <AlertDescription>
+                          {hardwareOperatorNote.description}
+                        </AlertDescription>
+                      </Alert>
+                    </div>
+                  </div>
+                </TabsContent>
+
+                {/* Queue Tab */}
+                <TabsContent value="queue" className="mt-4 space-y-4">
+                  <Alert>
+                    <List className="h-4 w-4" />
+                    <AlertTitle>Priority Queue</AlertTitle>
+                    <AlertDescription>
+                      Higher-priority waiting channels run before lower-priority work, while the channel already being checked is allowed to finish. Event checks use the same queue and continue after the current channel.
+                    </AlertDescription>
+                  </Alert>
+
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="space-y-2">
+                      <Label htmlFor="default_queue_start_mode">Default Run Start</Label>
+                      <Select
+                        value={editedConfig?.queue?.start_mode || 'first'}
+                        onValueChange={(value) => {
+                          updateConfigValue('queue.start_mode', value)
+                          if (value === 'channel' && !editedConfig?.queue?.start_channel_id && startChannels[0]) {
+                            updateConfigValue('queue.start_channel_id', startChannels[0].id)
+                          }
+                        }}
+                        disabled={!configEditing}
+                      >
+                        <SelectTrigger id="default_queue_start_mode">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="first">First channel</SelectItem>
+                          <SelectItem value="last">Last channel</SelectItem>
+                          <SelectItem value="channel">Selected channel</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        Default start point for manual quality-check runs when no per-run choice is supplied
+                      </p>
+                    </div>
+
+                    {editedConfig?.queue?.start_mode === 'channel' && (
+                      <div className="space-y-2">
+                        <Label htmlFor="default_queue_start_channel">Default Start Channel</Label>
+                        <Select
+                          value={editedConfig?.queue?.start_channel_id != null ? String(editedConfig.queue.start_channel_id) : ''}
+                          onValueChange={(value) => updateConfigValue('queue.start_channel_id', parseInt(value))}
+                          disabled={!configEditing || startChannels.length === 0}
+                        >
+                          <SelectTrigger id="default_queue_start_channel">
+                            <SelectValue placeholder="Select channel" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {startChannels.map(channel => (
+                              <SelectItem key={channel.id} value={String(channel.id)}>
+                                {channel.name || `Channel ${channel.id}`}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                          The queue rotates to this channel, then continues through the remaining channel order
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="space-y-2">
+                      <Label htmlFor="max_channels_per_run">Max Channels Per Run</Label>
+                      <Input
+                        id="max_channels_per_run"
+                        type="number"
+                        value={editedConfig?.queue?.max_channels_per_run || 50}
+                        onChange={(e) => updateConfigValue('queue.max_channels_per_run', parseInt(e.target.value))}
+                        disabled={!configEditing}
+                        min={1}
+                        max={1000}
+                      />
+                    </div>
                   </div>
                 </TabsContent>
 
                 {/* Concurrent Checking Tab */}
-                <TabsContent value="concurrent" className="space-y-4">
+                <TabsContent value="concurrent" className="mt-4 space-y-4">
+                  <Alert>
+                    <Activity className="h-4 w-4" />
+                    <AlertTitle>Check Capacity</AlertTitle>
+                    <AlertDescription>
+                      `Check slots full` means the checker is waiting for global workers, provider/profile slots, or viewer-protected capacity. Distinct usable profiles are independent provider credentials: finite route limits add to the account aggregate, while profiles with the same credential target (including default aliases) share capacity. M3U account Max Streams is only the no-active-profile fallback; active profiles without a usable route fail closed. Each probe URL is bound to its exact reserved profile; non-default profiles must produce their own valid credential rewrite. The Profile Matrix is read-only status/API information, not an editor. Viewer-preempted probes are skipped safely and can be checked again later.
+                    </AlertDescription>
+                  </Alert>
+
                   <div className="flex items-center justify-between">
                     <div className="space-y-0.5">
                       <Label htmlFor="concurrent_enabled">Enable Concurrent Checking</Label>
@@ -744,11 +1515,127 @@ export default function StreamChecker() {
                       Delay between starting each concurrent check to prevent overload
                     </p>
                   </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="provider_wait_timeout">Provider Wait Timeout (seconds)</Label>
+                    <Input
+                      id="provider_wait_timeout"
+                      type="number"
+                      value={editedConfig?.concurrent_streams?.provider_wait_timeout ?? 180}
+                      onChange={(e) => updateConfigValue('concurrent_streams.provider_wait_timeout', parseInt(e.target.value))}
+                      disabled={!configEditing || !editedConfig?.concurrent_streams?.enabled}
+                      min={30}
+                      max={900}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      Maximum wait when provider capacity is held by active viewers before preserving existing stream state
+                    </p>
+                  </div>
                 </TabsContent>
 
 
+                {/* Safety Tab */}
+                <TabsContent value="safety" className="mt-4 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="space-y-0.5">
+                      <Label htmlFor="connectivity_guard_enabled">Connectivity Guard</Label>
+                      <p className="text-xs text-muted-foreground">
+                        Verify internet and Dispatcharr API reachability before stream checks can mark streams dead or update channel assignments
+                      </p>
+                    </div>
+                    <Switch
+                      id="connectivity_guard_enabled"
+                      checked={editedConfig?.connectivity_guard?.enabled !== false}
+                      onCheckedChange={(checked) => updateConfigValue('connectivity_guard.enabled', checked)}
+                      disabled={!configEditing}
+                    />
+                  </div>
+
+                  <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_timeout">Connectivity Timeout (seconds)</Label>
+                      <Input
+                        id="connectivity_guard_timeout"
+                        type="number"
+                        step="0.5"
+                        value={editedConfig?.connectivity_guard?.timeout_seconds ?? 3}
+                        onChange={(e) => updateConfigValue('connectivity_guard.timeout_seconds', parseFloat(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={1}
+                        max={15}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Per-attempt probe timeout
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_retries">Connectivity Retries</Label>
+                      <Input
+                        id="connectivity_guard_retries"
+                        type="number"
+                        value={editedConfig?.connectivity_guard?.retry_attempts ?? 2}
+                        onChange={(e) => updateConfigValue('connectivity_guard.retry_attempts', parseInt(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={0}
+                        max={10}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Extra attempts before fail-closed abort
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_retry_backoff">Retry Backoff (seconds)</Label>
+                      <Input
+                        id="connectivity_guard_retry_backoff"
+                        type="number"
+                        step="0.5"
+                        value={editedConfig?.connectivity_guard?.retry_backoff_seconds ?? 1}
+                        onChange={(e) => updateConfigValue('connectivity_guard.retry_backoff_seconds', parseFloat(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={0}
+                        max={30}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        Pause between transient retry attempts
+                      </p>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="connectivity_guard_stale_recheck">Recovery Recheck (seconds)</Label>
+                      <Input
+                        id="connectivity_guard_stale_recheck"
+                        type="number"
+                        value={editedConfig?.connectivity_guard?.stale_recheck_interval_seconds ?? 60}
+                        onChange={(e) => updateConfigValue('connectivity_guard.stale_recheck_interval_seconds', parseInt(e.target.value))}
+                        disabled={!configEditing || editedConfig?.connectivity_guard?.enabled === false}
+                        min={10}
+                        max={3600}
+                      />
+                      <p className="text-xs text-muted-foreground">
+                        How often an idle stale failure is rechecked
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 rounded-md border p-3 text-sm">
+                    {editedConfig?.connectivity_guard?.enabled === false ? (
+                      <ShieldAlert className="h-4 w-4 text-muted-foreground" />
+                    ) : (
+                      <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+                    )}
+                    <span>
+                      {editedConfig?.connectivity_guard?.enabled === false
+                        ? 'Connectivity guard disabled'
+                        : 'Connectivity guard enabled'}
+                    </span>
+                  </div>
+
+                </TabsContent>
+
                 {/* Dead Streams Tab */}
-                <TabsContent value="dead-streams" className="space-y-4">
+                <TabsContent value="dead-streams" className="mt-4 space-y-4">
                   <p className="text-sm text-muted-foreground">
                     View and manage streams that have been marked as dead. Removal from channels during stream checks depends on each automation profile&apos;s Stream Checking settings.
                   </p>

@@ -4,6 +4,7 @@ from apps.api.schemas import (
     AutomationProfileCreateSchema,
     AutomationProfileUpdateSchema,
     AutoCreateRuleCreateSchema,
+    AutoCreateRuleTestSchema,
     BulkRegexPatternsSchema,
     ChannelMatchSettingsSchema,
     GroupRegexConfigSchema,
@@ -116,7 +117,28 @@ def test_auto_create_rule_schema_requires_channel_binding():
     with pytest.raises(ValidationError) as exc:
         AutoCreateRuleCreateSchema.from_payload({"name": "Rule", "regex_pattern": ".*"})
 
-    assert "channel_id or channel_ids" in str(exc.value)
+    assert "channel_id, channel_ids, or channel_group_ids" in str(exc.value)
+
+
+def test_auto_create_rule_schema_accepts_channel_group_binding():
+    parsed = AutoCreateRuleCreateSchema.from_payload({
+        "name": "Rule",
+        "regex_pattern": ".*",
+        "channel_group_ids": [10],
+    })
+
+    assert parsed.rule_data["channel_group_ids"] == [10]
+
+
+def test_auto_create_rule_test_schema_accepts_channel_group_binding():
+    parsed = AutoCreateRuleTestSchema.from_payload({
+        "regex_pattern": "Cup",
+        "channel_group_ids": [10],
+    })
+
+    assert parsed.channel_ids == []
+    assert parsed.channel_group_ids == [10]
+    assert parsed.minutes_before == 0
 
 
 def test_automation_profile_schema_normalizes_remove_dead_streams_flag():
@@ -126,11 +148,19 @@ def test_automation_profile_schema_normalizes_remove_dead_streams_flag():
             "stream_checking": {
                 "enabled": True,
                 "remove_dead_streams": "false",
+                "blank_check_enabled": "true",
+                "treat_blank_as_dead": "false",
+                "freeze_check_enabled": "true",
+                "treat_freeze_as_dead": "false",
             },
         }
     )
 
     assert parsed.profile_data["stream_checking"]["remove_dead_streams"] is False
+    assert parsed.profile_data["stream_checking"]["blank_check_enabled"] is True
+    assert parsed.profile_data["stream_checking"]["treat_blank_as_dead"] is False
+    assert parsed.profile_data["stream_checking"]["freeze_check_enabled"] is True
+    assert parsed.profile_data["stream_checking"]["treat_freeze_as_dead"] is False
 
 
 def test_automation_profile_schema_rejects_invalid_remove_dead_streams_flag():
@@ -144,3 +174,29 @@ def test_automation_profile_schema_rejects_invalid_remove_dead_streams_flag():
         )
 
     assert "stream_checking.remove_dead_streams must be a boolean" in str(exc.value)
+
+
+def test_automation_profile_schema_rejects_invalid_treat_blank_as_dead_flag():
+    with pytest.raises(ValidationError) as exc:
+        AutomationProfileUpdateSchema.from_payload(
+            {
+                "stream_checking": {
+                    "treat_blank_as_dead": "maybe",
+                },
+            }
+        )
+
+    assert "stream_checking.treat_blank_as_dead must be a boolean" in str(exc.value)
+
+
+def test_automation_profile_schema_rejects_invalid_freeze_check_flag():
+    with pytest.raises(ValidationError) as exc:
+        AutomationProfileUpdateSchema.from_payload(
+            {
+                "stream_checking": {
+                    "freeze_check_enabled": "maybe",
+                },
+            }
+        )
+
+    assert "stream_checking.freeze_check_enabled must be a boolean" in str(exc.value)

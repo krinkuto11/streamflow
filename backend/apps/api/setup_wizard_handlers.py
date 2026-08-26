@@ -1,10 +1,13 @@
 """Setup wizard API handler functions extracted from web_api."""
 
 import threading
-from typing import Any, Callable
+from pathlib import Path
+from typing import Any, Callable, Optional
 
 from flask import jsonify
 
+from apps.automation.regex_settings import default_channel_regex_global_settings
+from apps.core.atomic_json import atomic_write_json
 from apps.core.logging_config import setup_logging
 
 logger = setup_logging(__name__)
@@ -69,13 +72,40 @@ def get_setup_wizard_status_response(
         return jsonify({"error": "Internal Server Error"}), 500
 
 
-def ensure_wizard_config_response(*, get_automation_config_manager: Callable[[], Any]):
+def ensure_wizard_config_response(
+    *,
+    get_automation_config_manager: Callable[[], Any],
+    config_dir: Optional[Path] = None,
+):
     """Handle setup wizard SQL defaults creation."""
     try:
         from apps.database.manager import get_db_manager
 
         manager = get_automation_config_manager()
         db = get_db_manager()
+        if config_dir is not None:
+            config_dir = Path(config_dir)
+            config_dir.mkdir(parents=True, exist_ok=True)
+
+            automation_file = config_dir / "automation_config.json"
+            if not automation_file.exists():
+                atomic_write_json(
+                    automation_file,
+                    {
+                        "playlist_update_interval_minutes": 5,
+                        "autostart_automation": False,
+                    },
+                )
+
+            regex_file = config_dir / "channel_regex_config.json"
+            if not regex_file.exists():
+                atomic_write_json(
+                    regex_file,
+                    {
+                        "patterns": {},
+                        "global_settings": default_channel_regex_global_settings(),
+                    },
+                )
 
         automation_defaults = {
             "regular_automation_enabled": False,
@@ -94,13 +124,10 @@ def ensure_wizard_config_response(*, get_automation_config_manager: Callable[[],
         if db.get_system_setting("channel_regex_global_settings", None) is None:
             db.set_system_setting(
                 "channel_regex_global_settings",
-                {
-                    "case_sensitive": False,
-                    "require_exact_match": False,
-                },
+                default_channel_regex_global_settings(),
             )
 
-        return jsonify({"message": "Configuration defaults ensured in SQL"})
+        return jsonify({"message": "Configuration files ensured"})
     except Exception as exc:
         logger.error(f"Error ensuring wizard config: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500
@@ -134,10 +161,7 @@ def create_sample_patterns_response():
                     "enabled": True,
                 },
             },
-            "global_settings": {
-                "case_sensitive": False,
-                "require_exact_match": False,
-            },
+            "global_settings": default_channel_regex_global_settings(),
         }
 
         imported, errors = db.import_channel_regex_configs_from_json(patterns, merge=False)

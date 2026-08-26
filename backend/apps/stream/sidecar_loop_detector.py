@@ -20,6 +20,9 @@ HAMMING_TOLERANCE = 5
 LOOP_DURATION_THRESHOLD = 10.0
 BUFFER_MAXLEN = 300  # ~5 minutes at 1fps
 STALE_THRESHOLD = 10.0
+AVERAGE_HASH_TOLERANCE = 0
+DIFFERENCE_HASH_TOLERANCE = 3
+WAVELET_HASH_TOLERANCE = 2
 
 class SidecarLoopDetector:
     """
@@ -50,6 +53,62 @@ class SidecarLoopDetector:
     def get_loop_duration(self) -> float:
         """Returns the duration of the last detected loop."""
         return self._loop_duration
+
+    def frame_signature(self, img):
+        """Return a multi-hash signature for a decoded video frame."""
+        if not imagehash:
+            return self._simple_hash(img)
+        return {
+            "phash": imagehash.phash(img),
+            "ahash": imagehash.average_hash(img),
+            "dhash": imagehash.dhash(img),
+            "whash": imagehash.whash(img),
+        }
+
+    @staticmethod
+    def _signature_hash(signature, family: str = "phash"):
+        if isinstance(signature, dict):
+            return signature.get(family) or signature.get("phash")
+        return signature
+
+    @classmethod
+    def _signature_distance(cls, left, right, family: str = "phash") -> int:
+        left_hash = cls._signature_hash(left, family)
+        right_hash = cls._signature_hash(right, family)
+        if left_hash is None or right_hash is None:
+            return 999
+        try:
+            return int(left_hash - right_hash)
+        except Exception:
+            return 999
+
+    @classmethod
+    def _phash_sequence_matches(cls, history, recent, tolerance: int) -> bool:
+        return all(
+            cls._signature_distance(history[index], recent[index], "phash") <= tolerance
+            for index in range(SEQUENCE_LENGTH)
+        )
+
+    @classmethod
+    def _stable_compressed_sequence_matches(cls, history, recent) -> bool:
+        """Match loops whose pHash is noisy but shape/brightness stay stable.
+
+        MPEGTS/fMP4 proxy paths can introduce enough codec noise that pHash
+        moves by double digits even though the decoded scene is visually the
+        same. We require agreement from multiple simpler hashes instead of
+        loosening pHash globally.
+        """
+        for index in range(SEQUENCE_LENGTH):
+            ahash_distance = cls._signature_distance(history[index], recent[index], "ahash")
+            dhash_distance = cls._signature_distance(history[index], recent[index], "dhash")
+            whash_distance = cls._signature_distance(history[index], recent[index], "whash")
+            if ahash_distance > AVERAGE_HASH_TOLERANCE:
+                return False
+            if dhash_distance > DIFFERENCE_HASH_TOLERANCE:
+                return False
+            if whash_distance > WAVELET_HASH_TOLERANCE:
+                return False
+        return True
         
     def run(self):
         """
@@ -79,11 +138,8 @@ class SidecarLoopDetector:
                     # Parse PPM frame
                     img = Image.open(io.BytesIO(frame_data))
                     
-                    # Generate pHash
-                    if imagehash:
-                        h = imagehash.phash(img)
-                    else:
-                        h = self._simple_hash(img)
+                    # Generate a compact visual signature for loop matching.
+                    h = self.frame_signature(img)
                     
                     self.buffer.append((timestamp, h))
                     
@@ -144,7 +200,10 @@ class SidecarLoopDetector:
         
         # Static image / Black screen filter
         # If the 3 most recent are nearly identical, it's a static image or black screen
-        if (h0 - h_1 <= tolerance) and (h_1 - h_2 <= tolerance):
+        if (
+            self._signature_distance(h0, h_1, "phash") <= tolerance
+            and self._signature_distance(h_1, h_2, "phash") <= tolerance
+        ):
             return None
 
         # Iterate backward through history (skipping the most recent sequence)
@@ -154,11 +213,13 @@ class SidecarLoopDetector:
         for i in range(len(history) - SEQUENCE_LENGTH + 1):
             # Match recent sequence [H0, H-1, H-2] against [H-t, H-(t+1), H-(t+2)]
             # Note: history[i] is [H-(t+2)], history[i+1] is [H-(t+1)], history[i+2] is [H-t]
-            match_t2 = history[i][1] - h_2 <= tolerance
-            match_t1 = history[i+1][1] - h_1 <= tolerance
-            match_t0 = history[i+2][1] - h0 <= tolerance
-            
-            if match_t2 and match_t1 and match_t0:
+            history_sequence = [history[i][1], history[i + 1][1], history[i + 2][1]]
+            recent_sequence = [h_2, h_1, h0]
+
+            if (
+                self._phash_sequence_matches(history_sequence, recent_sequence, tolerance)
+                or self._stable_compressed_sequence_matches(history_sequence, recent_sequence)
+            ):
                 # Found a matching sequence!
                 t_match = history[i+2][0]
                 duration = t0 - t_match

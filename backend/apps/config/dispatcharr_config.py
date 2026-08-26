@@ -11,15 +11,38 @@ import json
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 from apps.core.logging_config import setup_logging
+from apps.core.secret_sources import external_secret_source, read_external_secret
 
 logger = setup_logging(__name__)
 
 # Configuration directory
 CONFIG_DIR = Path(os.environ.get('CONFIG_DIR', '/app/data'))
 DISPATCHARR_CONFIG_FILE = CONFIG_DIR / 'dispatcharr_config.json'
+DEFAULT_STREAM_FETCH_PAGE_SIZE = 1000
+DEFAULT_STREAM_FETCH_MAX_WORKERS = 10
+MIN_STREAM_FETCH_PAGE_SIZE = 100
+MAX_STREAM_FETCH_PAGE_SIZE = 10000
+MIN_STREAM_FETCH_MAX_WORKERS = 1
+MAX_STREAM_FETCH_MAX_WORKERS = 20
+DEFAULT_AUTH_MODE = 'credentials'
+AUTH_MODES = {'credentials', 'api_key'}
+
+
+def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    """Return a bounded integer for user-tunable fetch pressure settings."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return min(max(parsed, minimum), maximum)
+
+
+def _normalize_auth_mode(value: Any) -> str:
+    mode = str(value or DEFAULT_AUTH_MODE).strip().lower()
+    return mode if mode in AUTH_MODES else DEFAULT_AUTH_MODE
 
 
 class DispatcharrConfig:
@@ -34,7 +57,7 @@ class DispatcharrConfig:
     def __init__(self):
         """Initialize the configuration manager."""
         self._lock = threading.RLock()
-        self._config: Dict[str, str] = {}
+        self._config: Dict[str, Any] = {}
         self._load_config()
         logger.info("Dispatcharr configuration manager initialized")
     
@@ -52,9 +75,10 @@ class DispatcharrConfig:
                 return
 
             # Auto-migration: If not in DB, check for legacy file
-            if DISPATCHARR_CONFIG_FILE.exists():
-                logger.info(f"Found legacy config file: {DISPATCHARR_CONFIG_FILE}. Migrating to SQL...")
-                with open(DISPATCHARR_CONFIG_FILE, 'r') as f:
+            config_file = Path(CONFIG_DIR) / 'dispatcharr_config.json'
+            if config_file.exists():
+                logger.info(f"Found legacy config file: {config_file}. Migrating to SQL...")
+                with open(config_file, 'r') as f:
                     file_config = json.load(f)
                     with self._lock:
                         self._config = file_config
@@ -65,8 +89,8 @@ class DispatcharrConfig:
                 
                 # Delete file
                 try:
-                    DISPATCHARR_CONFIG_FILE.unlink()
-                    logger.info(f"Deleted legacy config file: {DISPATCHARR_CONFIG_FILE.name}")
+                    config_file.unlink()
+                    logger.info(f"Deleted legacy config file: {config_file.name}")
                 except Exception as e:
                     logger.warning(f"Could not delete legacy config file: {e}")
             else:
@@ -109,7 +133,10 @@ class DispatcharrConfig:
         """
         from apps.database.manager import get_db_manager
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
-        return db_config.get('base_url')
+        if not db_config:
+            self._load_config()
+            db_config = self._config
+        return os.getenv('DISPATCHARR_BASE_URL') or db_config.get('base_url')
     
     def get_username(self) -> Optional[str]:
         """Get Dispatcharr username from database.
@@ -119,7 +146,10 @@ class DispatcharrConfig:
         """
         from apps.database.manager import get_db_manager
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
-        return db_config.get('username')
+        if not db_config:
+            self._load_config()
+            db_config = self._config
+        return os.getenv('DISPATCHARR_USER') or db_config.get('username')
     
     def get_password(self) -> Optional[str]:
         """Get Dispatcharr password from database.
@@ -127,31 +157,119 @@ class DispatcharrConfig:
         Returns:
             Password or None if not configured
         """
+        external = read_external_secret('DISPATCHARR_PASS', 'DISPATCHARR_PASS_FILE')
+        if self.password_managed_externally():
+            return external
         from apps.database.manager import get_db_manager
         db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        if not db_config:
+            self._load_config()
+            db_config = self._config
         return db_config.get('password')
+
+    def get_api_key(self) -> Optional[str]:
+        """Get Dispatcharr API key from database."""
+        external = read_external_secret(
+            'DISPATCHARR_API_KEY',
+            'DISPATCHARR_API_KEY_FILE',
+        )
+        if self.api_key_managed_externally():
+            return external
+        from apps.database.manager import get_db_manager
+        db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        if not db_config:
+            self._load_config()
+            db_config = self._config
+        return db_config.get('api_key')
+
+    def get_auth_mode(self) -> str:
+        """Get configured Dispatcharr authentication mode."""
+        external_mode = os.getenv('DISPATCHARR_AUTH_MODE')
+        if external_mode:
+            return _normalize_auth_mode(external_mode)
+        if self.api_key_managed_externally():
+            return 'api_key'
+        from apps.database.manager import get_db_manager
+        db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        if not db_config and os.environ.get('DISPATCHARR_API_KEY'):
+            return 'api_key'
+        mode = _normalize_auth_mode(db_config.get('auth_mode'))
+        if (
+            'auth_mode' not in db_config
+            and db_config.get('api_key')
+            and not (db_config.get('username') and db_config.get('password'))
+        ):
+            return 'api_key'
+        return mode
+
+    def get_stream_fetch_page_size(self) -> int:
+        """Get Dispatcharr stream page size for UDI stream refreshes."""
+        from apps.database.manager import get_db_manager
+        db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        return _coerce_int(
+            db_config.get('stream_fetch_page_size'),
+            DEFAULT_STREAM_FETCH_PAGE_SIZE,
+            MIN_STREAM_FETCH_PAGE_SIZE,
+            MAX_STREAM_FETCH_PAGE_SIZE,
+        )
+
+    def get_stream_fetch_max_workers(self) -> int:
+        """Get Dispatcharr stream page concurrency for UDI stream refreshes."""
+        from apps.database.manager import get_db_manager
+        db_config = get_db_manager().get_system_setting('dispatcharr_config', {})
+        return _coerce_int(
+            db_config.get('stream_fetch_max_workers'),
+            DEFAULT_STREAM_FETCH_MAX_WORKERS,
+            MIN_STREAM_FETCH_MAX_WORKERS,
+            MAX_STREAM_FETCH_MAX_WORKERS,
+        )
     
-    def get_config(self) -> Dict[str, str]:
+    def get_config(self) -> Dict[str, Any]:
         """Get complete configuration (without password for security).
         
         Returns:
-            Dictionary with base_url, username, and has_password
+            Dictionary with base_url, username, password state, and fetch tuning.
         """
         return {
             'base_url': self.get_base_url() or '',
+            'auth_mode': self.get_auth_mode(),
             'username': self.get_username() or '',
-            'has_password': bool(self.get_password())
+            'has_password': bool(self.get_password()),
+            'has_api_key': bool(self.get_api_key()),
+            'password_managed_externally': self.password_managed_externally(),
+            'api_key_managed_externally': self.api_key_managed_externally(),
+            'stream_fetch_page_size': self.get_stream_fetch_page_size(),
+            'stream_fetch_max_workers': self.get_stream_fetch_max_workers(),
         }
+
+    def password_managed_externally(self) -> bool:
+        return bool(external_secret_source('DISPATCHARR_PASS', 'DISPATCHARR_PASS_FILE'))
+
+    def api_key_managed_externally(self) -> bool:
+        return bool(
+            external_secret_source(
+                'DISPATCHARR_API_KEY',
+                'DISPATCHARR_API_KEY_FILE',
+            )
+        )
     
     def update_config(self, base_url: Optional[str] = None, 
+                     auth_mode: Optional[str] = None,
                      username: Optional[str] = None,
-                     password: Optional[str] = None) -> bool:
+                     password: Optional[str] = None,
+                     api_key: Optional[str] = None,
+                     stream_fetch_page_size: Optional[Any] = None,
+                     stream_fetch_max_workers: Optional[Any] = None) -> bool:
         """Update configuration and save to database.
         
         Args:
             base_url: Dispatcharr base URL
+            auth_mode: Authentication mode, either credentials or api_key
             username: Dispatcharr username
             password: Dispatcharr password
+            api_key: Dispatcharr API key
+            stream_fetch_page_size: Items per stream page during UDI stream refreshes
+            stream_fetch_max_workers: Concurrent stream page requests during UDI stream refreshes
             
         Returns:
             True if successful, False otherwise
@@ -166,10 +284,28 @@ class DispatcharrConfig:
             
             if base_url is not None:
                 self._config['base_url'] = base_url.strip()
+            if auth_mode is not None:
+                self._config['auth_mode'] = _normalize_auth_mode(auth_mode)
             if username is not None:
                 self._config['username'] = username.strip()
-            if password is not None:
+            if password is not None and not self.password_managed_externally():
                 self._config['password'] = password
+            if api_key is not None and not self.api_key_managed_externally():
+                self._config['api_key'] = api_key.strip()
+            if stream_fetch_page_size is not None:
+                self._config['stream_fetch_page_size'] = _coerce_int(
+                    stream_fetch_page_size,
+                    DEFAULT_STREAM_FETCH_PAGE_SIZE,
+                    MIN_STREAM_FETCH_PAGE_SIZE,
+                    MAX_STREAM_FETCH_PAGE_SIZE,
+                )
+            if stream_fetch_max_workers is not None:
+                self._config['stream_fetch_max_workers'] = _coerce_int(
+                    stream_fetch_max_workers,
+                    DEFAULT_STREAM_FETCH_MAX_WORKERS,
+                    MIN_STREAM_FETCH_MAX_WORKERS,
+                    MAX_STREAM_FETCH_MAX_WORKERS,
+                )
             
             return self._save_config()
     
@@ -177,13 +313,13 @@ class DispatcharrConfig:
         """Check if all required configuration is present.
         
         Returns:
-            True if base_url, username, and password are all configured
+            True if base_url and the selected authentication method are configured.
         """
-        return all([
-            self.get_base_url(),
-            self.get_username(),
-            self.get_password()
-        ])
+        if not self.get_base_url():
+            return False
+        if self.get_auth_mode() == 'api_key':
+            return bool(self.get_api_key())
+        return bool(self.get_username() and self.get_password())
 
 
 # Global singleton instance

@@ -38,6 +38,7 @@ export const automationAPI = {
   getStatus: () => api.get('/automation/status'),
   start: () => api.post('/automation/start'),
   stop: () => api.post('/automation/stop'),
+  abortRun: () => api.post('/automation/abort-run'),
   runCycle: (data) => api.post('/automation/trigger', data),  // Trigger immediate automation cycle
   trigger: () => api.post('/automation/trigger'),
 
@@ -61,6 +62,7 @@ export const automationAPI = {
   assignChannel: (channelId, profileId) => api.post('/automation/assign/channel', { channel_id: channelId, profile_id: profileId }),
   assignChannels: (channelIds, profileId) => api.post('/automation/assign/channels', { channel_ids: channelIds, profile_id: profileId }),
   assignGroup: (groupId, profileId) => api.post('/automation/assign/group', { group_id: groupId, profile_id: profileId }),
+  assignGroups: (groupIds, profileId) => api.post('/automation/assign/groups', { group_ids: groupIds, profile_id: profileId }),
   getGroupAssignments: () => api.get('/automation/assign/group'),
 
   // EPG Scheduled Profile Assignments
@@ -70,7 +72,7 @@ export const automationAPI = {
   getGroupEpgAssignments: () => api.get('/automation/assign/epg-profile/group'),
 
   // Automation Periods
-  getPeriods: () => api.get('/automation/periods'),
+  getPeriods: (params = undefined) => api.get('/automation/periods', params ? { params } : undefined),
   createPeriod: (period) => api.post('/automation/periods', period),
   getPeriod: (periodId) => api.get(`/automation/periods/${periodId}`),
   updatePeriod: (periodId, period) => api.put(`/automation/periods/${periodId}`, period),
@@ -88,6 +90,7 @@ export const automationAPI = {
   removePeriodFromGroups: (periodId, groupIds) =>
     api.post(`/automation/periods/${periodId}/remove-groups`, { group_ids: groupIds }),
   getGroupPeriods: (groupId) => api.get(`/channels/groups/${groupId}/automation-periods`),
+  getGroupConfigSummary: () => api.get('/channels/groups/config-summary'),
   batchAssignPeriodsToGroups: (groupIds, periodAssignments, replace = false) =>
     api.post('/channels/groups/batch/assign-periods', { group_ids: groupIds, period_assignments: periodAssignments, replace }),
 
@@ -102,6 +105,10 @@ export const automationAPI = {
     return api.get(`/automation/events/upcoming?${params.toString()}`)
   },
   invalidateEventsCache: () => api.post('/automation/events/invalidate-cache'),
+};
+
+export const jobArbiterAPI = {
+  getStatus: () => api.get('/job-arbiter/status'),
 };
 
 export const channelsAPI = {
@@ -157,6 +164,8 @@ export const regexAPI = {
    * The result can be passed directly to importPatterns for backup/restore.
    */
   exportPatterns: () => api.get('/regex-patterns/export'),
+  getGlobalSettings: () => api.get('/regex-patterns/global-settings'),
+  updateGlobalSettings: (settings) => api.put('/regex-patterns/global-settings', settings),
   bulkAddPatterns: (data) => api.post('/regex-patterns/bulk', data),
   bulkDeletePatterns: (data) => api.post('/regex-patterns/bulk-delete', data),
   getCommonPatterns: (data) => api.post('/regex-patterns/common', data),
@@ -189,21 +198,81 @@ export const streamCheckerAPI = {
   addToQueue: (data) => api.post('/stream-checker/queue/add', data),
   clearQueue: () => api.post('/stream-checker/queue/clear'),
   getConfig: () => api.get('/stream-checker/config'),
+  getHardwareStatus: () => api.get('/stream-checker/hardware-status'),
   updateConfig: (config) => api.put('/stream-checker/config', config),
   getProgress: () => api.get('/stream-checker/progress'),
   checkChannel: (channelId) => api.post('/stream-checker/check-channel', { channel_id: channelId }),
   // Use longer timeout for single channel check as it can take time
-  checkSingleChannel: (channelId, profileId = null) => api.post('/stream-checker/check-single-channel', {
+  checkSingleChannel: (channelId, profileId = null, forceCheck = true) => api.post('/stream-checker/check-single-channel', {
     channel_id: channelId,
     ...(profileId ? { profile_id: profileId } : {}),
+    force_check: forceCheck,
   }, { timeout: 120000 }),
+  checkStream: (streamIdOrPayload, options = {}, requestConfig = {}) => {
+    const payloadProvided = typeof streamIdOrPayload === 'object'
+    const payload = payloadProvided
+      ? streamIdOrPayload
+      : { stream_id: streamIdOrPayload, ...options };
+    const effectiveRequestConfig = payloadProvided ? options : requestConfig;
+    // Direct checks may wait for provider capacity and run a serial bitrate
+    // recheck. Do not let Axios abandon the request while the reserved backend
+    // operation is still running and may persist its result.
+    return api.post('/stream-checker/check-stream', payload, {
+      ...effectiveRequestConfig,
+      timeout: 0,
+    });
+  },
+  checkStreamById: (streamId, options = {}, requestConfig = {}) => api.post(
+    `/stream-checker/streams/${streamId}/check`,
+    options,
+    { ...requestConfig, timeout: 0 },
+  ),
+  getStreamLastQualityStats: (streamId) => api.get(`/stream-checker/streams/${streamId}/last-quality-stats`),
   markUpdated: (data) => api.post('/stream-checker/mark-updated', data),
-  queueAllChannels: () => api.post('/stream-checker/queue-all'),
+  queueAllChannels: (options = {}) => api.post('/stream-checker/queue-all', options),
   triggerGlobalAction: () => api.post('/stream-checker/global-action'),
 };
 
+export const qualityStatsV2API = {
+  getStream: (streamId) => api.get(`/quality-stats/v2/streams/${streamId}`),
+  getProvider: (providerId, params = {}) => api.get(`/quality-stats/v2/providers/${providerId}`, { params }),
+  bulk: (data) => api.post('/quality-stats/v2/bulk', data),
+};
+
+export const shadowBlankMonitorAPI = {
+  getConfig: () => api.get('/shadow-blank-monitor/config'),
+  updateConfig: (config) => api.put('/shadow-blank-monitor/config', config),
+  getStatus: () => api.get('/shadow-blank-monitor/status'),
+  start: () => api.post('/shadow-blank-monitor/start'),
+  stop: () => api.post('/shadow-blank-monitor/stop'),
+  runOnce: () => api.post('/shadow-blank-monitor/run-once'),
+  learnOfflineImage: (payload = {}) => api.post('/shadow-blank-monitor/offline-image/learn', payload),
+};
+
+export const viewerActivityAPI = {
+  getStatus: () => api.get('/viewer-activity/status'),
+};
+
+export const teamarrPreflightAPI = {
+  getConfig: () => api.get('/teamarr-preflight/config'),
+  updateConfig: (config) => api.put('/teamarr-preflight/config', config),
+  getStatus: () => api.get('/teamarr-preflight/status'),
+  start: () => api.post('/teamarr-preflight/start'),
+  stop: () => api.post('/teamarr-preflight/stop'),
+  runOnce: () => api.post('/teamarr-preflight/run-once'),
+  forceEventCheck: (identity) => api.post('/teamarr-preflight/events/force-check', { identity }),
+};
+
 export const changelogAPI = {
-  getChangelog: (days = 7, page = 1, limit = 10) => api.get(`/changelog`, { params: { days, page, limit } }),
+  getChangelog: (days = 7, page = 1, limit = 10, filters = {}) => api.get(`/changelog`, { params: { days, page, limit, ...filters } }),
+  exportRun: (runId, options = {}) => api.get(`/changelog/${runId}/export`, {
+    params: {
+      format: options.format || 'json',
+      include_url: options.include_url === true ? 'true' : 'false',
+      scope: options.scope || 'all',
+    },
+    responseType: 'blob',
+  }),
 };
 
 export const deadStreamsAPI = {
@@ -246,11 +315,6 @@ export const dispatcharrAPI = {
   testConnection: (config) => api.post('/dispatcharr/test-connection', config),
   initializeUDI: () => api.post('/dispatcharr/initialize-udi', {}, { timeout: 120000 }),
   getInitializationStatus: () => api.get('/dispatcharr/initialization-status'),
-};
-
-export const aceStreamOrchestratorAPI = {
-  getConfig: () => api.get('/acestream-orchestrator/config'),
-  updateConfig: (config) => api.put('/acestream-orchestrator/config', config),
 };
 
 export const sessionSettingsAPI = {

@@ -35,6 +35,8 @@ const DEFAULT_PROFILE = {
         remove_dead_streams: true,
         check_all_streams: false,
         loop_check_enabled: false,
+        blank_check_enabled: false,
+        freeze_check_enabled: false,
         stream_limit: 0,
         min_resolution: 'any',
         min_fps: 0,
@@ -49,13 +51,21 @@ const DEFAULT_PROFILE = {
         codec: 0.10,
         prefer_h265: true,
         loop_penalty: 0
+    },
+    channel_visibility_automation: {
+        enabled: false,
+        hide_on_no_regex: false,
+        hide_on_no_streams: false,
+        hide_on_all_failed: false,
+        unhide_on_recovered: true
     }
 }
 
 const STEPS = [
     { id: 'm3u_update', label: 'Playlist Updating', sublabel: 'M3U Updates' },
     { id: 'stream_matching', label: 'Stream Matching', sublabel: 'Regex Pattern matching' },
-    { id: 'stream_checking', label: 'Stream Checking', sublabel: 'Quality & Scoring' }
+    { id: 'stream_checking', label: 'Stream Checking', sublabel: 'Quality & Scoring' },
+    { id: 'channel_visibility_automation', label: 'Channel Visibility', sublabel: 'Output visibility' }
 ]
 
 export default function AutomationProfileEditor() {
@@ -105,6 +115,10 @@ export default function AutomationProfileEditor() {
                             scoring_weights: {
                                 ...DEFAULT_PROFILE.scoring_weights,
                                 ...(loadedProfile.scoring_weights || {})
+                            },
+                            channel_visibility_automation: {
+                                ...DEFAULT_PROFILE.channel_visibility_automation,
+                                ...(loadedProfile.channel_visibility_automation || {})
                             }
                         })
                     } else {
@@ -194,9 +208,45 @@ export default function AutomationProfileEditor() {
         )
     }
 
+    const channelVisibilityConfig = profile?.channel_visibility_automation || DEFAULT_PROFILE.channel_visibility_automation
+    const noUsableStreamsVisibilityEnabled = channelVisibilityConfig.hide_on_no_streams === true
+        || channelVisibilityConfig.hide_on_all_failed === true
+
     const isStepEnabled = (stepId) => {
+        if (stepId === 'channel_visibility_automation') {
+            return channelVisibilityConfig.enabled === true
+        }
         return profile?.[stepId]?.enabled
     }
+
+    const handleStepEnabledChange = (checked) => {
+        if (activeStep === 'm3u_update' && checked) {
+            setProfile(prev => ({
+                ...prev,
+                m3u_update: {
+                    ...prev.m3u_update,
+                    enabled: true,
+                    playlists: m3uAccounts.map(a => a.id)
+                }
+            }))
+        } else if (activeStep === 'stream_matching' && checked) {
+            updateProfile('stream_matching.enabled', true)
+        } else if (activeStep === 'channel_visibility_automation') {
+            setProfile(prev => ({
+                ...prev,
+                channel_visibility_automation: {
+                    ...DEFAULT_PROFILE.channel_visibility_automation,
+                    ...(prev.channel_visibility_automation || {}),
+                    enabled: checked
+                }
+            }))
+        } else {
+            updateProfile(`${activeStep}.enabled`, checked)
+        }
+    }
+
+    const streamPriorityMode = profile?.stream_checking?.m3u_priority_mode || 'absolute'
+    const playlistRankActive = ['absolute', 'same_resolution', 'playlist_score', 'score_playlist'].includes(streamPriorityMode)
 
     return (
         <div className="max-w-4xl mx-auto space-y-8">
@@ -293,25 +343,14 @@ export default function AutomationProfileEditor() {
                             <CardDescription>Configure options for this automation step.</CardDescription>
                         </div>
                         <div className="flex items-center gap-2">
-                            <span className="text-sm font-medium">{isStepEnabled(activeStep) ? 'Step Enabled' : 'Step Disabled'}</span>
+                            <span className="text-sm font-medium">
+                                {activeStep === 'channel_visibility_automation'
+                                    ? (isStepEnabled(activeStep) ? 'Profile Enabled' : 'Profile Disabled')
+                                    : (isStepEnabled(activeStep) ? 'Step Enabled' : 'Step Disabled')}
+                            </span>
                             <Switch
                                 checked={isStepEnabled(activeStep)}
-                                onCheckedChange={(checked) => {
-                                    if (activeStep === 'm3u_update' && checked) {
-                                        setProfile(prev => ({
-                                            ...prev,
-                                            m3u_update: {
-                                                ...prev.m3u_update,
-                                                enabled: true,
-                                                playlists: m3uAccounts.map(a => a.id)
-                                            }
-                                        }))
-                                    } else if (activeStep === 'stream_matching' && checked) {
-                                        updateProfile('stream_matching.enabled', true)
-                                    } else {
-                                        updateProfile(`${activeStep}.enabled`, checked)
-                                    }
-                                }}
+                                onCheckedChange={handleStepEnabledChange}
                             />
                         </div>
                     </div>
@@ -462,6 +501,28 @@ export default function AutomationProfileEditor() {
                                                     <p className="text-[10px] text-muted-foreground">Checks top 25% of streams with a score greater than 0.50</p>
                                                 </div>
                                             </div>
+                                            <div className="flex items-center space-x-3 bg-muted/50 p-3 rounded-md">
+                                                <Switch
+                                                    id="blank_check_enabled"
+                                                    checked={profile.stream_checking.blank_check_enabled ?? false}
+                                                    onCheckedChange={(checked) => updateProfile('stream_checking.blank_check_enabled', checked)}
+                                                />
+                                                <div className="space-y-0.5">
+                                                    <Label htmlFor="blank_check_enabled" className="cursor-pointer font-medium">Check streams for blank screens</Label>
+                                                    <p className="text-[10px] text-muted-foreground">Detected blank streams are marked dead and follow this profile&apos;s dead stream removal setting.</p>
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center space-x-3 bg-muted/50 p-3 rounded-md">
+                                                <Switch
+                                                    id="freeze_check_enabled"
+                                                    checked={profile.stream_checking.freeze_check_enabled ?? false}
+                                                    onCheckedChange={(checked) => updateProfile('stream_checking.freeze_check_enabled', checked)}
+                                                />
+                                                <div className="space-y-0.5">
+                                                    <Label htmlFor="freeze_check_enabled" className="cursor-pointer font-medium">Check streams for frozen pictures</Label>
+                                                    <p className="text-[10px] text-muted-foreground">Detected stuck-picture streams are marked dead and follow this profile&apos;s dead stream removal setting.</p>
+                                                </div>
+                                            </div>
 
                                             <div className="space-y-2">
                                                 <Label htmlFor="s_limit">Stream Limit per Channel</Label>
@@ -519,19 +580,26 @@ export default function AutomationProfileEditor() {
                                             <div className="space-y-2">
                                                 <Label className="text-xs">Priority Mode</Label>
                                                 <Select
-                                                    value={profile.stream_checking.m3u_priority_mode || 'absolute'}
+                                                    value={streamPriorityMode}
                                                     onValueChange={(val) => updateProfile('stream_checking.m3u_priority_mode', val)}
                                                 >
                                                     <SelectTrigger><SelectValue /></SelectTrigger>
                                                     <SelectContent>
                                                         <SelectItem value="absolute">Playlist Priority → Resolution → Score</SelectItem>
+                                                        <SelectItem value="playlist_score">Playlist Priority → Score</SelectItem>
                                                         <SelectItem value="same_resolution">Resolution → Playlist Priority → Score</SelectItem>
                                                         <SelectItem value="equal">Resolution → Score</SelectItem>
+                                                        <SelectItem value="score_playlist">Score → Playlist Priority</SelectItem>
                                                         <SelectItem value="quality">Score Only</SelectItem>
                                                     </SelectContent>
                                                 </Select>
+                                                <p className="text-xs text-muted-foreground">
+                                                    {playlistRankActive
+                                                        ? 'Playlist rank is applied by this mode.'
+                                                        : 'Playlist rank is ignored by this mode.'}
+                                                </p>
                                             </div>
-                                            <div className="space-y-2">
+                                            <div className={cn('space-y-2', !playlistRankActive && 'opacity-60')}>
                                                 <Label className="text-xs">Playlist Priority Rank</Label>
                                                 <div className="border rounded-md divide-y overflow-hidden bg-background">
                                                     {(() => {
@@ -542,14 +610,18 @@ export default function AutomationProfileEditor() {
                                                         return sortedIds.map((id, idx) => {
                                                             const acct = m3uAccounts.find(a => a.id === id)
                                                             return (
-                                                                <div key={id} className="flex items-center justify-between p-2 text-sm group">
+                                                                <div
+                                                                    key={id}
+                                                                    className="flex items-center justify-between p-2 text-sm group"
+                                                                    aria-disabled={!playlistRankActive}
+                                                                >
                                                                     <span className="truncate max-w-[150px]"><span className="text-muted-foreground mr-1">#{idx + 1}</span> {acct?.name}</span>
                                                                     <div className="flex gap-0.5">
                                                                         <Button
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === 0}
+                                                                            disabled={!playlistRankActive || idx === 0}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]
@@ -564,7 +636,7 @@ export default function AutomationProfileEditor() {
                                                                             variant="ghost"
                                                                             size="icon"
                                                                             className="h-6 w-6"
-                                                                            disabled={idx === sortedIds.length - 1}
+                                                                            disabled={!playlistRankActive || idx === sortedIds.length - 1}
                                                                             onClick={() => {
                                                                                 const newOrder = [...sortedIds]
                                                                                 const temp = newOrder[idx]
@@ -686,6 +758,79 @@ export default function AutomationProfileEditor() {
                                     </div>
                                 </div>
                             )}
+                        </div>
+                    )}
+
+                    {activeStep === 'channel_visibility_automation' && (
+                        <div className="space-y-4">
+                            <div className="space-y-4">
+                                <Alert>
+                                    <AlertCircle className="h-4 w-4" />
+                                    <AlertTitle>Channels stay in Dispatcharr</AlertTitle>
+                                    <AlertDescription>
+                                        StreamFlow never deletes channels here. This profile only toggles Dispatcharr&apos;s Hidden from output flag (<code className="rounded bg-muted px-1 py-0.5">hidden_from_output</code>); recovery turns that flag off again.
+                                    </AlertDescription>
+                                </Alert>
+                                <div className="grid gap-3 md:grid-cols-2">
+                                    <div className="flex items-center justify-between rounded-md border p-4">
+                                        <div className="space-y-0.5">
+                                            <Label htmlFor="visibility_enabled" className="font-medium">Enabled</Label>
+                                            <p className="text-xs text-muted-foreground">Allow this profile to manage output visibility.</p>
+                                        </div>
+                                        <Switch
+                                            id="visibility_enabled"
+                                            checked={channelVisibilityConfig.enabled === true}
+                                            onCheckedChange={(checked) => updateProfile('channel_visibility_automation.enabled', checked)}
+                                        />
+                                    </div>
+                                    <div className="flex items-center justify-between rounded-md border p-4">
+                                        <div className="space-y-0.5">
+                                            <Label htmlFor="visibility_no_regex" className="font-medium">No Regex</Label>
+                                            <p className="text-xs text-muted-foreground">Hide channels without matching rules.</p>
+                                        </div>
+                                        <Switch
+                                            id="visibility_no_regex"
+                                            checked={channelVisibilityConfig.hide_on_no_regex === true}
+                                            onCheckedChange={(checked) => updateProfile('channel_visibility_automation.hide_on_no_regex', checked)}
+                                            disabled={channelVisibilityConfig.enabled !== true}
+                                        />
+                                    </div>
+                                    <div className="flex items-center justify-between rounded-md border p-4">
+                                        <div className="space-y-0.5">
+                                            <Label htmlFor="visibility_no_usable_streams" className="font-medium">No Usable Streams</Label>
+                                            <p className="text-xs text-muted-foreground">Hide channels when no streams are present or every checked stream fails.</p>
+                                        </div>
+                                        <Switch
+                                            id="visibility_no_usable_streams"
+                                            checked={noUsableStreamsVisibilityEnabled}
+                                            onCheckedChange={(checked) => {
+                                                setProfile(prev => ({
+                                                    ...prev,
+                                                    channel_visibility_automation: {
+                                                        ...DEFAULT_PROFILE.channel_visibility_automation,
+                                                        ...(prev.channel_visibility_automation || {}),
+                                                        hide_on_no_streams: checked,
+                                                        hide_on_all_failed: checked
+                                                    }
+                                                }))
+                                            }}
+                                            disabled={channelVisibilityConfig.enabled !== true}
+                                        />
+                                    </div>
+                                </div>
+                                <div className="flex items-center justify-between rounded-md border p-4">
+                                    <div className="space-y-0.5">
+                                        <Label htmlFor="visibility_recovered" className="font-medium">Recover Visible</Label>
+                                        <p className="text-xs text-muted-foreground">Unhide StreamFlow-managed channels after recovery.</p>
+                                    </div>
+                                    <Switch
+                                        id="visibility_recovered"
+                                        checked={channelVisibilityConfig.unhide_on_recovered !== false}
+                                        onCheckedChange={(checked) => updateProfile('channel_visibility_automation.unhide_on_recovered', checked)}
+                                        disabled={channelVisibilityConfig.enabled !== true}
+                                    />
+                                </div>
+                            </div>
                         </div>
                     )}
                 </CardContent>

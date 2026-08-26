@@ -155,6 +155,41 @@ def test_event_caching():
             automation_events_scheduler.EVENTS_CACHE_FILE = original_events_cache
 
 
+def test_cached_events_snapshot_does_not_recalculate():
+    """Cache-only startup snapshot must not touch fresh event calculation."""
+    from apps.automation.automation_events_scheduler import (
+        CACHE_VALIDITY_SECONDS,
+        AutomationEventsScheduler,
+    )
+
+    scheduler = AutomationEventsScheduler()
+    scheduler._cache = [
+        {
+            "time": (datetime.now() + timedelta(hours=1)).isoformat(),
+            "period_id": "1",
+            "period_name": "Full Check",
+        },
+        {
+            "time": (datetime.now() + timedelta(hours=48)).isoformat(),
+            "period_id": "2",
+            "period_name": "Later",
+        },
+    ]
+    scheduler._cache_timestamp = datetime.now() - timedelta(seconds=CACHE_VALIDITY_SECONDS + 10)
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("snapshot path must not recalculate events")
+
+    scheduler.calculate_upcoming_events = fail_if_called
+
+    result = scheduler.get_cached_events_snapshot(hours_ahead=24, max_events=100)
+
+    assert result["from_cache"] is True
+    assert result["cache_only"] is True
+    assert result["stale"] is True
+    assert [event["period_name"] for event in result["events"]] == ["Full Check"]
+
+
 def test_multiple_periods():
     """Test events from multiple periods"""
     print("Test: Multiple periods")

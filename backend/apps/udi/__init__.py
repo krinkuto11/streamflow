@@ -16,5 +16,6 @@ Usage:
 """
 
 from apps.udi.manager import UDIManager, get_udi_manager
+from apps.udi.storage import UDIStorage
 
-__all__ = ['UDIManager', 'get_udi_manager']
+__all__ = ['UDIManager', 'UDIStorage', 'get_udi_manager']

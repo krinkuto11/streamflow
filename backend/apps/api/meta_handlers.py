@@ -7,7 +7,8 @@ from pathlib import Path
 from typing import Any, Dict
 
 import requests
-from flask import jsonify, send_file, send_from_directory
+from flask import jsonify, make_response, send_file, send_from_directory
+from sqlalchemy import inspect, text
 from werkzeug.utils import safe_join
 
 from apps.core.logging_config import setup_logging
@@ -18,12 +19,26 @@ logger = setup_logging(__name__)
 # In-memory cache for public IP - refreshed at most once every 15 minutes.
 _env_cache: Dict[str, Any] = {"public_ip": None, "fetched_at": 0.0}
 _ENV_CACHE_TTL = 900  # seconds
+REQUIRED_SCHEMA_TABLES = {
+    "channels",
+    "streams",
+    "system_settings",
+    "monitoring_sessions",
+}
+
+
+def _frontend_shell_response(static_folder: Path):
+    response = make_response(send_file(static_folder / "index.html"))
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
 
 
 def root_response(*, static_folder: Path):
     """Serve root frontend entrypoint with API fallback when not built."""
     try:
-        return send_file(static_folder / "index.html")
+        return _frontend_shell_response(static_folder)
     except FileNotFoundError:
         return jsonify(
             {
@@ -39,8 +54,113 @@ def root_response(*, static_folder: Path):
 
 
 def health_check_response():
-    """Return service health status with current timestamp."""
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+    """Return process liveness without asserting downstream readiness."""
+    return jsonify({
+        "status": "healthy",
+        "live": True,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+
+def readiness_check_response(
+    *,
+    get_engine,
+    get_dispatcharr_config,
+    get_udi_manager,
+    get_required_services_status,
+):
+    """Return operational readiness for UI and deployment gates."""
+    checks: Dict[str, Any] = {}
+
+    try:
+        engine = get_engine()
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        missing_tables = sorted(
+            REQUIRED_SCHEMA_TABLES - set(inspect(engine).get_table_names())
+        )
+        checks["database"] = {
+            "ready": not missing_tables,
+            "schema_ready": not missing_tables,
+            "missing_tables": missing_tables,
+        }
+    except Exception:
+        checks["database"] = {
+            "ready": False,
+            "schema_ready": False,
+            "reason": "database_unavailable",
+        }
+
+    try:
+        dispatcharr_configured = bool(get_dispatcharr_config().is_configured())
+        checks["dispatcharr_config"] = {
+            "ready": dispatcharr_configured,
+            "configured": dispatcharr_configured,
+            "reason": None if dispatcharr_configured else "setup_required",
+        }
+    except Exception:
+        checks["dispatcharr_config"] = {
+            "ready": False,
+            "configured": False,
+            "reason": "config_unavailable",
+        }
+
+    initialization: Dict[str, Any] = {}
+    try:
+        udi = get_udi_manager()
+        initialized = bool(udi.is_initialized())
+        network_ready = bool(udi.is_network_ready())
+        pending = bool(udi.is_initialization_pending())
+        initialization = dict(udi.get_init_progress() or {})
+        udi_status = dict(udi.get_status() or {})
+        checks["udi"] = {
+            "ready": initialized and network_ready,
+            "initialized": initialized,
+            "network_ready": network_ready,
+            "initialization_pending": pending,
+            "data_counts": udi_status.get("data_counts") or {},
+        }
+    except Exception:
+        checks["udi"] = {
+            "ready": False,
+            "initialized": False,
+            "network_ready": False,
+            "initialization_pending": False,
+            "reason": "udi_unavailable",
+        }
+
+    try:
+        services = dict(get_required_services_status() or {})
+    except Exception:
+        services = {
+            "runtime_services": {
+                "required": True,
+                "ready": False,
+                "state": "status_unavailable",
+            }
+        }
+    services_ready = all(
+        not bool(details.get("required")) or bool(details.get("ready"))
+        for details in services.values()
+        if isinstance(details, dict)
+    )
+    checks["services"] = {"ready": services_ready, "items": services}
+
+    ready = all(bool(check.get("ready")) for check in checks.values())
+    initialization.setdefault("percentage", 100 if ready else 0)
+    initialization.setdefault("status", "completed" if ready else "pending")
+    initialization.setdefault(
+        "message",
+        "StreamFlow is ready" if ready else "Waiting for required startup checks",
+    )
+    payload = {
+        "status": "ready" if ready else "not_ready",
+        "ready": ready,
+        "timestamp": datetime.now().isoformat(),
+        "checks": checks,
+        "initialization": initialization,
+    }
+    return jsonify(payload), 200 if ready else 503
 
 
 def get_version_response(*, current_file: Path):
@@ -110,6 +230,6 @@ def serve_frontend_response(*, static_folder: Path, path: str):
         return send_from_directory(static_folder, path)
 
     try:
-        return send_file(static_folder / "index.html")
+        return _frontend_shell_response(static_folder)
     except FileNotFoundError:
         return jsonify({"error": "Frontend not found"}), 404

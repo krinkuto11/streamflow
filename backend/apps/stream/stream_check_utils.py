@@ -15,13 +15,15 @@ system and provides a clean, maintainable API for stream quality analysis.
 
 Bitrate detection
 -----------------
-Bitrate is read exclusively from ffmpeg's built-in progress/stats line:
+Bitrate is read first from ffmpeg's built-in progress/stats line:
 
     frame= 1234 fps= 30 q=28.0 size=2048kB time=00:00:41.33 bitrate= 406.1kbits/s speed=1.02x
 
 This mirrors Dispatcharr's stream_manager._parse_ffmpeg_stats() exactly.
 The stats line is the most accurate source available — ffmpeg derives it from
 decoded frame timing, not raw byte counts.
+If that progress bitrate is N/A for a full-length probe, final ffmpeg
+bytes-read statistics are used as a conservative fallback.
 
 ffmpeg flags used
 -----------------
@@ -35,13 +37,14 @@ ffmpeg flags used
 
 With a sufficiently long analysis window (>=30 s, recommended 120 s) the
 running bitrate average stabilises into a reliable reading.  If no valid
-stats line is produced the stream is considered unanalyzable — a missing
-bitrate is a meaningful signal that the stream is dead or unresponsive.
+bitrate is produced but video/audio metadata is present, the stream is treated
+as alive but incomplete so callers can recheck it without marking it dead.
 """
 
 import io
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -49,10 +52,11 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Dict, Optional, Tuple, Any
+from typing import Callable, Dict, Optional, Tuple, Any, List
 
 from PIL import Image
 from apps.core.logging_config import setup_logging
+from apps.core.log_sanitizer import audit_ref as _audit_ref, scrub_urls, stream_ref, url_ref
 
 logger = setup_logging(__name__)
 
@@ -67,6 +71,28 @@ _LOOP_PROBE_DURATION_MIN      = 60    # enforced floor
 _LOOP_PROBE_DURATION_MAX      = 720   # 12 minutes — ceiling for future flexibility
 
 # Constants for error detection and logging
+FFMPEG_HWACCEL_MODES = {
+    'auto',
+    'cuda',
+    'd3d11va',
+    'dxva2',
+    'qsv',
+    'vaapi',
+    'vdpau',
+    'videotoolbox',
+}
+DRI_HWACCEL_METHODS = {'drm', 'qsv', 'vaapi'}
+FFMPEG_HWACCEL_FAILURE_PATTERNS = (
+    'device creation failed',
+    'failed to create',
+    'failed setup for format',
+    'hardware acceleration methods',
+    'no device available',
+    'no hw device',
+    'cannot load',
+    'cannot open',
+    'unknown hwaccel',
+)
 EARLY_EXIT_THRESHOLD = 0.8  # Consider ffmpeg exited early if elapsed < 80% of expected duration
 MAX_ERROR_LINES_TO_LOG = 5  # Maximum number of error lines to log from ffmpeg output
 MAX_DEBUG_LINES_TO_LOG = 10  # Maximum number of debug lines to log from ffmpeg output
@@ -76,6 +102,108 @@ MAX_DEBUG_LINES_TO_LOG = 10  # Maximum number of debug lines to log from ffmpeg 
 # has flowed.  Values at or below this threshold are startup artifacts and
 # are ignored so they cannot be mistaken for a real (very low) bitrate.
 MIN_VALID_PROGRESS_BITRATE = 10.0  # kbps
+
+# Blank/freeze decoding can be expensive on UHD/HEVC streams. Keep the regular
+# bitrate probe cheap and cap concurrent visual probes so provider/profile slots
+# are not exhausted by filter work.
+try:
+    VISUAL_PROBE_MAX_CONCURRENCY = max(
+        1,
+        int(os.getenv('STREAMFLOW_VISUAL_PROBE_MAX_CONCURRENCY', '2') or '2'),
+    )
+except (TypeError, ValueError):
+    VISUAL_PROBE_MAX_CONCURRENCY = 2
+VISUAL_PROBE_DEFAULT_BLANK_SECONDS = 8
+VISUAL_PROBE_DEFAULT_FREEZE_SECONDS = 10
+PROBE_PREEMPT_POLL_SECONDS = 0.25
+PROBE_PREEMPT_PROCESS_GRACE_SECONDS = 1.0
+_VISUAL_PROBE_SEMAPHORE = threading.BoundedSemaphore(VISUAL_PROBE_MAX_CONCURRENCY)
+
+try:
+    STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS = max(
+        0,
+        int(os.getenv('STREAMFLOW_STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS', '20') or '20'),
+    )
+except (TypeError, ValueError):
+    STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS = 20
+
+BLACK_START_RE = re.compile(r'black_start:(?P<start>-?[0-9]+(?:\.[0-9]+)?)')
+BLACK_END_RE = re.compile(r'black_end:(?P<end>-?[0-9]+(?:\.[0-9]+)?)')
+BLACK_DURATION_RE = re.compile(r'black_duration:(?P<duration>-?[0-9]+(?:\.[0-9]+)?)')
+FREEZE_START_RE = re.compile(r'freeze_start:\s*(?P<start>-?[0-9]+(?:\.[0-9]+)?)')
+FREEZE_END_RE = re.compile(r'freeze_end:\s*(?P<end>-?[0-9]+(?:\.[0-9]+)?)')
+FREEZE_DURATION_RE = re.compile(r'freeze_duration:\s*(?P<duration>-?[0-9]+(?:\.[0-9]+)?)')
+FFMPEG_TIME_RE = re.compile(r'time=(?P<hours>\d+):(?P<minutes>\d+):(?P<seconds>\d+(?:\.\d+)?)')
+FFMPEG_BYTES_READ_RE = re.compile(r'Statistics:\s*(?P<bytes>\d+)\s+bytes\s+read', re.IGNORECASE)
+
+
+class StreamProbePreempted(Exception):
+    """Raised when a real viewer needs the profile capacity used by a probe."""
+
+
+def _preemption_requested(preempt_check: Callable[[], bool]) -> bool:
+    """Treat an unreadable viewer state as a fail-closed preemption request."""
+    try:
+        return bool(preempt_check())
+    except Exception:
+        logger.warning(
+            "Viewer preemption check failed; aborting the provider probe fail-closed"
+        )
+        return True
+
+
+def _acquire_semaphore_with_preemption(
+    semaphore: threading.Semaphore,
+    preempt_check: Optional[Callable[[], bool]],
+) -> None:
+    """Acquire a probe slot without hiding a late real-viewer preemption.
+
+    Provider/profile capacity is already reserved while a visual probe waits
+    behind the global decode limit.  A blocking semaphore acquire would leave
+    that reservation uninterruptible until another visual probe finishes.  Poll
+    the viewer callback while waiting and once more after acquisition so the
+    reservation can be released before any new FFmpeg process starts.
+    """
+    if preempt_check is None:
+        semaphore.acquire()
+        return
+
+    while True:
+        if _preemption_requested(preempt_check):
+            raise StreamProbePreempted()
+        if not semaphore.acquire(timeout=PROBE_PREEMPT_POLL_SECONDS):
+            continue
+
+        keep_slot = False
+        try:
+            if _preemption_requested(preempt_check):
+                raise StreamProbePreempted()
+            keep_slot = True
+            return
+        finally:
+            if not keep_slot:
+                semaphore.release()
+
+
+def _sleep_with_preemption(
+    duration: float,
+    preempt_check: Optional[Callable[[], bool]],
+) -> None:
+    """Sleep between attempts while a reserved provider slot stays preemptible."""
+    delay = max(0.0, float(duration or 0.0))
+    if preempt_check is None:
+        time.sleep(delay)
+        return
+
+    deadline = time.monotonic() + delay
+    while True:
+        if _preemption_requested(preempt_check):
+            raise StreamProbePreempted()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(PROBE_PREEMPT_POLL_SECONDS, remaining))
+
 
 # FourCC to common codec name mapping
 FOURCC_TO_CODEC = {
@@ -105,6 +233,429 @@ def _get_ffmpeg_extra_args() -> list:
         return []
 
 
+def normalize_hardware_acceleration_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Return a safe, CPU-default hardware acceleration config."""
+    if not isinstance(config, dict):
+        return {
+            'enabled': False,
+            'mode': 'auto',
+            'device': '',
+            'allow_fallback': True,
+        }
+
+    mode = str(config.get('mode') or 'auto').strip().lower()
+    enabled = bool(config.get('enabled', False))
+    if mode in {'', 'none', 'disabled', 'cpu'}:
+        enabled = False
+        mode = 'auto'
+    elif mode not in FFMPEG_HWACCEL_MODES:
+        logger.warning(f"Invalid ffmpeg hardware acceleration mode '{mode}' ignored")
+        enabled = False
+        mode = 'auto'
+
+    device = str(config.get('device') or '').strip()
+    if device and not re.match(r'^[a-zA-Z0-9_./:\\-]+$', device):
+        logger.warning("Invalid ffmpeg hardware acceleration device ignored")
+        device = ''
+
+    return {
+        'enabled': enabled,
+        'mode': mode,
+        'device': device[:200],
+        'allow_fallback': bool(config.get('allow_fallback', True)),
+    }
+
+
+def _parse_ffmpeg_hwaccels(output: str) -> List[str]:
+    """Parse ffmpeg -hwaccels output into normalized method names."""
+    methods = []
+    for line in (output or '').splitlines():
+        value = line.strip().lower()
+        if not value or value.startswith('hardware acceleration'):
+            continue
+        if re.match(r'^[a-z0-9_]+$', value):
+            methods.append(value)
+    return sorted(set(methods))
+
+
+def _is_dri_device_path(device: str) -> bool:
+    """Return true when the configured ffmpeg device points at a Linux DRI device."""
+    normalized = str(device or '').strip().lower()
+    return normalized == '/dev/dri' or normalized.startswith('/dev/dri/')
+
+
+def _default_dri_render_device() -> str:
+    for minor in range(128, 136):
+        candidate = f"/dev/dri/renderD{minor}"
+        if os.path.exists(candidate):
+            return candidate
+    return "/dev/dri/renderD128"
+
+
+def _resolve_ffmpeg_hwaccel_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Resolve operator config to the concrete hwaccel flags ffmpeg should see."""
+    hwaccel = normalize_hardware_acceleration_config(config)
+    if not hwaccel['enabled']:
+        return hwaccel
+
+    resolved = dict(hwaccel)
+    device = resolved.get('device') or ''
+    normalized_device = device.rstrip('/')
+    if _is_dri_device_path(device):
+        if normalized_device == '/dev/dri':
+            resolved['device'] = _default_dri_render_device()
+        if resolved['mode'] == 'auto':
+            # With an explicit DRI device, make the VAAPI path observable instead
+            # of leaving ffmpeg to pick an opaque "auto" backend.
+            resolved['mode'] = 'vaapi'
+    return resolved
+
+
+def collect_hardware_acceleration_diagnostics(
+    config: Optional[Dict[str, Any]],
+    *,
+    command_runner: Optional[Callable[[List[str], float], subprocess.CompletedProcess]] = None,
+) -> Dict[str, Any]:
+    """Collect non-fatal startup diagnostics for optional ffmpeg hwaccel."""
+    hwaccel = normalize_hardware_acceleration_config(config)
+    diagnostics: Dict[str, Any] = {
+        'config': hwaccel,
+        'ffmpeg_available': False,
+        'ffmpeg_hwaccels': [],
+        'mode_supported': False,
+        'ffmpeg_error': '',
+        'nvidia_checked': False,
+        'nvidia_visible_devices_set': bool(os.getenv('NVIDIA_VISIBLE_DEVICES')),
+        'nvidia_smi_available': False,
+        'nvidia_smi_ok': False,
+        'nvidia_gpus': [],
+        'nvidia_error': '',
+        'dri_device_configured': _is_dri_device_path(hwaccel.get('device')),
+        'dri_hwaccels': [],
+        'dri_available': False,
+        'hardware_backend': 'cpu' if not hwaccel['enabled'] else 'unknown',
+    }
+    def _run(command: List[str], timeout: float) -> subprocess.CompletedProcess:
+        if command_runner:
+            return command_runner(command, timeout)
+        return subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            text=True,
+        )
+
+    try:
+        ffmpeg_result = _run(['ffmpeg', '-hide_banner', '-hwaccels'], 5.0)
+        diagnostics['ffmpeg_available'] = ffmpeg_result.returncode == 0
+        diagnostics['ffmpeg_hwaccels'] = _parse_ffmpeg_hwaccels(
+            f"{ffmpeg_result.stdout or ''}\n{ffmpeg_result.stderr or ''}"
+        )
+        diagnostics['dri_hwaccels'] = sorted(
+            method for method in diagnostics['ffmpeg_hwaccels']
+            if method in DRI_HWACCEL_METHODS
+        )
+        diagnostics['dri_available'] = bool(diagnostics['dri_hwaccels']) and (
+            diagnostics['dri_device_configured']
+            or hwaccel['mode'] in {'auto', 'qsv', 'vaapi'}
+        )
+        if hwaccel['enabled']:
+            mode = hwaccel['mode']
+            diagnostics['mode_supported'] = (
+                mode == 'auto' and bool(diagnostics['ffmpeg_hwaccels'])
+            ) or mode in diagnostics['ffmpeg_hwaccels']
+        if ffmpeg_result.returncode != 0:
+            diagnostics['ffmpeg_error'] = (ffmpeg_result.stderr or ffmpeg_result.stdout or '').strip()[:300]
+    except FileNotFoundError:
+        diagnostics['ffmpeg_error'] = 'ffmpeg executable not found'
+    except subprocess.TimeoutExpired:
+        diagnostics['ffmpeg_error'] = 'ffmpeg -hwaccels timed out'
+    except Exception as exc:
+        diagnostics['ffmpeg_error'] = str(exc)[:300]
+
+    should_check_nvidia = (
+        (hwaccel['enabled'] and hwaccel['mode'] == 'cuda')
+        or diagnostics['nvidia_visible_devices_set']
+    )
+    if should_check_nvidia:
+        diagnostics['nvidia_checked'] = True
+        try:
+            nvidia_result = _run(
+                ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader'],
+                5.0,
+            )
+            diagnostics['nvidia_smi_available'] = True
+            diagnostics['nvidia_smi_ok'] = nvidia_result.returncode == 0
+            if nvidia_result.returncode == 0:
+                diagnostics['nvidia_gpus'] = [
+                    line.strip()
+                    for line in (nvidia_result.stdout or '').splitlines()
+                    if line.strip()
+                ]
+            else:
+                diagnostics['nvidia_error'] = (nvidia_result.stderr or nvidia_result.stdout or '').strip()[:300]
+        except FileNotFoundError:
+            diagnostics['nvidia_error'] = 'nvidia-smi executable not found'
+        except subprocess.TimeoutExpired:
+            diagnostics['nvidia_error'] = 'nvidia-smi timed out'
+        except Exception as exc:
+            diagnostics['nvidia_error'] = str(exc)[:300]
+    if hwaccel['enabled']:
+        if diagnostics['nvidia_smi_ok'] or hwaccel['mode'] == 'cuda' or diagnostics['nvidia_visible_devices_set']:
+            diagnostics['hardware_backend'] = 'nvidia'
+        elif diagnostics['dri_available']:
+            diagnostics['hardware_backend'] = 'dri'
+        elif diagnostics['mode_supported']:
+            diagnostics['hardware_backend'] = 'ffmpeg'
+    return diagnostics
+
+
+def _log_nvidia_diagnostics(diagnostics: Dict[str, Any]) -> None:
+    if not diagnostics['nvidia_checked']:
+        return
+    if diagnostics['nvidia_smi_ok'] and diagnostics['nvidia_gpus']:
+        logger.info(
+            "NVIDIA runtime visible: NVIDIA_VISIBLE_DEVICES=%s; GPUs=%s",
+            'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+            ', '.join(diagnostics['nvidia_gpus']),
+        )
+    else:
+        logger.warning(
+            "NVIDIA runtime not ready: NVIDIA_VISIBLE_DEVICES=%s; nvidia-smi=%s",
+            'set' if diagnostics['nvidia_visible_devices_set'] else 'not set',
+            diagnostics['nvidia_error'] or 'no GPU reported',
+        )
+
+
+def _log_dri_diagnostics(diagnostics: Dict[str, Any]) -> None:
+    if not diagnostics.get('dri_available'):
+        return
+    hwaccel = diagnostics['config']
+    logger.info(
+        "DRI/VAAPI/QSV hardware methods reported by ffmpeg: device=%s methods=%s; "
+        "reported methods still require a successful ffmpeg device init during probes",
+        hwaccel['device'] or 'default',
+        ', '.join(diagnostics.get('dri_hwaccels') or []),
+    )
+
+
+def log_hardware_acceleration_startup_diagnostics(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Log a concise startup readiness summary for optional ffmpeg hwaccel."""
+    diagnostics = collect_hardware_acceleration_diagnostics(config)
+    hwaccel = diagnostics['config']
+    if not hwaccel['enabled']:
+        logger.info("FFmpeg hardware acceleration disabled; CPU stream analysis path is active")
+        _log_nvidia_diagnostics(diagnostics)
+        return diagnostics
+
+    logger.info(
+        "FFmpeg hardware acceleration configured: mode=%s device=%s cpu_fallback=%s",
+        hwaccel['mode'],
+        hwaccel['device'] or 'default',
+        hwaccel['allow_fallback'],
+    )
+    if diagnostics['ffmpeg_available']:
+        methods = ', '.join(diagnostics['ffmpeg_hwaccels']) or 'none reported'
+        logger.info("FFmpeg hardware acceleration methods available: %s", methods)
+        if diagnostics['mode_supported']:
+            logger.info(
+                "FFmpeg hardware acceleration mode %s is reported by ffmpeg; device init is verified during probes",
+                hwaccel['mode'],
+            )
+        else:
+            logger.warning("FFmpeg hardware acceleration mode %s is not reported by ffmpeg", hwaccel['mode'])
+    else:
+        logger.warning("FFmpeg hardware acceleration readiness unknown: %s", diagnostics['ffmpeg_error'])
+
+    _log_nvidia_diagnostics(diagnostics)
+    _log_dri_diagnostics(diagnostics)
+    return diagnostics
+
+
+def _get_ffmpeg_hwaccel_args(config: Optional[Dict[str, Any]]) -> list:
+    hwaccel = _resolve_ffmpeg_hwaccel_config(config)
+    if not hwaccel['enabled']:
+        return []
+
+    args = []
+    mode = hwaccel['mode']
+    device = hwaccel.get('device') or ''
+    if device and mode == 'vaapi':
+        args += ['-vaapi_device', device]
+    args += ['-hwaccel', mode]
+    if device and mode != 'vaapi':
+        args += ['-hwaccel_device', device]
+    return args
+
+
+def _log_ffmpeg_hwaccel_request(
+    context: str,
+    hwaccel_config: Dict[str, Any],
+    hwaccel_args: List[str],
+    *,
+    decode_filters: bool = False,
+) -> None:
+    if not hwaccel_args:
+        return
+    logger.info(
+        "FFmpeg %s hardware acceleration requested: mode=%s device=%s "
+        "cpu_fallback=%s decode_filters=%s",
+        context,
+        hwaccel_config.get('mode') or 'auto',
+        hwaccel_config.get('device') or 'default',
+        bool(hwaccel_config.get('allow_fallback', True)),
+        bool(decode_filters),
+    )
+
+
+def _looks_like_hwaccel_failure(output: str) -> bool:
+    lowered = (output or '').lower()
+    return any(pattern in lowered for pattern in FFMPEG_HWACCEL_FAILURE_PATTERNS)
+
+
+def _run_ffmpeg_with_optional_fallback(
+    command: List[str],
+    *,
+    fallback_command: Optional[List[str]],
+    timeout: float,
+    stdout: Any,
+    stderr: Any,
+    text: bool,
+    context: str,
+    preempt_check: Optional[Callable[[], bool]] = None,
+) -> subprocess.CompletedProcess:
+    def _run(command_to_run: List[str]) -> subprocess.CompletedProcess:
+        if preempt_check is None:
+            return subprocess.run(
+                command_to_run,
+                stdout=stdout,
+                stderr=stderr,
+                timeout=timeout,
+                text=text
+            )
+
+        # Do not open a provider connection when viewer capacity is already
+        # waiting.  The polling loop below covers viewers that arrive after the
+        # process starts; this first check also covers commands that exit before
+        # the loop gets a chance to poll them.
+        if _preemption_requested(preempt_check):
+            raise StreamProbePreempted()
+
+        process = subprocess.Popen(
+            command_to_run,
+            stdout=stdout,
+            stderr=stderr,
+            text=text,
+        )
+        deadline = time.monotonic() + timeout
+        preempted = False
+        timed_out = False
+
+        try:
+            while process.poll() is None:
+                if _preemption_requested(preempt_check):
+                    preempted = True
+                    process.terminate()
+                    break
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    process.kill()
+                    break
+                time.sleep(PROBE_PREEMPT_POLL_SECONDS)
+
+            if preempted:
+                try:
+                    process.communicate(timeout=PROBE_PREEMPT_PROCESS_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.communicate(timeout=PROBE_PREEMPT_PROCESS_GRACE_SECONDS)
+                    except subprocess.TimeoutExpired:
+                        logger.error(
+                            "Provider probe process did not exit within the bounded "
+                            "preemption cleanup window"
+                        )
+                raise StreamProbePreempted()
+
+            try:
+                stdout_data, stderr_data = process.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                try:
+                    stdout_data, stderr_data = process.communicate(
+                        timeout=PROBE_PREEMPT_PROCESS_GRACE_SECONDS
+                    )
+                except subprocess.TimeoutExpired:
+                    logger.error(
+                        "Provider probe process did not exit within the bounded timeout cleanup window"
+                    )
+                    stdout_data, stderr_data = '', ''
+                timed_out = True
+
+            if timed_out:
+                raise subprocess.TimeoutExpired(
+                    command_to_run,
+                    timeout,
+                    output=stdout_data,
+                    stderr=stderr_data,
+                )
+            return subprocess.CompletedProcess(
+                command_to_run,
+                process.returncode,
+                stdout=stdout_data,
+                stderr=stderr_data,
+            )
+        finally:
+            if process.poll() is None:
+                process.kill()
+                try:
+                    process.wait(timeout=PROBE_PREEMPT_PROCESS_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    logger.error(
+                        "Provider probe process remained alive after the bounded final cleanup window"
+                    )
+
+    try:
+        result = _run(command)
+    except subprocess.TimeoutExpired:
+        if fallback_command:
+            logger.warning(
+                "FFmpeg hardware acceleration timed out during %s; retrying on CPU",
+                context,
+            )
+            return _run(fallback_command)
+        raise
+    if (
+        fallback_command
+        and result.returncode != 0
+        and _looks_like_hwaccel_failure(result.stderr or result.stdout or '')
+    ):
+        logger.warning(
+            "FFmpeg hardware acceleration failed during %s; retrying on CPU",
+            context,
+        )
+        return _run(fallback_command)
+    return result
+
+
+def _stream_analysis_timeout(
+    timeout: int,
+    duration: int,
+    stream_startup_buffer: int,
+) -> int:
+    """
+    Timeout for real-time ffmpeg remux probes.
+
+    The probe intentionally uses ``-re`` so the stats bitrate reflects playback
+    pace. Some high-bitrate UHD streams need a little extra time after the
+    requested window for segment startup/teardown before ffmpeg exits cleanly.
+    Without this completion headroom, good streams can fall back to ffprobe and
+    lose bitrate even though the stream is playable.
+    """
+    return timeout + duration + stream_startup_buffer + STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS
+
+
 def _log_ffmpeg_errors(output: str, logger: logging.Logger, error_patterns: list) -> None:
     """
     Helper function to log ffmpeg errors with DEBUG_MODE awareness.
@@ -127,14 +678,258 @@ def _log_ffmpeg_errors(output: str, logger: logging.Logger, error_patterns: list
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"  ffmpeg error details (DEBUG_MODE):")
             for error_line in error_lines[:MAX_DEBUG_LINES_TO_LOG]:
-                logger.debug(f"     {error_line}")
+                logger.debug(f"     {scrub_urls(error_line)}")
         else:
             logger.warning(f"  ffmpeg encountered {len(error_lines)} error(s) (set DEBUG_MODE=true for details)")
     elif logger.isEnabledFor(logging.DEBUG):
         logger.debug(f"  Last lines of ffmpeg output (DEBUG_MODE):")
         for line in output.splitlines()[-MAX_DEBUG_LINES_TO_LOG:]:
             if line.strip():
-                logger.debug(f"     {line.strip()}")
+                logger.debug(f"     {scrub_urls(line.strip())}")
+
+
+def _parse_ffmpeg_progress_time(line: str) -> Optional[float]:
+    """Parse ffmpeg progress time=HH:MM:SS.xx into seconds."""
+    match = FFMPEG_TIME_RE.search(line)
+    if not match:
+        return None
+
+    try:
+        return (
+            int(match.group('hours')) * 3600
+            + int(match.group('minutes')) * 60
+            + float(match.group('seconds'))
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def _estimate_bitrate_from_ffmpeg_bytes_read(
+    output: str,
+    *,
+    duration: int,
+    elapsed: float,
+    media_time: float = 0.0,
+) -> Optional[float]:
+    """Estimate kbps from ffmpeg byte statistics when progress bitrate is unavailable."""
+    bytes_read = 0
+    for match in FFMPEG_BYTES_READ_RE.finditer(output or ''):
+        try:
+            bytes_read += int(match.group('bytes'))
+        except (TypeError, ValueError):
+            continue
+
+    if bytes_read <= 0:
+        return None
+
+    expected_min_time = max(0.0, float(duration or 0) * EARLY_EXIT_THRESHOLD)
+    usable_seconds = max(float(media_time or 0.0), float(elapsed or 0.0))
+    if usable_seconds < expected_min_time:
+        return None
+
+    if usable_seconds <= 0:
+        return None
+
+    bitrate_kbps = (bytes_read * 8.0) / usable_seconds / 1000.0
+    if bitrate_kbps <= MIN_VALID_PROGRESS_BITRATE:
+        return None
+    return bitrate_kbps
+
+
+def _visual_probe_duration(
+    *,
+    duration: int,
+    blank_check_enabled: bool,
+    blank_check_min_duration: float,
+    freeze_check_enabled: bool,
+    freeze_check_min_duration: float,
+) -> int:
+    """Pick a short visual window that can prove each enabled detector threshold."""
+    requested = max(1.0, float(duration or 0))
+    target = 0.0
+    if blank_check_enabled:
+        target = max(
+            target,
+            float(blank_check_min_duration or 0) + 1.0,
+            float(VISUAL_PROBE_DEFAULT_BLANK_SECONDS),
+        )
+    if freeze_check_enabled:
+        target = max(
+            target,
+            float(freeze_check_min_duration or 0) + 1.0,
+            float(VISUAL_PROBE_DEFAULT_FREEZE_SECONDS),
+        )
+    if target <= 0:
+        return max(1, int(math.ceil(requested)))
+    return max(1, int(math.ceil(target)))
+
+
+def _parse_blank_detection(
+    output: str,
+    duration: int,
+    blank_ratio_threshold: float = 0.80,
+) -> Dict[str, Any]:
+    """Parse ffmpeg blackdetect output into blank-screen metrics."""
+    segments: List[Dict[str, float]] = []
+    pending_start: Optional[float] = None
+    last_media_time: float = 0.0
+
+    for line in output.splitlines():
+        progress_time = _parse_ffmpeg_progress_time(line)
+        if progress_time is not None:
+            last_media_time = max(last_media_time, progress_time)
+
+        start_match = BLACK_START_RE.search(line)
+        end_match = BLACK_END_RE.search(line)
+        duration_match = BLACK_DURATION_RE.search(line)
+
+        start = None
+        if start_match:
+            try:
+                start = max(0.0, float(start_match.group('start')))
+                pending_start = start
+            except (TypeError, ValueError):
+                start = None
+
+        if not end_match:
+            continue
+
+        try:
+            end = max(0.0, float(end_match.group('end')))
+        except (TypeError, ValueError):
+            pending_start = None
+            continue
+
+        segment_start = start if start is not None else pending_start
+        segment_duration = None
+        if duration_match:
+            try:
+                segment_duration = max(0.0, float(duration_match.group('duration')))
+            except (TypeError, ValueError):
+                segment_duration = None
+
+        if segment_start is None and segment_duration is not None:
+            segment_start = max(0.0, end - segment_duration)
+        elif segment_start is None:
+            segment_start = 0.0
+
+        if segment_duration is None:
+            segment_duration = max(0.0, end - segment_start)
+
+        segments.append({
+            'start': round(segment_start, 3),
+            'end': round(end, 3),
+            'duration': round(segment_duration, 3),
+        })
+        pending_start = None
+
+    if pending_start is not None:
+        observed_end = max(float(duration or 0), last_media_time, pending_start)
+        segments.append({
+            'start': round(pending_start, 3),
+            'end': round(observed_end, 3),
+            'duration': round(max(0.0, observed_end - pending_start), 3),
+        })
+
+    blank_duration = sum(segment.get('duration', 0.0) for segment in segments)
+    probe_duration = float(duration or 0)
+    if probe_duration > 0:
+        blank_duration = min(blank_duration, probe_duration)
+        blank_ratio = min(1.0, blank_duration / probe_duration)
+    else:
+        blank_ratio = 0.0
+
+    return {
+        'blank_probe_ran': True,
+        'blank_detected': blank_ratio >= blank_ratio_threshold,
+        'blank_duration_secs': round(blank_duration, 3),
+        'blank_ratio': round(blank_ratio, 4),
+        'blank_segments': segments,
+    }
+
+
+def _parse_freeze_detection(
+    output: str,
+    duration: int,
+    freeze_ratio_threshold: float = 0.80,
+) -> Dict[str, Any]:
+    """Parse ffmpeg freezedetect output into frozen-picture metrics."""
+    segments: List[Dict[str, float]] = []
+    pending_start: Optional[float] = None
+    last_media_time: float = 0.0
+
+    for line in output.splitlines():
+        progress_time = _parse_ffmpeg_progress_time(line)
+        if progress_time is not None:
+            last_media_time = max(last_media_time, progress_time)
+
+        start_match = FREEZE_START_RE.search(line)
+        end_match = FREEZE_END_RE.search(line)
+        duration_match = FREEZE_DURATION_RE.search(line)
+
+        start = None
+        if start_match:
+            try:
+                start = max(0.0, float(start_match.group('start')))
+                pending_start = start
+            except (TypeError, ValueError):
+                start = None
+
+        if not end_match:
+            continue
+
+        try:
+            end = max(0.0, float(end_match.group('end')))
+        except (TypeError, ValueError):
+            pending_start = None
+            continue
+
+        segment_start = start if start is not None else pending_start
+        segment_duration = None
+        if duration_match:
+            try:
+                segment_duration = max(0.0, float(duration_match.group('duration')))
+            except (TypeError, ValueError):
+                segment_duration = None
+
+        if segment_start is None and segment_duration is not None:
+            segment_start = max(0.0, end - segment_duration)
+        elif segment_start is None:
+            segment_start = 0.0
+
+        if segment_duration is None:
+            segment_duration = max(0.0, end - segment_start)
+
+        segments.append({
+            'start': round(segment_start, 3),
+            'end': round(end, 3),
+            'duration': round(segment_duration, 3),
+        })
+        pending_start = None
+
+    if pending_start is not None:
+        observed_end = max(float(duration or 0), last_media_time, pending_start)
+        segments.append({
+            'start': round(pending_start, 3),
+            'end': round(observed_end, 3),
+            'duration': round(max(0.0, observed_end - pending_start), 3),
+        })
+
+    freeze_duration = sum(segment.get('duration', 0.0) for segment in segments)
+    probe_duration = float(duration or 0)
+    if probe_duration > 0:
+        freeze_duration = min(freeze_duration, probe_duration)
+        freeze_ratio = min(1.0, freeze_duration / probe_duration)
+    else:
+        freeze_ratio = 0.0
+
+    return {
+        'freeze_probe_ran': True,
+        'freeze_detected': freeze_ratio >= freeze_ratio_threshold,
+        'freeze_duration_secs': round(freeze_duration, 3),
+        'freeze_ratio': round(freeze_ratio, 4),
+        'freeze_segments': segments,
+    }
 
 
 def _extract_codec_from_line(line: str, codec_type: str) -> Optional[str]:
@@ -240,7 +1035,7 @@ def _get_hdr_metadata(url: str, timeout: int = 10, user_agent: str = 'VLC/3.0.14
     Returns:
         Dictionary with HDR metadata fields, or None if extraction fails
     """
-    logger.debug(f"Extracting HDR metadata with ffprobe for: {url[:50]}...")
+    logger.debug(f"Extracting HDR metadata with ffprobe for: {url_ref(url)}")
     command = [
         'ffprobe',
         '-user_agent', user_agent,
@@ -363,7 +1158,7 @@ def get_stream_info(url: str, timeout: int = 30, user_agent: str = 'VLC/3.0.14')
 
     Get stream information using ffprobe to extract codec, resolution, and FPS.
     """
-    logger.debug(f"Running ffprobe for URL: {url[:50]}...")
+    logger.debug(f"Running ffprobe for URL: {url_ref(url)}")
     command = [
         'ffprobe',
         '-user_agent', user_agent,
@@ -396,19 +1191,431 @@ def get_stream_info(url: str, timeout: int = 30, user_agent: str = 'VLC/3.0.14')
         return None, None
 
     except subprocess.TimeoutExpired:
-        logger.warning(f"Timeout ({timeout}s) while fetching stream info for: {url[:50]}...")
+        logger.warning(f"Timeout ({timeout}s) while fetching stream info for: {url_ref(url)}")
         return None, None
     except json.JSONDecodeError as e:
-        logger.warning(f"Failed to decode JSON from ffprobe for {url[:50]}...: {e}")
+        logger.warning(f"Failed to decode JSON from ffprobe for {url_ref(url)}: {scrub_urls(e)}")
         return None, None
     except Exception as e:
-        logger.error(f"Stream info check failed for {url[:50]}...: {e}")
+        logger.error(f"Stream info check failed for {url_ref(url)}: {scrub_urls(e)}")
         return None, None
 
 
-def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30, user_agent: str = 'VLC/3.0.14', stream_startup_buffer: int = 10) -> Dict[str, Any]:
+def _parse_ffprobe_rate(rate: Any) -> float:
+    """Parse an ffprobe frame-rate string such as 30000/1001 or 30/1."""
+    if not rate:
+        return 0
+    try:
+        rate_text = str(rate).strip()
+        if '/' in rate_text:
+            numerator, denominator = rate_text.split('/', 1)
+            denominator_value = float(denominator)
+            if denominator_value == 0:
+                return 0
+            return _snap_to_common_fps(float(numerator) / denominator_value)
+        return _snap_to_common_fps(float(rate_text))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0
+
+
+def _kbps_from_ffprobe_bit_rate(bit_rate: Any) -> Optional[float]:
+    """Convert ffprobe bit_rate bits/sec values to kbps."""
+    try:
+        if bit_rate in (None, '', 'N/A'):
+            return None
+        kbps = float(bit_rate) / 1000.0
+        return kbps if kbps > MIN_VALID_PROGRESS_BITRATE else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> Optional[int]:
+    try:
+        if value in (None, '', 'N/A'):
+            return None
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ffprobe_media_fallback(
+    url: str,
+    *,
+    timeout: int,
+    user_agent: str,
+    reason: str,
+    preempt_check: Optional[Callable[[], bool]] = None,
+) -> Optional[Dict[str, Any]]:
+    """Use ffprobe as a narrow media-presence fallback after ffmpeg is inconclusive.
+
+    This does not forgive truly offline streams: the fallback is accepted only
+    when ffprobe sees a video stream with non-zero dimensions.
     """
-    Get complete stream information using ffmpeg in a single call.
+    command = [
+        'ffprobe',
+        '-user_agent', user_agent,
+        '-v', 'error',
+        '-show_entries',
+        (
+            'stream=codec_name,codec_type,width,height,avg_frame_rate,'
+            'r_frame_rate,bit_rate,pix_fmt,color_space,color_primaries,'
+            'color_transfer,profile,sample_rate,channels,channel_layout:'
+            'format=bit_rate'
+        ),
+        '-of', 'json',
+        url,
+    ]
+
+    start = time.time()
+    try:
+        result = _run_ffmpeg_with_optional_fallback(
+            command,
+            fallback_command=None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=max(5, timeout),
+            text=True,
+            context="ffprobe media fallback",
+            preempt_check=preempt_check,
+        )
+    except StreamProbePreempted:
+        raise
+    except subprocess.TimeoutExpired:
+        logger.warning("  [ffprobe fallback] Timeout while validating media presence")
+        return None
+    except Exception as exc:
+        logger.warning(f"  [ffprobe fallback] Failed to start: {scrub_urls(exc)}")
+        return None
+
+    elapsed = time.time() - start
+    if result.returncode != 0 or not result.stdout:
+        logger.warning(
+            "  [ffprobe fallback] No usable media info returned "
+            f"(exit={result.returncode})"
+        )
+        return None
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        logger.warning(f"  [ffprobe fallback] Invalid JSON: {exc}")
+        return None
+
+    streams = payload.get('streams') or []
+    video = next(
+        (
+            stream for stream in streams
+            if stream.get('codec_type') == 'video'
+            and (_safe_int(stream.get('width')) or 0) > 0
+            and (_safe_int(stream.get('height')) or 0) > 0
+        ),
+        None,
+    )
+    if not video:
+        logger.warning("  [ffprobe fallback] No valid video stream found")
+        return None
+
+    audio = next((stream for stream in streams if stream.get('codec_type') == 'audio'), None)
+    width = _safe_int(video.get('width')) or 0
+    height = _safe_int(video.get('height')) or 0
+    video_codec = _sanitize_codec_name(video.get('codec_name'))
+    audio_codec = _sanitize_codec_name(audio.get('codec_name')) if audio else 'N/A'
+    fps = _parse_ffprobe_rate(video.get('avg_frame_rate')) or _parse_ffprobe_rate(video.get('r_frame_rate'))
+    bitrate_kbps = (
+        _kbps_from_ffprobe_bit_rate(video.get('bit_rate'))
+        or _kbps_from_ffprobe_bit_rate((payload.get('format') or {}).get('bit_rate'))
+    )
+
+    metadata = {
+        'color_transfer': video.get('color_transfer'),
+        'color_primaries': video.get('color_primaries'),
+        'color_space': video.get('color_space'),
+        'pix_fmt': video.get('pix_fmt'),
+        'profile': video.get('profile'),
+    }
+
+    logger.info(
+        "  [ffprobe fallback] Valid media after %s: %sx%s, %.2f FPS, %s/%s",
+        reason,
+        width,
+        height,
+        fps,
+        video_codec,
+        audio_codec,
+    )
+    return {
+        'video_codec': video_codec,
+        'audio_codec': audio_codec,
+        'resolution': f"{width}x{height}",
+        'fps': fps,
+        'bitrate_kbps': bitrate_kbps,
+        'bitrate_source': 'ffprobe_fallback' if bitrate_kbps is not None else 'ffprobe_media_fallback_no_bitrate',
+        'hdr_format': _detect_hdr_format(metadata),
+        'pixel_format': video.get('pix_fmt'),
+        'audio_sample_rate': _safe_int(audio.get('sample_rate')) if audio else None,
+        'audio_channels': _safe_int(audio.get('channels')) if audio else None,
+        'channel_layout': audio.get('channel_layout') if audio else None,
+        'audio_bitrate': _safe_int(_kbps_from_ffprobe_bit_rate(audio.get('bit_rate'))) if audio else None,
+        'status': 'OK',
+        'ffprobe_fallback_ran': True,
+        'ffprobe_fallback_reason': reason,
+        'ffprobe_fallback_elapsed_time': elapsed,
+    }
+
+
+def _visual_probe_default_result(
+    *,
+    visual_duration: int,
+    requested_duration: int,
+    blank_check_enabled: bool,
+    freeze_check_enabled: bool,
+) -> Dict[str, Any]:
+    duration_adjusted = visual_duration > requested_duration
+    return {
+        'visual_probe_ran': bool(blank_check_enabled or freeze_check_enabled),
+        'visual_probe_completed': False,
+        'visual_probe_incomplete': False,
+        'visual_probe_incomplete_reason': 'none',
+        'visual_probe_requested_duration_seconds': requested_duration,
+        'visual_probe_minimum_duration_seconds': visual_duration,
+        'visual_probe_duration_seconds': visual_duration,
+        'visual_probe_duration_adjusted': duration_adjusted,
+        'visual_probe_duration_adjustment_reason': (
+            'detector_minimum_window' if duration_adjusted else 'none'
+        ),
+        'visual_probe_elapsed_time': None,
+        'blank_probe_ran': bool(blank_check_enabled),
+        'blank_detected': False,
+        'blank_duration_secs': None,
+        'blank_ratio': None,
+        'blank_segments': [],
+        'freeze_probe_ran': bool(freeze_check_enabled),
+        'freeze_detected': False,
+        'freeze_duration_secs': None,
+        'freeze_ratio': None,
+        'freeze_segments': [],
+    }
+
+
+def _mark_visual_probe_incomplete(
+    result: Dict[str, Any],
+    *,
+    reason: str,
+    elapsed: Optional[float] = None,
+) -> Dict[str, Any]:
+    result['visual_probe_incomplete'] = True
+    result['visual_probe_incomplete_reason'] = reason
+    result['blank_detected'] = False
+    result['freeze_detected'] = False
+    if elapsed is not None:
+        result['visual_probe_elapsed_time'] = elapsed
+    result['measurement_incomplete'] = True
+    result['measurement_incomplete_reason'] = f'visual_probe_{reason}'
+    result['measurement_incomplete_context'] = {
+        'reason': reason,
+        'visual_probe_requested_duration_seconds': result.get(
+            'visual_probe_requested_duration_seconds'
+        ),
+        'visual_probe_minimum_duration_seconds': result.get(
+            'visual_probe_minimum_duration_seconds'
+        ),
+        'visual_probe_duration_seconds': result.get('visual_probe_duration_seconds'),
+        'visual_probe_duration_adjusted': result.get('visual_probe_duration_adjusted'),
+        'visual_probe_duration_adjustment_reason': result.get(
+            'visual_probe_duration_adjustment_reason'
+        ),
+        'visual_probe_elapsed_time': result.get('visual_probe_elapsed_time'),
+        'blank_probe_ran': result.get('blank_probe_ran'),
+        'freeze_probe_ran': result.get('freeze_probe_ran'),
+    }
+    return result
+
+
+def _run_visual_detection_probe(
+    url: str,
+    *,
+    duration: int,
+    timeout: int,
+    user_agent: str,
+    stream_startup_buffer: int,
+    blank_check_enabled: bool,
+    blank_check_min_duration: float,
+    blank_check_pixel_threshold: float,
+    blank_check_ratio_threshold: float,
+    freeze_check_enabled: bool,
+    freeze_check_min_duration: float,
+    freeze_check_noise_threshold: float,
+    freeze_check_ratio_threshold: float,
+    hardware_acceleration: Optional[Dict[str, Any]],
+    preempt_check: Optional[Callable[[], bool]],
+) -> Dict[str, Any]:
+    """Run expensive visual filters separately from the cheap bitrate probe."""
+    visual_duration = _visual_probe_duration(
+        duration=duration,
+        blank_check_enabled=blank_check_enabled,
+        blank_check_min_duration=blank_check_min_duration,
+        freeze_check_enabled=freeze_check_enabled,
+        freeze_check_min_duration=freeze_check_min_duration,
+    )
+    requested_duration = max(1, int(math.ceil(float(duration or 0))))
+    result_data = _visual_probe_default_result(
+        visual_duration=visual_duration,
+        requested_duration=requested_duration,
+        blank_check_enabled=blank_check_enabled,
+        freeze_check_enabled=freeze_check_enabled,
+    )
+
+    video_filters = []
+    if blank_check_enabled:
+        video_filters.append(
+            f'blackdetect=d={float(blank_check_min_duration):g}:'
+            f'pix_th={float(blank_check_pixel_threshold):g}'
+        )
+    if freeze_check_enabled:
+        video_filters.append(
+            f'freezedetect=n={float(freeze_check_noise_threshold):g}:'
+            f'd={float(freeze_check_min_duration):g}'
+        )
+    if not video_filters:
+        return result_data
+
+    extra_args = _get_ffmpeg_extra_args()
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
+    hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
+    command = [
+        'ffmpeg', '-re', '-v', 'info', '-stats',
+        '-user_agent', user_agent,
+    ] + hwaccel_args + extra_args + [
+        '-i', url, '-t', str(visual_duration),
+        '-map', '0:v:0?', '-an', '-sn',
+        '-vf', ','.join(video_filters),
+        '-f', 'null', os.devnull,
+    ]
+    fallback_command = None
+    if hwaccel_args and hwaccel_config.get('allow_fallback', True):
+        fallback_command = [
+            'ffmpeg', '-re', '-v', 'info', '-stats',
+            '-user_agent', user_agent,
+        ] + extra_args + [
+            '-i', url, '-t', str(visual_duration),
+            '-map', '0:v:0?', '-an', '-sn',
+            '-vf', ','.join(video_filters),
+            '-f', 'null', os.devnull,
+        ]
+
+    _log_ffmpeg_hwaccel_request(
+        "visual stream analysis",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=True,
+    )
+
+    visual_timeout = timeout + visual_duration + stream_startup_buffer
+    try:
+        start = time.time()
+        visual_slot_acquired = False
+        try:
+            _acquire_semaphore_with_preemption(
+                _VISUAL_PROBE_SEMAPHORE,
+                preempt_check,
+            )
+            visual_slot_acquired = True
+            visual_result = _run_ffmpeg_with_optional_fallback(
+                command,
+                fallback_command=fallback_command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                timeout=visual_timeout,
+                text=True,
+                context="visual stream analysis",
+                preempt_check=preempt_check,
+            )
+        finally:
+            if visual_slot_acquired:
+                _VISUAL_PROBE_SEMAPHORE.release()
+        elapsed = time.time() - start
+        result_data['visual_probe_elapsed_time'] = elapsed
+        result_data['visual_probe_completed'] = visual_result.returncode == 0
+
+        output = visual_result.stderr or ''
+        if blank_check_enabled:
+            result_data.update(_parse_blank_detection(
+                output,
+                duration=visual_duration,
+                blank_ratio_threshold=float(blank_check_ratio_threshold),
+            ))
+            if result_data.get('blank_detected'):
+                logger.warning(
+                    "  [blank-detect] Blank screen detected "
+                    f"({result_data['blank_duration_secs']:.1f}s/"
+                    f"{visual_duration}s, ratio={result_data['blank_ratio']:.2f})"
+                )
+        if freeze_check_enabled:
+            result_data.update(_parse_freeze_detection(
+                output,
+                duration=visual_duration,
+                freeze_ratio_threshold=float(freeze_check_ratio_threshold),
+            ))
+            if result_data.get('freeze_detected'):
+                logger.warning(
+                    "  [freeze-detect] Frozen picture detected "
+                    f"({result_data['freeze_duration_secs']:.1f}s/"
+                    f"{visual_duration}s, ratio={result_data['freeze_ratio']:.2f})"
+                )
+
+        if visual_result.returncode != 0:
+            return _mark_visual_probe_incomplete(
+                result_data,
+                reason=f'exit_{visual_result.returncode}',
+                elapsed=elapsed,
+            )
+        return result_data
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "Visual blank/freeze probe timed out after %ss; keeping bitrate "
+            "measurement and marking visual detection incomplete",
+            visual_timeout,
+        )
+        return _mark_visual_probe_incomplete(
+            result_data,
+            reason='timeout',
+            elapsed=float(visual_timeout),
+        )
+    except StreamProbePreempted:
+        logger.info("Visual blank/freeze probe preempted because viewer capacity is needed")
+        result_data['preempted'] = True
+        result_data['preempt_reason'] = 'viewer_preempted'
+        return _mark_visual_probe_incomplete(
+            result_data,
+            reason='preempted',
+        )
+    except Exception as exc:
+        logger.warning(f"Visual blank/freeze probe failed: {scrub_urls(exc)}")
+        return _mark_visual_probe_incomplete(
+            result_data,
+            reason=type(exc).__name__,
+        )
+
+
+def get_stream_info_and_bitrate(
+    url: str,
+    duration: int = 30,
+    timeout: int = 30,
+    user_agent: str = 'VLC/3.0.14',
+    stream_startup_buffer: int = 10,
+    blank_check_enabled: bool = False,
+    blank_check_min_duration: float = 2.0,
+    blank_check_pixel_threshold: float = 0.10,
+    blank_check_ratio_threshold: float = 0.80,
+    freeze_check_enabled: bool = False,
+    freeze_check_min_duration: float = 5.0,
+    freeze_check_noise_threshold: float = 0.001,
+    freeze_check_ratio_threshold: float = 0.80,
+    hardware_acceleration: Optional[Dict[str, Any]] = None,
+    preempt_check: Optional[Callable[[], bool]] = None,
+) -> Dict[str, Any]:
+    """
+    Get complete stream information using ffmpeg.
 
     Uses ffmpeg flags:
         -v info   : preserves Input#/Stream# lines for codec+resolution parsing
@@ -424,12 +1631,24 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
         timeout: Base timeout in seconds (actual timeout includes duration + overhead)
         user_agent: User agent string to use for HTTP requests
         stream_startup_buffer: Buffer in seconds for stream startup (default: 10s)
+        blank_check_enabled: Run a separate ffmpeg blackdetect visual probe
+        blank_check_min_duration: Minimum continuous black duration in seconds
+        blank_check_pixel_threshold: blackdetect pixel threshold
+        blank_check_ratio_threshold: Probe-window ratio required to flag blank
+        freeze_check_enabled: Run a separate ffmpeg freezedetect visual probe
+        freeze_check_min_duration: Minimum continuous frozen duration in seconds
+        freeze_check_noise_threshold: freezedetect noise threshold
+        freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
+        hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
+        preempt_check: Optional callback returning True when the probe should abort
 
     Returns:
         Dictionary containing:
         - video_codec, audio_codec, resolution, fps, bitrate_kbps
         - hdr_format, pixel_format, audio_sample_rate, audio_channels
         - channel_layout, audio_bitrate, status, elapsed_time
+        - blank_probe_ran, blank_detected, blank_duration_secs, blank_ratio
+        - freeze_probe_ran, freeze_detected, freeze_duration_secs, freeze_ratio
     """
     # Validate and sanitize URL to prevent command injection
     if not url or not isinstance(url, str):
@@ -439,24 +1658,43 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
             'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,
             'pixel_format': None, 'audio_sample_rate': None,
             'audio_channels': None, 'channel_layout': None,
-            'audio_bitrate': None, 'status': 'Error', 'elapsed_time': 0
+            'audio_bitrate': None, 'status': 'Error', 'elapsed_time': 0,
+            'blank_probe_ran': False, 'blank_detected': False,
+            'blank_duration_secs': None, 'blank_ratio': None,
+            'blank_segments': [],
+            'freeze_probe_ran': False, 'freeze_detected': False,
+            'freeze_duration_secs': None, 'freeze_ratio': None,
+            'freeze_segments': [],
+            'bitrate_source': None,
         }
 
     url_lower = url.lower()
     if not (url_lower.startswith('http://') or url_lower.startswith('https://') or
             url_lower.startswith('rtmp://') or url_lower.startswith('rtmps://')):
-        logger.error(f"Invalid URL protocol: {url[:50]}... (must be http://, https://, rtmp://, or rtmps://)")
+        logger.error(
+            f"Invalid URL protocol: {url_ref(url)} "
+            "(must be http://, https://, rtmp://, or rtmps://)"
+        )
         return {
             'video_codec': 'N/A', 'audio_codec': 'N/A', 'resolution': '0x0',
             'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,
             'pixel_format': None, 'audio_sample_rate': None,
             'audio_channels': None, 'channel_layout': None,
-            'audio_bitrate': None, 'status': 'Error', 'elapsed_time': 0
+            'audio_bitrate': None, 'status': 'Error', 'elapsed_time': 0,
+            'blank_probe_ran': False, 'blank_detected': False,
+            'blank_duration_secs': None, 'blank_ratio': None,
+            'blank_segments': [],
+            'freeze_probe_ran': False, 'freeze_detected': False,
+            'freeze_duration_secs': None, 'freeze_ratio': None,
+            'freeze_segments': [],
+            'bitrate_source': None,
         }
 
-    logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url[:50]}...")
+    logger.debug(f"Analyzing stream with ffmpeg for {duration}s: {url_ref(url)}")
 
     extra_args = _get_ffmpeg_extra_args()
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
+    hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
 
     # Flag rationale:
     #   -re      : read at native frame rate so bitrate reflects real playback
@@ -479,30 +1717,100 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
     command = [
         'ffmpeg', '-re', '-v', 'info', '-stats',
         '-user_agent', user_agent,
-    ] + extra_args + [
+    ] + hwaccel_args + extra_args + [
         '-i', url, '-t', str(duration),
         '-c', 'copy', '-f', 'mpegts', 'pipe:1'
     ]
+    fallback_command = None
+    if hwaccel_args and hwaccel_config.get('allow_fallback', True):
+        fallback_command = [
+            'ffmpeg', '-re', '-v', 'info', '-stats',
+            '-user_agent', user_agent,
+        ] + extra_args + [
+            '-i', url, '-t', str(duration),
+            '-c', 'copy', '-f', 'mpegts', 'pipe:1'
+        ]
+
+    _log_ffmpeg_hwaccel_request(
+        "stream analysis",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=False,
+    )
+
+    # Total subprocess timeout: analysis window + startup and completion headroom.
+    actual_timeout = _stream_analysis_timeout(timeout, duration, stream_startup_buffer)
 
     result_data = {
         'video_codec': 'N/A', 'audio_codec': 'N/A', 'resolution': '0x0',
         'fps': 0, 'bitrate_kbps': None, 'hdr_format': None,
         'pixel_format': None, 'audio_sample_rate': None,
         'audio_channels': None, 'channel_layout': None,
-        'audio_bitrate': None, 'status': 'OK', 'elapsed_time': 0
+        'audio_bitrate': None, 'status': 'OK', 'elapsed_time': 0,
+        'timeout_seconds': actual_timeout,
+        'operation_timeout_seconds': timeout,
+        'ffmpeg_duration_seconds': duration,
+        'startup_buffer_seconds': stream_startup_buffer,
+        'completion_headroom_seconds': STREAM_ANALYSIS_COMPLETION_HEADROOM_SECONDS,
+        'blank_probe_ran': False, 'blank_detected': False,
+        'blank_duration_secs': None, 'blank_ratio': None,
+        'blank_segments': [],
+        'freeze_probe_ran': False, 'freeze_detected': False,
+        'freeze_duration_secs': None, 'freeze_ratio': None,
+        'freeze_segments': [],
+        'visual_probe_ran': False,
+        'visual_probe_completed': False,
+        'visual_probe_incomplete': False,
+        'visual_probe_incomplete_reason': 'none',
+        'visual_probe_requested_duration_seconds': None,
+        'visual_probe_minimum_duration_seconds': None,
+        'visual_probe_duration_seconds': None,
+        'visual_probe_duration_adjusted': False,
+        'visual_probe_duration_adjustment_reason': 'none',
+        'visual_probe_elapsed_time': None,
+        'measurement_incomplete': False,
+        'measurement_incomplete_reason': 'none',
+        'measurement_incomplete_context': {},
+        'preempted': False, 'preempt_reason': None,
+        'bitrate_source': None,
+        'ffprobe_fallback_ran': False,
+        'ffprobe_fallback_reason': None,
+        'ffprobe_fallback_elapsed_time': None,
     }
 
-    # Total subprocess timeout: analysis window + startup headroom
-    actual_timeout = timeout + duration + stream_startup_buffer
+    def apply_visual_probe() -> None:
+        if not (blank_check_enabled or freeze_check_enabled):
+            return
+        visual_result = _run_visual_detection_probe(
+            url,
+            duration=duration,
+            timeout=timeout,
+            user_agent=user_agent,
+            stream_startup_buffer=stream_startup_buffer,
+            blank_check_enabled=blank_check_enabled,
+            blank_check_min_duration=blank_check_min_duration,
+            blank_check_pixel_threshold=blank_check_pixel_threshold,
+            blank_check_ratio_threshold=blank_check_ratio_threshold,
+            freeze_check_enabled=freeze_check_enabled,
+            freeze_check_min_duration=freeze_check_min_duration,
+            freeze_check_noise_threshold=freeze_check_noise_threshold,
+            freeze_check_ratio_threshold=freeze_check_ratio_threshold,
+            hardware_acceleration=hardware_acceleration,
+            preempt_check=preempt_check,
+        )
+        result_data.update(visual_result)
 
     try:
         start = time.time()
-        result = subprocess.run(
+        result = _run_ffmpeg_with_optional_fallback(
             command,
+            fallback_command=fallback_command,
             stdout=subprocess.DEVNULL,  # OS drains stdout so ffmpeg never blocks
             stderr=subprocess.PIPE,
             timeout=actual_timeout,
-            text=True
+            text=True,
+            context="stream analysis",
+            preempt_check=preempt_check,
         )
         elapsed = time.time() - start
         result_data['elapsed_time'] = elapsed
@@ -510,12 +1818,16 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
         output = result.stderr
         progress_bitrate = None
         last_stats_line = None  # keeps updating; final line is the most stable average
+        last_media_time = 0.0
 
         # Track Input vs Output sections so we only parse input stream codecs,
         # not decoded output formats (e.g. pcm_s16le instead of aac)
         in_input_section = False
 
         for line in output.splitlines():
+            progress_time = _parse_ffmpeg_progress_time(line)
+            if progress_time is not None:
+                last_media_time = max(last_media_time, progress_time)
 
             # ── Section tracking ─────────────────────────────────────────────
             if 'Input #' in line:
@@ -681,6 +1993,7 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
         # ── Post-loop: commit final (most stable) bitrate reading ─────────────
         if progress_bitrate is not None:
             result_data['bitrate_kbps'] = progress_bitrate
+            result_data['bitrate_source'] = 'ffmpeg_progress'
             if last_stats_line:
                 logger.debug(
                     f"  [ffmpeg final] {last_stats_line} "
@@ -690,12 +2003,26 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
         # ── Warn clearly when no stats line was produced ──────────────────────
         expected_min_time = duration * EARLY_EXIT_THRESHOLD
         exited_early = elapsed < expected_min_time
+        if result_data['bitrate_kbps'] is None:
+            bytes_fallback_bitrate = _estimate_bitrate_from_ffmpeg_bytes_read(
+                output,
+                duration=duration,
+                elapsed=elapsed,
+                media_time=last_media_time,
+            )
+            if bytes_fallback_bitrate is not None and result.returncode == 0:
+                result_data['bitrate_kbps'] = bytes_fallback_bitrate
+                result_data['bitrate_source'] = 'ffmpeg_bytes_read_fallback'
+                logger.info(
+                    "  [ffmpeg fallback] Estimated bitrate from bytes read: "
+                    f"{bytes_fallback_bitrate:.2f} kbps"
+                )
 
         if result_data['bitrate_kbps'] is None:
             logger.warning(
                 f"  [!] No bitrate detected — ffmpeg produced no valid stats lines "
                 f"(elapsed={elapsed:.2f}s, expected ~{duration}s). "
-                f"Stream is likely dead or unresponsive."
+                f"Measurement is incomplete and should be rechecked before scoring."
             )
             if exited_early or result.returncode != 0:
                 if result.returncode != 0:
@@ -712,12 +2039,44 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
                 ]
                 _log_ffmpeg_errors(output, logger, error_patterns)
 
+        apply_visual_probe()
+
         logger.debug(f"  Analysis completed in {elapsed:.2f}s")
 
     except subprocess.TimeoutExpired:
         logger.warning(f"Timeout ({actual_timeout}s) while analyzing stream")
-        result_data['status'] = "Timeout"
-        result_data['elapsed_time'] = actual_timeout
+        try:
+            fallback = _ffprobe_media_fallback(
+                url,
+                timeout=min(max(timeout, 10), 20),
+                user_agent=user_agent,
+                reason='ffmpeg_timeout',
+                preempt_check=preempt_check,
+            )
+        except StreamProbePreempted:
+            logger.info(
+                "FFprobe media fallback preempted because viewer capacity is needed"
+            )
+            result_data['status'] = "PREEMPTED"
+            result_data['preempted'] = True
+            result_data['preempt_reason'] = 'viewer_preempted'
+            result_data['elapsed_time'] = time.time() - start if 'start' in locals() else 0
+            return result_data
+        if fallback:
+            result_data.update(fallback)
+            result_data['elapsed_time'] = actual_timeout + float(
+                fallback.get('ffprobe_fallback_elapsed_time') or 0.0
+            )
+            apply_visual_probe()
+        else:
+            result_data['status'] = "Timeout"
+            result_data['elapsed_time'] = actual_timeout
+    except StreamProbePreempted:
+        logger.info("Stream analysis preempted because viewer capacity is needed")
+        result_data['status'] = "PREEMPTED"
+        result_data['preempted'] = True
+        result_data['preempt_reason'] = 'viewer_preempted'
+        result_data['elapsed_time'] = time.time() - start if 'start' in locals() else 0
     except Exception as e:
         logger.error(f"Stream analysis failed: {e}")
         result_data['status'] = "Error"
@@ -726,7 +2085,14 @@ def get_stream_info_and_bitrate(url: str, duration: int = 30, timeout: int = 30,
     return result_data
 
 
-def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_agent: str = 'VLC/3.0.14', stream_startup_buffer: int = 10) -> Tuple[Optional[float], str, float]:
+def get_stream_bitrate(
+    url: str,
+    duration: int = 30,
+    timeout: int = 30,
+    user_agent: str = 'VLC/3.0.14',
+    stream_startup_buffer: int = 10,
+    hardware_acceleration: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[float], str, float]:
     """
     Get stream bitrate using ffmpeg.
 
@@ -739,6 +2105,7 @@ def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_age
         timeout: Base timeout in seconds (actual timeout includes duration + overhead)
         user_agent: User agent string to use for HTTP requests
         stream_startup_buffer: Buffer in seconds for stream startup (default: 10s)
+        hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
 
     Returns:
         Tuple of (bitrate_kbps, status, elapsed_time)
@@ -748,33 +2115,57 @@ def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_age
     """
     logger.debug(f"Analyzing bitrate for {duration}s...")
     extra_args = _get_ffmpeg_extra_args()
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
+    hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
     command = [
         'ffmpeg', '-re', '-v', 'info', '-stats',
         '-user_agent', user_agent,
-    ] + extra_args + [
+    ] + hwaccel_args + extra_args + [
         '-i', url, '-t', str(duration),
         '-c', 'copy', '-f', 'mpegts', 'pipe:1'
     ]
+    fallback_command = None
+    if hwaccel_args and hwaccel_config.get('allow_fallback', True):
+        fallback_command = [
+            'ffmpeg', '-re', '-v', 'info', '-stats',
+            '-user_agent', user_agent,
+        ] + extra_args + [
+            '-i', url, '-t', str(duration),
+            '-c', 'copy', '-f', 'mpegts', 'pipe:1'
+        ]
+
+    _log_ffmpeg_hwaccel_request(
+        "bitrate analysis",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=False,
+    )
 
     bitrate = None
     status = "OK"
-    actual_timeout = timeout + duration + stream_startup_buffer
+    actual_timeout = _stream_analysis_timeout(timeout, duration, stream_startup_buffer)
 
     try:
         start = time.time()
-        result = subprocess.run(
+        result = _run_ffmpeg_with_optional_fallback(
             command,
+            fallback_command=fallback_command,
             stdout=subprocess.DEVNULL,  # OS drains stdout so ffmpeg never blocks
             stderr=subprocess.PIPE,
             timeout=actual_timeout,
-            text=True
+            text=True,
+            context="bitrate analysis",
         )
         elapsed = time.time() - start
         output = result.stderr
         progress_bitrate = None
         last_stats_line = None
+        last_media_time = 0.0
 
         for line in output.splitlines():
+            progress_time = _parse_ffmpeg_progress_time(line)
+            if progress_time is not None:
+                last_media_time = max(last_media_time, progress_time)
             if 'bitrate=' in line and 'bits/s' in line:
                 logger.debug(f"  [ffmpeg stats] {line.strip()}")
                 last_stats_line = line.strip()
@@ -807,12 +2198,25 @@ def get_stream_bitrate(url: str, duration: int = 30, timeout: int = 30, user_age
 
         expected_min_time = duration * EARLY_EXIT_THRESHOLD
         exited_early = elapsed < expected_min_time
+        if bitrate is None:
+            bytes_fallback_bitrate = _estimate_bitrate_from_ffmpeg_bytes_read(
+                output,
+                duration=duration,
+                elapsed=elapsed,
+                media_time=last_media_time,
+            )
+            if bytes_fallback_bitrate is not None and result.returncode == 0:
+                bitrate = bytes_fallback_bitrate
+                logger.info(
+                    "  [ffmpeg fallback] Estimated bitrate from bytes read: "
+                    f"{bytes_fallback_bitrate:.2f} kbps"
+                )
 
         if bitrate is None:
             logger.warning(
                 f"  [!] No bitrate detected — ffmpeg produced no valid stats lines "
                 f"(elapsed={elapsed:.2f}s, expected ~{duration}s). "
-                f"Stream is likely dead or unresponsive."
+                f"Bitrate is unavailable and should not be reused for scoring."
             )
             logger.debug(f"  Searched {len(output.splitlines())} lines of output")
             if exited_early or result.returncode != 0:
@@ -850,6 +2254,9 @@ def _probe_stream_for_loops(
     stream_tag: str,
     probe_duration: int = _LOOP_PROBE_DURATION,
     user_agent: str = 'VLC/3.0.14',
+    hardware_acceleration: Optional[Dict[str, Any]] = None,
+    headers: Optional[str] = None,
+    should_abort: Optional[Callable[[], bool]] = None,
 ) -> 'tuple[bool, float | None, int]':
     """
     Probe a stream for looping content using a single lightweight FFmpeg process.
@@ -870,6 +2277,10 @@ def _probe_stream_for_loops(
         probe_duration: Seconds to run. Clamped to
                         [_LOOP_PROBE_DURATION_MIN, _LOOP_PROBE_DURATION_MAX].
         user_agent:     HTTP User-Agent forwarded to FFmpeg.
+        hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default.
+        headers:        Optional HTTP headers forwarded to FFmpeg.
+        should_abort:   Optional callback polled while FFmpeg is running. When
+                        it returns True, the probe terminates early.
 
     Returns:
         (loop_detected, loop_duration_secs, frames_processed)
@@ -882,17 +2293,22 @@ def _probe_stream_for_loops(
         logger.error(f"[loop-probe:{stream_tag}] SidecarLoopDetector unavailable")
         return False, None, 0
 
-    try:
-        import imagehash as _imagehash
-    except ImportError:
-        _imagehash = None
-
     clamped = max(_LOOP_PROBE_DURATION_MIN, min(_LOOP_PROBE_DURATION_MAX, probe_duration))
 
     logger.info(
         f"[loop-probe:{stream_tag}] Starting {clamped}s probe "
         f"(hamming_tolerance={_LOOP_PROBE_HAMMING_TOLERANCE}, "
-        f"sequence_length=3, duration_threshold=10.0s)"
+        f"sequence_length=3, duration_threshold=10.0s, "
+        f"ffmpeg_fps=1, media_time_sampling=true)"
+    )
+
+    hwaccel_config = _resolve_ffmpeg_hwaccel_config(hardware_acceleration)
+    hwaccel_args = _get_ffmpeg_hwaccel_args(hwaccel_config)
+    _log_ffmpeg_hwaccel_request(
+        f"loop probe {stream_tag}",
+        hwaccel_config,
+        hwaccel_args,
+        decode_filters=True,
     )
 
     cmd = [
@@ -901,15 +2317,40 @@ def _probe_stream_for_loops(
         '-nostdin',
         '-loglevel', 'warning',
         '-user_agent', user_agent,
+    ]
+    if headers:
+        cmd.extend(['-headers', headers])
+    cmd.extend(hwaccel_args + [
         '-i', url,
         '-t', str(clamped),
         '-map', '0:v:0',
         '-an', '-sn',
-        '-vf', 'scale=32:32:flags=fast_bilinear,format=gray',
+        '-vf', 'fps=1,scale=32:32:flags=fast_bilinear,format=gray',
         '-c:v', 'ppm',
         '-f', 'image2pipe',
         'pipe:1',
-    ]
+    ])
+    fallback_cmd = None
+    if hwaccel_args and hwaccel_config.get('allow_fallback', True):
+        fallback_cmd = [
+            'ffmpeg',
+            '-hide_banner',
+            '-nostdin',
+            '-loglevel', 'warning',
+            '-user_agent', user_agent,
+        ]
+        if headers:
+            fallback_cmd.extend(['-headers', headers])
+        fallback_cmd.extend([
+            '-i', url,
+            '-t', str(clamped),
+            '-map', '0:v:0',
+            '-an', '-sn',
+            '-vf', 'fps=1,scale=32:32:flags=fast_bilinear,format=gray',
+            '-c:v', 'ppm',
+            '-f', 'image2pipe',
+            'pipe:1',
+        ])
 
     try:
         proc = subprocess.Popen(
@@ -931,6 +2372,7 @@ def _probe_stream_for_loops(
     def _reader():
         nonlocal loop_detected, loop_duration
         logger.debug(f"[loop-probe:{stream_tag}] Reader thread started")
+        max_media_frames = clamped + 2
         try:
             while not detector.is_closed:
                 frame_data = detector._read_ppm_frame()
@@ -938,18 +2380,23 @@ def _probe_stream_for_loops(
                     logger.debug(f"[loop-probe:{stream_tag}] Pipe EOF — reader exiting")
                     break
 
-                ts = time.monotonic()
-                detector.last_frame_time = ts
+                wall_time = time.monotonic()
+                detector.last_frame_time = wall_time
+                # FFmpeg already emits one frame per media second via fps=1.
+                # Dispatcharr may deliver buffered media faster than wall clock,
+                # so a second wall-time throttle would discard valid samples.
+                media_time = float(frames_done[0])
 
                 try:
                     img = Image.open(io.BytesIO(frame_data))
-                    h   = _imagehash.phash(img) if _imagehash else detector._simple_hash(img)
-                    detector.buffer.append((ts, h))
+                    h   = detector.frame_signature(img)
+                    detector.buffer.append((media_time, h))
                     frames_done[0] += 1
 
+                    display_hash = h.get("phash") if isinstance(h, dict) else h
                     logger.debug(
                         f"[loop-probe:{stream_tag}] "
-                        f"frame={frames_done[0]:4d}  hash={h}  buffer={len(detector.buffer)}"
+                        f"frame={frames_done[0]:4d}  hash={display_hash}  buffer={len(detector.buffer)}"
                     )
 
                     detected = detector.detect_loop(
@@ -958,6 +2405,9 @@ def _probe_stream_for_loops(
                     if detected:
                         detector._is_looping   = True
                         detector._loop_duration = detected
+                        loop_detected = True
+                        if loop_duration is None or detected > loop_duration:
+                            loop_duration = detected
                         logger.debug(
                             f"[loop-probe:{stream_tag}] Loop signal at "
                             f"frame {frames_done[0]}: period={detected:.1f}s"
@@ -965,6 +2415,13 @@ def _probe_stream_for_loops(
                     else:
                         detector._is_looping   = False
                         detector._loop_duration = 0.0
+
+                    if frames_done[0] >= max_media_frames:
+                        logger.debug(
+                            f"[loop-probe:{stream_tag}] Reached media-frame safety cap "
+                            f"({max_media_frames})"
+                        )
+                        break
 
                 except Exception as frame_err:
                     logger.debug(f"[loop-probe:{stream_tag}] Frame error: {frame_err}")
@@ -979,14 +2436,53 @@ def _probe_stream_for_loops(
             except Exception:
                 pass
 
-        loop_detected = detector.is_looping()
-        loop_duration = detector.get_loop_duration() if loop_detected else None
+        if not loop_detected:
+            loop_detected = detector.is_looping()
+            loop_duration = detector.get_loop_duration() if loop_detected else None
 
     reader = threading.Thread(
         target=_reader, daemon=True,
         name=f"LoopProbe-Reader[{stream_tag}]"
     )
     reader.start()
+
+    abort_watcher_stop = threading.Event()
+    abort_watcher_thread: Optional[threading.Thread] = None
+
+    if callable(should_abort):
+        def _abort_watcher() -> None:
+            while not abort_watcher_stop.wait(0.5):
+                try:
+                    if not should_abort():
+                        continue
+                except Exception as abort_exc:
+                    logger.warning(f"[loop-probe:{stream_tag}] Abort callback failed: {abort_exc}")
+                    return
+                logger.info(f"[loop-probe:{stream_tag}] Abort requested; terminating probe")
+                try:
+                    proc.terminate()
+                except Exception as terminate_exc:
+                    logger.warning(f"[loop-probe:{stream_tag}] Abort terminate failed: {terminate_exc}")
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+                return
+
+        abort_watcher_thread = threading.Thread(
+            target=_abort_watcher,
+            daemon=True,
+            name=f"LoopProbe-AbortWatcher[{stream_tag}]",
+        )
+        abort_watcher_thread.start()
+
+        try:
+            if should_abort():
+                logger.info(f"[loop-probe:{stream_tag}] Abort requested before wait; terminating probe")
+                proc.terminate()
+        except Exception as abort_exc:
+            logger.warning(f"[loop-probe:{stream_tag}] Abort callback failed: {abort_exc}")
+            should_abort = None
 
     # Wait for FFmpeg; hard-kill if it overshoots
     try:
@@ -997,6 +2493,10 @@ def _probe_stream_for_loops(
         )
         proc.kill()
         proc.wait()
+
+    abort_watcher_stop.set()
+    if abort_watcher_thread is not None:
+        abort_watcher_thread.join(timeout=1)
 
     detector.is_closed = True
     reader.join(timeout=10)
@@ -1009,13 +2509,28 @@ def _probe_stream_for_loops(
     except Exception:
         stderr_out = ''
 
+    if n == 0 and fallback_cmd and _looks_like_hwaccel_failure(stderr_out):
+        logger.warning(
+            "[loop-probe:%s] FFmpeg hardware acceleration failed; retrying on CPU",
+            stream_tag,
+        )
+        return _probe_stream_for_loops(
+            url=url,
+            stream_tag=stream_tag,
+            probe_duration=probe_duration,
+            user_agent=user_agent,
+            hardware_acceleration={'enabled': False},
+            headers=headers,
+            should_abort=should_abort,
+        )
+
     if n == 0:
         logger.warning(
             f"[loop-probe:{stream_tag}] 0 frames received — loop detection "
             f"inconclusive. Stream may not expose decodable video frames."
         )
         if stderr_out:
-            logger.warning(f"[loop-probe:{stream_tag}] FFmpeg said: {stderr_out[:300]}")
+            logger.warning(f"[loop-probe:{stream_tag}] FFmpeg said: {scrub_urls(stderr_out[:300])}")
     elif loop_detected:
         logger.warning(
             f"[loop-probe:{stream_tag}] LOOP DETECTED — "
@@ -1029,6 +2544,54 @@ def _probe_stream_for_loops(
     return loop_detected, loop_duration, n
 
 
+def _analysis_failure_context(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value for key, value in {
+            'elapsed_seconds': result.get('elapsed_time'),
+            'timeout_seconds': result.get('timeout_seconds'),
+            'operation_timeout_seconds': result.get('operation_timeout_seconds'),
+            'ffmpeg_duration_seconds': result.get('ffmpeg_duration_seconds', result.get('ffmpeg_duration')),
+            'startup_buffer_seconds': result.get('startup_buffer_seconds', result.get('stream_startup_buffer')),
+            'attempt': result.get('attempt'),
+            'attempts': result.get('attempts'),
+            'max_attempts': result.get('max_attempts'),
+            'stage': result.get('stage') or 'stream analysis',
+            'message': result.get('error_message'),
+        }.items()
+        if value not in (None, '', [], {})
+    }
+
+
+def _stamp_analysis_failure_reason(result: Dict[str, Any]) -> None:
+    status = str(result.get('status') or '').strip().lower()
+    if status in {'timeout', 'stream_timeout', 'probe_timeout'}:
+        result['quality_reason'] = 'offline'
+        result['quality_reason_detail'] = 'stream_timeout'
+        result['quality_reason_context'] = _analysis_failure_context(result)
+    elif status in {'error', 'failed'}:
+        result['quality_reason'] = 'offline'
+        result['quality_reason_detail'] = 'error'
+        result['quality_reason_context'] = _analysis_failure_context(result)
+
+
+def _missing_bitrate_context(result: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        key: value for key, value in {
+            'bitrate_source': result.get('bitrate_source'),
+            'ffprobe_fallback_ran': result.get('ffprobe_fallback_ran'),
+            'ffprobe_fallback_reason': result.get('ffprobe_fallback_reason'),
+            'ffprobe_fallback_elapsed_time': result.get('ffprobe_fallback_elapsed_time'),
+            'elapsed_seconds': result.get('elapsed_time'),
+            'ffmpeg_duration_seconds': result.get('ffmpeg_duration_seconds', result.get('ffmpeg_duration')),
+            'attempt': result.get('attempt'),
+            'attempts': result.get('attempts'),
+            'max_attempts': result.get('max_attempts'),
+            'stage': result.get('stage') or 'stream analysis',
+        }.items()
+        if value not in (None, '', [], {})
+    }
+
+
 def analyze_stream(
     stream_url: str,
     stream_id: int,
@@ -1038,7 +2601,18 @@ def analyze_stream(
     retries: int = 1,
     retry_delay: int = 10,
     user_agent: str = 'VLC/3.0.14',
-    stream_startup_buffer: int = 10
+    stream_startup_buffer: int = 10,
+    blank_check_enabled: bool = False,
+    blank_check_min_duration: float = 2.0,
+    blank_check_pixel_threshold: float = 0.10,
+    blank_check_ratio_threshold: float = 0.80,
+    freeze_check_enabled: bool = False,
+    freeze_check_min_duration: float = 5.0,
+    freeze_check_noise_threshold: float = 0.001,
+    freeze_check_ratio_threshold: float = 0.80,
+    hardware_acceleration: Optional[Dict[str, Any]] = None,
+    preempt_check: Optional[Callable[[], bool]] = None,
+    defer_missing_bitrate_retry: bool = False,
 ) -> Dict[str, Any]:
     """
     Perform complete stream analysis including codec, resolution, FPS, bitrate, and audio.
@@ -1058,6 +2632,19 @@ def analyze_stream(
         retry_delay: Delay in seconds between retries
         user_agent: User agent string to use for HTTP requests
         stream_startup_buffer: Buffer in seconds for stream startup (default: 10s)
+        blank_check_enabled: Run blank-screen detection in the same ffmpeg process
+        blank_check_min_duration: Minimum continuous black duration in seconds
+        blank_check_pixel_threshold: blackdetect pixel threshold
+        blank_check_ratio_threshold: Probe-window ratio required to flag blank
+        freeze_check_enabled: Run frozen-picture detection in the same ffmpeg process
+        freeze_check_min_duration: Minimum continuous frozen duration in seconds
+        freeze_check_noise_threshold: freezedetect noise threshold
+        freeze_check_ratio_threshold: Probe-window ratio required to flag frozen
+        hardware_acceleration: Optional ffmpeg hwaccel config; CPU remains default
+        preempt_check: Optional callback returning True when a real viewer needs capacity
+        defer_missing_bitrate_retry: Return a completed missing-bitrate result after
+            the first successful basis probe so the caller can retry it later without
+            competing with the initial parallel channel scan.
 
     Returns:
         Dictionary containing analysis results with keys:
@@ -1066,10 +2653,12 @@ def analyze_stream(
         - hdr_format, pixel_format, audio_sample_rate, audio_channels
         - channel_layout, audio_bitrate, status
     """
+    stream_audit_ref = stream_ref(stream_id, stream_url)
+
     if logger.isEnabledFor(logging.DEBUG):
-        logger.info(f"Analyzing stream: {stream_name} (ID: {stream_id})")
+        logger.info(f"Analyzing stream: {stream_audit_ref}")
     else:
-        logger.debug(f"Checking {stream_name}")
+        logger.debug(f"Checking {stream_audit_ref}")
 
     result = {
         'stream_id': stream_id,
@@ -1090,6 +2679,47 @@ def analyze_stream(
         'status': 'Error',
         'elapsed_time': 0,
         'ffmpeg_duration': ffmpeg_duration,
+        'ffmpeg_duration_seconds': ffmpeg_duration,
+        'timeout_seconds': timeout + ffmpeg_duration + stream_startup_buffer,
+        'operation_timeout_seconds': timeout,
+        'stream_startup_buffer': stream_startup_buffer,
+        'startup_buffer_seconds': stream_startup_buffer,
+        'attempt': 0,
+        'attempts': 0,
+        'max_attempts': retries + 1,
+        'stage': 'stream analysis',
+        'blank_probe_ran': False,
+        'blank_detected': False,
+        'blank_duration_secs': None,
+        'blank_ratio': None,
+        'blank_segments': [],
+        'freeze_probe_ran': False,
+        'freeze_detected': False,
+        'freeze_duration_secs': None,
+        'freeze_ratio': None,
+        'freeze_segments': [],
+        'visual_probe_ran': False,
+        'visual_probe_completed': False,
+        'visual_probe_incomplete': False,
+        'visual_probe_incomplete_reason': 'none',
+        'visual_probe_requested_duration_seconds': None,
+        'visual_probe_minimum_duration_seconds': None,
+        'visual_probe_duration_seconds': None,
+        'visual_probe_duration_adjusted': False,
+        'visual_probe_duration_adjustment_reason': 'none',
+        'visual_probe_elapsed_time': None,
+        'preempted': False,
+        'preempt_reason': None,
+        'ffprobe_fallback_ran': False,
+        'ffprobe_fallback_reason': None,
+        'ffprobe_fallback_elapsed_time': None,
+        'quality_reason': 'offline',
+        'quality_reason_detail': 'error',
+        'quality_reason_context': {},
+        'measurement_incomplete': False,
+        'measurement_incomplete_reason': 'none',
+        'measurement_incomplete_context': {},
+        'bitrate_recheck_required': False,
     }
 
     try:
@@ -1097,21 +2727,57 @@ def analyze_stream(
         for attempt in range(total_attempts):
             if attempt > 0:
                 if logger.isEnabledFor(logging.DEBUG):
-                    logger.info(f"  Retry attempt {attempt} of {retries} (attempt {attempt + 1} of {total_attempts}) for {stream_name}")
+                    logger.info(
+                        f"  Retry attempt {attempt} of {retries} "
+                        f"(attempt {attempt + 1} of {total_attempts}) for {stream_audit_ref}"
+                    )
                 else:
-                    logger.info(f"  Retry {attempt + 1}/{total_attempts} for {stream_name}")
-                time.sleep(retry_delay)
+                    logger.info(f"  Retry {attempt + 1}/{total_attempts} for {stream_audit_ref}")
+                try:
+                    _sleep_with_preemption(retry_delay, preempt_check)
+                except StreamProbePreempted:
+                    logger.info(
+                        f"  {stream_audit_ref}: Retry wait preempted for active viewer capacity"
+                    )
+                    result.update({
+                        'status': 'PREEMPTED',
+                        'preempted': True,
+                        'preempt_reason': 'viewer_preempted',
+                        'elapsed_time': 0,
+                        'attempt': attempt,
+                        'attempts': attempt,
+                        'max_attempts': total_attempts,
+                        'stage': 'stream analysis retry wait',
+                        'quality_reason': None,
+                        'quality_reason_detail': None,
+                        'quality_reason_context': {},
+                        'measurement_incomplete': False,
+                        'measurement_incomplete_reason': 'none',
+                        'measurement_incomplete_context': {},
+                        'bitrate_recheck_required': False,
+                    })
+                    return result
 
             try:
                 if logger.isEnabledFor(logging.DEBUG):
-                    logger.info("  Analyzing stream (single ffmpeg call)...")
+                    logger.info("  Analyzing stream (basis probe plus optional visual probe)...")
 
                 result_data = get_stream_info_and_bitrate(
                     url=stream_url,
                     duration=ffmpeg_duration,
                     timeout=timeout,
                     user_agent=user_agent,
-                    stream_startup_buffer=stream_startup_buffer
+                    stream_startup_buffer=stream_startup_buffer,
+                    blank_check_enabled=blank_check_enabled,
+                    blank_check_min_duration=blank_check_min_duration,
+                    blank_check_pixel_threshold=blank_check_pixel_threshold,
+                    blank_check_ratio_threshold=blank_check_ratio_threshold,
+                    freeze_check_enabled=freeze_check_enabled,
+                    freeze_check_min_duration=freeze_check_min_duration,
+                    freeze_check_noise_threshold=freeze_check_noise_threshold,
+                    freeze_check_ratio_threshold=freeze_check_ratio_threshold,
+                    hardware_acceleration=hardware_acceleration,
+                    preempt_check=preempt_check,
                 )
 
                 result = {
@@ -1124,6 +2790,7 @@ def analyze_stream(
                     'resolution': result_data['resolution'],
                     'fps': result_data['fps'],
                     'bitrate_kbps': result_data['bitrate_kbps'],
+                    'bitrate_source': result_data.get('bitrate_source'),
                     'hdr_format': result_data['hdr_format'],
                     'pixel_format': result_data['pixel_format'],
                     'audio_sample_rate': result_data['audio_sample_rate'],
@@ -1133,7 +2800,93 @@ def analyze_stream(
                     'status': result_data['status'],
                     'elapsed_time': result_data.get('elapsed_time', 0),
                     'ffmpeg_duration': ffmpeg_duration,
+                    'ffmpeg_duration_seconds': result_data.get('ffmpeg_duration_seconds', ffmpeg_duration),
+                    'timeout_seconds': result_data.get(
+                        'timeout_seconds',
+                        timeout + ffmpeg_duration + stream_startup_buffer,
+                    ),
+                    'operation_timeout_seconds': result_data.get('operation_timeout_seconds', timeout),
+                    'stream_startup_buffer': stream_startup_buffer,
+                    'startup_buffer_seconds': result_data.get('startup_buffer_seconds', stream_startup_buffer),
+                    'attempt': attempt + 1,
+                    'attempts': attempt + 1,
+                    'max_attempts': total_attempts,
+                    'stage': 'stream analysis',
+                    'blank_probe_ran': result_data.get('blank_probe_ran', False),
+                    'blank_detected': result_data.get('blank_detected', False),
+                    'blank_duration_secs': result_data.get('blank_duration_secs'),
+                    'blank_ratio': result_data.get('blank_ratio'),
+                    'blank_segments': result_data.get('blank_segments', []),
+                    'freeze_probe_ran': result_data.get('freeze_probe_ran', False),
+                    'freeze_detected': result_data.get('freeze_detected', False),
+                    'freeze_duration_secs': result_data.get('freeze_duration_secs'),
+                    'freeze_ratio': result_data.get('freeze_ratio'),
+                    'freeze_segments': result_data.get('freeze_segments', []),
+                    'visual_probe_ran': bool(result_data.get('visual_probe_ran')),
+                    'visual_probe_completed': bool(result_data.get('visual_probe_completed')),
+                    'visual_probe_incomplete': bool(result_data.get('visual_probe_incomplete')),
+                    'visual_probe_incomplete_reason': result_data.get('visual_probe_incomplete_reason') or 'none',
+                    'visual_probe_requested_duration_seconds': result_data.get(
+                        'visual_probe_requested_duration_seconds'
+                    ),
+                    'visual_probe_minimum_duration_seconds': result_data.get(
+                        'visual_probe_minimum_duration_seconds'
+                    ),
+                    'visual_probe_duration_seconds': result_data.get('visual_probe_duration_seconds'),
+                    'visual_probe_duration_adjusted': bool(
+                        result_data.get('visual_probe_duration_adjusted')
+                    ),
+                    'visual_probe_duration_adjustment_reason': (
+                        result_data.get('visual_probe_duration_adjustment_reason') or 'none'
+                    ),
+                    'visual_probe_elapsed_time': result_data.get('visual_probe_elapsed_time'),
+                    'preempted': bool(result_data.get('preempted')),
+                    'preempt_reason': result_data.get('preempt_reason'),
+                    'ffprobe_fallback_ran': bool(result_data.get('ffprobe_fallback_ran')),
+                    'ffprobe_fallback_reason': result_data.get('ffprobe_fallback_reason'),
+                    'ffprobe_fallback_elapsed_time': result_data.get('ffprobe_fallback_elapsed_time'),
+                    'measurement_incomplete': bool(result_data.get('measurement_incomplete')),
+                    'measurement_incomplete_reason': result_data.get('measurement_incomplete_reason') or 'none',
+                    'measurement_incomplete_context': result_data.get('measurement_incomplete_context') or {},
+                    'bitrate_recheck_required': bool(result_data.get('bitrate_recheck_required')),
                 }
+                if result['status'] == 'OK':
+                    result['quality_reason'] = 'none'
+                    result['quality_reason_detail'] = 'none'
+                    result['quality_reason_context'] = {}
+                    if result.get('bitrate_kbps') is None:
+                        result['measurement_incomplete'] = True
+                        result['measurement_incomplete_reason'] = 'missing_bitrate'
+                        result['measurement_incomplete_context'] = _missing_bitrate_context(result)
+                        result['bitrate_recheck_required'] = True
+                else:
+                    _stamp_analysis_failure_reason(result)
+
+                if result.get('blank_probe_ran'):
+                    blank_duration = float(result.get('blank_duration_secs') or 0.0)
+                    blank_ratio = float(result.get('blank_ratio') or 0.0)
+                    blank_segments_count = len(result.get('blank_segments') or [])
+                    log_method = logger.warning if result.get('blank_detected') else logger.info
+                    log_method(
+                        f"  [blank-detect] stream_ref={_audit_ref('stream', stream_id)}: "
+                        f"detected={bool(result.get('blank_detected'))}, "
+                        f"blank_duration={blank_duration:.1f}s, "
+                        f"ratio={blank_ratio:.3f}, "
+                        f"segments={blank_segments_count}"
+                    )
+
+                if result.get('freeze_probe_ran'):
+                    freeze_duration = float(result.get('freeze_duration_secs') or 0.0)
+                    freeze_ratio = float(result.get('freeze_ratio') or 0.0)
+                    freeze_segments_count = len(result.get('freeze_segments') or [])
+                    log_method = logger.warning if result.get('freeze_detected') else logger.info
+                    log_method(
+                        f"  [freeze-detect] stream_ref={_audit_ref('stream', stream_id)}: "
+                        f"detected={bool(result.get('freeze_detected'))}, "
+                        f"freeze_duration={freeze_duration:.1f}s, "
+                        f"ratio={freeze_ratio:.3f}, "
+                        f"segments={freeze_segments_count}"
+                    )
 
                 if logger.isEnabledFor(logging.DEBUG):
                     if result['video_codec'] != 'N/A' or result['resolution'] != '0x0':
@@ -1151,17 +2904,22 @@ def analyze_stream(
                             logger.info(f"    Bitrate: {result['bitrate_kbps']:.2f} kbps (elapsed: {result_data['elapsed_time']:.2f}s)")
                         else:
                             logger.warning(f"    Bitrate detection failed (elapsed: {result_data['elapsed_time']:.2f}s)")
-                        logger.info(f"  Stream analysis complete for {stream_name}")
+                        logger.info(f"  Stream analysis complete for {stream_audit_ref}")
                     else:
                         logger.warning(f"    Status: {result['status']} (elapsed: {result_data['elapsed_time']:.2f}s)")
                 else:
                     if result['status'] == "OK":
                         bitrate_str = f"{result['bitrate_kbps']:.2f} kbps" if result['bitrate_kbps'] is not None else "N/A"
                         hdr_str = f", {result['hdr_format']}" if result.get('hdr_format') else ""
-                        logger.info(f"  {stream_name}: {result['resolution']}, {result['fps']} FPS, {bitrate_str}, {result['video_codec']}/{result['audio_codec']}{hdr_str} ({result_data['elapsed_time']:.2f}s)")
+                        logger.info(f"  {stream_audit_ref}: {result['resolution']}, {result['fps']} FPS, {bitrate_str}, {result['video_codec']}/{result['audio_codec']}{hdr_str} ({result_data['elapsed_time']:.2f}s)")
                     else:
-                        logger.warning(f"  {stream_name}: Check failed - {result['status']} ({result_data['elapsed_time']:.2f}s)")
+                        logger.warning(f"  {stream_audit_ref}: Check failed - {result['status']} ({result_data['elapsed_time']:.2f}s)")
 
+                if result.get('preempted'):
+                    logger.info(
+                        f"  {stream_audit_ref}: Check preempted for active viewer capacity"
+                    )
+                    break
                 if result['status'] == "OK":
                     # Check whether FFmpeg ran for a meaningful portion of the
                     # probe window.  A stream that exits early produced partial
@@ -1169,18 +2927,32 @@ def analyze_stream(
                     # Give it another attempt rather than accepting the result.
                     elapsed  = result_data.get('elapsed_time', ffmpeg_duration)
                     completed = elapsed >= ffmpeg_duration * EARLY_EXIT_THRESHOLD
-                    if completed:
+                    missing_bitrate = result.get('bitrate_kbps') is None
+                    if completed and missing_bitrate and defer_missing_bitrate_retry:
+                        logger.warning(
+                            f"  {stream_audit_ref}: completed probe without bitrate "
+                            f"({elapsed:.1f}s/{ffmpeg_duration}s) - deferring retry "
+                            "until the initial channel scan is complete"
+                        )
+                        break
+                    if completed and missing_bitrate and attempt < total_attempts - 1:
+                        logger.warning(
+                            f"  {stream_audit_ref}: completed probe without bitrate "
+                            f"({elapsed:.1f}s/{ffmpeg_duration}s) - retrying "
+                            f"(attempt {attempt + 2}/{total_attempts})"
+                        )
+                    elif completed:
                         break
                     elif attempt < total_attempts - 1:
                         if logger.isEnabledFor(logging.DEBUG):
                             logger.warning(
-                                f"  Stream '{stream_name}' exited early "
+                                f"  Stream {stream_audit_ref} exited early "
                                 f"({elapsed:.1f}s / {ffmpeg_duration}s expected) — "
                                 f"retrying (attempt {attempt + 2}/{total_attempts})"
                             )
                         else:
                             logger.warning(
-                                f"  {stream_name} exited early "
+                                f"  {stream_audit_ref} exited early "
                                 f"({elapsed:.1f}s/{ffmpeg_duration}s) — "
                                 f"retrying (attempt {attempt + 2}/{total_attempts})"
                             )
@@ -1189,16 +2961,48 @@ def analyze_stream(
                 else:
                     if attempt < total_attempts - 1:
                         if logger.isEnabledFor(logging.DEBUG):
-                            logger.warning(f"  Stream '{stream_name}' failed with status '{result['status']}'. Retrying in {retry_delay} seconds...")
+                            logger.warning(
+                                f"  Stream {stream_audit_ref} failed with status "
+                                f"'{result['status']}'. Retrying in {retry_delay} seconds..."
+                            )
                         else:
-                            logger.warning(f"  Retrying {stream_name} in {retry_delay}s (attempt {attempt + 2}/{total_attempts})")
+                            logger.warning(
+                                f"  Retrying {stream_audit_ref} in {retry_delay}s "
+                                f"(attempt {attempt + 2}/{total_attempts})"
+                            )
 
             except Exception as inner_e:
-                logger.error(f"  Exception during stream analysis (attempt {attempt + 1} of {total_attempts}): {inner_e}")
+                result.update({
+                    'status': 'Error',
+                    'elapsed_time': 0,
+                    'ffmpeg_duration': ffmpeg_duration,
+                    'ffmpeg_duration_seconds': ffmpeg_duration,
+                    'timeout_seconds': timeout + ffmpeg_duration + stream_startup_buffer,
+                    'operation_timeout_seconds': timeout,
+                    'stream_startup_buffer': stream_startup_buffer,
+                    'startup_buffer_seconds': stream_startup_buffer,
+                    'attempt': attempt + 1,
+                    'attempts': attempt + 1,
+                    'max_attempts': total_attempts,
+                    'stage': 'stream analysis',
+                    'error_message': scrub_urls(str(inner_e))[:300],
+                })
+                _stamp_analysis_failure_reason(result)
+                logger.error(
+                    f"  Exception during stream analysis "
+                    f"(attempt {attempt + 1} of {total_attempts}) for {stream_audit_ref}: "
+                    f"{scrub_urls(inner_e)}"
+                )
                 if attempt < total_attempts - 1:
                     logger.warning(f"  Retrying in {retry_delay} seconds...")
 
     except Exception as outer_e:
-        logger.error(f"Unexpected error in analyze_stream for {stream_name}: {outer_e}")
+        result.update({
+            'status': 'Error',
+            'error_message': scrub_urls(str(outer_e))[:300],
+            'stage': 'stream analysis',
+        })
+        _stamp_analysis_failure_reason(result)
+        logger.error(f"Unexpected error in analyze_stream for {stream_audit_ref}: {scrub_urls(outer_e)}")
 
     return result

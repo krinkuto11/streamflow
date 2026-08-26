@@ -8,17 +8,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog';
 import { useToast } from '@/hooks/use-toast';
 import { streamSessionsAPI } from '@/services/streamSessions';
-import { aceStreamMonitoringAPI } from '@/services/aceStreamMonitoring';
 import CreateSessionDialog from '@/components/stream-monitoring/CreateSessionDialog';
 import SessionMonitorView from '@/components/stream-monitoring/SessionMonitorView';
-import AceSessionMonitorView from '@/components/stream-monitoring/AceSessionMonitorView';
-
-function normalizeAceSession(item) {
-  return {
-    ...item,
-    source_type: 'acestream',
-  };
-}
 
 function StreamMonitoring() {
   const [sessions, setSessions] = useState([]);
@@ -53,10 +44,9 @@ function StreamMonitoring() {
       if (showLoading) {
         setLoading(true);
       }
-      const [allResult, activeResult, aceResult] = await Promise.allSettled([
+      const [allResult, activeResult] = await Promise.allSettled([
         streamSessionsAPI.getSessions(),
         streamSessionsAPI.getSessions('active'),
-        aceStreamMonitoringAPI.getChannelSessions(),
       ]);
 
       if (allResult.status !== 'fulfilled' || activeResult.status !== 'fulfilled') {
@@ -65,12 +55,9 @@ function StreamMonitoring() {
 
       const standardAll = allResult.value.data || [];
       const standardActive = activeResult.value.data || [];
-      const aceItems = aceResult.status === 'fulfilled' ? (aceResult.value?.data || []) : [];
-      const aceSessions = aceItems.map(normalizeAceSession);
-      const aceActive = aceSessions.filter((s) => s.is_active);
 
-      setSessions([...aceSessions, ...standardAll]);
-      setActiveSessions([...aceActive, ...standardActive]);
+      setSessions(standardAll);
+      setActiveSessions(standardActive);
     } catch (err) {
       console.error('Failed to load sessions:', err);
       toast({
@@ -86,14 +73,6 @@ function StreamMonitoring() {
   };
 
   const handleStartSession = async (session) => {
-    if (session.source_type === 'acestream') {
-      toast({
-        title: 'Info',
-        description: 'AceStream sessions are created from channels or groups in the creation dialog.',
-      });
-      return;
-    }
-
     try {
       await streamSessionsAPI.startSession(session.session_id);
       toast({
@@ -113,11 +92,7 @@ function StreamMonitoring() {
 
   const handleStopSession = async (session) => {
     try {
-      if (session.source_type === 'acestream') {
-        await aceStreamMonitoringAPI.stopChannelSession(session.session_id);
-      } else {
-        await streamSessionsAPI.stopSession(session.session_id);
-      }
+      await streamSessionsAPI.stopSession(session.session_id);
       toast({
         title: 'Success',
         description: 'Session stopped successfully'
@@ -142,11 +117,7 @@ function StreamMonitoring() {
     if (!sessionToDelete) return;
 
     try {
-      if (sessionToDelete.source_type === 'acestream') {
-        await aceStreamMonitoringAPI.deleteChannelSession(sessionToDelete.session_id);
-      } else {
-        await streamSessionsAPI.deleteSession(sessionToDelete.session_id);
-      }
+      await streamSessionsAPI.deleteSession(sessionToDelete.session_id);
       toast({
         title: 'Success',
         description: 'Session deleted successfully'
@@ -179,34 +150,7 @@ function StreamMonitoring() {
 
   const handleCreateSession = async (sessionData) => {
     try {
-      if (sessionData.session_type === 'acestream') {
-        if (sessionData.group_id) {
-          const response = await aceStreamMonitoringAPI.createGroupChannelSessions({
-            group_id: sessionData.group_id,
-            interval_s: sessionData.interval_s,
-            run_seconds: sessionData.run_seconds,
-            per_sample_timeout_s: sessionData.per_sample_timeout_s,
-            engine_container_id: sessionData.engine_container_id || null,
-          })
-          toast({
-            title: 'Success',
-            description: response.data.message || 'AceStream group sessions started successfully'
-          })
-        } else {
-          await aceStreamMonitoringAPI.createChannelSession({
-            channel_id: sessionData.channel_id,
-            interval_s: sessionData.interval_s,
-            run_seconds: sessionData.run_seconds,
-            per_sample_timeout_s: sessionData.per_sample_timeout_s,
-            engine_container_id: sessionData.engine_container_id || null,
-          })
-          toast({
-            title: 'Success',
-            description: 'AceStream channel session started successfully'
-          })
-        }
-
-      } else if (sessionData.group_id) {
+      if (sessionData.group_id) {
         // Group Monitoring
         const response = await streamSessionsAPI.createGroupSession(sessionData);
         toast({
@@ -284,15 +228,12 @@ function StreamMonitoring() {
     if (selectedSessions.size === 0) return;
 
     try {
-      const selected = sessions.filter((s) => selectedSessions.has(s.session_id));
-      const standardIds = selected.filter((s) => s.source_type !== 'acestream').map((s) => s.session_id);
-      const aceIds = selected.filter((s) => s.source_type === 'acestream').map((s) => s.session_id);
+      const standardIds = sessions
+        .filter((s) => selectedSessions.has(s.session_id))
+        .map((s) => s.session_id);
 
       if (standardIds.length > 0) {
         await streamSessionsAPI.batchStopSessions(standardIds);
-      }
-      if (aceIds.length > 0) {
-        await Promise.all(aceIds.map((id) => aceStreamMonitoringAPI.stopChannelSession(id)));
       }
 
       toast({
@@ -319,15 +260,12 @@ function StreamMonitoring() {
     }
 
     try {
-      const selected = sessions.filter((s) => selectedSessions.has(s.session_id));
-      const standardIds = selected.filter((s) => s.source_type !== 'acestream').map((s) => s.session_id);
-      const aceIds = selected.filter((s) => s.source_type === 'acestream').map((s) => s.session_id);
+      const standardIds = sessions
+        .filter((s) => selectedSessions.has(s.session_id))
+        .map((s) => s.session_id);
 
       if (standardIds.length > 0) {
         await streamSessionsAPI.batchDeleteSessions(standardIds);
-      }
-      if (aceIds.length > 0) {
-        await Promise.all(aceIds.map((id) => aceStreamMonitoringAPI.deleteChannelSession(id)));
       }
 
       toast({
@@ -350,20 +288,11 @@ function StreamMonitoring() {
     <>
       {/* If viewing a specific session, show the monitor view */}
       {selectedSession ? (
-        selectedSession?.source_type === 'acestream' ? (
-          <AceSessionMonitorView
-            sessionId={selectedSession.session_id}
-            onBack={handleBackToList}
-            onStop={() => handleStopSession(selectedSession)}
-            onDelete={() => handleDeleteSession(selectedSession)}
-          />
-        ) : (
-          <SessionMonitorView
-            sessionId={selectedSession?.session_id}
-            onBack={handleBackToList}
-            onStop={() => handleStopSession(selectedSession)}
-          />
-        )
+        <SessionMonitorView
+          sessionId={selectedSession?.session_id}
+          onBack={handleBackToList}
+          onStop={() => handleStopSession(selectedSession)}
+        />
       ) : (
         <div className="space-y-6 relative pb-20">
           {/* Header */}
@@ -617,7 +546,7 @@ function SessionCard({ session, onView, onStart, onStop, onDelete, selected, onT
 
   return (
     <Card
-      className={`hover:shadow-lg transition-shadow cursor-pointer relative group ${selected ? 'ring-2 ring-primary border-primary' : session.source_type === 'acestream' ? 'border-orange-400 dark:border-orange-500' : ''}`}
+      className={`hover:shadow-lg transition-shadow cursor-pointer relative group ${selected ? 'ring-2 ring-primary border-primary' : ''}`}
       onClick={() => onView(session)}
     >
       <div
@@ -648,9 +577,7 @@ function SessionCard({ session, onView, onStart, onStop, onDelete, selected, onT
           <div className="flex-1 min-w-0 pr-6"> {/* Padding for checkbox */}
             <CardTitle className="text-lg">{session.channel_name}</CardTitle>
             <div className="mt-1">
-              <Badge variant={session.source_type === 'acestream' ? 'outline' : 'secondary'}>
-                {session.source_type === 'acestream' ? 'AceStream' : 'Standard'}
-              </Badge>
+              <Badge variant="secondary">Standard</Badge>
             </div>
             {session.epg_event_title && (
               <p className="text-sm font-medium text-primary mt-1 truncate" title={session.epg_event_title}>
@@ -792,7 +719,7 @@ function SessionTable({
                       )}
                       <div className="min-w-0">
                         <p className="font-medium truncate">{session.channel_name}</p>
-                        <p className="text-xs text-muted-foreground">{session.source_type === 'acestream' ? 'AceStream' : 'Standard'}</p>
+                        <p className="text-xs text-muted-foreground">Standard</p>
                         {session.epg_event_title && (
                           <p className="text-xs text-muted-foreground truncate" title={session.epg_event_title}>
                             {session.epg_event_title}

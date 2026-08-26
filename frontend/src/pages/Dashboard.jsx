@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
@@ -7,10 +8,31 @@ import { Alert, AlertDescription } from '@/components/ui/alert.jsx'
 import { Label } from '@/components/ui/label.jsx'
 import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
-import { automationAPI, streamCheckerAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { automationAPI, streamCheckerAPI, shadowBlankMonitorAPI, viewerActivityAPI, m3uAPI, dispatcharrAPI, environmentAPI } from '@/services/api.js'
+import { getDashboardRunMetrics } from '@/lib/dashboard-run-counts.js'
+import { getQueueEtaDisplay } from '@/lib/queue-eta-display.js'
+import { getCheckerConcurrencyDisplay } from '@/lib/provider-progress-display.js'
+import {
+  getAbortedRunDisplay,
+  getDashboardActionStates,
+  getAutomationStageCards,
+  getCacheSyncCardDetail,
+  getRunHistoryBaseline,
+  getM3uRefreshCardDetail,
+  getRunDurationCardValue,
+  getRunDurationValue,
+  getSkippedRunDisplay,
+  getStreamCheckerRunDisplay,
+  isM3uRefreshSkipped,
+  normalizeRunStageKey,
+  preferLiveRunSeconds,
+  shouldShowAutomationRunCard,
+} from '@/lib/dashboard-run-display.js'
+import { formatDuration as formatDurationValue, formatLatency as formatLatencyValue } from '@/lib/time-format.js'
 import {
   PlayCircle, RefreshCw, Activity, CheckCircle2,
-  Loader2, ChevronDown, Tv, Radio, Database, WifiOff
+  Loader2, ChevronDown, Tv, Radio, Database, WifiOff,
+  Clock3, AlertCircle, ListChecks, Timer, Eye, Users, StopCircle, History
 } from 'lucide-react'
 import {
   DropdownMenu,
@@ -21,11 +43,85 @@ import {
   DropdownMenuLabel,
 } from '@/components/ui/dropdown-menu.jsx'
 import UpcomingAutomationEvents from '@/components/Dashboard/UpcomingAutomationEvents.jsx'
+import StreamFlowInitializingScreen from '@/components/Dashboard/StreamFlowInitializingScreen.jsx'
+import {
+  formatRealViewerChannelCount,
+  formatStreamRef,
+  formatViewerClientCount,
+  formatWatcherClientCount,
+  formatWatcherOnlyChannelCount,
+  getPlaybackBadgeLabel,
+  getViewerActivityDetailLabel,
+} from '@/lib/viewer-activity-display.js'
+
+const AUTOMATION_STAGES = [
+  { id: 'settings', label: 'Preparing' },
+  { id: 'period_discovery', label: 'Schedule' },
+  { id: 'm3u_refresh', label: 'M3U Refresh' },
+  { id: 'cache_sync', label: 'Cache Sync' },
+  { id: 'stream_matching', label: 'Matching' },
+  { id: 'quality_queueing', label: 'Queueing' },
+  { id: 'quality_checking', label: 'Quality Check' },
+  { id: 'finalizing', label: 'Finalizing' },
+]
+
+const LIVE_STATUS_POLL_MS = 1000
+const BACKGROUND_DATA_POLL_MS = 30000
+
+const formatDuration = (seconds) => {
+  const formatted = formatDurationValue(seconds)
+  return formatted || 'N/A'
+}
+
+const formatLatency = (seconds) => {
+  const formatted = formatLatencyValue(seconds)
+  return formatted || 'N/A'
+}
+
+const formatSecondsPerChannel = (seconds) => {
+  const value = Number(seconds)
+  if (!Number.isFinite(value)) return 'N/A'
+  return `${value >= 10 ? Math.round(value) : value.toFixed(1)} sec`
+}
+
+const getSecondsPerChannelBaselineLabel = (baseline) => {
+  if (baseline?.perChannelBaselineStable) {
+    return formatSecondsPerChannel(baseline.typicalSecondsPerChannel)
+  }
+  if ((baseline?.perChannelSampleCount || 0) > 0) {
+    return 'Mixed'
+  }
+  return 'N/A'
+}
+
+const formatTime = (value) => {
+  if (!value) return 'N/A'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'N/A'
+  return date.toLocaleTimeString()
+}
+
+const elapsedSecondsSince = (value, now = Date.now()) => {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return Math.max(0, (now - date.getTime()) / 1000)
+}
+
+const formatShadowEvent = (eventType) => {
+  if (!eventType) return ''
+  return eventType
+    .split('_')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
 
 export default function Dashboard() {
   const [status, setStatus] = useState(null)
   const [automationConfig, setAutomationConfig] = useState(null)
   const [streamCheckerStatus, setStreamCheckerStatus] = useState(null)
+  const [shadowMonitorStatus, setShadowMonitorStatus] = useState(null)
+  const [viewerActivityStatus, setViewerActivityStatus] = useState(null)
   const [playlists, setPlaylists] = useState([])
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState('')
@@ -33,41 +129,111 @@ export default function Dashboard() {
   const [periods, setPeriods] = useState([])
   const [udiStats, setUdiStats] = useState(null)
   const [udiSyncing, setUdiSyncing] = useState(false)
+  const [dashboardNow, setDashboardNow] = useState(() => Date.now())
+  const statusPollInFlight = useRef(false)
   // debug_mode gates the fault injection panel (Phase 5 — not yet built)
   const [debugMode, setDebugMode] = useState(false)
   const { toast } = useToast()
 
   useEffect(() => {
+    setDashboardNow(Date.now())
     loadStatus()
     loadPlaylists()
     loadPeriods()
     loadEnvironment()
-    const interval = setInterval(() => {
+    loadUdiStats()
+
+    const statusInterval = setInterval(() => {
+      setDashboardNow(Date.now())
+      loadStatus()
+    }, LIVE_STATUS_POLL_MS)
+
+    const backgroundInterval = setInterval(() => {
       loadStatus()
       loadPlaylists()
-    }, 30000)
-    return () => clearInterval(interval)
+      loadUdiStats()
+    }, BACKGROUND_DATA_POLL_MS)
+
+    return () => {
+      clearInterval(statusInterval)
+      clearInterval(backgroundInterval)
+    }
   }, [])
 
   const loadStatus = async () => {
+    if (statusPollInFlight.current) {
+      return
+    }
+    statusPollInFlight.current = true
     try {
-      const [automationResponse, streamCheckerResponse, automationConfigResponse] = await Promise.all([
+      const [automationResult, streamCheckerResult, automationConfigResult, shadowMonitorResult, viewerActivityResult] = await Promise.allSettled([
         automationAPI.getStatus(),
         streamCheckerAPI.getStatus(),
         automationAPI.getConfig(),
+        shadowBlankMonitorAPI.getStatus(),
+        viewerActivityAPI.getStatus(),
       ])
-      setStatus(automationResponse.data)
-      setStreamCheckerStatus(streamCheckerResponse.data)
-      setAutomationConfig(automationConfigResponse.data || {})
+
+      if (automationResult.status === 'fulfilled') {
+        setStatus(automationResult.value.data)
+      }
+      if (streamCheckerResult.status === 'fulfilled') {
+        setStreamCheckerStatus(streamCheckerResult.value.data)
+      }
+      if (automationConfigResult.status === 'fulfilled') {
+        setAutomationConfig(automationConfigResult.value.data || {})
+      }
+      if (shadowMonitorResult.status === 'fulfilled') {
+        setShadowMonitorStatus(shadowMonitorResult.value.data)
+      }
+      if (viewerActivityResult.status === 'fulfilled') {
+        setViewerActivityStatus(viewerActivityResult.value.data)
+      }
+
+      const failedResults = [
+        automationResult,
+        streamCheckerResult,
+        automationConfigResult,
+        shadowMonitorResult,
+        viewerActivityResult,
+      ].filter(result => result.status === 'rejected')
+
+      if (failedResults.length > 0) {
+        console.warn(
+          'Dashboard status poll had partial failures:',
+          failedResults.map(result => result.reason?.message || result.reason)
+        )
+      }
     } catch (err) {
       console.error('Failed to load status:', err)
-      toast({
-        title: "Error",
-        description: "Failed to load automation status",
-        variant: "destructive"
-      })
     } finally {
+      statusPollInFlight.current = false
       setLoading(false)
+    }
+  }
+
+  const loadUdiStats = async () => {
+    try {
+      const response = await dispatcharrAPI.getInitializationStatus()
+      const data = response.data || {}
+      const ec = data.entity_counts || {}
+      const counts = {
+        channels_count: ec.channels?.received ?? null,
+        streams_count: ec.streams?.received ?? null,
+        m3u_accounts_count: ec.m3u_accounts?.received ?? null,
+      }
+      const hasCounts = Object.values(counts).some(value => value != null)
+
+      if (data.status || hasCounts) {
+        setUdiStats({
+          syncStatus: data.status || 'unknown',
+          percentage: data.percentage ?? null,
+          message: data.message || '',
+          ...counts,
+        })
+      }
+    } catch (err) {
+      console.error('UDI status poll error:', err)
     }
   }
 
@@ -82,8 +248,9 @@ export default function Dashboard() {
 
   const loadPeriods = async () => {
     try {
-      const response = await automationAPI.getPeriods()
-      setPeriods(response.data || [])
+      const response = await automationAPI.getPeriods({ page: 1, per_page: 200 })
+      const periodItems = Array.isArray(response.data) ? response.data : response.data?.items || []
+      setPeriods(periodItems)
     } catch (err) {
       console.error('Failed to load periods:', err)
     }
@@ -117,16 +284,20 @@ export default function Dashboard() {
         const res = await dispatcharrAPI.getInitializationStatus()
         const data = res.data || {}
         const ec = data.entity_counts || {}
+        const counts = {
+          channels_count: ec.channels?.received ?? null,
+          streams_count: ec.streams?.received ?? null,
+          m3u_accounts_count: ec.m3u_accounts?.received ?? null,
+        }
+        const hasCounts = Object.values(counts).some(value => value != null)
 
-        if (data.status === 'completed' || data.status === 'failed') {
+        if (hasCounts || data.status === 'completed' || data.status === 'failed') {
           clearInterval(udiPollInterval)
           setUdiStats(prev => {
             if (prev !== null) return prev
             return {
-              syncStatus:         data.status,
-              channels_count:     ec.channels?.received     ?? null,
-              streams_count:      ec.streams?.received      ?? null,
-              m3u_accounts_count: ec.m3u_accounts?.received ?? null,
+              syncStatus: data.status || 'unknown',
+              ...counts,
             }
           })
         }
@@ -226,6 +397,41 @@ export default function Dashboard() {
     }
   }
 
+  const handleStopActiveRun = async () => {
+    try {
+      setActionLoading('stop-run')
+
+      const activeStreamCheck = Boolean(
+        streamCheckerStatus?.stream_checking_mode ||
+        streamCheckerStatus?.checking ||
+        (streamCheckerStatus?.queue?.queue_size || 0) > 0 ||
+        (streamCheckerStatus?.queue?.in_progress || 0) > 0
+      )
+      const activeAutomationRun = Boolean(status?.running || status?.run_status?.active)
+
+      if (activeStreamCheck) {
+        await streamCheckerAPI.clearQueue()
+      }
+      if (activeAutomationRun) {
+        await automationAPI.abortRun()
+      }
+
+      toast({
+        title: "Stop Requested",
+        description: "Active automation and stream-check work is being stopped.",
+      })
+      await loadStatus()
+    } catch (err) {
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to stop the active run",
+        variant: "destructive",
+      })
+    } finally {
+      setActionLoading('')
+    }
+  }
+
   const handleTogglePlaylist = async (playlistId, currentlyEnabled) => {
     try {
       setTogglingPlaylist(playlistId)
@@ -276,19 +482,294 @@ export default function Dashboard() {
   }
 
   const isAutomationRunning = status?.running || false
+  const runStatus = status?.run_status || {}
+  const schedulerRetry = runStatus?.scheduler_retry || status?.scheduler_retry || {}
+  const schedulerRetryPeriods = Array.isArray(schedulerRetry?.periods)
+    ? schedulerRetry.periods
+    : []
+  const runCounts = runStatus.counts || {}
+  const runDurations = runStatus.durations || {}
+  const udiStatus = status?.udi_status || {}
+  const apiTiming = udiStatus?.api_timing || {}
+  const runState = runStatus.state || 'idle'
+  const runStage = runStatus.stage || 'idle'
+  const runStageLabel = runStatus.stage_label || 'Idle'
+  const runProgress = runStatus.progress || {}
+  const runningRun = runState === 'running'
+  const failedRun = runState === 'failed'
+  const abortedRun = runState === 'aborted'
+  const completedRun = runState === 'completed'
+  const skippedRun = runState === 'skipped'
+  const queuedRun = runState === 'queued'
   const queueSize     = streamCheckerStatus?.queue?.queue_size || 0
   const completed     = streamCheckerStatus?.queue?.completed  || 0
   const inProgress    = streamCheckerStatus?.queue?.in_progress || 0
+  const queueState    = streamCheckerStatus?.queue?.state || 'idle'
+  const streamCheckerEtaDisplay = getQueueEtaDisplay(streamCheckerStatus?.queue)
+  const checkerConcurrencyDisplay = getCheckerConcurrencyDisplay(streamCheckerStatus)
   const totalProcessed = completed
   const batchTotal    = completed + inProgress + queueSize
   const queueProgress = batchTotal > 0 ? (completed / batchTotal) * 100 : 0
-  const isProcessing  = streamCheckerStatus?.stream_checking_mode || false
-  const shouldDisableActions = isProcessing || actionLoading !== ''
-
+  const streamCheckerRunDisplay = getStreamCheckerRunDisplay({
+    streamCheckerStatus,
+    runState,
+    runStage,
+    batchTotal,
+    completed,
+    now: dashboardNow,
+  })
+  const isProcessing = streamCheckerRunDisplay.isProcessing
+  const queueHistoryOnly = !isProcessing && queueState === 'completed' && totalProcessed > 0
+  const totalProcessedLabel = queueHistoryOnly ? 'Last Batch:' : 'Total Processed:'
+  const streamQueueActive = streamCheckerRunDisplay.streamQueueActive
+  const streamCheckerOnlyActive = streamCheckerRunDisplay.streamCheckerOnlyActive
+  const streamQueueHistory = queueHistoryOnly && ['idle', 'skipped'].includes(runState)
+  const streamRunActive = streamCheckerOnlyActive
+  const streamProgress = streamCheckerStatus?.progress || {}
+  const singleStreamRunActive = streamRunActive && !streamQueueActive
+  const skippedRunDisplay = getSkippedRunDisplay({
+    skippedRun,
+    streamRunActive,
+    streamQueueActive,
+    runProgressMessage: runProgress.message,
+    runStatusMessage: runStatus.message,
+  })
+  const abortedRunDisplay = getAbortedRunDisplay({
+    runState,
+    runStatus,
+  })
+  const rawRunProgressPercent = Number(runProgress.percent)
+  const runProgressPercent = abortedRunDisplay.progressPercent !== null
+    ? abortedRunDisplay.progressPercent
+    : streamQueueActive
+    ? queueProgress
+    : singleStreamRunActive && Number.isFinite(Number(streamProgress.percentage))
+      ? Number(streamProgress.percentage)
+    : Number.isFinite(rawRunProgressPercent)
+      ? rawRunProgressPercent
+      : 0
+  const runProgressCurrent = streamQueueActive ? completed : (singleStreamRunActive ? null : runProgress.current)
+  const runProgressTotal = streamQueueActive ? batchTotal : (singleStreamRunActive ? null : runProgress.total)
+  const hasRunProgressTotal = runProgressTotal !== null && runProgressTotal !== undefined
+  const runProgressDetail = abortedRunDisplay.progressDetail || (hasRunProgressTotal
+    ? `${runProgressCurrent ?? 0} of ${runProgressTotal}`
+    : singleStreamRunActive
+      ? (streamProgress.channel_name || streamProgress.step || 'Single channel check in progress')
+      : skippedRunDisplay.progressDetail || runProgress.message || runStatus.message || 'Waiting for progress')
+  const showRunProgress = isProcessing || runState !== 'idle' || Object.keys(runProgress).length > 0
+  const showAutomationRunCard = shouldShowAutomationRunCard({
+    showRunProgress,
+    skippedRunDisplay,
+  })
+  const streamRunDisplayMessage = streamRunActive && queuedRun
+    ? `${streamCheckerRunDisplay.displayMessage}; automation queued`
+    : streamCheckerRunDisplay.displayMessage
+  const displayRunMessage = streamRunActive
+    ? streamRunDisplayMessage
+    : abortedRunDisplay.message || skippedRunDisplay.message || runProgress.message || runStatus.message || 'Automation run status'
+  const displayRunStageId = normalizeRunStageKey(streamRunActive ? streamCheckerRunDisplay.displayStageId : runStage)
+  const displayRunStageLabel = streamRunActive ? streamCheckerRunDisplay.displayStageLabel : runStageLabel
+  const displayRunningRun = runningRun || streamRunActive
+  const runDisplayStageLabel = skippedRunDisplay.stageLabel || displayRunStageLabel
+  const runDisplayBadgeLabel = streamRunActive
+    ? 'Running'
+    : skippedRunDisplay.badgeLabel || (skippedRun
+      ? 'Waiting'
+      : runningRun
+        ? 'Running'
+        : queuedRun
+          ? 'Queued'
+        : completedRun
+          ? 'Completed'
+          : failedRun
+            ? 'Failed'
+            : abortedRun
+              ? 'Aborted'
+              : 'Idle')
+  const streamCheckerElapsedSeconds = streamCheckerRunDisplay.streamCheckerElapsedSeconds
+  const liveRunDurationSeconds = runningRun
+    ? elapsedSecondsSince(runStatus.started_at, dashboardNow) ?? runStatus.duration_seconds
+    : runStatus.duration_seconds
+  const liveStageDurationSeconds = runningRun
+    ? elapsedSecondsSince(runStatus.stage_started_at, dashboardNow) ?? runStatus.stage_duration_seconds
+    : runStatus.stage_duration_seconds
+  const displayRunUpdatedAt = streamRunActive
+    ? (streamCheckerStatus?.progress?.timestamp || streamCheckerStatus?.queue?.started_at || runStatus.updated_at)
+    : runStatus.updated_at
+  const displayRunElapsedSeconds = streamRunActive
+    ? streamCheckerElapsedSeconds
+    : preferLiveRunSeconds({
+        active: runningRun,
+        reportedSeconds: runStatus.elapsed_seconds ?? runProgress.elapsed_seconds,
+        liveSeconds: liveRunDurationSeconds,
+      })
+  const displayRunStageElapsedSeconds = streamRunActive
+    ? streamCheckerElapsedSeconds
+    : preferLiveRunSeconds({
+        active: runningRun,
+        reportedSeconds: runStatus.stage_elapsed_seconds ?? runProgress.stage_elapsed_seconds,
+        liveSeconds: liveStageDurationSeconds,
+      })
+  const displayStageCards = getAutomationStageCards({
+    stages: AUTOMATION_STAGES,
+    runStatusStages: runStatus.stages,
+    displayRunStageId,
+    displayRunningRun,
+    completedRun,
+    neutralRun: Boolean(skippedRunDisplay.stageLabel),
+    streamRunActive,
+  })
+  const m3uRefreshDuration = getRunDurationValue({
+    runDurations,
+    durationKey: 'm3u_refresh_seconds',
+    stageId: 'm3u_refresh',
+    displayRunStageId,
+    displayRunningRun,
+    streamRunActive,
+    streamCheckerElapsedSeconds,
+    displayRunStageElapsedSeconds,
+    stages: AUTOMATION_STAGES,
+  })
+  const cacheSyncDuration = getRunDurationValue({
+    runDurations,
+    durationKey: 'udi_sync_seconds',
+    stageId: 'cache_sync',
+    displayRunStageId,
+    displayRunningRun,
+    streamRunActive,
+    streamCheckerElapsedSeconds,
+    displayRunStageElapsedSeconds,
+    stages: AUTOMATION_STAGES,
+  })
+  const streamMatchingDuration = getRunDurationValue({
+    runDurations,
+    durationKey: 'stream_matching_seconds',
+    stageId: 'stream_matching',
+    displayRunStageId,
+    displayRunningRun,
+    streamRunActive,
+    streamCheckerElapsedSeconds,
+    displayRunStageElapsedSeconds,
+    stages: AUTOMATION_STAGES,
+  })
+  const qualityCheckDuration = getRunDurationValue({
+    runDurations,
+    durationKey: 'quality_check_seconds',
+    stageId: 'quality_checking',
+    displayRunStageId,
+    displayRunningRun,
+    streamRunActive,
+    streamCheckerElapsedSeconds,
+    displayRunStageElapsedSeconds,
+    stages: AUTOMATION_STAGES,
+  })
+  const m3uRefreshSkipped = isM3uRefreshSkipped({
+    runCounts,
+    streamRunActive,
+  })
+  const m3uRefreshDetail = getM3uRefreshCardDetail({
+    runCounts,
+    skipped: m3uRefreshSkipped,
+    streamRunActive,
+  })
+  const cacheSyncSkipped = m3uRefreshSkipped && cacheSyncDuration == null
+  const cacheSyncDetail = getCacheSyncCardDetail({
+    runCounts,
+    skipped: cacheSyncSkipped,
+    streamRunActive,
+  })
+  const durationCards = [
+    {
+      label: 'M3U Refresh',
+      value: getRunDurationCardValue({
+        seconds: m3uRefreshDuration,
+        skipped: m3uRefreshSkipped,
+      }),
+      detail: m3uRefreshDetail,
+    },
+    {
+      label: 'Cache Sync',
+      value: getRunDurationCardValue({
+        seconds: cacheSyncDuration,
+        skipped: cacheSyncSkipped,
+      }),
+      detail: cacheSyncDetail,
+    },
+    {
+      label: 'Stream Matching',
+      value: getRunDurationCardValue({ seconds: streamMatchingDuration }),
+    },
+    {
+      label: 'Quality Check',
+      value: getRunDurationCardValue({ seconds: qualityCheckDuration }),
+    },
+  ]
+  const runHistoryBaseline = getRunHistoryBaseline({
+    summary: status?.run_history_summary,
+  })
+  const displayRunMetrics = getDashboardRunMetrics({
+    streamCheckerStatus,
+    streamQueueActive,
+    streamQueueHistory,
+    streamCheckerOnlyActive,
+    batchTotal,
+    completed,
+    runCounts,
+  })
+  const currentCheckingChannelName = isProcessing && streamProgress?.channel_name
+    ? String(streamProgress.channel_name)
+    : ''
   const syncStatus = udiStats?.syncStatus
+  const udiInitProgress = status?.udi_status?.init_progress || {}
+  const udiCacheHasCompleted = Boolean(
+    status?.udi_status?.last_refresh_time ||
+    udiInitProgress?.last_refresh_time
+  )
+  const udiBackendRefreshing = Boolean(
+    status?.udi_status?.init_in_progress ||
+    syncStatus === 'in_progress'
+  )
+  const udiRefreshing = Boolean(udiSyncing || udiBackendRefreshing)
+  const udiBootstrapInitializing = Boolean(udiBackendRefreshing && !udiCacheHasCompleted)
+  const udiInitialization = {
+    inProgress: udiBootstrapInitializing,
+    percentage: udiStats?.percentage ?? udiInitProgress?.percentage ?? 0,
+    message: udiStats?.message || udiInitProgress?.message || '',
+  }
+  if (udiBootstrapInitializing) {
+    return <StreamFlowInitializingScreen initialization={udiInitialization} />
+  }
+
+  const runBadgeClass = failedRun
+    ? 'bg-destructive text-destructive-foreground border-transparent'
+    : abortedRun
+      ? 'bg-amber-600 text-white border-transparent'
+      : completedRun
+      ? 'bg-green-600 text-white border-transparent'
+      : displayRunningRun
+        ? 'bg-blue-600 text-white border-transparent'
+        : ''
+  const actionStates = getDashboardActionStates({
+    actionLoading,
+    isStreamCheckerProcessing: isProcessing,
+    udiInitializing: udiRefreshing,
+    udiSyncing,
+  })
+  const showStopRunAction = displayRunningRun || isProcessing
+  const shadowWatchedCount = shadowMonitorStatus?.watched_count || shadowMonitorStatus?.watched_channels?.length || 0
+  const shadowLastEvent = shadowMonitorStatus?.recent_events?.[0]
+  const viewerChannels = viewerActivityStatus?.channels || []
+  const realWatchedCount = viewerActivityStatus?.real_watched_count || 0
+  const watcherOnlyCount = viewerActivityStatus?.watcher_only_count || 0
+  const totalRealClients = viewerActivityStatus?.total_real_clients || 0
+  const totalWatcherClients = viewerActivityStatus?.total_watcher_clients || 0
+  const visibleViewerChannels = viewerChannels.slice(0, 6)
+  const hiddenViewerChannelCount = Math.max(0, viewerChannels.length - visibleViewerChannels.length)
+
   const syncBadgeClass =
     syncStatus === 'completed' ? 'bg-green-600 text-white border-transparent' :
     syncStatus === 'failed'    ? 'bg-destructive text-destructive-foreground border-transparent' :
+    udiRefreshing              ? 'bg-blue-600 text-white border-transparent' :
     ''
 
   return (
@@ -298,24 +779,194 @@ export default function Dashboard() {
         <p className="text-muted-foreground">Monitor and control your stream automation</p>
       </div>
 
-      {/* Active Operations Alert */}
-      {isProcessing && (
-        <Alert className="border-blue-500 bg-blue-50 dark:bg-blue-950">
-          <Loader2 className="h-4 w-4 animate-spin text-blue-600" />
-          <AlertDescription className="text-blue-900 dark:text-blue-100">
-            <div className="font-medium mb-1">Stream checker is actively processing</div>
-            <div className="text-sm">
-              {completed} of {batchTotal} channels completed
-              {inProgress > 0 && ` (${inProgress} in progress, ${queueSize} in queue)`}
+      {showAutomationRunCard && (
+        <Card>
+          <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="space-y-1">
+              <CardTitle className="flex items-center gap-2 text-lg">
+                <ListChecks className="h-5 w-5 text-muted-foreground" />
+                Automation Run
+              </CardTitle>
+              <CardDescription>{displayRunMessage}</CardDescription>
             </div>
-            <Progress value={queueProgress} className="mt-2 h-2" />
-            <div className="text-xs mt-1 text-muted-foreground">Quick actions are temporarily disabled</div>
-          </AlertDescription>
-        </Alert>
+            <div className="flex flex-wrap items-center gap-2">
+              {showStopRunAction && (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleStopActiveRun}
+                  disabled={actionLoading === 'stop-run'}
+                  title="Stop the active automation or stream-check run"
+                >
+                  {actionLoading === 'stop-run' ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <StopCircle className="mr-2 h-4 w-4" />
+                  )}
+                  Stop Run
+                </Button>
+              )}
+              <Badge variant="outline" className={`w-fit gap-1 ${runBadgeClass}`}>
+                {displayRunningRun && <Loader2 className="h-3 w-3 animate-spin" />}
+                {failedRun && <AlertCircle className="h-3 w-3" />}
+                {abortedRun && <AlertCircle className="h-3 w-3" />}
+                {completedRun && <CheckCircle2 className="h-3 w-3" />}
+                {runDisplayBadgeLabel}
+              </Badge>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Activity className="h-3.5 w-3.5" />
+                  Current Stage
+                </div>
+                <div className="mt-1 truncate text-lg font-semibold">{runDisplayStageLabel}</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Clock3 className="h-3.5 w-3.5" />
+                  Updated
+                </div>
+                <div className="mt-1 text-lg font-semibold">{formatTime(displayRunUpdatedAt)}</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Timer className="h-3.5 w-3.5" />
+                  Duration
+                </div>
+                <div className="mt-1 text-lg font-semibold">{formatDuration(displayRunElapsedSeconds)}</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Timer className="h-3.5 w-3.5" />
+                  Stage Time
+                </div>
+                <div className="mt-1 text-lg font-semibold">{formatDuration(displayRunStageElapsedSeconds)}</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Activity className="h-3.5 w-3.5" />
+                  Progress
+                </div>
+                <div className="mt-1 text-lg font-semibold">{Math.round(runProgressPercent)}%</div>
+              </div>
+              <div className="rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium uppercase text-muted-foreground">
+                  <Database className="h-3.5 w-3.5" />
+                  API p95 / p99
+                </div>
+                <div className="mt-1 text-lg font-semibold">
+                  {apiTiming.p95_seconds != null ? formatLatency(apiTiming.p95_seconds) : 'N/A'}
+                  <span className="mx-1 text-muted-foreground">/</span>
+                  {apiTiming.p99_seconds != null ? formatLatency(apiTiming.p99_seconds) : 'N/A'}
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-2 flex items-center justify-between gap-3 text-sm">
+                <span className="text-muted-foreground">{runProgressDetail}</span>
+                <span className="text-muted-foreground">{Math.round(runProgressPercent)}%</span>
+              </div>
+              <Progress value={runProgressPercent} className="h-2" />
+              {currentCheckingChannelName && (
+                <div
+                  className="mt-2 flex min-w-0 items-center gap-2 rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground"
+                  title={currentCheckingChannelName}
+                >
+                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" />
+                  <span className="shrink-0 font-medium text-foreground/80">Checking now</span>
+                  <span className="min-w-0 truncate">{currentCheckingChannelName}</span>
+                </div>
+              )}
+            </div>
+
+            {schedulerRetryPeriods.length > 0 && (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-sm">
+                <div className="flex items-center gap-2 font-medium text-amber-200">
+                  <Clock3 className="h-4 w-4" />
+                  Quality retry status
+                </div>
+                <div className="mt-2 space-y-1 text-muted-foreground">
+                  {schedulerRetryPeriods.map((retry) => (
+                    <div key={retry.period_id} className="flex flex-wrap gap-x-2 gap-y-1">
+                      <span className="font-medium text-foreground">
+                        {retry.period_name || `Period ${retry.period_id}`}
+                      </span>
+                      <span>{retry.pending_channels} channel(s) pending</span>
+                      <span>
+                        {retry.exhausted
+                          ? 'Retry budget exhausted; waiting for the next regular schedule'
+                          : `Retry ${retry.attempt}/${retry.max_attempts} at ${new Date(retry.next_retry_at).toLocaleString()}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="grid gap-2 md:grid-cols-4 lg:grid-cols-8">
+              {displayStageCards.map((stage) => {
+                const isCurrent = stage.id === displayRunStageId && stage.status === 'running'
+                const isDone = stage.status === 'completed'
+                const isAborted = stage.status === 'aborted'
+                const stageClass = isCurrent
+                  ? 'border-primary bg-primary/10 text-primary'
+                  : isDone
+                    ? 'border-green-500/50 bg-green-500/10 text-green-600 dark:text-green-400'
+                    : isAborted
+                      ? 'border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400'
+                      : 'border-border bg-background text-muted-foreground'
+                return (
+                  <div key={stage.id} className={`rounded-md border px-3 py-2 text-xs font-medium ${stageClass}`}>
+                    <div className="flex items-center gap-2">
+                      {isCurrent && displayRunningRun ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : isDone ? (
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                      ) : isAborted ? (
+                        <AlertCircle className="h-3.5 w-3.5" />
+                      ) : (
+                        <Activity className="h-3.5 w-3.5" />
+                      )}
+                      <span className="truncate">{stage.label}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-10">
+              {displayRunMetrics.map((metric) => (
+                <div key={metric.key} className="rounded-md border p-3" title={metric.description}>
+                  <div className="text-xs text-muted-foreground">{metric.label}</div>
+                  <div className={`text-xl font-semibold ${metric.value === null ? 'text-muted-foreground' : ''}`}>
+                    {metric.value === null ? 'N/A' : metric.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {durationCards.map((card) => (
+                <div key={card.label} className="rounded-md border p-3">
+                  <div className="text-xs text-muted-foreground">{card.label}</div>
+                  <div className="text-base font-semibold">{card.value}</div>
+                  {card.detail && (
+                    <div className="mt-1 text-xs text-muted-foreground">{card.detail}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
       )}
 
       {/* Status Cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Automation Status</CardTitle>
@@ -356,6 +1007,33 @@ export default function Dashboard() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Shadow Monitor</CardTitle>
+            <Eye className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap items-center gap-2">
+              {shadowMonitorStatus?.running ? (
+                <Badge variant="default" className="bg-green-500">
+                  <CheckCircle2 className="h-3 w-3 mr-1" />Watching
+                </Badge>
+              ) : shadowMonitorStatus?.enabled ? (
+                <Badge variant="outline">Enabled</Badge>
+              ) : (
+                <Badge variant="secondary">Disabled</Badge>
+              )}
+              {shadowMonitorStatus?.dry_run && <Badge variant="outline">Dry Run</Badge>}
+            </div>
+            <p className="text-xs text-muted-foreground mt-2">
+              <Link to="/shadow-monitor" className="hover:underline">
+                {shadowWatchedCount} active channels
+                {shadowLastEvent ? `, last ${formatShadowEvent(shadowLastEvent.type)}` : ''}
+              </Link>
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
             <CardTitle className="text-sm font-medium">Last Update</CardTitle>
             <RefreshCw className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
@@ -369,6 +1047,91 @@ export default function Dashboard() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-1">
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Users className="h-5 w-5 text-muted-foreground" />
+              Watched Channels
+            </CardTitle>
+            <CardDescription>Current viewer and watcher playback</CardDescription>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Badge variant={realWatchedCount > 0 ? 'default' : 'secondary'}>
+              {formatRealViewerChannelCount(realWatchedCount)}
+            </Badge>
+            <Badge variant={watcherOnlyCount > 0 ? 'outline' : 'secondary'}>
+              {formatWatcherOnlyChannelCount(watcherOnlyCount)}
+            </Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Viewer Clients</div>
+              <div className="mt-1 text-2xl font-semibold">{totalRealClients}</div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Watcher Clients</div>
+              <div className="mt-1 text-2xl font-semibold">{totalWatcherClients}</div>
+            </div>
+            <div className="rounded-md border bg-muted/30 p-3">
+              <div className="text-xs font-medium uppercase text-muted-foreground">Active Channels</div>
+              <div className="mt-1 text-2xl font-semibold">{viewerChannels.length}</div>
+            </div>
+          </div>
+
+          {viewerChannels.length === 0 ? (
+            <div className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">
+              No active channel playback detected
+            </div>
+          ) : (
+            <div className="grid gap-2 lg:grid-cols-2 xl:grid-cols-3">
+              {visibleViewerChannels.map((channel) => (
+                <div
+                  key={`${channel.channel_uuid || channel.channel_id}-${channel.stream_id || 'stream'}`}
+                  className="rounded-md border bg-background p-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="truncate text-sm font-medium">{channel.channel_name || 'Unknown Channel'}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {getViewerActivityDetailLabel(channel)}
+                        {formatStreamRef(channel.stream_id)}
+                      </div>
+                    </div>
+                    {channel.has_real_clients ? (
+                      <Badge className="shrink-0 bg-green-600 text-white">{getPlaybackBadgeLabel(channel)}</Badge>
+                    ) : (
+                      <Badge variant="outline" className="shrink-0">{getPlaybackBadgeLabel(channel)}</Badge>
+                    )}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                    <Badge variant="secondary">{formatViewerClientCount(channel.real_client_count)}</Badge>
+                    <Badge variant="outline">{formatWatcherClientCount(channel.watcher_client_count)}</Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {hiddenViewerChannelCount > 0 && (
+            <p className="text-xs text-muted-foreground">
+              {hiddenViewerChannelCount} more active channels are not shown in this summary
+            </p>
+          )}
+
+          {viewerChannels.length > 0 && realWatchedCount === 0 && shadowMonitorStatus?.running && (
+            <Alert>
+              <Eye className="h-4 w-4" />
+              <AlertDescription>
+                Only watcher clients are active; no real viewer clients are currently detected.
+              </AlertDescription>
+            </Alert>
+          )}
+        </CardContent>
+      </Card>
 
       {/* Quick Actions */}
       <Card>
@@ -385,7 +1148,7 @@ export default function Dashboard() {
                 <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                   Dispatcharr Cache
                 </span>
-                {udiSyncing ? (
+                {udiRefreshing ? (
                   <Badge variant="outline" className="text-xs gap-1 border-blue-400 text-blue-400">
                     <Loader2 className="h-3 w-3 animate-spin" />Syncing
                   </Badge>
@@ -433,7 +1196,7 @@ export default function Dashboard() {
               </div>
 
               <p className="text-[11px] text-muted-foreground">
-                {udiSyncing
+                {udiRefreshing
                   ? 'Fetching data from Dispatcharr...'
                   : udiStats
                     ? 'Counts reflect the last completed sync'
@@ -445,18 +1208,25 @@ export default function Dashboard() {
             <div className="flex flex-col justify-center gap-3 sm:min-w-[180px]">
               <Button
                 onClick={handleReloadUDI}
-                disabled={shouldDisableActions || udiSyncing}
+                disabled={actionStates.reloadUdi.disabled}
                 className="w-full"
+                title={actionStates.reloadUdi.reason || 'Reload Dispatcharr cache'}
               >
-                {udiSyncing
+                {udiRefreshing
                   ? <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   : <RefreshCw className="mr-2 h-4 w-4" />}
-                {udiSyncing ? 'Syncing...' : 'Reload UDI'}
+                {udiRefreshing ? 'Syncing...' : 'Reload UDI'}
               </Button>
 
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
-                  <Button disabled={shouldDisableActions} variant="outline" className="w-full">
+                  <Button
+                    disabled={actionStates.runAutomation.disabled}
+                    variant="outline"
+                    className="w-full"
+                    aria-describedby={actionStates.runAutomation.reason ? 'run-automation-disabled-reason' : undefined}
+                    title={actionStates.runAutomation.reason || 'Run automation'}
+                  >
                     <PlayCircle className="mr-2 h-4 w-4" />
                     {actionLoading === 'automation' ? 'Running...' : 'Run Automation'}
                     <ChevronDown className="ml-2 h-4 w-4 opacity-50" />
@@ -481,13 +1251,18 @@ export default function Dashboard() {
                   )}
                 </DropdownMenuContent>
               </DropdownMenu>
+              {actionStates.runAutomation.reason && (
+                <p id="run-automation-disabled-reason" className="text-xs text-muted-foreground">
+                  {actionStates.runAutomation.reason}
+                </p>
+              )}
             </div>
           </div>
         </CardContent>
       </Card>
 
       {/* System Information */}
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <Card>
           <CardHeader><CardTitle>Automation Configuration</CardTitle></CardHeader>
           <CardContent>
@@ -511,8 +1286,8 @@ export default function Dashboard() {
               <div className="flex justify-between items-center">
                 <dt className="text-muted-foreground">Checker Concurrency:</dt>
                 <dd>
-                  <Badge variant={(streamCheckerStatus?.parallel?.max_workers || 0) > 0 ? "outline" : "secondary"}>
-                    {streamCheckerStatus?.parallel?.max_workers || 0} Workers
+                  <Badge variant={checkerConcurrencyDisplay.active ? "outline" : "secondary"}>
+                    {checkerConcurrencyDisplay.text}
                   </Badge>
                 </dd>
               </div>
@@ -529,29 +1304,64 @@ export default function Dashboard() {
                 <dd><Badge variant={queueSize > 0 ? "default" : "secondary"}>{queueSize}</Badge></dd>
               </div>
               <div className="flex justify-between items-center">
-                <dt className="text-muted-foreground">Total Processed:</dt>
-                <dd><Badge variant="outline">{totalProcessed}</Badge></dd>
+                <dt className="text-muted-foreground">{totalProcessedLabel}</dt>
+                <dd><Badge variant={queueHistoryOnly ? 'secondary' : 'outline'}>{totalProcessed}</Badge></dd>
               </div>
               {queueSize > 0 && (
                 <div className="pt-2">
                   <div className="flex justify-between items-center mb-2">
                     <Label className="text-xs text-muted-foreground block">Processing Progress</Label>
-                    {streamCheckerStatus?.queue?.eta_seconds > 0 ? (
-                      <span className="text-xs text-muted-foreground">
-                        ~{streamCheckerStatus.queue.eta_seconds > 60
-                          ? `${Math.floor(streamCheckerStatus.queue.eta_seconds / 60)}m ${streamCheckerStatus.queue.eta_seconds % 60}s`
-                          : `${streamCheckerStatus.queue.eta_seconds}s`} remaining
+                    {streamCheckerEtaDisplay.label ? (
+                      <span
+                        className={`text-xs text-muted-foreground ${streamCheckerEtaDisplay.pulse ? 'animate-pulse text-primary/70' : ''}`}
+                        title={streamCheckerEtaDisplay.title}
+                      >
+                        {streamCheckerEtaDisplay.label}
                       </span>
                     ) : (
-                      <span className="text-xs text-muted-foreground animate-pulse text-primary/70">
-                        Calculating ETA...
-                      </span>
+                      null
                     )}
                   </div>
                   <Progress value={queueProgress} className="h-2" />
                 </div>
               )}
             </dl>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <History className="h-4 w-4 text-muted-foreground" />
+              Recent Run Baseline
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {runHistoryBaseline.available ? (
+              <dl className="space-y-3 text-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Typical Duration:</dt>
+                  <dd><Badge variant="outline">{formatDuration(runHistoryBaseline.typicalDurationSeconds)}</Badge></dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Seconds / Channel:</dt>
+                  <dd><Badge variant="secondary">{getSecondsPerChannelBaselineLabel(runHistoryBaseline)}</Badge></dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Samples:</dt>
+                  <dd><Badge variant="secondary">{runHistoryBaseline.sampleCount}</Badge></dd>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <dt className="text-muted-foreground">Last Run:</dt>
+                  <dd className="text-right">
+                    <div className="font-medium">{formatDuration(runHistoryBaseline.latest?.duration_seconds)}</div>
+                    <div className="text-xs text-muted-foreground">{formatTime(runHistoryBaseline.latest?.timestamp)}</div>
+                  </dd>
+                </div>
+              </dl>
+            ) : (
+              <p className="text-sm text-muted-foreground">No completed automation runs yet</p>
+            )}
           </CardContent>
         </Card>
       </div>

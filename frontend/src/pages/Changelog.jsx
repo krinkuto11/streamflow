@@ -1,12 +1,22 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
+import { Button } from '@/components/ui/button.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table.jsx'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion.jsx'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { changelogAPI } from '@/services/api.js'
-import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown } from 'lucide-react'
+import {
+  getChangelogRunContextBadges,
+  getChangelogStaleWarnings,
+  getChangelogVisibilityEvents,
+  getChangelogVisibilityMetrics,
+} from '@/lib/changelog-run-summary.js'
+import { formatDuration } from '@/lib/time-format.js'
+import { TELEMETRY_DATE_RANGES } from '@/lib/telemetry-retention.js'
+import { getQualityReasonDisplay, getVisualProbeLabel } from '@/lib/quality-reason-display.js'
+import { Loader2, CheckCircle2, AlertCircle, Activity, ChevronDown, Download, EyeOff } from 'lucide-react'
 
 function formatTimestamp(timestamp) {
   const date = new Date(timestamp)
@@ -81,12 +91,55 @@ function getActionColor(action) {
   }
 }
 
+const entrySearchText = (entry) => JSON.stringify(entry || {}).toLowerCase()
+
+function QualityReasonValue({ stream }) {
+  const reason = getQualityReasonDisplay(stream)
+  if (!reason) {
+    return <span className="text-muted-foreground">-</span>
+  }
+  return (
+    <span className="text-amber-700 dark:text-amber-300" title={reason.title}>
+      {reason.text}
+    </span>
+  )
+}
+
+function entryMatchesSourceFilter(entry, sourceFilter) {
+  if (sourceFilter === 'all') return true
+  const action = entry?.action
+  const text = entrySearchText(entry)
+
+  if (sourceFilter === 'single_checks') {
+    return action === 'single_channel_check'
+  }
+  if (sourceFilter === 'full_runs') {
+    return ['automation_run', 'global_check', 'batch_stream_check'].includes(action)
+  }
+  if (sourceFilter === 'dead_revive') {
+    return text.includes('dead_stream') || text.includes('revived_stream') || text.includes('streams_revived')
+  }
+  if (sourceFilter === 'blank_freeze_loop') {
+    return text.includes('blank') || text.includes('freeze') || text.includes('loop')
+  }
+  if (sourceFilter === 'teamarr_preflight') {
+    return text.includes('teamarr') || text.includes('preflight')
+  }
+  return true
+}
+
 function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
   const [logoError, setLogoError] = useState(false)
   const channelLabel = item.channel_name
   const channelStats = groupType === 'check' && item.stats ?
     `Avg ${item.stats.avg_resolution || 'N/A'}, ${item.stats.avg_bitrate || 'N/A'}` :
     null
+  const streamDetails = item.stats?.stream_details || []
+  const hasScore = streamDetails.some(s => s.score !== undefined && s.score !== null)
+  const hasVisualProbe = streamDetails.some(s => s.visual_probe_ran)
+  const hasLoopProbe = streamDetails.some(s => s.loop_probe_ran)
+  const hasBlankProbe = streamDetails.some(s => s.blank_probe_ran)
+  const hasFreezeProbe = streamDetails.some(s => s.freeze_probe_ran)
 
   return (
     <AccordionItem key={itemIndex} value={`channel-${groupIndex}-${itemIndex}`}>
@@ -118,7 +171,7 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
             </ul>
           )}
 
-          {groupType === 'check' && item.stats && item.stats.stream_details && item.stats.stream_details.length > 0 && (
+          {groupType === 'check' && streamDetails.length > 0 && (
             <div className="rounded-md border mt-2">
               <Table>
                 <TableHeader>
@@ -129,16 +182,16 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                     <TableHead>Framerate</TableHead>
                     <TableHead>Bitrate</TableHead>
                     <TableHead>Codec</TableHead>
-                    {item.stats.stream_details.some(s => s.score !== undefined && s.score !== null) && (
-                      <TableHead>Score</TableHead>
-                    )}
-                    {item.stats.stream_details.some(s => s.loop_probe_ran) && (
-                      <TableHead>Loop</TableHead>
-                    )}
+                    <TableHead>Reason</TableHead>
+                    {hasVisualProbe && <TableHead>Visual Probe</TableHead>}
+                    {hasScore && <TableHead>Score</TableHead>}
+                    {hasLoopProbe && <TableHead>Loop</TableHead>}
+                    {hasBlankProbe && <TableHead>Blank</TableHead>}
+                    {hasFreezeProbe && <TableHead>Freeze</TableHead>}
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {[...item.stats.stream_details]
+                  {[...streamDetails]
                     .sort((a, b) => {
                       const scoreA = a.score !== undefined && a.score !== null ? a.score : -Infinity
                       const scoreB = b.score !== undefined && b.score !== null ? b.score : -Infinity
@@ -161,15 +214,28 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                         <TableCell>{streamDetail.fps || 'N/A'}</TableCell>
                         <TableCell>{streamDetail.bitrate || 'N/A'}</TableCell>
                         <TableCell>{streamDetail.video_codec || 'N/A'}</TableCell>
-                        {item.stats.stream_details.some(s => s.score !== undefined && s.score !== null) && (
+                        <TableCell className="max-w-[220px] text-xs">
+                          <QualityReasonValue stream={streamDetail} />
+                        </TableCell>
+                        {hasVisualProbe && (
+                          <TableCell>
+                            <span
+                              className={streamDetail.visual_probe_incomplete ? 'text-amber-500 text-xs' : 'text-muted-foreground text-xs'}
+                              title={`Requested ${streamDetail.visual_probe_requested_duration_seconds ?? '-'}s; minimum ${streamDetail.visual_probe_minimum_duration_seconds ?? '-'}s; effective ${streamDetail.visual_probe_duration_seconds ?? '-'}s`}
+                            >
+                              {streamDetail.visual_probe_ran ? getVisualProbeLabel(streamDetail) : '-'}
+                            </span>
+                          </TableCell>
+                        )}
+                        {hasScore && (
                           <TableCell>{streamDetail.score !== undefined && streamDetail.score !== null ? streamDetail.score.toFixed(2) : 'N/A'}</TableCell>
                         )}
-                        {item.stats.stream_details.some(s => s.loop_probe_ran) && (
+                        {hasLoopProbe && (
                           <TableCell>
                             {streamDetail.loop_probe_ran ? (
                               streamDetail.loop_detected === true ? (
                                 <span className="text-amber-500 font-medium text-xs">
-                                  ⚠ {streamDetail.loop_duration_secs ? `${streamDetail.loop_duration_secs.toFixed(1)}s` : 'Loop'}
+                                  ⚠ {streamDetail.loop_duration_secs ? formatDuration(streamDetail.loop_duration_secs) : 'Loop'}
                                 </span>
                               ) : streamDetail.loop_detected === false ? (
                                 <span className="text-muted-foreground text-xs">✓</span>
@@ -178,6 +244,40 @@ function ChannelItem({ item, groupType, groupIndex, itemIndex }) {
                               )
                             ) : (
                               <span className="text-muted-foreground text-xs">—</span>
+                            )}
+                          </TableCell>
+                        )}
+                        {hasBlankProbe && (
+                          <TableCell>
+                            {streamDetail.blank_probe_ran ? (
+                              streamDetail.blank_detected === true ? (
+                                <span className="text-red-500 font-medium text-xs">
+                                  {streamDetail.blank_duration_secs ? formatDuration(streamDetail.blank_duration_secs) : 'Blank'}
+                                </span>
+                              ) : streamDetail.blank_detected === false ? (
+                                <span className="text-muted-foreground text-xs">OK</span>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">-</span>
+                              )
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
+                            )}
+                          </TableCell>
+                        )}
+                        {hasFreezeProbe && (
+                          <TableCell>
+                            {streamDetail.freeze_probe_ran ? (
+                              streamDetail.freeze_detected === true ? (
+                                <span className="text-red-500 font-medium text-xs">
+                                  {streamDetail.freeze_duration_secs ? formatDuration(streamDetail.freeze_duration_secs) : 'Frozen'}
+                                </span>
+                              ) : streamDetail.freeze_detected === false ? (
+                                <span className="text-muted-foreground text-xs">OK</span>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">-</span>
+                              )
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
                             )}
                           </TableCell>
                         )}
@@ -199,6 +299,7 @@ function getStepIcon(name) {
     case 'validation': return <AlertCircle className="h-4 w-4" />
     case 'assignment': return <CheckCircle2 className="h-4 w-4" />
     case 'quality check': return <Activity className="h-4 w-4" />
+    case 'channel visibility': return <EyeOff className="h-4 w-4" />
     default: return <Activity className="h-4 w-4" />
   }
 }
@@ -209,6 +310,11 @@ function getStepColor(status, name = '') {
   if (stepName === 'assignment') return 'text-green-500 bg-green-500/5 border-green-500/10'
   if (stepName === 'quality check') return 'text-indigo-500 bg-indigo-500/5 border-indigo-500/10'
   if (stepName === 'validation') return 'text-purple-500 bg-purple-500/5 border-purple-500/10'
+  if (stepName === 'channel visibility') {
+    return status === 'warning'
+      ? 'text-amber-500 bg-amber-500/5 border-amber-500/10'
+      : 'text-green-500 bg-green-500/5 border-green-500/10'
+  }
 
   if (status === 'success') return 'text-green-500 bg-green-500/5 border-green-500/10'
   if (status === 'failed') return 'text-destructive bg-destructive/5 border-destructive/10'
@@ -220,6 +326,7 @@ function hasStepDetails(name, details) {
   return (name === 'Validation' && details.removed_count > 0) ||
     (name === 'Assignment' && details.added_count > 0) ||
     (name === 'Playlist Refresh' && details.accounts && details.accounts.length > 0) ||
+    (name === 'Channel Visibility' && details.changed) ||
     (name === 'Quality Check' && (details.dead_streams_count > 0 || details.revived_streams_count > 0 || details.skipped_streams_count > 0 || details.checked_streams?.length > 0))
 }
 
@@ -301,6 +408,29 @@ function StepContent({ step }) {
         </div>
       )}
 
+      {name === 'Channel Visibility' && details.changed && (
+        <div className="text-xs space-y-2 mt-1 opacity-90">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge
+              variant="outline"
+              className={details.action === 'hidden'
+                ? 'border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                : 'border-green-500/60 bg-green-500/10 text-green-700 dark:text-green-300'}
+            >
+              {details.action === 'hidden' ? 'Hidden' : 'Restored'}
+            </Badge>
+            <Badge variant="secondary" className="max-w-full truncate text-xs">
+              {formatVisibilityReason(details.reason)}
+            </Badge>
+          </div>
+          <div className="grid grid-cols-3 gap-2 text-muted-foreground">
+            <span>{details.details?.good_streams_count ?? 0} good</span>
+            <span>{details.details?.dead_streams_count ?? 0} dead</span>
+            <span>{details.details?.total_streams ?? 0} total</span>
+          </div>
+        </div>
+      )}
+
       {name === 'Quality Check' && (
         <div className="space-y-3 mt-1">
           {details.dead_streams_count > 0 && (
@@ -364,9 +494,16 @@ function StepContent({ step }) {
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Rate</TableHead>
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Bitrate</TableHead>
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Codec</TableHead>
+                      <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Reason</TableHead>
+                      {details.checked_streams.some(s => s.visual_probe_ran) && (
+                        <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground">Visual Probe</TableHead>
+                      )}
                       <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Score</TableHead>
                       {details.checked_streams.some(s => s.loop_probe_ran) && (
                         <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Loop</TableHead>
+                      )}
+                      {details.checked_streams.some(s => s.freeze_probe_ran) && (
+                        <TableHead className="h-7 text-[10px] uppercase font-bold text-muted-foreground text-right">Freeze</TableHead>
                       )}
                     </TableRow>
                   </TableHeader>
@@ -396,6 +533,19 @@ function StepContent({ step }) {
                         <TableCell className="py-1 text-muted-foreground">
                           {s.video_codec || '-'}
                         </TableCell>
+                        <TableCell className="py-1 max-w-[220px] text-xs">
+                          <QualityReasonValue stream={s} />
+                        </TableCell>
+                        {details.checked_streams.some(stream => stream.visual_probe_ran) && (
+                          <TableCell className="py-1">
+                            <span
+                              className={s.visual_probe_incomplete ? 'text-amber-500 text-xs' : 'text-muted-foreground text-xs'}
+                              title={`Requested ${s.visual_probe_requested_duration_seconds ?? '-'}s; minimum ${s.visual_probe_minimum_duration_seconds ?? '-'}s; effective ${s.visual_probe_duration_seconds ?? '-'}s`}
+                            >
+                              {s.visual_probe_ran ? getVisualProbeLabel(s) : '-'}
+                            </span>
+                          </TableCell>
+                        )}
                         <TableCell className="py-1 text-right font-mono text-xs">
                           {s.score !== undefined && s.score !== null ? s.score.toFixed(2) : '-'}
                         </TableCell>
@@ -404,7 +554,7 @@ function StepContent({ step }) {
                             {s.loop_probe_ran ? (
                               s.loop_detected === true ? (
                                 <span className="text-amber-500 font-medium text-xs">
-                                  ⚠ {s.loop_duration_secs ? `${s.loop_duration_secs.toFixed(1)}s` : 'Loop'}
+                                  ⚠ {s.loop_duration_secs ? formatDuration(s.loop_duration_secs) : 'Loop'}
                                 </span>
                               ) : s.loop_detected === false ? (
                                 <span className="text-muted-foreground text-xs">✓</span>
@@ -413,6 +563,23 @@ function StepContent({ step }) {
                               )
                             ) : (
                               <span className="text-muted-foreground text-xs">—</span>
+                            )}
+                          </TableCell>
+                        )}
+                        {details.checked_streams.some(s => s.freeze_probe_ran) && (
+                          <TableCell className="py-1 text-right">
+                            {s.freeze_probe_ran ? (
+                              s.freeze_detected === true ? (
+                                <span className="text-red-500 font-medium text-xs">
+                                  {s.freeze_duration_secs ? `${s.freeze_duration_secs.toFixed(1)}s` : 'Frozen'}
+                                </span>
+                              ) : s.freeze_detected === false ? (
+                                <span className="text-muted-foreground text-xs">OK</span>
+                              ) : (
+                                <span className="text-muted-foreground text-xs">-</span>
+                              )
+                            ) : (
+                              <span className="text-muted-foreground text-xs">-</span>
                             )}
                           </TableCell>
                         )}
@@ -477,24 +644,161 @@ function AutomationChannel({ channel, cIdx }) {
   )
 }
 
-function ChangelogEntry({ entry }) {
-  const { timestamp, action, details, subentries } = entry
-  const hasSubentries = subentries && subentries.length > 0
+function formatVisibilityReason(reason) {
+  return String(reason || 'visibility change')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function ChannelVisibilityChanges({ events }) {
+  if (!events.length) return null
 
   return (
-    <Card className={`overflow-hidden shadow-md transition-shadow hover:shadow-lg dark:bg-card/40 ${action === 'automation_run' ? 'border-2 border-blue-500 dark:border-green-500' : 'border-muted/60'}`}>
-      <CardHeader className="pb-3 bg-muted/10">
-        <div className="flex items-start justify-between">
-          <div className="flex items-center gap-2">
-            <Badge variant="outline" className={`${getActionColor(action)} border-current font-bold px-2 py-0.5`}>
-              <div className="bg-current/10 p-1 rounded-sm mr-2 inline-flex">
+    <CardContent className="border-t bg-muted/5 pt-4">
+      <div className="space-y-3 rounded-lg border border-border/70 bg-background/60 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h4 className="text-sm font-bold">Channel Visibility Changes</h4>
+            <p className="text-xs text-muted-foreground">Channels hidden or restored by this run</p>
+          </div>
+          <Badge variant="secondary" className="text-xs font-semibold">
+            {events.length} {events.length === 1 ? 'change' : 'changes'}
+          </Badge>
+        </div>
+        <div className="grid gap-2">
+          {events.map(event => {
+            const isHidden = event.action === 'hidden'
+            const badgeClass = isHidden
+              ? 'border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+              : 'border-green-500/60 bg-green-500/10 text-green-700 dark:text-green-300'
+            return (
+              <div key={event.key} className="flex min-w-0 flex-col gap-2 rounded-md border border-border/60 p-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex min-w-0 items-center gap-3">
+                  {event.logo_url ? (
+                    <img src={event.logo_url} alt={event.channel_name} className="h-8 w-8 shrink-0 rounded bg-white object-contain p-1 dark:bg-card" />
+                  ) : (
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-muted text-xs font-bold">
+                      {String(event.channel_name || 'CH').slice(0, 2).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold">{event.channel_name}</div>
+                    <div className="text-xs text-muted-foreground">
+                      ID {event.channel_id || event.channel_ref || 'unknown'}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant="outline" className={badgeClass}>
+                    {isHidden ? 'Hidden' : 'Restored'}
+                  </Badge>
+                  <Badge variant="secondary" className="max-w-full truncate text-xs">
+                    {formatVisibilityReason(event.reason)}
+                  </Badge>
+                  <span className="text-xs text-muted-foreground">
+                    {event.good_streams_count} good / {event.dead_streams_count} dead / {event.total_streams} total
+                  </span>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </div>
+    </CardContent>
+  )
+}
+
+function ChangelogEntry({ entry, onExport, exportingScope }) {
+  const { timestamp, action, details, subentries } = entry
+  const hasSubentries = subentries && subentries.length > 0
+  const runContextBadges = getChangelogRunContextBadges(details)
+  const staleWarnings = getChangelogStaleWarnings(details)
+  const visibilityMetrics = getChangelogVisibilityMetrics(details)
+  const visibilityEvents = getChangelogVisibilityEvents(details)
+
+  return (
+    <Card className={`min-w-0 max-w-full overflow-hidden shadow-md transition-shadow hover:shadow-lg dark:bg-card/40 ${action === 'automation_run' ? 'border-2 border-blue-500 dark:border-green-500' : 'border-muted/60'}`}>
+      <CardHeader className="min-w-0 pb-3 bg-muted/10">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex min-w-0 items-center gap-2">
+            <Badge variant="outline" className={`${getActionColor(action)} min-w-0 max-w-full whitespace-normal border-current px-2 py-0.5 font-bold leading-snug`}>
+              <div className="mr-2 inline-flex shrink-0 rounded-sm bg-current/10 p-1">
                 {getActionIcon(action)}
               </div>
-              <span className="text-[11px] uppercase tracking-wider">{getActionLabel(action)}</span>
+              <span className="min-w-0 break-words text-[11px] uppercase tracking-wider">{getActionLabel(action)}</span>
             </Badge>
           </div>
-          <span className="text-[11px] font-medium text-muted-foreground bg-muted/30 px-2 py-1 rounded-md">{formatTimestamp(timestamp)}</span>
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {entry.id !== undefined && (
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-2 gap-1"
+                  onClick={() => onExport?.(entry, 'all')}
+                  disabled={Boolean(exportingScope)}
+                  title="Export full run"
+                >
+                  {exportingScope === 'all' ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4" />
+                  )}
+                  <span className="text-xs">Run</span>
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-8 px-2 gap-1"
+                  onClick={() => onExport?.(entry, 'dead')}
+                  disabled={Boolean(exportingScope)}
+                  title="Export dead, blank, freeze, and failed streams"
+                >
+                  {exportingScope === 'dead' ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="h-4 w-4" />
+                  )}
+                  <span className="text-xs">Dead</span>
+                </Button>
+              </>
+            )}
+            <span className="rounded-md bg-muted/30 px-2 py-1 text-[11px] font-medium text-muted-foreground">{formatTimestamp(timestamp)}</span>
+          </div>
         </div>
+
+        {runContextBadges.length > 0 && (
+          <div className="mt-3 flex min-w-0 flex-wrap gap-2 border-t pt-3">
+            {runContextBadges.map(item => (
+              <Badge
+                key={item.key}
+                variant="secondary"
+                className="min-w-0 max-w-full justify-start gap-1 whitespace-normal text-left leading-snug"
+              >
+                <span className="shrink-0 text-[10px] uppercase tracking-tight text-muted-foreground">{item.label}</span>
+                <span className="min-w-0 break-words font-semibold">{item.value}</span>
+              </Badge>
+            ))}
+          </div>
+        )}
+
+        {staleWarnings.length > 0 && (
+          <div className="mt-3 flex min-w-0 flex-wrap gap-2 border-t pt-3">
+            {staleWarnings.map(item => (
+              <Badge
+                key={item.key}
+                variant="outline"
+                className="min-w-0 max-w-full justify-start gap-1 whitespace-normal border-amber-500/70 bg-amber-500/10 text-left leading-snug text-amber-700 dark:text-amber-300"
+              >
+                <span className="shrink-0 text-[10px] uppercase text-amber-800/80 dark:text-amber-200/80">{item.label}</span>
+                <span className="min-w-0 break-words font-semibold">{item.value}</span>
+              </Badge>
+            ))}
+          </div>
+        )}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-3 pt-3 border-t">
           {details.total_channels !== undefined && (
@@ -545,10 +849,16 @@ function ChangelogEntry({ entry }) {
               <p className="text-lg font-bold text-green-500">{details.streams_revived}</p>
             </div>
           )}
+          {visibilityMetrics.map(metric => (
+            <div key={metric.key}>
+              <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">{metric.label}</p>
+              <p className={`text-lg font-bold ${metric.className}`}>{metric.value}</p>
+            </div>
+          ))}
           {details.duration && (
             <div>
               <p className="text-[10px] text-muted-foreground uppercase tracking-tight font-bold">Duration</p>
-              <p className="text-lg font-bold">{details.duration}</p>
+              <p className="text-lg font-bold">{formatDuration(details.duration)}</p>
             </div>
           )}
           {details.avg_bitrate && details.avg_bitrate !== 'N/A' && (
@@ -572,6 +882,8 @@ function ChangelogEntry({ entry }) {
         </div>
       </CardHeader>
 
+      <ChannelVisibilityChanges events={visibilityEvents} />
+
       {action === 'automation_run' && details.periods && (
         <CardContent className="pt-0 space-y-6 bg-muted/5">
           <div className="pt-4 px-1">
@@ -579,13 +891,13 @@ function ChangelogEntry({ entry }) {
               {details.periods.map((period, pIdx) => (
                 <AccordionItem key={pIdx} value={`period-${pIdx}`} className="border rounded-xl overflow-hidden bg-background shadow-sm border-muted/50">
                   <AccordionTrigger className="hover:no-underline hover:bg-muted/30 px-5 py-4 transition-colors">
-                    <div className="flex items-center justify-between w-full pr-4">
-                      <div className="flex items-center gap-4">
+                    <div className="flex min-w-0 w-full flex-col gap-3 pr-4 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="flex min-w-0 items-center gap-4">
                         <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary font-bold text-sm border border-primary/20">
                           {pIdx + 1}
                         </div>
-                        <div className="flex flex-col items-start gap-0.5">
-                          <span className="font-bold text-lg tracking-tight">{period.period_name}</span>
+                        <div className="flex min-w-0 flex-col items-start gap-0.5">
+                          <span className="min-w-0 break-words text-lg font-bold tracking-tight">{period.period_name}</span>
                           <span className="text-[10px] font-bold uppercase text-muted-foreground tracking-widest opacity-70">Automation Period</span>
                         </div>
                       </div>
@@ -739,12 +1051,14 @@ export default function Changelog() {
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
   const [actionFilter, setActionFilter] = useState('all')
+  const [sourceFilter, setSourceFilter] = useState('all')
+  const [exportingRunKey, setExportingRunKey] = useState(null)
   const { toast } = useToast()
 
   useEffect(() => {
     // Reset page when filter changes
     setPage(1)
-  }, [days, actionFilter])
+  }, [days, actionFilter, sourceFilter])
 
   useEffect(() => {
     loadChangelog()
@@ -780,24 +1094,75 @@ export default function Changelog() {
   }
 
   const filteredEntries = useMemo(() => {
-    return actionFilter === 'all'
+    const actionFiltered = actionFilter === 'all'
       ? entries
       : entries.filter(entry => entry.action === actionFilter)
-  }, [entries, actionFilter])
+    return actionFiltered.filter(entry => entryMatchesSourceFilter(entry, sourceFilter))
+  }, [entries, actionFilter, sourceFilter])
+
+  const handleExportRun = async (entry, scope = 'all') => {
+    if (!entry?.id) return
+    const exportKey = `${entry.id}:${scope}`
+    try {
+      setExportingRunKey(exportKey)
+      const response = await changelogAPI.exportRun(entry.id, { format: 'json', include_url: false, scope })
+      const disposition = response.headers?.['content-disposition'] || ''
+      const match = disposition.match(/filename="?([^"]+)"?/i)
+      const filename = match?.[1] || `changelog-run-${entry.id}.json`
+      const blob = response.data instanceof Blob
+        ? response.data
+        : new Blob([response.data], { type: response.headers?.['content-type'] || 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      toast({
+        title: "Export ready",
+        description: `Downloaded ${filename}`
+      })
+    } catch (err) {
+      console.error('Failed to export changelog run:', err)
+      toast({
+        title: "Error",
+        description: err.response?.data?.error || "Failed to export changelog run",
+        variant: "destructive"
+      })
+    } finally {
+      setExportingRunKey(null)
+    }
+  }
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="min-w-0 space-y-6 overflow-hidden">
+      <div className="flex min-w-0 flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
           <h1 className="text-3xl font-bold tracking-tight">Changelog</h1>
           <p className="text-muted-foreground">
             View activity history and system events
           </p>
         </div>
 
-        <div className="flex gap-3">
+        <div className="grid w-full min-w-0 grid-cols-1 gap-3 sm:grid-cols-3 lg:flex lg:w-auto">
+          <Select value={sourceFilter} onValueChange={setSourceFilter}>
+            <SelectTrigger className="w-full lg:w-[190px]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">All Sources</SelectItem>
+              <SelectItem value="single_checks">Single Checks</SelectItem>
+              <SelectItem value="full_runs">Full Runs</SelectItem>
+              <SelectItem value="dead_revive">Dead / Revive</SelectItem>
+              <SelectItem value="blank_freeze_loop">Blank / Freeze / Loop</SelectItem>
+              <SelectItem value="teamarr_preflight">Teamarr Preflight</SelectItem>
+            </SelectContent>
+          </Select>
+
           <Select value={actionFilter} onValueChange={setActionFilter}>
-            <SelectTrigger className="w-[200px]">
+            <SelectTrigger className="w-full lg:w-[200px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -814,14 +1179,13 @@ export default function Changelog() {
           </Select>
 
           <Select value={days.toString()} onValueChange={(value) => setDays(Number(value))}>
-            <SelectTrigger className="w-[150px]">
+            <SelectTrigger className="w-full lg:w-[150px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="1">Last 24 hours</SelectItem>
-              <SelectItem value="7">Last 7 days</SelectItem>
-              <SelectItem value="30">Last 30 days</SelectItem>
-              <SelectItem value="90">Last 90 days</SelectItem>
+              {TELEMETRY_DATE_RANGES.map((range) => (
+                <SelectItem key={range.value} value={range.value}>{range.label}</SelectItem>
+              ))}
             </SelectContent>
           </Select>
         </div>
@@ -845,9 +1209,18 @@ export default function Changelog() {
           </CardContent>
         </Card>
       ) : (
-        <div className="space-y-4">
+        <div className="min-w-0 space-y-4">
           {filteredEntries.map((entry, index) => (
-            <ChangelogEntry key={index} entry={entry} />
+            <ChangelogEntry
+              key={entry.id ?? index}
+              entry={entry}
+              onExport={handleExportRun}
+              exportingScope={
+                exportingRunKey?.startsWith(`${entry.id}:`)
+                  ? exportingRunKey.split(':')[1]
+                  : null
+              }
+            />
           ))}
 
           {/* Pagination Controls */}

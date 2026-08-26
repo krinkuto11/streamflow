@@ -1,0 +1,85 @@
+"""Small helpers for URL/name-safe operational logging."""
+
+import hashlib
+import os
+import re
+from typing import Any, Optional
+
+
+_URL_RE = re.compile(r"(?i)\b(?:https?|rtmps?|rtsp|rtp|udp|tcp)://[^\s'\"<>]+")
+_AUTH_VALUE_RE = re.compile(
+    r"(?i)\b(?:bearer|apikey|basic)\s+[A-Za-z0-9._~+/=-]+"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)([\"']?(?:api[_-]?key|watcher_api_key|password|passwd|token|authorization)"
+    r"[\"']?\s*[:=]\s*)([\"']?)([^\s,}\]]+)([\"']?)"
+)
+_TRUE_VALUES = {"true", "1", "yes", "on"}
+
+
+def debug_mode_enabled() -> bool:
+    return os.getenv("DEBUG_MODE", "false").strip().lower() in _TRUE_VALUES
+
+
+def audit_ref(kind: str, value: Any) -> str:
+    """Return a stable, non-reversible reference for a logged object."""
+    if value is None or value == "":
+        return f"{kind}-unknown"
+    if debug_mode_enabled():
+        return f"{kind}-{value}"
+    digest = hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()[:12]
+    return f"{kind}-{digest}"
+
+
+def channel_ref(channel_id: Any) -> str:
+    return audit_ref("channel", channel_id)
+
+
+def stream_ref(stream_id: Any = None, stream_url: Optional[str] = None) -> str:
+    if stream_id is not None and stream_id != "":
+        return audit_ref("stream", stream_id)
+    if stream_url:
+        return audit_ref("stream-url", stream_url)
+    return "stream-unknown"
+
+
+def url_ref(url: Optional[str]) -> str:
+    if url is None or url == "":
+        return "url-unknown"
+    digest = hashlib.sha256(f"url:{url}".encode("utf-8")).hexdigest()[:12]
+    return f"url-{digest}"
+
+
+def scrub_urls(message: Any) -> str:
+    """Replace raw stream/API URLs inside a log message with stable URL refs."""
+    text = str(message)
+    def _replace(match: re.Match) -> str:
+        return f"<{url_ref(match.group(0))}>"
+
+    return _URL_RE.sub(_replace, text)
+
+
+def scrub_secrets(message: Any) -> str:
+    """Redact common credential forms from an already formatted log message."""
+    text = scrub_urls(message)
+    text = _AUTH_VALUE_RE.sub("<authorization-redacted>", text)
+
+    def _replace_assignment(match: re.Match) -> str:
+        return f"{match.group(1)}<redacted>"
+
+    return _SECRET_ASSIGNMENT_RE.sub(_replace_assignment, text)
+
+
+def stream_context(
+    *,
+    stream_id: Any = None,
+    stream_url: Optional[str] = None,
+    channel_id: Any = None,
+    reason: Optional[str] = None,
+) -> str:
+    parts = [f"stream_ref={stream_ref(stream_id, stream_url)}"]
+    if channel_id is not None:
+        parts.append(f"channel_ref={channel_ref(channel_id)}")
+    if reason:
+        parts.append(f"reason={reason}")
+    return ", ".join(parts)

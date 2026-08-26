@@ -7,7 +7,6 @@ ffmpeg for stream analysis.
 """
 
 import unittest
-from unittest.mock import Mock, patch, MagicMock
 import sys
 import os
 import re
@@ -91,6 +90,128 @@ class TestM3UProfileURLTransformation(unittest.TestCase):
         # Replace 'path/to' with 'new/path'
         transformed = re.sub(r'path/to', 'new/path', original)
         self.assertEqual(transformed, 'http://example.com/new/path/stream')
+
+    def test_explicit_alternate_profile_resolves_changed_credential_url(self):
+        """The production resolver binds an alternate profile to its own URL."""
+        from apps.udi.manager import UDIManager
+
+        manager = object.__new__(UDIManager)
+        stream = {
+            'id': 101,
+            'url': 'http://provider.test/live/main-user/main-token/101.ts',
+        }
+        profile = {
+            'id': 11,
+            'is_default': False,
+            'search_pattern': r'/main-user/main-token/',
+            'replace_pattern': '/second-user/second-token/',
+        }
+
+        eligible, resolved_url, reason = manager.resolve_profile_stream_url(stream, profile)
+
+        self.assertTrue(eligible)
+        self.assertEqual(reason, 'profile_url_transformed')
+        self.assertEqual(
+            resolved_url,
+            'http://provider.test/live/second-user/second-token/101.ts',
+        )
+
+    def test_live_style_default_noop_rewrite_remains_eligible(self):
+        """Dispatcharr default profiles may explicitly rewrite to the stored URL."""
+        from apps.udi.manager import UDIManager
+
+        manager = object.__new__(UDIManager)
+        stream = {'id': 101, 'url': 'http://provider.test/live/main/main/101.ts'}
+        profile = {
+            'id': 10,
+            'is_default': True,
+            'search_pattern': r'/main/main/',
+            'replace_pattern': '/main/main/',
+        }
+
+        eligible, resolved_url, reason = manager.resolve_profile_stream_url(stream, profile)
+
+        self.assertTrue(eligible)
+        self.assertEqual(resolved_url, stream['url'])
+        self.assertEqual(reason, 'default_profile_url')
+
+    def test_nondefault_missing_or_nonmatching_rewrite_fails_closed(self):
+        """An alternate slot can never silently probe the stored main URL."""
+        from apps.udi.manager import UDIManager
+
+        manager = object.__new__(UDIManager)
+        stream = {'id': 101, 'url': 'http://provider.test/live/main/main/101.ts'}
+        profiles = [
+            {
+                'id': 11,
+                'is_default': False,
+                'search_pattern': None,
+                'replace_pattern': None,
+            },
+            {
+                'id': 12,
+                'is_default': False,
+                'search_pattern': r'^http://another-provider\.test/',
+                'replace_pattern': 'http://provider.test/live/other/other/',
+            },
+        ]
+
+        outcomes = [manager.resolve_profile_stream_url(stream, profile) for profile in profiles]
+
+        self.assertTrue(all(not eligible for eligible, _url, _reason in outcomes))
+        self.assertTrue(all(url == '' for _eligible, url, _reason in outcomes))
+
+    def test_non_boolean_default_flag_cannot_select_raw_provider_url(self):
+        """String-like booleans must not become implicit default credentials."""
+        from apps.udi.manager import UDIManager
+
+        manager = object.__new__(UDIManager)
+        stream = {
+            'id': 101,
+            'url': 'http://provider.test/live/private/private/101.ts',
+        }
+        profile = {
+            'id': 11,
+            'is_default': 'false',
+            'search_pattern': None,
+            'replace_pattern': None,
+        }
+
+        eligible, resolved_url, reason = manager.resolve_profile_stream_url(
+            stream,
+            profile,
+        )
+
+        self.assertFalse(eligible)
+        self.assertEqual(resolved_url, '')
+        self.assertEqual(reason, 'invalid_profile_default_flag')
+
+    def test_invalid_regex_log_does_not_expose_pattern_or_url(self):
+        """Configuration failures are observable without leaking credentials."""
+        from apps.udi.manager import UDIManager
+
+        manager = object.__new__(UDIManager)
+        stream = {
+            'id': 101,
+            'url': 'http://provider.test/live/private-user/private-token/101.ts',
+        }
+        profile = {
+            'id': 11,
+            'is_default': False,
+            'search_pattern': r'(private-user/private-token',
+            'replace_pattern': '/other-user/other-token/',
+        }
+
+        with self.assertLogs('apps.udi.manager', level='ERROR') as captured:
+            eligible, resolved_url, reason = manager.resolve_profile_stream_url(stream, profile)
+
+        log_output = '\n'.join(captured.output)
+        self.assertFalse(eligible)
+        self.assertEqual(resolved_url, '')
+        self.assertEqual(reason, 'invalid_profile_url_regex')
+        self.assertNotIn('private-user', log_output)
+        self.assertNotIn('private-token', log_output)
+        self.assertNotIn(stream['url'], log_output)
 
 
 if __name__ == '__main__':

@@ -21,6 +21,7 @@ UI available at **http://localhost:5000** (default port).
 - **Automation Periods** — interval or cron-based schedules assigned per-channel with a profile. See [docs/automation.md](docs/automation.md).
 - **Stream Matching** — regex and/or TVG-ID based stream→channel assignment with per-pattern M3U account filtering. See [docs/stream-matching.md](docs/stream-matching.md).
 - **Stream Checking** — ffmpeg-based quality analysis (bitrate, resolution, FPS, codec, HDR) with weighted scoring and automatic reordering. See [docs/stream-checking.md](docs/stream-checking.md).
+- **Optional Hardware Acceleration** — CPU-safe stream probing by default, with optional GPU/ffmpeg acceleration, CPU fallback, and container setup notes. See [docs/operations-guide.md#hardware-acceleration](docs/operations-guide.md#hardware-acceleration).
 - **Stream Monitoring** — event-based session tracking, reliability scoring, screenshot capture, and interactive timeline. See [docs/stream-monitoring.md](docs/stream-monitoring.md).
 - **Dead Stream Tracking** — persistent dead stream detection with optional auto-removal and quarantine/revival. See [docs/stream-checking.md](docs/stream-checking.md).
 - **Concurrent Stream Limits** — per-M3U-account throttling during parallel checks. See [docs/stream-checking.md](docs/stream-checking.md).
@@ -28,7 +29,8 @@ UI available at **http://localhost:5000** (default port).
 - **EPG Scheduling** — schedule channel checks from live EPG program data. See [docs/automation.md](docs/automation.md).
 - **Global Action** — manually trigger a full update cycle across all channels.
 - **Changelog** — timestamped activity log with per-channel and per-stream detail.
-- **REST API** — full API for all operations. See [docs/api.md](docs/api.md).
+- **Operations Guide** — practical setup, profile, monitoring, and troubleshooting guidance. See [docs/operations-guide.md](docs/operations-guide.md).
+- **REST API** — full API for all operations. See [docs/API.md](docs/API.md).
 
 ## Documentation
 
@@ -38,7 +40,8 @@ UI available at **http://localhost:5000** (default port).
 | [docs/stream-matching.md](docs/stream-matching.md)     | Regex patterns, TVG-ID, mass assignment, validation         |
 | [docs/stream-checking.md](docs/stream-checking.md)     | Quality checking, scoring, dead streams, concurrency limits |
 | [docs/stream-monitoring.md](docs/stream-monitoring.md) | Live monitoring, sessions, timeline, screenshots            |
-| [docs/api.md](docs/api.md)                             | REST API reference                                          |
+| [docs/operations-guide.md](docs/operations-guide.md)   | Setup, profiles, GPU/container notes, monitoring, troubleshooting |
+| [docs/API.md](docs/API.md)                             | REST API reference                                          |
 | [DEVELOPMENT.md](DEVELOPMENT.md)                       | Local dev setup                                             |
 
 ## License

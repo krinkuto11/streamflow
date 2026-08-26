@@ -84,7 +84,13 @@ class TestUDICacheSyncAfterStatsUpdate(unittest.TestCase):
             'source_fps': 30,
             'video_codec': 'h265',
             'audio_codec': 'aac',
-            'ffmpeg_output_bitrate': 5000
+            'ffmpeg_output_bitrate': 5000,
+            'measurement_incomplete': False,
+            'measurement_incomplete_reason': 'none',
+            'measurement_incomplete_context': {},
+            'bitrate_recheck_required': False,
+            'bitrate_recheck_attempted': False,
+            'bitrate_recheck_outcome': 'not_needed',
         }
         self.assertEqual(patch_payload['stream_stats'], expected_stats)
         

@@ -57,9 +57,6 @@ class TestCurrentViewersTracking(unittest.TestCase):
             {'id': 103, 'name': 'Channel 103', 'streams': [6]},  # Stream 6 from Account 2
         ]
         
-        # Build channel index
-        self.udi._channels_by_id = {ch['id']: ch for ch in self.udi._channels_cache}
-        
         # Test streams with current_viewers
         self.udi._streams_cache = [
             # Account 1 streams
@@ -72,17 +69,16 @@ class TestCurrentViewersTracking(unittest.TestCase):
             {'id': 6, 'name': 'Stream 6', 'm3u_account': 2, 'current_viewers': 1},
         ]
         
-        # Build stream index
-        self.udi._streams_by_id = {s['id']: s for s in self.udi._streams_cache}
+        self.udi._build_indexes()
     
     def test_get_active_streams_for_account(self):
         """Test counting active streams for an account."""
         # Mock proxy status showing channels 100, 101 (account 1), and 102, 103 (account 2) are active
         mock_proxy_status = {
-            '100': {'channel_id': '100', 'state': 'active'},  # Stream 2 from Account 1
-            '101': {'channel_id': '101', 'state': 'active'},  # Stream 3 from Account 1
-            '102': {'channel_id': '102', 'state': 'active'},  # Stream 4 from Account 2
-            '103': {'channel_id': '103', 'state': 'active'},  # Stream 6 from Account 2
+            '100': {'channel_id': '100', 'state': 'active', 'm3u_profile_id': 101},  # Account 1
+            '101': {'channel_id': '101', 'state': 'active', 'm3u_profile_id': 101},  # Account 1
+            '102': {'channel_id': '102', 'state': 'active', 'm3u_profile_id': 201},  # Account 2
+            '103': {'channel_id': '103', 'state': 'active', 'm3u_profile_id': 201},  # Account 2
         }
         
         with patch.object(self.udi.fetcher, 'fetch_proxy_status', return_value=mock_proxy_status):
@@ -108,10 +104,10 @@ class TestCurrentViewersTracking(unittest.TestCase):
         """Test counting active streams for a profile."""
         # Mock proxy status showing channels 100, 101 (account 1), and 102, 103 (account 2) are active
         mock_proxy_status = {
-            '100': {'channel_id': '100', 'state': 'active'},  # Stream 2 from Account 1
-            '101': {'channel_id': '101', 'state': 'active'},  # Stream 3 from Account 1
-            '102': {'channel_id': '102', 'state': 'active'},  # Stream 4 from Account 2
-            '103': {'channel_id': '103', 'state': 'active'},  # Stream 6 from Account 2
+            '100': {'channel_id': '100', 'state': 'active', 'm3u_profile_id': 101},  # Account 1
+            '101': {'channel_id': '101', 'state': 'active', 'm3u_profile_id': 101},  # Account 1
+            '102': {'channel_id': '102', 'state': 'active', 'm3u_profile_id': 201},  # Account 2
+            '103': {'channel_id': '103', 'state': 'active', 'm3u_profile_id': 201},  # Account 2
         }
         
         with patch.object(self.udi.fetcher, 'fetch_proxy_status', return_value=mock_proxy_status):
@@ -135,6 +131,7 @@ class TestCurrentViewersTracking(unittest.TestCase):
     
     def test_nonexistent_account(self):
         """Test handling of nonexistent account."""
+        self.udi.fetcher.fetch_proxy_status = Mock(return_value={})
         active_count = self.udi.get_active_streams_for_account(999)
         self.assertEqual(active_count, 0, "Nonexistent account should return 0 active streams")
         
@@ -248,10 +245,10 @@ class TestStreamLimiterWithCurrentViewers(unittest.TestCase):
         # Mock UDI to raise an error
         self.mock_udi.get_active_streams_for_account.side_effect = Exception("UDI error")
         
-        # Should still work (treating as 0 active streams)
+        # Unknown live provider usage must not be treated as zero.
         acquired, reason = self.limiter.acquire(1, timeout=0.1)
-        self.assertTrue(acquired, "Should acquire even with UDI error")
-        self.assertEqual(reason, 'acquired', "Should succeed with 'acquired' reason")
+        self.assertFalse(acquired)
+        self.assertEqual(reason, 'provider_usage_unavailable')
         
         # Clean up
         if acquired:
@@ -296,7 +293,11 @@ class TestStreamLimiterWithCurrentViewers(unittest.TestCase):
         streams = [{'id': 1, 'name': 'Test Stream', 'url': 'http://test.com', 'm3u_account': 1}]
         
         # Run check
-        results = scheduler.check_streams_with_limits(streams, check_func)
+        results = scheduler.check_streams_with_limits(
+            streams,
+            check_func,
+            provider_wait_timeout=0.1,
+        )
         
         # Should have 1 result with cached stats
         self.assertEqual(len(results), 1, "Should have 1 result")

@@ -1,5 +1,6 @@
 """Automation API handler functions extracted from web_api."""
 
+from statistics import median
 from typing import Any, Callable, Dict, Optional
 
 from flask import jsonify
@@ -24,6 +25,46 @@ from apps.core.logging_config import setup_logging
 logger = setup_logging(__name__)
 
 
+def _normalize_m3u_refresh_wait_settings(value: Any, defaults: Dict[str, Any]) -> Dict[str, Any]:
+    raw = value if isinstance(value, dict) else {}
+    merged = {**defaults, **raw}
+
+    def positive_int(key: str, minimum: int) -> int:
+        try:
+            parsed = int(merged.get(key, defaults.get(key)))
+        except (TypeError, ValueError):
+            parsed = defaults.get(key)
+        try:
+            parsed = int(parsed)
+        except (TypeError, ValueError):
+            parsed = minimum
+        return max(minimum, parsed)
+
+    return {
+        "enabled": bool(merged.get("enabled", True)),
+        "timeout_seconds": positive_int("timeout_seconds", 30),
+        "poll_interval_seconds": positive_int("poll_interval_seconds", 1),
+        "stable_polls_required": positive_int("stable_polls_required", 1),
+        "min_wait_seconds": positive_int("min_wait_seconds", 0),
+        "retry_failed_providers": bool(merged.get("retry_failed_providers", False)),
+    }
+
+
+def _attach_period_runtime_metadata(period: Dict[str, Any], get_automation_manager: Optional[Callable[[], Any]]) -> Dict[str, Any]:
+    if not get_automation_manager or not period:
+        return period
+    try:
+        manager = get_automation_manager()
+        if not hasattr(manager, "get_period_skip_history"):
+            return period
+        history = manager.get_period_skip_history(period.get("id"), limit=5)
+        period["skip_history"] = history
+        period["last_skip"] = history[0] if history else None
+    except Exception as exc:
+        logger.debug(f"Could not attach automation period runtime metadata: {exc}")
+    return period
+
+
 def _validation_error(exc: ValidationError):
     return error_response(
         exc.message,
@@ -31,6 +72,103 @@ def _validation_error(exc: ValidationError):
         code=exc.error_code,
         details=exc.details,
     )
+
+
+def _finite_number(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def get_recent_run_history_summary(limit: int = 5) -> Dict[str, Any]:
+    """Return a small dashboard-safe baseline from stored automation telemetry."""
+    safe_limit = max(1, min(int(limit or 5), 10))
+    empty = {
+        "sample_count": 0,
+        "runs": [],
+        "latest": None,
+        "typical_duration_seconds": None,
+        "average_duration_seconds": None,
+        "typical_seconds_per_channel": None,
+        "per_channel_sample_count": 0,
+        "per_channel_baseline_stable": False,
+    }
+
+    try:
+        from apps.telemetry.telemetry_db import Run, get_session
+
+        session = get_session()
+    except Exception as exc:
+        logger.debug(f"Could not open telemetry session for run history: {exc}")
+        return empty
+
+    try:
+        rows = (
+            session.query(Run)
+            .filter(Run.run_type == "automation_run")
+            .order_by(Run.timestamp.desc())
+            .limit(safe_limit)
+            .all()
+        )
+
+        runs = []
+        durations = []
+        seconds_per_channel = []
+        for row in rows:
+            duration = _finite_number(getattr(row, "duration_seconds", None))
+            total_channels = int(getattr(row, "total_channels", 0) or 0)
+            if duration is None:
+                continue
+
+            durations.append(duration)
+            per_channel = None
+            if total_channels > 0:
+                per_channel = duration / total_channels
+                if total_channels >= 10:
+                    seconds_per_channel.append(per_channel)
+
+            runs.append(
+                {
+                    "id": getattr(row, "id", None),
+                    "timestamp": row.timestamp.isoformat() if getattr(row, "timestamp", None) else None,
+                    "duration_seconds": round(duration, 3),
+                    "total_channels": total_channels,
+                    "total_streams": int(getattr(row, "total_streams", 0) or 0),
+                    "dead_streams": int(getattr(row, "global_dead_count", 0) or 0),
+                    "revived_streams": int(getattr(row, "global_revived_count", 0) or 0),
+                    "seconds_per_channel": round(per_channel, 3) if per_channel is not None else None,
+                }
+            )
+
+        if not runs:
+            return empty
+
+        per_channel_stable = False
+        typical_seconds_per_channel = None
+        if len(seconds_per_channel) >= 3:
+            fastest = min(seconds_per_channel)
+            slowest = max(seconds_per_channel)
+            per_channel_stable = fastest > 0 and (slowest / fastest) <= 5
+            if per_channel_stable:
+                typical_seconds_per_channel = round(median(seconds_per_channel), 3)
+
+        return {
+            "sample_count": len(runs),
+            "runs": runs,
+            "latest": runs[0],
+            "typical_duration_seconds": round(median(durations), 3),
+            "average_duration_seconds": round(sum(durations) / len(durations), 3),
+            "typical_seconds_per_channel": typical_seconds_per_channel,
+            "per_channel_sample_count": len(seconds_per_channel),
+            "per_channel_baseline_stable": per_channel_stable,
+        }
+    except Exception as exc:
+        logger.debug(f"Could not build automation run history summary: {exc}")
+        return empty
+    finally:
+        session.close()
 
 
 def handle_global_automation_settings_response(
@@ -47,6 +185,14 @@ def handle_global_automation_settings_response(
         "regular_automation_enabled",
         "validate_existing_streams",
         "playlist_update_interval_minutes",
+        "catch_up_max_periods_per_cycle",
+        "run_all_due_periods",
+        "maintenance_window_enabled",
+        "maintenance_window_start",
+        "maintenance_window_end",
+        "teamarr_event_window_enabled",
+        "teamarr_event_window_before_minutes",
+        "teamarr_event_window_after_minutes",
     }
 
     if method == "GET":
@@ -54,6 +200,10 @@ def handle_global_automation_settings_response(
             settings = config_manager.get_global_settings()
             manager = get_automation_manager()
             settings["enabled_m3u_accounts"] = manager.config.get("enabled_m3u_accounts", [])
+            settings["m3u_refresh_wait"] = _normalize_m3u_refresh_wait_settings(
+                manager.config.get("m3u_refresh_wait", {}),
+                getattr(manager, "M3U_REFRESH_WAIT_DEFAULTS", {}),
+            )
             return jsonify(settings), 200
         except Exception as exc:
             logger.error(f"Error getting global automation settings: {exc}")
@@ -89,6 +239,12 @@ def handle_global_automation_settings_response(
 
                 manager_updates["enabled_m3u_accounts"] = normalized_accounts
 
+            if "m3u_refresh_wait" in updates:
+                manager_updates["m3u_refresh_wait"] = _normalize_m3u_refresh_wait_settings(
+                    updates.get("m3u_refresh_wait"),
+                    getattr(manager, "M3U_REFRESH_WAIT_DEFAULTS", {}),
+                )
+
             if not global_updates and not manager_updates:
                 return jsonify({"error": "No valid settings provided"}), 400
 
@@ -102,6 +258,10 @@ def handle_global_automation_settings_response(
             if global_update_success:
                 new_settings = config_manager.get_global_settings()
                 new_settings["enabled_m3u_accounts"] = manager.config.get("enabled_m3u_accounts", [])
+                new_settings["m3u_refresh_wait"] = _normalize_m3u_refresh_wait_settings(
+                    manager.config.get("m3u_refresh_wait", {}),
+                    getattr(manager, "M3U_REFRESH_WAIT_DEFAULTS", {}),
+                )
                 new_regular_enabled = new_settings.get("regular_automation_enabled", False)
 
                 if old_regular_enabled != new_regular_enabled and check_wizard_complete():
@@ -147,6 +307,18 @@ def get_automation_status_response(
         stream_checking_enabled = any(
             profile.get("stream_checking", {}).get("enabled", False) for profile in profiles
         )
+        run_status = manager.get_run_status() if hasattr(manager, "get_run_status") else None
+        run_progress = run_status
+        run_history_summary = get_recent_run_history_summary()
+        udi_status = None
+        try:
+            from apps.udi import get_udi_manager
+
+            udi = get_udi_manager()
+            if hasattr(udi, "get_observability_status"):
+                udi_status = udi.get_observability_status()
+        except Exception as exc:
+            logger.debug(f"Could not collect UDI observability status: {exc}")
 
         return (
             jsonify(
@@ -158,6 +330,10 @@ def get_automation_status_response(
                     ),
                     "profiles_count": profiles_count,
                     "stream_checking_enabled": stream_checking_enabled,
+                    "run_status": run_status,
+                    "run_progress": run_progress,
+                    "run_history_summary": run_history_summary,
+                    "udi_status": udi_status,
                 }
             ),
             200,
@@ -190,6 +366,29 @@ def stop_automation_service_api_response(*, get_automation_manager: Callable[[],
         return jsonify({"message": "Automation service stopped"}), 200
     except Exception as exc:
         logger.error(f"Error stopping automation service: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
+def abort_automation_run_api_response(*, get_automation_manager: Callable[[], Any]):
+    """Handle stop request for the active automation run without stopping the scheduler."""
+    try:
+        manager = get_automation_manager()
+        requested = bool(manager.request_active_run_stop())
+        return (
+            jsonify(
+                {
+                    "message": (
+                        "Active automation run stop requested"
+                        if requested
+                        else "No active automation run to stop"
+                    ),
+                    "stop_requested": requested,
+                }
+            ),
+            200,
+        )
+    except Exception as exc:
+        logger.error(f"Error aborting active automation run: {exc}")
         return jsonify({"error": "Internal Server Error"}), 500
 
 
@@ -442,6 +641,36 @@ def assign_automation_profile_group_response(
         return error_response("Internal Server Error", status_code=500, code="internal_error")
 
 
+def assign_automation_profile_groups_response(
+    *,
+    payload: Optional[Dict[str, Any]],
+    get_automation_config_manager: Callable[[], Any],
+):
+    """Assign or remove one automation profile mapping for multiple channel groups."""
+    try:
+        automation_config = get_automation_config_manager()
+        data = MultiEntityProfileAssignmentSchema.from_payload(payload or {}, entity_field="group_ids")
+        group_ids = data.entity_ids
+        profile_id = data.profile_id
+
+        if automation_config.assign_profile_to_groups(group_ids, profile_id):
+            return (
+                jsonify(
+                    {
+                        "message": f"Profile {profile_id} assigned to {len(group_ids)} groups",
+                        "group_ids": group_ids,
+                    }
+                ),
+                200,
+            )
+        return error_response("Failed to assign profile to groups", status_code=500, code="internal_error")
+    except ValidationError as exc:
+        return _validation_error(exc)
+    except Exception as exc:
+        logger.error(f"Error assigning profile to groups: {exc}")
+        return error_response("Internal Server Error", status_code=500, code="internal_error")
+
+
 def assign_epg_scheduled_profile_channel_response(
     *,
     payload: Optional[Dict[str, Any]],
@@ -550,6 +779,71 @@ def get_group_automation_periods_response(
         return jsonify({"error": "Internal Server Error"}), 500
 
 
+def get_group_configuration_summary_response(
+    *,
+    get_automation_config_manager: Callable[[], Any],
+    get_regex_matcher: Callable[[], Any],
+):
+    """Return all group-level profile, period, EPG, and matching settings in one response."""
+    try:
+        automation_config = get_automation_config_manager()
+        periods = automation_config.get_all_periods()
+        profiles = automation_config.get_all_profiles()
+
+        period_by_id = {
+            str(period.get("id")): period
+            for period in periods
+            if isinstance(period, dict) and period.get("id") is not None
+        }
+        profile_by_id = {
+            str(profile.get("id")): profile
+            for profile in profiles
+            if isinstance(profile, dict) and profile.get("id") is not None
+        }
+
+        group_profiles = automation_config.get_all_group_assignments()
+        group_epg_profiles = automation_config.get_all_group_epg_scheduled_assignments()
+        group_period_assignments = automation_config.get_all_group_period_assignments()
+
+        matcher = get_regex_matcher()
+        matcher.reload_patterns()
+        get_patterns = getattr(matcher, "_get_group_patterns", None)
+        group_matching = get_patterns() if callable(get_patterns) else {}
+        if not isinstance(group_matching, dict):
+            group_matching = {}
+
+        group_ids = set()
+        group_ids.update(str(gid) for gid in group_profiles.keys())
+        group_ids.update(str(gid) for gid in group_epg_profiles.keys())
+        group_ids.update(str(gid) for gid in group_period_assignments.keys())
+        group_ids.update(str(gid) for gid in group_matching.keys())
+
+        summary = {}
+        for gid in sorted(group_ids, key=lambda value: int(value) if str(value).isdigit() else str(value)):
+            period_entries = []
+            period_map = group_period_assignments.get(gid, {})
+            if isinstance(period_map, dict):
+                for pid, profile_id in period_map.items():
+                    period_copy = dict(period_by_id.get(str(pid), {"id": str(pid), "name": f"Period {pid}"}))
+                    period_copy["profile_id"] = str(profile_id) if profile_id is not None else None
+                    profile = profile_by_id.get(str(profile_id))
+                    if isinstance(profile, dict):
+                        period_copy["profile_name"] = profile.get("name")
+                    period_entries.append(period_copy)
+
+            summary[gid] = {
+                "profile_id": group_profiles.get(gid),
+                "epg_profile_id": group_epg_profiles.get(gid),
+                "periods": period_entries,
+                "matching": group_matching.get(gid, {}),
+            }
+
+        return jsonify(summary), 200
+    except Exception as exc:
+        logger.error(f"Error getting group configuration summary: {exc}")
+        return jsonify({"error": "Internal Server Error"}), 500
+
+
 def assign_period_to_groups_response(
     *,
     period_id: str,
@@ -650,11 +944,11 @@ def handle_automation_periods_response(
     get_automation_config_manager: Callable[[], Any],
     croniter_available: bool,
     croniter_module: Any,
+    get_udi_manager: Optional[Callable[[], Any]] = None,
+    get_automation_manager: Optional[Callable[[], Any]] = None,
 ):
     """Get all automation periods or create a new period."""
     try:
-        automation_config = get_automation_config_manager()
-
         if method == "GET":
             search = args.get("search", "").strip()
             page_param = args.get("page", None)
@@ -676,20 +970,45 @@ def handle_automation_periods_response(
             except (ValueError, TypeError):
                 per_page = 50
 
+            if get_udi_manager is not None:
+                try:
+                    udi = get_udi_manager()
+                    if getattr(udi, "is_initialization_pending", lambda: False)():
+                        if page is None:
+                            return jsonify([]), 200
+                        return jsonify(
+                            {
+                                "items": [],
+                                "total": 0,
+                                "page": page,
+                                "per_page": per_page,
+                                "total_pages": 1,
+                                "has_next": False,
+                                "has_prev": page > 1,
+                                "initializing": True,
+                            }
+                        ), 200
+                except Exception as exc:
+                    logger.debug(f"Could not read UDI initialization state for automation periods: {exc}")
+
+            automation_config = get_automation_config_manager()
             result = automation_config.get_all_periods(search=search, page=page, per_page=per_page)
 
             if page is None:
                 for period in result:
                     channels = automation_config.get_period_channels(period["id"])
                     period["channel_count"] = len(channels)
+                    _attach_period_runtime_metadata(period, get_automation_manager)
                 return jsonify(result), 200
 
             for period in result["items"]:
                 channels = automation_config.get_period_channels(period["id"])
                 period["channel_count"] = len(channels)
+                _attach_period_runtime_metadata(period, get_automation_manager)
             return jsonify(result), 200
 
         if method == "POST":
+            automation_config = get_automation_config_manager()
             data = AutomationPeriodCreateSchema.from_payload(payload or {}).period_data
 
             schedule = data["schedule"]
@@ -725,6 +1044,7 @@ def handle_automation_period_response(
     get_automation_config_manager: Callable[[], Any],
     croniter_available: bool,
     croniter_module: Any,
+    get_automation_manager: Optional[Callable[[], Any]] = None,
 ):
     """Get, update, or delete a specific automation period."""
     try:
@@ -735,6 +1055,7 @@ def handle_automation_period_response(
             if period:
                 channels = automation_config.get_period_channels(period_id)
                 period["channels"] = channels
+                _attach_period_runtime_metadata(period, get_automation_manager)
                 return jsonify(period), 200
             return error_response("Period not found", status_code=404, code="not_found")
 
@@ -1022,6 +1343,7 @@ def get_upcoming_automation_events_response(
     args: Any,
     get_events_scheduler: Callable[[], Any],
     get_automation_config_manager: Callable[[], Any],
+    get_udi_manager: Optional[Callable[[], Any]] = None,
 ):
     """Get upcoming automation events based on configured periods."""
     try:
@@ -1032,7 +1354,19 @@ def get_upcoming_automation_events_response(
         period_id_filter = args.get("period_id")
         force_refresh = args.get("force_refresh", "").lower() == "true"
 
-        result = events_scheduler.get_cached_events(hours_ahead, max_events, force_refresh)
+        initializing = False
+        if get_udi_manager is not None:
+            try:
+                udi = get_udi_manager()
+                initializing = bool(getattr(udi, "is_initialization_pending", lambda: False)())
+            except Exception as exc:
+                logger.debug(f"Could not read UDI initialization state for upcoming events: {exc}")
+
+        if initializing:
+            result = events_scheduler.get_cached_events_snapshot(hours_ahead, max_events)
+            result["initializing"] = True
+        else:
+            result = events_scheduler.get_cached_events(hours_ahead, max_events, force_refresh)
 
         config_manager = get_automation_config_manager()
         global_settings = config_manager.get_global_settings()

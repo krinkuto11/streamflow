@@ -23,15 +23,28 @@ Usage:
     udi.refresh_all()
 """
 
+import copy
+import json
+import os
 import threading
 import time
 import requests
+from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional, Any, Set, Tuple
 
-from apps.udi.fetcher import UDIFetcher, FetchResult
+from apps.udi.fetcher import (
+    UDIFetcher,
+    FetchResult,
+    FetchCancelled,
+    ProxyStatusError,
+    ProxyStatusPayloadError,
+    ProxyStatusTransportError,
+)
 from apps.udi.cache import UDICache
+from apps.udi.storage import UDIStorage
 from apps.core.auth import _get_auth_headers
 
 from apps.core.logging_config import setup_logging
@@ -53,6 +66,50 @@ UDI_INTEGRITY_THRESHOLD = 0.9
 # the cached state and Dispatcharr, refresh_delta() falls back to refresh_all().
 # 20 % covers large M3U imports while still catching single-item add/delete quickly.
 UDI_DELTA_FALLBACK_THRESHOLD = 0.20
+SHADOW_MONITOR_DEFAULT_USER_AGENT = 'StreamFlow-Shadow-Blank-Monitor/1.0'
+SHADOW_MONITOR_CONFIG_FILE = Path(os.environ.get("CONFIG_DIR", "/app/data")) / "shadow_blank_monitor_config.json"
+STREAMFLOW_CHANNEL_VISIBILITY_STATE_KEY = "streamflow_channel_visibility_state"
+
+
+def _safe_positive_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def _normalize_udi_identifier(value: Any) -> Optional[Any]:
+    """Normalize numeric Dispatcharr identifiers without rejecting legacy IDs."""
+    if value in (None, ''):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _strict_active_proxy_profile_id(value: Any) -> Optional[int]:
+    """Validate a non-custom profile ID from an active proxy status.
+
+    Dispatcharr may omit the profile field for custom streams. Once a value is
+    present, capacity accounting can only remain authoritative when it is a
+    positive numeric profile ID. Arbitrary strings and booleans must not be
+    normalized into a lookup miss and silently counted as zero usage.
+    """
+    if value in (None, "") and not isinstance(value, bool):
+        return None
+    if isinstance(value, bool):
+        raise ProxyStatusPayloadError("proxy_status_active_profile_id_invalid")
+    if isinstance(value, int):
+        profile_id = value
+    elif isinstance(value, str) and value.strip().isdigit():
+        profile_id = int(value.strip())
+    else:
+        raise ProxyStatusPayloadError("proxy_status_active_profile_id_invalid")
+    if profile_id <= 0:
+        raise ProxyStatusPayloadError("proxy_status_active_profile_id_invalid")
+    return profile_id
 
 
 def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
@@ -91,13 +148,35 @@ def _check_fetch_integrity(entity: str, result: FetchResult) -> bool:
         return False
 
     if received != expected:
-        # Within threshold but not an exact match — log at debug level only.
-        logger.debug(
-            f"UDI integrity minor variance for {entity}: "
-            f"received {received}, expected {expected}"
+        logger.warning(
+            f"UDI integrity check FAILED for {entity}: "
+            f"received {received} of {expected} expected records"
         )
+        return False
 
     return True
+
+
+def _check_nonempty_live_fetch(entity: str, result: FetchResult, existing_count: int) -> bool:
+    """Reject suspicious empty live fetches before they replace a good cache.
+
+    A confirmed ``expected_count == 0`` from Dispatcharr is valid. An empty
+    result with an unknown expected count usually means the endpoint could not be
+    reached or did not return the expected payload shape.
+    """
+    if len(result) > 0:
+        return True
+
+    if result.expected_count == 0:
+        return True
+
+    logger.warning(
+        "UDI live fetch for %s returned zero records without a confirmed zero "
+        "count; preserving existing cache with %s records",
+        entity,
+        existing_count,
+    )
+    return False
 
 
 class UDIManager:
@@ -110,6 +189,10 @@ class UDIManager:
     - Background refresh capability
     - Thread-safe operations
     """
+
+    # Consumers must check the concrete class marker rather than trusting a
+    # dynamically-created Mock attribute before relying on lease semantics.
+    supports_account_authority_lease = True
     
     def __init__(self):
         """Initialize the UDI Manager (pure in-memory, no local persistence)."""
@@ -125,17 +208,22 @@ class UDIManager:
         # The scheduled UDI refresh worker checks this before firing to avoid
         # replacing the cache mid-pipeline. Cleared before any background sync fires.
         self._automation_busy: bool = False
+        self._automation_busy_count: int = 0
         self._automation_busy_lock = threading.Lock()
         self._automation_busy_since: Optional[datetime] = None
         # If busy flag is not cleared within this window (e.g. due to a crash),
         # is_automation_busy() auto-clears it to prevent permanent deadlock.
-        self._automation_busy_timeout_seconds: int = 3600
+        # Full quality runs can legitimately take several hours on large
+        # channel sets, so this must be longer than a normal overnight run.
+        self._automation_busy_timeout_seconds: int = 24 * 60 * 60
 
         # Last run timestamp for the scheduled UDI refresh worker.
         # In-memory only — resets on restart, which is correct behaviour.
         self._udi_refresh_last_run: Optional[datetime] = None
 
-        self._lock = threading.Lock()
+        # Re-entrant because account-authority leases deliberately keep this
+        # lock held while consumers may perform read-only UDI helper calls.
+        self._lock = threading.RLock()
         self._refresh_thread = None
         self._refresh_running = False       # controls background refresh loop thread
         self._init_in_progress = False      # re-entry guard for initialize()
@@ -162,8 +250,13 @@ class UDIManager:
         self._channels_by_group_id: Dict[int, List[Dict[str, Any]]] = {}
         # stream_id -> account_id (derived from stream['m3u_account'])
         self._stream_account_id: Dict[int, int] = {}
-        # profile_id -> account_id (derived from M3UAccount.profiles nesting)
+        # profile_id -> preferred current/last-known account_id. Candidate owner
+        # sets below preserve both old and new accounts during an ID-reuse race:
+        # one proxy status profile ID cannot reveal which generation owns an
+        # already-open session, so capacity is charged conservatively to every
+        # observed owner for the remainder of this process.
         self._profile_to_account_id: Dict[int, int] = {}
+        self._profile_account_id_candidates: Dict[int, Set[int]] = {}
         # account_id -> list of stream dicts
         self._streams_by_account_id: Dict[int, List[Dict[str, Any]]] = {}
         # maintained flag so has_custom_streams() is O(1)
@@ -175,6 +268,7 @@ class UDIManager:
             'percentage': 0,
             'message': '',
             'current_step': '',
+            'started_at': None,
             'total_steps': 6,       # channels, streams, groups, logos, m3u_accounts, profiles
             # entity_counts is populated after each full refresh_all() run.
             # Each entry: { 'received': int, 'expected': int | None }
@@ -186,6 +280,21 @@ class UDIManager:
         self._proxy_status_cache: Dict[str, Any] = {}
         self._proxy_status_last_fetch: float = 0
         self._proxy_status_ttl: float = 1.0  # Cache proxy status for 1 second to match FFmpeg stats update frequency
+        self._proxy_status_cache_authoritative: bool = False
+        self._proxy_status_last_error: Optional[str] = None
+        self._proxy_status_last_error_type: Optional[type] = None
+        self._proxy_status_last_error_at: float = 0
+        # Capacity polls use a separate, deliberately tiny freshness bound.
+        # Concurrent polls coalesce into one request, but a normal one-second
+        # UI cache can never authorize a materially later provider probe.
+        self._proxy_status_authoritative_ttl: float = 0.075
+        self._proxy_status_condition = threading.Condition(threading.Lock())
+        self._proxy_status_fetch_in_progress: bool = False
+        self._proxy_status_fetch_generation: int = 0
+        self._proxy_status_completed_generation: int = 0
+        self._proxy_status_fetch_results: Dict[int, Tuple[bool, Optional[type], Optional[str]]] = {}
+        self._proxy_status_waiter_count: int = 0
+        self._proxy_status_waiters_by_generation: Dict[int, int] = {}
         
         logger.info("UDI Manager created")
     
@@ -204,22 +313,26 @@ class UDIManager:
             True if initialization successful
         """
         # 1. State check with lock
+        wait_for_existing_init = False
         with self._lock:
             if self._initialized and not force_refresh:
                 logger.debug("UDI Manager already initialized")
                 return True
 
             if self._init_in_progress:
-                logger.debug("UDI Manager initialization already in progress in another thread")
-                return True
+                logger.info("UDI Manager initialization already in progress; waiting for completion")
+                wait_for_existing_init = True
+            else:
+                config = get_dispatcharr_config()
+                if not config.is_configured():
+                    logger.warning("Cannot initialize UDI: Dispatcharr credentials not configured")
+                    self._initialized = True
+                    return False
 
-            config = get_dispatcharr_config()
-            if not config.is_configured():
-                logger.warning("Cannot initialize UDI: Dispatcharr credentials not configured")
-                self._initialized = True
-                return False
+                self._init_in_progress = True
 
-            self._init_in_progress = True
+        if wait_for_existing_init:
+            return self._wait_for_initialization_completion(force_refresh=force_refresh)
 
         # 2. Fetch fresh data from API (OUTSIDE Lock)
         logger.debug("Fetching fresh data from API...")
@@ -235,9 +348,143 @@ class UDIManager:
         finally:
             with self._lock:
                 self._init_in_progress = False
+
+    def _wait_for_initialization_completion(self, *, force_refresh: bool, timeout_seconds: int = 300) -> bool:
+        """Wait for a concurrent initialization instead of reporting success early."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            with self._lock:
+                if not self._init_in_progress:
+                    if force_refresh:
+                        return bool(
+                            self._initialized
+                            and self._network_ready
+                            and self._init_progress.get("status") == "completed"
+                        )
+                    return bool(self._initialized)
+            time.sleep(0.25)
+
+        logger.warning("Timed out waiting for concurrent UDI initialization to complete")
+        return False
+
+    def _load_legacy_storage_snapshot(self) -> bool:
+        """Load old single-file UDI storage for compatibility tests/migrations.
+
+        Runtime V2 data is intentionally in-memory and refreshed from Dispatcharr.
+        This fallback only activates for an overridden storage directory, or when
+        explicitly enabled, so a normal container does not silently prefer stale
+        `/app/data/udi_data.json` over the live API.
+        """
+        try:
+            from apps.udi import storage as udi_storage
+
+            storage_dir = Path(getattr(udi_storage, "CONFIG_DIR", Path("/app/data")))
+            if (
+                storage_dir == Path("/app/data")
+                and os.environ.get("STREAMFLOW_ENABLE_LEGACY_UDI_STORAGE") != "1"
+            ):
+                return False
+
+            snapshot_path = storage_dir / "udi_data.json"
+            if not snapshot_path.exists():
+                return False
+
+            data = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return False
+
+            channels = data.get("channels", []) if isinstance(data.get("channels"), list) else []
+            streams = data.get("streams", []) if isinstance(data.get("streams"), list) else []
+            channel_groups = (
+                data.get("channel_groups", []) if isinstance(data.get("channel_groups"), list) else []
+            )
+            logos = data.get("logos", []) if isinstance(data.get("logos"), list) else []
+            m3u_accounts = (
+                data.get("m3u_accounts", []) if isinstance(data.get("m3u_accounts"), list) else []
+            )
+            channel_profiles = data.get("channel_profiles", data.get("profiles", []))
+            channel_profiles = channel_profiles if isinstance(channel_profiles, list) else []
+            profile_channels = data.get("profile_channels", {})
+            profile_channels = profile_channels if isinstance(profile_channels, dict) else {}
+
+            with self._lock:
+                self._channels_cache = channels
+                self._streams_cache = streams
+                self._channel_groups_cache = channel_groups
+                self._logos_cache = logos
+                self._m3u_accounts_cache = m3u_accounts
+                self._channel_profiles_cache = channel_profiles
+                self._profile_channels_cache = profile_channels
+                self._build_indexes_locked()
+                self._initialized = True
+                self._network_ready = False
+                self._last_refresh_time = None
+                self._init_progress.update(
+                    {
+                        "status": "completed",
+                        "percentage": 100,
+                        "message": "Loaded legacy UDI storage snapshot",
+                        "current_step": "legacy_storage",
+                        "entity_counts": {
+                            "channels": {"received": len(channels), "expected": None},
+                            "streams": {"received": len(streams), "expected": None},
+                            "groups": {"received": len(channel_groups), "expected": None},
+                            "logos": {"received": len(logos), "expected": None},
+                            "m3u_accounts": {"received": len(m3u_accounts), "expected": None},
+                            "profiles": {"received": len(channel_profiles), "expected": None},
+                        },
+                    },
+                )
+            logger.info("Loaded legacy UDI storage snapshot from %s", snapshot_path)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to load legacy UDI storage snapshot: %s", exc)
+            return False
     
+    def _remember_profile_account_mappings(
+        self,
+        current_mapping: Dict[Any, Any],
+    ) -> None:
+        """Atomically record current owners while retaining ambiguous history.
+
+        A profile can be removed or its numeric ID can be reused while an older
+        proxy session is still open. Proxy status exposes only the profile ID,
+        not its account generation, so every observed owner remains a capacity
+        candidate for the remainder of this process. Even an authoritative
+        idle snapshot cannot prove which account generation a later reused
+        numeric profile ID belongs to, so absence does not prune history.
+        Callers already holding ``self._lock`` may use this helper; it performs
+        only in-memory assignments and deliberately does not acquire the lock.
+        """
+        normalized_current: Dict[Any, Any] = {}
+        for raw_profile_id, raw_account_id in current_mapping.items():
+            profile_id = _normalize_udi_identifier(raw_profile_id)
+            account_id = _normalize_udi_identifier(raw_account_id)
+            if profile_id is None or account_id is None:
+                continue
+            normalized_current[profile_id] = account_id
+
+        retained_preferred = dict(self._profile_to_account_id)
+        owner_candidates = {
+            profile_id: set(account_ids)
+            for profile_id, account_ids in self._profile_account_id_candidates.items()
+        }
+        for profile_id, account_id in retained_preferred.items():
+            owner_candidates.setdefault(profile_id, set()).add(account_id)
+        for profile_id, account_id in normalized_current.items():
+            retained_preferred[profile_id] = account_id
+            owner_candidates.setdefault(profile_id, set()).add(account_id)
+
+        self._profile_to_account_id = retained_preferred
+        self._profile_account_id_candidates = owner_candidates
+
     def _build_indexes(self) -> None:
-        """Build index caches for fast lookups."""
+        """Build index caches atomically under the shared UDI state lock."""
+        with self._lock:
+            self._build_indexes_locked()
+
+    def _build_indexes_locked(self) -> None:
+        """Build index caches while ``self._lock`` is held by the caller."""
         self._channels_by_id = {ch.get('id'): ch for ch in self._channels_cache if ch.get('id') is not None}
         self._streams_by_id = {st.get('id'): st for st in self._streams_cache if st.get('id') is not None}
         self._streams_by_url = {st.get('url'): st for st in self._streams_cache if st.get('url')}
@@ -251,22 +498,23 @@ class UDIManager:
         self._stream_account_id = {}
         for st in self._streams_cache:
             sid = st.get('id')
-            aid = st.get('m3u_account')
+            aid = self._get_stream_m3u_account_id(st)
             if sid is not None and aid is not None:
                 self._stream_account_id[sid] = aid
                 self._streams_by_account_id.setdefault(aid, []).append(st)
 
-        # profile_id -> account_id (profiles are nested inside m3u_accounts)
-        self._profile_to_account_id = {}
+        # profile_id -> account_id (profiles are nested inside m3u_accounts).
+        current_profile_to_account_id = {}
         for account in self._m3u_accounts_cache:
-            aid = account.get('id')
+            aid = _normalize_udi_identifier(account.get('id'))
             if aid is None:
                 continue
             for profile in account.get('profiles', []):
                 if isinstance(profile, dict):
-                    pid = profile.get('id')
+                    pid = _normalize_udi_identifier(profile.get('id'))
                     if pid is not None:
-                        self._profile_to_account_id[pid] = aid
+                        current_profile_to_account_id[pid] = aid
+        self._remember_profile_account_mappings(current_profile_to_account_id)
 
         self._has_custom_streams = any(st.get('is_custom', False) for st in self._streams_cache)
 
@@ -280,6 +528,183 @@ class UDIManager:
             if gid is not None:
                 self._channels_by_group_id.setdefault(gid, []).append(ch)
 
+    @staticmethod
+    def _extract_managed_hidden_channel_ids(state: Any) -> Set[int]:
+        """Return StreamFlow-owned hidden channel IDs from the persisted visibility state."""
+        if not isinstance(state, dict):
+            return set()
+
+        channel_ids: Set[int] = set()
+        for raw_key, entry in state.items():
+            if not isinstance(entry, dict) or entry.get("hidden_by") != "streamflow":
+                continue
+            raw_id = entry.get("channel_id", raw_key)
+            try:
+                channel_ids.add(int(raw_id))
+            except (TypeError, ValueError):
+                continue
+        return channel_ids
+
+    def _get_managed_hidden_channel_ids(self) -> Set[int]:
+        """Read StreamFlow-managed hidden channel IDs from system settings."""
+        try:
+            from apps.database.manager import get_db_manager
+
+            state = get_db_manager().get_system_setting(
+                STREAMFLOW_CHANNEL_VISIBILITY_STATE_KEY,
+                {},
+            )
+            return self._extract_managed_hidden_channel_ids(state)
+        except Exception as exc:
+            logger.debug("Could not read channel visibility state for UDI rehydrate: %s", exc)
+            return set()
+
+    @staticmethod
+    def _merge_channel_list_with_rehydrated(
+        channels: List[Dict[str, Any]],
+        rehydrated: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Merge individually fetched hidden channels into a channel list by ID."""
+        if not rehydrated:
+            return channels, 0
+
+        merged = list(channels)
+        positions: Dict[Any, int] = {
+            channel.get("id"): index
+            for index, channel in enumerate(merged)
+            if channel.get("id") is not None
+        }
+        changed = 0
+        for channel in rehydrated:
+            channel_id = channel.get("id")
+            if channel_id is None:
+                continue
+            if channel_id in positions:
+                merged[positions[channel_id]] = channel
+            else:
+                positions[channel_id] = len(merged)
+                merged.append(channel)
+            changed += 1
+        return merged, changed
+
+    def _rehydrate_managed_hidden_channels(
+        self,
+        channels: List[Dict[str, Any]],
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Keep StreamFlow-hidden Dispatcharr channels in UDI even when list APIs hide them.
+
+        Dispatcharr's normal channel list and ids endpoints can omit channels
+        hidden from output. StreamFlow must still know about channels it hid so
+        later automation can match/check them and unhide them after recovery.
+        """
+        managed_ids = self._get_managed_hidden_channel_ids()
+        if not managed_ids:
+            return channels, 0
+
+        cached_ids = {
+            channel.get("id")
+            for channel in channels
+            if channel.get("id") is not None
+        }
+        missing_ids = sorted(managed_ids - cached_ids)
+        if not missing_ids:
+            return channels, 0
+
+        rehydrated = self.fetcher.fetch_channels_by_ids(missing_ids)
+        if not rehydrated:
+            logger.warning(
+                "UDI could not rehydrate %s StreamFlow-managed hidden channel(s): %s",
+                len(missing_ids),
+                missing_ids[:10],
+            )
+            return channels, 0
+
+        merged, changed = self._merge_channel_list_with_rehydrated(channels, rehydrated)
+        fetched_ids = {channel.get("id") for channel in rehydrated}
+        still_missing = [channel_id for channel_id in missing_ids if channel_id not in fetched_ids]
+        if still_missing:
+            logger.warning(
+                "UDI rehydrated %s StreamFlow-managed hidden channel(s); %s still missing: %s",
+                changed,
+                len(still_missing),
+                still_missing[:10],
+            )
+        else:
+            logger.info(
+                "UDI rehydrated %s StreamFlow-managed hidden channel(s) omitted by list APIs",
+                changed,
+            )
+        return merged, changed
+
+    def _rehydrate_missing_channel_ids(
+        self,
+        channels: List[Dict[str, Any]],
+        expected_ids: Optional[Set[int]],
+        *,
+        reason: str,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Fetch channels that are present in Dispatcharr IDs but absent from the list API.
+
+        Dispatcharr may hide ``hidden_from_output`` channels from normal list
+        responses in some deployments. The /ids/ endpoint with
+        ``visibility_filter=all`` is the broader oracle; when it reports IDs
+        that the list response omitted, fetch those channels individually so
+        StreamFlow can still rematch/check and restore them.
+        """
+        if not expected_ids:
+            return channels, 0
+
+        cached_ids = {
+            channel.get("id")
+            for channel in channels
+            if channel.get("id") is not None
+        }
+        missing_ids = sorted(expected_ids - cached_ids)
+        if not missing_ids:
+            return channels, 0
+
+        rehydrated = self.fetcher.fetch_channels_by_ids(missing_ids)
+        if not rehydrated:
+            logger.warning(
+                "UDI could not rehydrate %s channel(s) omitted by channel list (%s): %s",
+                len(missing_ids),
+                reason,
+                missing_ids[:10],
+            )
+            return channels, 0
+
+        merged, changed = self._merge_channel_list_with_rehydrated(channels, rehydrated)
+        fetched_ids = {channel.get("id") for channel in rehydrated}
+        still_missing = [channel_id for channel_id in missing_ids if channel_id not in fetched_ids]
+        if still_missing:
+            logger.warning(
+                "UDI rehydrated %s channel(s) omitted by channel list (%s); %s still missing: %s",
+                changed,
+                reason,
+                len(still_missing),
+                still_missing[:10],
+            )
+        else:
+            logger.info(
+                "UDI rehydrated %s channel(s) omitted by channel list (%s)",
+                changed,
+                reason,
+            )
+        return merged, changed
+
+    @staticmethod
+    def _get_stream_m3u_account_id(stream: Dict[str, Any]) -> Optional[Any]:
+        """Return a stream's M3U account id across legacy and SQL payloads."""
+        if not isinstance(stream, dict):
+            return None
+        account_id = stream.get('m3u_account_id')
+        if account_id in (None, ''):
+            account_id = stream.get('m3u_account')
+        try:
+            return int(account_id) if account_id not in (None, '') else None
+        except (TypeError, ValueError):
+            return account_id
+
     # === Data Access Methods ===
     
     def get_init_progress(self) -> Dict[str, Any]:
@@ -288,7 +713,15 @@ class UDIManager:
         Returns:
             Dictionary with status, percentage, message, and entity_counts.
         """
-        return self._init_progress.copy()
+        progress = self._init_progress.copy()
+        progress['entity_counts'] = self._init_progress.get('entity_counts', {}).copy()
+        progress['api_timing'] = self.get_api_timing_summary()
+        progress['last_refresh_duration_seconds'] = round(self._last_refresh_duration_seconds, 3)
+        progress['last_refresh_time'] = self._last_refresh_time.isoformat() if self._last_refresh_time else None
+        started_at = self._init_progress.get('started_at')
+        progress['elapsed_seconds'] = round((datetime.now() - started_at).total_seconds(), 3) if started_at else None
+        progress['started_at'] = started_at.isoformat() if started_at else None
+        return progress
     
     def _update_init_progress(
         self,
@@ -310,6 +743,12 @@ class UDIManager:
                            existing dict so partial updates are safe.
         """
         if status:
+            if status == 'in_progress':
+                current_status = self._init_progress.get('status')
+                if current_status != 'in_progress' or not self._init_progress.get('started_at'):
+                    self._init_progress['started_at'] = datetime.now()
+            elif status in {'idle', 'completed', 'failed'}:
+                self._init_progress['started_at'] = None
             self._init_progress['status'] = status
         if percentage is not None:
             self._init_progress['percentage'] = percentage
@@ -346,6 +785,14 @@ class UDIManager:
         """
         return self._network_ready
 
+    def is_initialization_pending(self) -> bool:
+        """Return True while the startup/live UDI refresh is actively building caches."""
+        with self._lock:
+            return bool(
+                self._init_in_progress
+                or self._init_progress.get("status") == "in_progress"
+            )
+
     def get_last_refresh_duration(self) -> float:
         """Return seconds taken by the last successful refresh_all().
 
@@ -354,6 +801,37 @@ class UDIManager:
         has never completed successfully (e.g. before startup init finishes).
         """
         return self._last_refresh_duration_seconds
+
+    def get_api_timing_summary(self) -> Dict[str, Any]:
+        """Return recent Dispatcharr API latency metrics from the fetcher."""
+        getter = getattr(self.fetcher, "get_api_timing_summary", None)
+        if callable(getter):
+            return getter()
+        return {
+            "sample_count": 0,
+            "failure_count": 0,
+            "p95_seconds": None,
+            "p99_seconds": None,
+            "slowest": [],
+        }
+
+    def get_observability_status(self) -> Dict[str, Any]:
+        """Return UI-safe UDI timing and cache status details."""
+        now = datetime.now()
+        age_seconds = None
+        if self._last_refresh_time:
+            age_seconds = round((now - self._last_refresh_time).total_seconds(), 3)
+        return {
+            "network_ready": self._network_ready,
+            "refresh_running": self._refresh_running,
+            "init_in_progress": self._init_in_progress,
+            "last_refresh_time": self._last_refresh_time.isoformat() if self._last_refresh_time else None,
+            "last_refresh_age_seconds": age_seconds,
+            "last_refresh_duration_seconds": round(self._last_refresh_duration_seconds, 3),
+            "cache_age_description": self.get_cache_age_description(),
+            "api_timing": self.get_api_timing_summary(),
+            "init_progress": self.get_init_progress(),
+        }
 
     def get_cache_age_description(self) -> str:
         """Return a human-readable description of UDI cache age and last sync time.
@@ -396,8 +874,10 @@ class UDIManager:
         any post-completion background sync fires.
         """
         with self._automation_busy_lock:
+            self._automation_busy_count += 1
             self._automation_busy = True
-            self._automation_busy_since = datetime.now()
+            if self._automation_busy_since is None:
+                self._automation_busy_since = datetime.now()
 
     def clear_automation_busy(self) -> None:
         """Clear the automation busy flag.
@@ -407,8 +887,10 @@ class UDIManager:
         thread, so the sync does not hold the busy flag.
         """
         with self._automation_busy_lock:
-            self._automation_busy = False
-            self._automation_busy_since = None
+            self._automation_busy_count = max(0, self._automation_busy_count - 1)
+            if self._automation_busy_count == 0:
+                self._automation_busy = False
+                self._automation_busy_since = None
 
     def is_automation_busy(self) -> bool:
         """Return True if a cycle or single-channel check is currently running.
@@ -430,6 +912,7 @@ class UDIManager:
                         "This usually means automation crashed without calling clear_automation_busy()."
                     )
                     self._automation_busy = False
+                    self._automation_busy_count = 0
                     self._automation_busy_since = None
                     return False
             return True
@@ -457,7 +940,30 @@ class UDIManager:
             List of channel dictionaries.
         """
         self._ensure_initialized()
-        return list(self._channels_cache)
+        result: List[Dict[str, Any]] = []
+        positions_by_id: Dict[Any, int] = {}
+        duplicate_count = 0
+
+        for channel in self._channels_cache:
+            channel_id = channel.get('id')
+            if channel_id is None:
+                result.append(channel)
+                continue
+
+            if channel_id in positions_by_id:
+                result[positions_by_id[channel_id]] = channel
+                duplicate_count += 1
+            else:
+                positions_by_id[channel_id] = len(result)
+                result.append(channel)
+
+        if duplicate_count:
+            logger.warning(
+                "UDI channels cache deduplicated %s duplicate channel entries",
+                duplicate_count,
+            )
+
+        return result
     
     def get_channel_by_id(self, channel_id: int, fetch_if_missing: bool = True) -> Optional[Dict[str, Any]]:
         """Get a specific channel by ID.
@@ -652,9 +1158,9 @@ class UDIManager:
             List of M3U account dictionaries with priority_mode included
         """
         self._ensure_initialized()
-        logger.debug(f"Returning {len(self._m3u_accounts_cache)} M3U accounts from UDI cache")
-        accounts = self._m3u_accounts_cache.copy()
-        
+        with self._lock:
+            logger.debug(f"Returning {len(self._m3u_accounts_cache)} M3U accounts from UDI cache")
+            accounts = copy.deepcopy(self._m3u_accounts_cache)
         return accounts
     
     def get_m3u_account_by_id(self, account_id: int) -> Optional[Dict[str, Any]]:
@@ -667,11 +1173,41 @@ class UDIManager:
             M3U account dictionary or None if not found
         """
         self._ensure_initialized()
-        account = self._m3u_accounts_by_id.get(account_id)
-        if account is not None:
-            return account.copy()
+        normalized_account_id = (
+            None
+            if isinstance(account_id, bool)
+            else _normalize_udi_identifier(account_id)
+        )
+        with self._lock:
+            account = self._m3u_accounts_by_id.get(normalized_account_id)
+            if account is not None:
+                return copy.deepcopy(account)
         logger.debug(f"M3U account {account_id} not found in UDI")
         return None
+
+    @contextmanager
+    def account_authority_lease(self, account_id: int):
+        """Hold the current M3U account generation stable for one admission.
+
+        The yielded account is a private deep snapshot, so callers cannot
+        mutate UDI-owned profile lists and a later pointer swap cannot alter the
+        snapshot. The shared state lock remains held until context exit; every
+        production account cache/index swap uses this same lock. Callers may
+        derive secret-free hashes from route data but must not log the snapshot.
+
+        ``None`` is yielded for an invalid or currently absent account. The
+        context itself never logs account payloads, URLs, or credentials.
+        """
+        self._ensure_initialized()
+        normalized_account_id = (
+            None
+            if isinstance(account_id, bool)
+            else _normalize_udi_identifier(account_id)
+        )
+        with self._lock:
+            account = self._m3u_accounts_by_id.get(normalized_account_id)
+            snapshot = copy.deepcopy(account) if account is not None else None
+            yield snapshot
     
     def get_channel_profiles(self) -> List[Dict[str, Any]]:
         """Get all channel profiles.
@@ -713,6 +1249,8 @@ class UDIManager:
             True if at least one custom stream exists
         """
         self._ensure_initialized()
+        if not self._has_custom_streams and self._streams_cache:
+            self._has_custom_streams = any(st.get('is_custom', False) for st in self._streams_cache)
         return self._has_custom_streams
 
     def get_stream_count(self) -> int:
@@ -737,6 +1275,7 @@ class UDIManager:
             logger.warning("Cannot refresh data: Dispatcharr credentials not configured")
             self._update_init_progress(status='failed', message='Dispatcharr not configured')
             return False
+        self.fetcher.refresh_config()
         
         try:
             _refresh_start = datetime.now()
@@ -747,7 +1286,7 @@ class UDIManager:
             # Progress advances as each future lands via as_completed so the
             # frontend bar still moves steadily.
             _fetch_tasks = {
-                'pre_counts':   self.fetcher.fetch_entity_counts,
+                'pre_ids':      self.fetcher.fetch_all_ids,
                 'channels':     self.fetcher.fetch_channels,
                 'streams':      self.fetcher.fetch_streams,
                 'groups':       self.fetcher.fetch_channel_groups,
@@ -772,7 +1311,11 @@ class UDIManager:
                         current_step='fetch',
                     )
 
-            pre_counts      = _fetch_results.get('pre_counts') or {}
+            pre_ids         = _fetch_results.get('pre_ids') or {}
+            pre_counts      = {
+                'channels': len(pre_ids['channels']) if 'channels' in pre_ids else None,
+                'streams': len(pre_ids['streams']) if 'streams' in pre_ids else None,
+            }
             channels_result = _fetch_results.get('channels') or FetchResult()
             streams_result  = _fetch_results.get('streams')  or FetchResult()
             channel_groups  = _fetch_results.get('groups')   or []
@@ -787,15 +1330,39 @@ class UDIManager:
 
             # Apply /ids/ oracle when the paginated envelope omitted 'count'
             # (can happen with older Dispatcharr builds / custom pagination).
-            if channels_result.expected_count is None and pre_counts.get('channels') is not None:
+            if (
+                pre_counts.get('channels') is not None
+                and (
+                    channels_result.expected_count is None
+                    or pre_counts['channels'] > channels_result.expected_count
+                )
+            ):
                 channels_result.expected_count = pre_counts['channels']
                 logger.info(f"UDI integrity: using /ids/ oracle for channels — expected {channels_result.expected_count}")
             if streams_result.expected_count is None and pre_counts.get('streams') is not None:
                 streams_result.expected_count = pre_counts['streams']
                 logger.info(f"UDI integrity: using /ids/ oracle for streams — expected {streams_result.expected_count}")
 
-            channels_ok = _check_fetch_integrity('channels', channels_result)
-            streams_ok  = _check_fetch_integrity('streams',  streams_result)
+            rehydrated_missing_count = 0
+            channels_result.items, rehydrated_missing_count = self._rehydrate_missing_channel_ids(
+                channels_result.items,
+                pre_ids.get('channels') if isinstance(pre_ids, dict) else None,
+                reason="dispatcharr_ids_oracle",
+            )
+            channels_result.items, rehydrated_hidden_count = self._rehydrate_managed_hidden_channels(
+                channels_result.items,
+            )
+
+            existing_channel_count = len(self._channels_cache)
+            existing_stream_count = len(self._streams_cache)
+            channels_ok = (
+                _check_fetch_integrity('channels', channels_result)
+                and _check_nonempty_live_fetch('channels', channels_result, existing_channel_count)
+            )
+            streams_ok = (
+                _check_fetch_integrity('streams', streams_result)
+                and _check_nonempty_live_fetch('streams', streams_result, existing_stream_count)
+            )
             _check_fetch_integrity('logos', logos_result)
 
             # Profile channels are embedded in the profiles list response — no
@@ -831,6 +1398,25 @@ class UDIManager:
                     'expected': None,  # non-paginated, no oracle available
                 },
             }
+            if rehydrated_missing_count:
+                entity_counts['channels']['rehydrated_missing'] = rehydrated_missing_count
+            if rehydrated_hidden_count:
+                entity_counts['channels']['rehydrated_hidden'] = rehydrated_hidden_count
+
+            integrity_ok = channels_ok and streams_ok
+            if not integrity_ok:
+                self._update_init_progress(
+                    status='failed',
+                    percentage=100,
+                    message='Initialization failed integrity check — retry the data refresh',
+                    current_step='failed',
+                    entity_counts=entity_counts,
+                )
+                return False
+
+            new_channels = channels_result.items
+            if rehydrated_missing_count or rehydrated_hidden_count:
+                entity_counts['channels']['received'] = len(new_channels)
 
             self._update_init_progress(percentage=85, message='Building indexes...', current_step='index')
 
@@ -839,7 +1425,6 @@ class UDIManager:
             # the lock is held only for the pointer swap (microseconds), not
             # for index construction or storage writes (potentially seconds).
             # ----------------------------------------------------------------
-            new_channels    = channels_result.items
             new_streams     = streams_result.items
             new_groups      = channel_groups
             new_logos       = logos_result.items
@@ -879,7 +1464,7 @@ class UDIManager:
             new_stream_account_id: Dict[int, int] = {}
             for st in new_streams:
                 sid = st.get('id')
-                aid = st.get('m3u_account')
+                aid = self._get_stream_m3u_account_id(st)
                 if sid is not None and aid is not None:
                     new_stream_account_id[sid] = aid
                     new_streams_by_account.setdefault(aid, []).append(st)
@@ -918,8 +1503,9 @@ class UDIManager:
                 self._channels_by_group_id    = new_channels_by_group
                 self._streams_by_account_id   = new_streams_by_account
                 self._stream_account_id       = new_stream_account_id
-                self._profile_to_account_id   = new_profile_to_account
+                self._remember_profile_account_mappings(new_profile_to_account)
                 self._has_custom_streams      = new_has_custom
+                self._initialized             = True
 
             now = datetime.now()
 
@@ -934,19 +1520,10 @@ class UDIManager:
                 f"{len(self._channel_profiles_cache)} profiles"
             )
 
-            # Surface integrity warnings in the progress status if any check failed.
-            # Phase 3 (unstable state) will act on these; for now we log and expose.
-            integrity_ok = channels_ok and streams_ok
-            completion_message = (
-                'Initialization complete'
-                if integrity_ok
-                else 'Initialization complete (integrity warnings — check logs)'
-            )
-
             self._update_init_progress(
                 status='completed',
                 percentage=100,
-                message=completion_message,
+                message='Initialization complete',
                 current_step='done',
                 entity_counts=entity_counts,
             )
@@ -1020,6 +1597,11 @@ class UDIManager:
         deleted_stream_ids  = cached_stream_ids       - dispatcharr_stream_ids
         added_channel_ids   = dispatcharr_channel_ids - cached_channel_ids
         deleted_channel_ids = cached_channel_ids      - dispatcharr_channel_ids
+        managed_hidden_channel_ids = self._get_managed_hidden_channel_ids()
+        managed_hidden_deleted_ids = deleted_channel_ids & managed_hidden_channel_ids
+        missing_managed_hidden_ids = managed_hidden_channel_ids - cached_channel_ids
+        if managed_hidden_deleted_ids:
+            deleted_channel_ids -= managed_hidden_deleted_ids
 
         stream_change_ratio  = (len(added_stream_ids)  + len(deleted_stream_ids))  / max(len(dispatcharr_stream_ids),  1)
         channel_change_ratio = (len(added_channel_ids) + len(deleted_channel_ids)) / max(len(dispatcharr_channel_ids), 1)
@@ -1040,13 +1622,23 @@ class UDIManager:
             )
             return self.refresh_all()
 
-        if not any([added_stream_ids, deleted_stream_ids, added_channel_ids, deleted_channel_ids]):
+        if not any([
+            added_stream_ids,
+            deleted_stream_ids,
+            added_channel_ids,
+            deleted_channel_ids,
+            managed_hidden_deleted_ids,
+            missing_managed_hidden_ids,
+        ]):
             logger.info("Delta refresh: no structural changes detected")
             return True
 
         # ---- Step 4: fetch new items — both concurrently (outside the lock) ----
         new_streams:  List[Dict[str, Any]] = []
         new_channels: List[Dict[str, Any]] = []
+        hidden_channel_ids_to_rehydrate = sorted(
+            (managed_hidden_deleted_ids | missing_managed_hidden_ids) - added_channel_ids
+        )
 
         if added_stream_ids or added_channel_ids:
             with ThreadPoolExecutor(max_workers=2) as _ex:
@@ -1064,6 +1656,17 @@ class UDIManager:
                 if _ch_future is not None:
                     new_channels = _ch_future.result()
                     logger.info(f"Fetched {len(new_channels)}/{len(added_channel_ids)} new channels")
+        if hidden_channel_ids_to_rehydrate:
+            hidden_channels = self.fetcher.fetch_channels_by_ids(hidden_channel_ids_to_rehydrate)
+            new_channels, rehydrated_hidden_count = self._merge_channel_list_with_rehydrated(
+                new_channels,
+                hidden_channels,
+            )
+            logger.info(
+                "Delta refresh rehydrated %s/%s StreamFlow-managed hidden channel(s)",
+                rehydrated_hidden_count,
+                len(hidden_channel_ids_to_rehydrate),
+            )
 
         # ---- Step 5: apply delta atomically under lock ----
         with self._lock:
@@ -1077,7 +1680,7 @@ class UDIManager:
                 if st.get('url'):
                     self._streams_by_url[st['url']] = st
                 self._valid_stream_ids.add(sid)
-                aid = st.get('m3u_account')
+                aid = self._get_stream_m3u_account_id(st)
                 if aid is not None:
                     self._stream_account_id[sid] = aid
                     self._streams_by_account_id.setdefault(aid, []).append(st)
@@ -1117,11 +1720,14 @@ class UDIManager:
                 cid = ch.get('id')
                 if cid is None:
                     continue
-                self._channels_cache.append(ch)
-                self._channels_by_id[cid] = ch
-                gid = ch.get('channel_group_id')
-                if gid is not None:
-                    self._channels_by_group_id.setdefault(gid, []).append(ch)
+                replaced = False
+                for index, cached_channel in enumerate(self._channels_cache):
+                    if cached_channel.get('id') == cid:
+                        self._channels_cache[index] = ch
+                        replaced = True
+                        break
+                if not replaced:
+                    self._channels_cache.append(ch)
 
             # Channel deletions
             if deleted_channel_ids:
@@ -1138,11 +1744,13 @@ class UDIManager:
                     ch for ch in self._channels_cache
                     if ch.get('id') not in deleted_channel_ids
                 ]
+            self._build_indexes()
 
         logger.info(
             f"Delta refresh complete — "
             f"streams +{len(new_streams)} -{len(deleted_stream_ids)}, "
-            f"channels +{len(new_channels)} -{len(deleted_channel_ids)}"
+            f"channels +{len(new_channels)} -{len(deleted_channel_ids)} "
+            f"(protected hidden {len(managed_hidden_deleted_ids)})"
         )
         return True
 
@@ -1161,16 +1769,27 @@ class UDIManager:
         logger.info("Refreshing channels...")
         try:
             result = self.fetcher.fetch_channels()
+            channel_ids: Optional[Set[int]] = None
+            try:
+                current_ids = self.fetcher.fetch_all_ids()
+                channel_ids = current_ids.get('channels') if isinstance(current_ids, dict) else None
+            except Exception as exc:
+                logger.debug("Channel refresh could not fetch channel IDs oracle: %s", exc)
+            channels, rehydrated_missing_count = self._rehydrate_missing_channel_ids(
+                result.items,
+                channel_ids,
+                reason="refresh_channels_ids_oracle",
+            )
+            channels, rehydrated_hidden_count = self._rehydrate_managed_hidden_channels(channels)
             with self._lock:
-                self._channels_cache = result.items
-                self._channels_by_id = {
-                    ch.get('id'): ch for ch in result.items if ch.get('id') is not None
-                }
-                self._channels_by_group_id = {}
-                for ch in result.items:
-                    gid = ch.get('channel_group_id')
-                    if gid is not None:
-                        self._channels_by_group_id.setdefault(gid, []).append(ch)
+                self._channels_cache = channels
+                self._build_indexes()
+            if rehydrated_missing_count or rehydrated_hidden_count:
+                logger.info(
+                    "Channel refresh retained %s omitted channel(s), including %s StreamFlow-managed hidden channel(s)",
+                    rehydrated_missing_count,
+                    rehydrated_hidden_count,
+                )
             self.cache.mark_refreshed('channels')
             return True
         except Exception as e:
@@ -1212,7 +1831,7 @@ class UDIManager:
             logger.error(f"Error refreshing channel {channel_id}: {e}")
             return False
     
-    def refresh_streams(self) -> bool:
+    def refresh_streams(self, progress_callback=None, cancel_check=None) -> bool:
         """Refresh only streams data.
         
         Returns:
@@ -1220,7 +1839,23 @@ class UDIManager:
         """
         logger.info("Refreshing streams...")
         try:
-            result = self.fetcher.fetch_streams()
+            result = self.fetcher.fetch_streams(
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+            )
+            existing_stream_count = len(self._streams_cache)
+            if not (
+                _check_fetch_integrity('streams', result)
+                and _check_nonempty_live_fetch('streams', result, existing_stream_count)
+            ):
+                logger.warning(
+                    "Preserving existing stream cache with %s records after "
+                    "incomplete refresh_streams() result (%s/%s)",
+                    existing_stream_count,
+                    len(result),
+                    result.expected_count,
+                )
+                return False
             with self._lock:
                 self._streams_cache = result.items
                 self._streams_by_id = {
@@ -1232,13 +1867,16 @@ class UDIManager:
                 self._stream_account_id = {}
                 for st in result.items:
                     sid = st.get('id')
-                    aid = st.get('m3u_account')
+                    aid = self._get_stream_m3u_account_id(st)
                     if sid is not None and aid is not None:
                         self._stream_account_id[sid] = aid
                         self._streams_by_account_id.setdefault(aid, []).append(st)
                 self._has_custom_streams = any(st.get('is_custom', False) for st in result.items)
             self.cache.mark_refreshed('streams')
             return True
+        except FetchCancelled:
+            logger.info("Stream cache refresh cancelled")
+            raise
         except Exception as e:
             logger.error(f"Error refreshing streams: {e}")
             return False
@@ -1277,17 +1915,21 @@ class UDIManager:
                 self._m3u_accounts_by_id = {
                     a.get('id'): a for a in accounts if a.get('id') is not None
                 }
-                # Rebuild profile->account mapping since profiles nest inside accounts
-                self._profile_to_account_id = {}
+                # Refresh current owners while retaining ambiguous prior owners
+                # conservatively for this process.
+                current_profile_to_account_id = {}
                 for account in accounts:
-                    aid = account.get('id')
+                    aid = _normalize_udi_identifier(account.get('id'))
                     if aid is None:
                         continue
                     for profile in account.get('profiles', []):
                         if isinstance(profile, dict):
-                            pid = profile.get('id')
+                            pid = _normalize_udi_identifier(profile.get('id'))
                             if pid is not None:
-                                self._profile_to_account_id[pid] = aid
+                                current_profile_to_account_id[pid] = aid
+                self._remember_profile_account_mappings(
+                    current_profile_to_account_id
+                )
             self.cache.mark_refreshed('m3u_accounts')
             return True
         except Exception as e:
@@ -1481,15 +2123,31 @@ class UDIManager:
         return self.cache.get_last_refresh(entity_type)
     
     def _find_account_for_profile(self, profile_id: int) -> Optional[int]:
-        """Find the M3U account ID that contains a specific profile.
+        """Find the current or last-known M3U account for a profile.
 
         Args:
             profile_id: M3U account profile ID
 
         Returns:
-            M3U account ID or None if profile not found
+            M3U account ID or None if the profile has never been observed
         """
-        return self._profile_to_account_id.get(profile_id)
+        normalized_profile_id = _normalize_udi_identifier(profile_id)
+        return self._profile_to_account_id.get(normalized_profile_id)
+
+    def _profile_account_owners(self) -> Dict[Any, Set[Any]]:
+        """Return conservative current and last-known capacity owners.
+
+        Proxy-status health now distinguishes idle from unavailable, but an
+        idle moment still cannot disambiguate a later reused numeric profile
+        ID. Retaining candidates in memory can make that rare reuse wait on
+        both accounts, but it cannot hide an upstream session and overbook
+        provider credentials.
+        """
+        with self._lock:
+            return {
+                profile_id: set(account_ids)
+                for profile_id, account_ids in self._profile_account_id_candidates.items()
+            }
     
     def _is_channel_status_active(self, status: Dict[str, Any]) -> bool:
         """Check if a channel status indicates it's active.
@@ -1520,36 +2178,261 @@ class UDIManager:
             return True
             
         return False
+
+    @staticmethod
+    def _client_text(client: Any) -> str:
+        if isinstance(client, dict):
+            values = [
+                client.get("user_agent"),
+                client.get("client_id"),
+                client.get("username"),
+                client.get("user"),
+                client.get("ip"),
+            ]
+            return " ".join(str(value) for value in values if value is not None)
+        return str(client)
+
+    @staticmethod
+    def _clients_from_status(status: Dict[str, Any]) -> Optional[List[Any]]:
+        clients = status.get("clients") if isinstance(status, dict) else None
+        if isinstance(clients, dict):
+            return list(clients.values())
+        if isinstance(clients, list):
+            return clients
+        return None
+
+    def _shadow_watcher_user_agent(self) -> str:
+        """Return the configured Shadow watcher marker without importing stream services."""
+        try:
+            if SHADOW_MONITOR_CONFIG_FILE.exists():
+                with open(SHADOW_MONITOR_CONFIG_FILE, "r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                marker = str(payload.get("watcher_user_agent") or "").strip()
+                if marker:
+                    return marker
+        except Exception as exc:
+            logger.debug("Could not read Shadow watcher user-agent config: %s", exc)
+        return SHADOW_MONITOR_DEFAULT_USER_AGENT
+
+    def _split_status_profile_usage(self, status: Dict[str, Any], watcher_marker: str) -> Dict[str, int]:
+        """Split a proxy status into capacity slots, real viewers, and Shadow watchers."""
+        clients = self._clients_from_status(status)
+        marker = str(watcher_marker or "").lower().strip()
+
+        if clients is None:
+            active_streams = 1 if self._is_channel_status_active(status) else 0
+            real_viewers = 0
+            for key in ("real_client_count", "client_count", "current_viewers", "viewer_count"):
+                count = _safe_positive_int(status.get(key))
+                if count > 0:
+                    real_viewers = count
+                    break
+            if real_viewers == 0 and active_streams:
+                real_viewers = 1
+            return {
+                "active_streams": active_streams,
+                "real_viewers": real_viewers,
+                "real_viewer_streams": 1 if active_streams and real_viewers else 0,
+                "shadow_watchers": 0,
+            }
+
+        real_viewers = 0
+        shadow_watchers = 0
+        for client in clients:
+            text = self._client_text(client).lower()
+            if marker and marker in text:
+                shadow_watchers += 1
+            else:
+                real_viewers += 1
+
+        return {
+            # Dispatcharr's upstream state is authoritative for the provider
+            # slot. The client list only classifies downstream consumers and
+            # may be briefly empty while an upstream session remains active.
+            "active_streams": 1 if self._is_channel_status_active(status) else 0,
+            "real_viewers": real_viewers,
+            "real_viewer_streams": 1 if real_viewers > 0 else 0,
+            "shadow_watchers": shadow_watchers,
+        }
     
-    def _get_proxy_status(self, force_refresh: bool = False) -> Dict[str, Any]:
+    def _get_proxy_status(
+        self,
+        force_refresh: bool = False,
+        require_authoritative: bool = False,
+    ) -> Dict[str, Any]:
         """Get cached proxy status or fetch fresh if needed.
         
         Args:
             force_refresh: If True, always fetch fresh data
+            require_authoritative: If True, propagate health failures instead
+                of returning a stale protective cache or an empty fallback.
             
         Returns:
             Dictionary with proxy status information
+
+        Raises:
+            ProxyStatusError: No fresh authoritative status is available and
+                ``require_authoritative`` is true.
         """
-        current_time = time.time()
-        
-        # Check if cache is valid
-        if not force_refresh and self._proxy_status_cache:
-            age = current_time - self._proxy_status_last_fetch
-            if age < self._proxy_status_ttl:
-                logger.debug(f"Using cached proxy status (age: {age:.1f}s)")
-                return self._proxy_status_cache
-        
-        # Fetch fresh data
+        freshness_ttl = (
+            self._proxy_status_authoritative_ttl
+            if require_authoritative
+            else self._proxy_status_ttl
+        )
+
+        def cache_is_fresh_locked() -> bool:
+            if not self._proxy_status_cache_authoritative:
+                return False
+            age = time.time() - self._proxy_status_last_fetch
+            return 0 <= age < freshness_ttl
+
+        def failure_for_generation_locked(generation: int) -> Optional[ProxyStatusError]:
+            result = self._proxy_status_fetch_results.get(generation)
+            if not result or result[0]:
+                return None
+            failure_type = result[1] or ProxyStatusTransportError
+            reason = result[2] or "proxy_status_fetch_failed"
+            return failure_type(reason)
+
+        with self._proxy_status_condition:
+            if (
+                require_authoritative
+                and not force_refresh
+                and self._proxy_status_last_error
+                and self._proxy_status_last_error_type
+                and self._proxy_status_last_error_at
+                >= self._proxy_status_last_fetch
+                and 0 <= (
+                    time.time() - self._proxy_status_last_error_at
+                ) < self._proxy_status_authoritative_ttl
+            ):
+                raise self._proxy_status_last_error_type(
+                    self._proxy_status_last_error
+                )
+            if not force_refresh and cache_is_fresh_locked():
+                age = time.time() - self._proxy_status_last_fetch
+                logger.debug("Using cached proxy status (age: %.3fs)", age)
+                return copy.deepcopy(self._proxy_status_cache)
+
+            if self._proxy_status_fetch_in_progress:
+                observed_generation = self._proxy_status_fetch_generation
+                self._proxy_status_waiter_count += 1
+                self._proxy_status_waiters_by_generation[observed_generation] = (
+                    self._proxy_status_waiters_by_generation.get(
+                        observed_generation,
+                        0,
+                    )
+                    + 1
+                )
+                self._proxy_status_condition.notify_all()
+                try:
+                    self._proxy_status_condition.wait_for(
+                        lambda: self._proxy_status_completed_generation
+                        >= observed_generation
+                    )
+                finally:
+                    self._proxy_status_waiter_count -= 1
+                    remaining_waiters = (
+                        self._proxy_status_waiters_by_generation.get(
+                            observed_generation,
+                            1,
+                        )
+                        - 1
+                    )
+                    if remaining_waiters > 0:
+                        self._proxy_status_waiters_by_generation[
+                            observed_generation
+                        ] = remaining_waiters
+                    else:
+                        self._proxy_status_waiters_by_generation.pop(
+                            observed_generation,
+                            None,
+                        )
+
+                joined_failure = failure_for_generation_locked(
+                    observed_generation
+                )
+                if joined_failure is not None:
+                    if require_authoritative:
+                        raise joined_failure
+                    if self._proxy_status_cache_authoritative:
+                        return copy.deepcopy(self._proxy_status_cache)
+                    return {}
+                return copy.deepcopy(self._proxy_status_cache)
+
+            self._proxy_status_fetch_in_progress = True
+            self._proxy_status_fetch_generation += 1
+            fetch_generation = self._proxy_status_fetch_generation
+
+        proxy_status: Optional[Dict[str, Any]] = None
+        failure: Optional[ProxyStatusError] = None
         try:
             logger.debug("Fetching fresh proxy status")
             proxy_status = self.fetcher.fetch_proxy_status()
-            self._proxy_status_cache = proxy_status
-            self._proxy_status_last_fetch = current_time
-            return proxy_status
-        except Exception as e:
-            logger.warning(f"Failed to fetch proxy status: {e}")
-            # Return cached data even if expired, or empty dict
-            return self._proxy_status_cache if self._proxy_status_cache else {}
+            if not isinstance(proxy_status, dict):
+                raise ProxyStatusPayloadError("proxy_status_mapping_invalid")
+        except ProxyStatusError as exc:
+            failure = exc
+        except Exception:
+            failure = ProxyStatusTransportError("proxy_status_fetch_failed")
+
+        with self._proxy_status_condition:
+            if failure is None:
+                # The cache is an authority boundary. Neither the fetcher's
+                # mutable response nor any public snapshot may share nested
+                # channel/client objects with it.
+                self._proxy_status_cache = copy.deepcopy(proxy_status or {})
+                self._proxy_status_last_fetch = time.time()
+                self._proxy_status_cache_authoritative = True
+                self._proxy_status_last_error = None
+                self._proxy_status_last_error_type = None
+                self._proxy_status_last_error_at = 0
+                self._proxy_status_fetch_results[fetch_generation] = (
+                    True,
+                    None,
+                    None,
+                )
+            else:
+                self._proxy_status_last_error = failure.reason
+                self._proxy_status_last_error_type = type(failure)
+                self._proxy_status_last_error_at = time.time()
+                self._proxy_status_fetch_results[fetch_generation] = (
+                    False,
+                    type(failure),
+                    failure.reason,
+                )
+            self._proxy_status_completed_generation = fetch_generation
+            self._proxy_status_fetch_in_progress = False
+            removable_generations = sorted(
+                generation
+                for generation in self._proxy_status_fetch_results
+                if generation not in self._proxy_status_waiters_by_generation
+            )
+            while (
+                len(self._proxy_status_fetch_results) > 16
+                and removable_generations
+            ):
+                oldest_generation = removable_generations.pop(0)
+                self._proxy_status_fetch_results.pop(oldest_generation, None)
+            self._proxy_status_condition.notify_all()
+
+            if failure is None:
+                return copy.deepcopy(self._proxy_status_cache)
+            if require_authoritative:
+                logger.warning("Proxy status unavailable (%s)", failure.reason)
+                raise failure
+            logger.warning("Proxy status unavailable (%s)", failure.reason)
+            # Stale status remains useful to fail conservatively for
+            # non-capacity callers, but strict callers never use it.
+            if self._proxy_status_cache_authoritative:
+                return copy.deepcopy(self._proxy_status_cache)
+            return {}
+
+    def _get_authoritative_proxy_status(self) -> Dict[str, Any]:
+        """Fetch status that is fresh enough to authorize provider capacity."""
+        return self._get_proxy_status(
+            require_authoritative=True,
+        )
     
     def _count_active_streams(self, account_id: int) -> int:
         """Count streams with active viewers for an account.
@@ -1565,7 +2448,9 @@ class UDIManager:
             Number of active streams for this account
         """
         # Get real-time proxy status
-        proxy_status = self._get_proxy_status()
+        proxy_status = self._get_authoritative_proxy_status()
+        profile_account_owners = self._profile_account_owners()
+        normalized_account_id = _normalize_udi_identifier(account_id)
         
         # Count active channels that are using profiles from this account
         active_count = 0
@@ -1576,19 +2461,23 @@ class UDIManager:
                 continue
             
             # Get the m3u_profile_id from the proxy status
-            profile_id = status.get('m3u_profile_id')
-            if not profile_id:
+            profile_id = _strict_active_proxy_profile_id(
+                status.get('m3u_profile_id')
+            )
+            if profile_id is None:
                 logger.debug(f"Channel {channel_id_str} has no m3u_profile_id in proxy status")
                 continue
-            
-            # Find which account owns this profile
-            profile_account_id = self._find_account_for_profile(profile_id)
-            if profile_account_id is None:
-                logger.debug(f"Profile {profile_id} not found in any M3U account")
-                continue
-            
+
+            # During profile removal or ID reuse, one status can conservatively
+            # consume capacity from more than one observed owner.
+            profile_account_ids = profile_account_owners.get(profile_id, set())
+            if not profile_account_ids:
+                raise ProxyStatusPayloadError(
+                    "proxy_status_active_profile_unowned"
+                )
+
             # If this profile belongs to the account we're checking, count it
-            if profile_account_id == account_id:
+            if normalized_account_id in profile_account_ids:
                 active_count += 1
                 active_profiles.add(profile_id)
                 profile_name = status.get('m3u_profile_name', f'Profile {profile_id}')
@@ -1637,10 +2526,15 @@ class UDIManager:
             logger.warning(f"Profile {profile_id} not found in any M3U account")
             return 0
         
-        # Count active streams for this account
-        active_count = self._count_active_streams(account_id)
+        profile_counts = self.get_active_stream_context_per_profile(account_id)
+        usage = profile_counts.get(profile_id, {})
+        active_count = (
+            usage.get('active_streams', 0)
+            if isinstance(usage, dict)
+            else usage
+        )
         logger.debug(f"Profile {profile_id} has {active_count} active streams")
-        return active_count
+        return _safe_positive_int(active_count)
     
     def get_active_streams_for_account(self, account_id: int) -> int:
         """Calculate the number of active streams for an M3U account.
@@ -1677,16 +2571,131 @@ class UDIManager:
         # Get real-time proxy status
         proxy_status = self._get_proxy_status()
         
-        # Check if this channel is in the proxy status
+        # Dispatcharr proxy status has existed in both numeric-ID keyed and
+        # UUID-keyed shapes. Match both so active viewers reliably protect the
+        # channel from quality checks.
         channel_id_str = str(channel_id)
-        if channel_id_str in proxy_status:
-            status = proxy_status[channel_id_str]
+        channel = self._channels_by_id.get(channel_id)
+        channel_uuid = None
+        if isinstance(channel, dict):
+            channel_uuid = channel.get('uuid') or channel.get('channel_uuid')
+            if channel_uuid is not None:
+                channel_uuid = str(channel_uuid)
+
+        candidate_keys = {channel_id_str}
+        if channel_uuid:
+            candidate_keys.add(channel_uuid)
+
+        for key in candidate_keys:
+            if key not in proxy_status:
+                continue
+            status = proxy_status[key]
             is_active = self._is_channel_status_active(status)
-            logger.debug(f"Channel {channel_id} is {'active' if is_active else 'inactive'} (from proxy status)")
+            logger.debug(
+                f"Channel {channel_id} is {'active' if is_active else 'inactive'} "
+                f"(from proxy status key {key})"
+            )
             return is_active
+
+        for key, status in proxy_status.items():
+            if not isinstance(status, dict):
+                continue
+            status_identifiers = {
+                str(value)
+                for value in (
+                    status.get('channel_id'),
+                    status.get('channel_uuid'),
+                    status.get('uuid'),
+                    status.get('id'),
+                )
+                if value not in (None, '')
+            }
+            if channel_id_str in status_identifiers or (channel_uuid and channel_uuid in status_identifiers):
+                is_active = self._is_channel_status_active(status)
+                logger.debug(
+                    f"Channel {channel_id} is {'active' if is_active else 'inactive'} "
+                    f"(from proxy status entry {key})"
+                )
+                return is_active
         
         logger.debug(f"Channel {channel_id} is not in proxy status, assuming inactive")
         return False
+
+    def get_active_stream_ids_for_channel(self, channel_id: int) -> Set[int]:
+        """Return stream IDs currently watched for a channel.
+
+        Dispatcharr proxy status has existed in numeric channel ID, channel UUID,
+        and list-like shapes. This mirrors ``is_channel_active`` matching but
+        returns the concrete stream IDs so quality checks can protect only the
+        watched stream while still checking the rest of the channel.
+        """
+        self._ensure_initialized()
+        proxy_status = self._get_proxy_status()
+
+        channel_id_str = str(channel_id)
+        channel = self._channels_by_id.get(channel_id)
+        channel_uuid = None
+        if isinstance(channel, dict):
+            channel_uuid = channel.get('uuid') or channel.get('channel_uuid')
+            if channel_uuid is not None:
+                channel_uuid = str(channel_uuid)
+
+        candidate_keys = {channel_id_str}
+        if channel_uuid:
+            candidate_keys.add(channel_uuid)
+
+        def status_matches_channel(status: Dict[str, Any]) -> bool:
+            status_identifiers = {
+                str(value)
+                for value in (
+                    status.get('channel_id'),
+                    status.get('channel_uuid'),
+                    status.get('uuid'),
+                    status.get('id'),
+                )
+                if value not in (None, '')
+            }
+            return channel_id_str in status_identifiers or bool(channel_uuid and channel_uuid in status_identifiers)
+
+        def collect_stream_ids(value: Any) -> Set[int]:
+            collected: Set[int] = set()
+            if value in (None, ''):
+                return collected
+            if isinstance(value, dict):
+                for item_key in ('stream_id', 'id'):
+                    collected.update(collect_stream_ids(value.get(item_key)))
+                return collected
+            if isinstance(value, (list, tuple, set)):
+                for item in value:
+                    collected.update(collect_stream_ids(item))
+                return collected
+            try:
+                collected.add(int(value))
+            except (TypeError, ValueError):
+                pass
+            return collected
+
+        active_stream_ids: Set[int] = set()
+        stream_keys = ('stream_id', 'stream', 'streams', 'active_streams')
+        for key in candidate_keys:
+            status = proxy_status.get(key)
+            if isinstance(status, dict) and self._is_channel_status_active(status):
+                for stream_key in stream_keys:
+                    active_stream_ids.update(collect_stream_ids(status.get(stream_key)))
+
+        for key, status in proxy_status.items():
+            if not isinstance(status, dict):
+                continue
+            if status_matches_channel(status) and self._is_channel_status_active(status):
+                for stream_key in stream_keys:
+                    active_stream_ids.update(collect_stream_ids(status.get(stream_key)))
+
+        logger.debug(
+            "Channel %s active stream IDs from proxy status: %s",
+            channel_id,
+            sorted(active_stream_ids),
+        )
+        return active_stream_ids
     
     def get_total_viewers_for_profile(self, profile_id: int) -> int:
         """Calculate the total number of viewers for a specific M3U account profile.
@@ -1731,42 +2740,84 @@ class UDIManager:
         logger.debug(f"Account {account_id} has {total_viewers} total viewers")
         return total_viewers
     
-    def get_active_streams_count_per_profile(self, account_id: int) -> Dict[int, int]:
-        """Get the count of active streams for each profile in an account.
+    def get_active_stream_context_per_profile(self, account_id: int) -> Dict[int, Dict[str, int]]:
+        """Get active profile capacity context for an account.
+
+        ``active_streams`` preserves the historical slot-count semantics used
+        for profile capacity. ``real_viewer_streams`` counts those upstream slots
+        that have at least one real client, while ``real_viewers`` and
+        ``shadow_watchers`` expose downstream client counts.
         
         Args:
             account_id: M3U account ID
             
         Returns:
-            Dictionary mapping profile_id to active stream count
+            Dictionary mapping profile_id to active stream context
         """
         self._ensure_initialized()
         
         # Get real-time proxy status
-        proxy_status = self._get_proxy_status()
+        proxy_status = self._get_authoritative_proxy_status()
+        profile_account_owners = self._profile_account_owners()
+        normalized_account_id = _normalize_udi_identifier(account_id)
+        watcher_marker = self._shadow_watcher_user_agent()
         
         # Count active streams per profile
-        profile_counts: Dict[int, int] = {}
+        profile_counts: Dict[int, Dict[str, int]] = {}
         
         for channel_id_str, status in proxy_status.items():
             if not self._is_channel_status_active(status):
                 continue
             
             # Get the m3u_profile_id from the proxy status
-            profile_id = status.get('m3u_profile_id')
-            if not profile_id:
+            profile_id = _strict_active_proxy_profile_id(
+                status.get('m3u_profile_id')
+            )
+            if profile_id is None:
                 continue
-            
-            # Find which account owns this profile
-            profile_account_id = self._find_account_for_profile(profile_id)
-            if profile_account_id != account_id:
+
+            profile_account_ids = profile_account_owners.get(profile_id, set())
+            if not profile_account_ids:
+                raise ProxyStatusPayloadError(
+                    "proxy_status_active_profile_unowned"
+                )
+            if normalized_account_id not in profile_account_ids:
                 continue
-            
-            # Increment count for this profile
-            profile_counts[profile_id] = profile_counts.get(profile_id, 0) + 1
+
+            usage = self._split_status_profile_usage(status, watcher_marker)
+            if usage.get("active_streams", 0) <= 0:
+                continue
+
+            current = profile_counts.setdefault(
+                profile_id,
+                {
+                    "active_streams": 0,
+                    "real_viewers": 0,
+                    "real_viewer_streams": 0,
+                    "shadow_watchers": 0,
+                },
+            )
+            current["active_streams"] += usage.get("active_streams", 0)
+            current["real_viewers"] += usage.get("real_viewers", 0)
+            current["real_viewer_streams"] += usage.get("real_viewer_streams", 0)
+            current["shadow_watchers"] += usage.get("shadow_watchers", 0)
         
         logger.debug(f"Account {account_id} profile usage: {profile_counts}")
         return profile_counts
+
+    def get_active_streams_count_per_profile(self, account_id: int) -> Dict[int, int]:
+        """Get the count of active streams for each profile in an account.
+
+        Kept as the legacy integer API for callers that only need capacity slot
+        counts. Use ``get_active_stream_context_per_profile`` when client class
+        context matters.
+        """
+        profile_context = self.get_active_stream_context_per_profile(account_id)
+        return {
+            profile_id: _safe_positive_int(context.get("active_streams", 0))
+            for profile_id, context in profile_context.items()
+            if isinstance(context, dict)
+        }
     
     def find_available_profile_for_stream(self, stream: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Find an available profile that can serve this stream.
@@ -1785,7 +2836,7 @@ class UDIManager:
         """
         self._ensure_initialized()
         
-        account_id = stream.get('m3u_account')
+        account_id = self._get_stream_m3u_account_id(stream)
         stream_id = stream.get('id')
         
         if not account_id:
@@ -1827,10 +2878,23 @@ class UDIManager:
             if not profile.get('is_active', True):
                 logger.debug(f"Profile {profile_id} ({profile_name}) is inactive, skipping")
                 continue
+
+            route_eligible, _resolved_url, route_reason = self.resolve_profile_stream_url(
+                stream,
+                profile,
+            )
+            if not route_eligible:
+                logger.debug(
+                    "Profile %s cannot serve stream %s (%s), skipping",
+                    profile_id,
+                    stream_id,
+                    route_reason,
+                )
+                continue
             
             # Check if profile has available slots
-            max_streams = profile.get('max_streams', 0)
-            active_count = profile_usage.get(profile_id, 0)
+            max_streams = _safe_positive_int(profile.get('max_streams', 0))
+            active_count = _safe_positive_int(profile_usage.get(profile_id, 0))
             
             if max_streams == 0:
                 # Unlimited streams
@@ -1869,9 +2933,22 @@ class UDIManager:
         """
         self._ensure_initialized()
         
-        account_id = stream.get('m3u_account')
+        account_id = self._get_stream_m3u_account_id(stream)
         if not account_id:
             # Custom stream without M3U account - can always run
+            return (True, None)
+
+        account = self.get_m3u_account_by_id(account_id)
+        active_profiles = [
+            profile
+            for profile in (account.get('profiles', []) if isinstance(account, dict) else [])
+            if isinstance(profile, dict) and profile.get('is_active', True)
+        ]
+        if not active_profiles:
+            # Accounts without active profile credentials use their account-level
+            # max_streams fallback. The AccountStreamLimiter performs that atomic
+            # admission check together with current viewer/checker usage; this
+            # legacy preflight must not reject the stream before it gets there.
             return (True, None)
         
         # Try to find an available profile
@@ -1880,10 +2957,115 @@ class UDIManager:
         if available_profile:
             return (True, None)
         else:
-            account = self.get_m3u_account_by_id(account_id)
             account_name = account.get('name', f'Account {account_id}') if account else f'Account {account_id}'
             return (False, f"All profiles in {account_name} are at capacity")
     
+    def resolve_profile_stream_url(
+        self,
+        stream: Dict[str, Any],
+        profile: Dict[str, Any],
+    ) -> Tuple[bool, str, str]:
+        """Resolve one explicit profile to the exact URL it can serve.
+
+        This is the fail-closed counterpart to
+        :meth:`apply_profile_url_transformation`. A profile with no rewrite is
+        the default credential route and may use the stored URL. A non-default
+        profile is eligible only when both patterns are usable, the search
+        pattern matches this stream, and the rewrite produces a changed, valid
+        URL. Dispatcharr default profiles may explicitly rewrite to the unchanged
+        stored URL. Pattern values and URLs are deliberately never logged.
+
+        Returns:
+            ``(eligible, url, reason)``. ``url`` is empty when the profile is
+            ineligible.
+        """
+        import re
+
+        original_url = stream.get('url', '') if isinstance(stream, dict) else ''
+        if not isinstance(original_url, str) or not original_url:
+            return (False, '', 'missing_stream_url')
+        if not isinstance(profile, dict):
+            return (False, '', 'missing_profile')
+
+        raw_is_default = profile.get('is_default')
+        if raw_is_default is not None and not isinstance(raw_is_default, bool):
+            logger.warning(
+                "Profile %s has a non-boolean default flag",
+                profile.get('id'),
+            )
+            return (False, '', 'invalid_profile_default_flag')
+
+        raw_search_pattern = profile.get('search_pattern')
+        raw_replace_pattern = profile.get('replace_pattern')
+        search_present = raw_search_pattern not in (None, '')
+        replace_present = raw_replace_pattern not in (None, '')
+
+        if not search_present and not replace_present:
+            if raw_is_default is False:
+                return (False, '', 'nondefault_profile_missing_url_transformation')
+            return (True, original_url, 'default_profile_url')
+        if not search_present or not replace_present:
+            logger.warning(
+                "Profile %s has an incomplete URL transformation",
+                profile.get('id'),
+            )
+            return (False, '', 'incomplete_profile_url_transformation')
+        if not isinstance(raw_search_pattern, str) or not isinstance(raw_replace_pattern, str):
+            logger.warning(
+                "Profile %s has non-string URL transformation values",
+                profile.get('id'),
+            )
+            return (False, '', 'invalid_profile_url_transformation_type')
+
+        search_pattern = raw_search_pattern.strip()
+        replace_pattern = raw_replace_pattern.strip()
+        if not search_pattern or not replace_pattern:
+            logger.warning(
+                "Profile %s has an empty URL transformation",
+                profile.get('id'),
+            )
+            return (False, '', 'empty_profile_url_transformation')
+
+        try:
+            if not re.search(search_pattern, original_url):
+                return (False, '', 'profile_url_pattern_mismatch')
+
+            python_replace_pattern = replace_pattern
+            for i in range(99, 0, -1):
+                python_replace_pattern = python_replace_pattern.replace(f'${i}', f'\\{i}')
+
+            transformed_url = re.sub(search_pattern, python_replace_pattern, original_url)
+        except re.error:
+            logger.error(
+                "Invalid URL transformation regex for profile %s",
+                profile.get('id'),
+            )
+            return (False, '', 'invalid_profile_url_regex')
+        except Exception as exc:
+            logger.error(
+                "URL transformation failed for profile %s: %s",
+                profile.get('id'),
+                type(exc).__name__,
+            )
+            return (False, '', 'profile_url_transformation_failed')
+
+        if not transformed_url.startswith(('http://', 'https://', 'rtmp://', 'rtmps://')):
+            logger.error(
+                "Profile %s URL transformation produced an invalid protocol",
+                profile.get('id'),
+            )
+            return (False, '', 'invalid_profile_url_protocol')
+        if transformed_url == original_url:
+            if raw_is_default is True:
+                return (True, original_url, 'default_profile_url')
+            logger.warning(
+                "Profile %s URL transformation did not change the route",
+                profile.get('id'),
+            )
+            return (False, '', 'profile_url_unchanged')
+
+        return (True, transformed_url, 'profile_url_transformed')
+
     def apply_profile_url_transformation(self, stream: Dict[str, Any], profile: Optional[Dict[str, Any]] = None) -> str:
         """Apply search/replace pattern transformation to a stream URL.
         
@@ -1899,8 +3081,6 @@ class UDIManager:
         Returns:
             Transformed URL string. If no transformation is needed, returns original URL.
         """
-        import re
-        
         original_url = stream.get('url', '')
         if not original_url:
             return original_url
@@ -1909,64 +3089,14 @@ class UDIManager:
         if profile is None:
             profile = self.find_available_profile_for_stream(stream)
         
-        # If still no profile, return original URL
+        # If still no profile, return original URL. Capacity-controlled callers
+        # must pass their explicit reservation and use resolve_profile_stream_url
+        # so they can fail closed rather than auto-selecting another credential.
         if not profile:
             return original_url
-        
-        # Get search and replace patterns
-        search_pattern = profile.get('search_pattern')
-        replace_pattern = profile.get('replace_pattern')
-        
-        # If patterns are not configured, return original URL
-        # Check explicitly for None or empty strings (including whitespace-only strings)
-        if not search_pattern or not replace_pattern:
-            return original_url
-        
-        # Strip whitespace and check again
-        search_pattern = search_pattern.strip()
-        replace_pattern = replace_pattern.strip()
-        
-        if not search_pattern or not replace_pattern:
-            logger.debug(f"Profile {profile.get('id')} has empty search_pattern or replace_pattern after stripping whitespace")
-            return original_url
-        
-        try:
-            # First, test if the pattern matches the URL
-            # If it doesn't match, don't apply any transformation
-            if not re.search(search_pattern, original_url):
-                logger.debug(f"Search pattern '{search_pattern}' does not match URL for stream {stream.get('id')}, skipping transformation")
-                return original_url
-            
-            # Convert $1, $2 style backreferences to \1, \2 for Python's re.sub()
-            # This handles patterns from other regex engines (e.g., JavaScript, Perl)
-            # Maximum supported backreference number (Python regex supports up to 99 groups)
-            MAX_BACKREFERENCE_COUNT = 99
-            python_replace_pattern = replace_pattern
-            # Replace $1, $2, ... $99 with \1, \2, ... \99
-            # Start from highest to avoid replacing $10 as $1 + 0
-            for i in range(MAX_BACKREFERENCE_COUNT, 0, -1):
-                python_replace_pattern = python_replace_pattern.replace(f'${i}', f'\\{i}')
-            
-            # Apply regex transformation
-            transformed_url = re.sub(search_pattern, python_replace_pattern, original_url)
-            
-            # Validate the transformed URL has a valid protocol
-            if not transformed_url.startswith(('http://', 'https://', 'rtmp://', 'rtmps://')):
-                logger.error(f"Profile {profile.get('id')} transformation resulted in invalid URL protocol. "
-                           f"Original URL preserved. Check search_pattern and replace_pattern configuration.")
-                return original_url
-            
-            if transformed_url != original_url:
-                # Log transformation without exposing sensitive URL details
-                logger.debug(f"Applied URL transformation for stream {stream.get('id')} using profile {profile.get('id')}")
-            
-            return transformed_url
-        except re.error as e:
-            logger.error(f"Invalid regex pattern in profile {profile.get('id')}: {e}")
-            return original_url
-        except Exception as e:
-            logger.error(f"Error applying URL transformation for stream {stream.get('id')}: {e}")
-            return original_url
+
+        eligible, resolved_url, _reason = self.resolve_profile_stream_url(stream, profile)
+        return resolved_url if eligible else original_url
     
     def _ensure_initialized(self) -> None:
         """Ensure UDI Manager is initialized before data access.
@@ -1978,6 +3108,8 @@ class UDIManager:
             config = get_dispatcharr_config()
             if not config.is_configured():
                 logger.warning("UDI Manager not initialized and Dispatcharr not configured — skipping auto-init.")
+                return
+            if self._load_legacy_storage_snapshot():
                 return
             logger.info("UDI Manager not initialized, auto-initializing from API...")
             self.initialize()

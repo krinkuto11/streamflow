@@ -49,7 +49,26 @@ frame=  750 fps= 25 q=-1.0 size=   18000kB time=00:00:30.00 bitrate=4800.0kbits/
         self.assertIsNotNone(bitrate, "Bitrate should be detected from progress output")
         self.assertAlmostEqual(bitrate, 4800.0, places=1, msg="Bitrate should match progress value")
 
-    # Removed test_bitrate_method_3_bytes_read_without_statistics as Method 3 is deprecated.
+    @patch('subprocess.run')
+    def test_bitrate_method_3_bytes_read_fallback_when_progress_bitrate_is_na(self, mock_run):
+        """Use ffmpeg bytes-read statistics when a full probe reports bitrate=N/A."""
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stderr = """
+frame=  750 fps= 25 q=-1.0 size=N/A time=00:00:30.00 bitrate=N/A speed=1.0x
+Statistics: 18750000 bytes read
+        """
+        mock_run.return_value = mock_result
+
+        bitrate, status, elapsed = get_stream_bitrate(
+            'http://test.com/stream.m3u8',
+            duration=30,
+            timeout=10,
+        )
+
+        self.assertEqual(status, "OK")
+        self.assertIsNotNone(bitrate, "Bitrate should be estimated from bytes read")
+        self.assertAlmostEqual(bitrate, 5000.0, places=1)
 
     @patch('subprocess.run')
     def test_bitrate_all_methods_fail(self, mock_run):
@@ -101,7 +120,7 @@ frame=  750 fps= 25 q=-1.0 size=   15000kB time=00:00:30.00 bitrate=4000.0kbits/
     def test_bitrate_timeout_handling(self, mock_run):
         """Test that timeout is handled gracefully."""
         test_timeout = 10
-        expected_timeout = test_timeout + 30 + 10  # timeout + duration + buffer
+        expected_timeout = test_timeout + 30 + 10 + 20  # timeout + duration + startup + completion headroom
         mock_run.side_effect = subprocess.TimeoutExpired(cmd='ffmpeg', timeout=expected_timeout)
         
         bitrate, status, elapsed = get_stream_bitrate(

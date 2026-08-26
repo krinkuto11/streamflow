@@ -192,7 +192,6 @@ class AutomationProfile(Base):
     description = Column(String(1024), nullable=True)
     enabled = Column(Boolean, default=True)
     parallel_checks = Column(Integer, default=1)
-    enable_loop_detection = Column(Boolean, default=False)
     extra_settings = Column(JSON, nullable=True)
 
     # Relationships
@@ -211,7 +210,6 @@ class AutomationPeriod(Base):
     exclude_regex = Column(String(512), nullable=True)
     matching_type = Column(String(50), nullable=True)
     automation_type = Column(String(50), nullable=True)
-    enable_loop_detection = Column(Boolean, default=False)
     extra_settings = Column(JSON, nullable=True)
 
     # Relationships
@@ -234,7 +232,6 @@ class MonitoringSession(Base):
     pid = Column(Integer, nullable=True)
     current_speed = Column(Float, default=0.0)
     current_bitrate = Column(Integer, default=0)
-    enable_loop_detection = Column(Boolean, default=False)
     raw_info = Column(JSON, nullable=True)
 
 
@@ -321,6 +318,10 @@ class Run(Base):
     global_dead_count = Column(Integer, nullable=False, default=0)
     global_revived_count = Column(Integer, nullable=False, default=0)
     run_type = Column(String(50), nullable=False, default='automation_run')
+    job_category = Column(String(50), nullable=True)
+    job_outcome = Column(String(50), nullable=True)
+    job_subject_ref = Column(String(100), nullable=True)
+    job_correlation_id = Column(String(100), nullable=True)
     raw_details = Column(String, nullable=True)
     raw_subentries = Column(String, nullable=True)
 

@@ -169,7 +169,8 @@ class TestDebugMode(unittest.TestCase):
         
         log_output = self.log_stream.getvalue()
         self.assertIn("POST", log_output)
-        self.assertIn("http://example.com/api/test", log_output)
+        self.assertIn("url-", log_output)
+        self.assertNotIn("http://example.com/api/test", log_output)
         # Should NOT include actual auth data
         self.assertNotIn("secret_token", log_output)
         self.assertIn("redacted", log_output)

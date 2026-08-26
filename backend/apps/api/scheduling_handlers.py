@@ -163,19 +163,18 @@ def create_auto_create_rule_response(
         schema = AutoCreateRuleCreateSchema.from_payload(payload)
 
         service = get_scheduling_service()
-        rule = service.create_auto_create_rule(schema.rule_data)
+        rule = service.create_auto_create_rule(schema.rule_data, match_immediately=False)
 
         def _match_in_background():
             try:
-                service.match_programs_to_rules()
+                service.match_programs_to_rules(force_refresh=True)
                 logger.info("Background program matching complete after creating auto-create rule")
+                if scheduled_event_processor_wake is not None and hasattr(scheduled_event_processor_wake, "set"):
+                    scheduled_event_processor_wake.set()
             except Exception as exc:
                 logger.warning(f"Background program matching failed after creating auto-create rule: {exc}")
 
         threading.Thread(target=_match_in_background, daemon=True).start()
-
-        if scheduled_event_processor_wake is not None and hasattr(scheduled_event_processor_wake, "set"):
-            scheduled_event_processor_wake.set()
 
         return jsonify(rule), 201
     except ValidationError as exc:
@@ -242,15 +241,21 @@ def update_auto_create_rule_response(
 
 
 def test_auto_create_rule_response(*, payload: Any, get_scheduling_service: Callable[[], Any]):
-    """Handle regex testing against EPG data for a channel."""
+    """Handle regex testing against EPG data for selected channels and groups."""
     from apps.automation.scheduling_service import NoTvgIdError
     try:
         schema = AutoCreateRuleTestSchema.from_payload(payload)
 
         service = get_scheduling_service()
-        matching_programs = service.test_regex_against_epg(schema.channel_id, schema.regex_pattern)
-
-        return jsonify({"matches": len(matching_programs), "programs": matching_programs})
+        result = service.test_regex_against_epg_for_rule(
+            channel_ids=schema.channel_ids,
+            channel_group_ids=schema.channel_group_ids,
+            regex_pattern=schema.regex_pattern,
+            minutes_before=schema.minutes_before,
+            max_events_per_run=schema.max_events_per_run,
+            force_refresh=True,
+        )
+        return jsonify(result)
 
     except NoTvgIdError as exc:
         # SCH-002: channel has no TVG-ID — return structured 200 so the frontend

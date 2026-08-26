@@ -2,25 +2,15 @@
 import unittest
 import sys
 import time
-from unittest.mock import MagicMock
-
-# Mock external dependencies before import
-sys.modules['udi'] = MagicMock()
-sys.modules['logging_config'] = MagicMock()
-sys.modules['api_utils'] = MagicMock()
+import tempfile
+from unittest.mock import patch
 
 # Add backend to path
-import os
 from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import apps.stream.stream_session_manager
+import apps.stream.stream_session_manager as stream_session_manager
 from apps.stream.stream_session_manager import StreamInfo, SessionInfo, StreamSessionManager
-
-# Patch CONFIG_DIR to avoid mkdir calls
-stream_session_manager.CONFIG_DIR = MagicMock()
-stream_session_manager.SESSION_DATA_FILE = MagicMock()
-stream_session_manager.SESSION_DATA_FILE.exists.return_value = False
 
 class TestStreamStatus(unittest.TestCase):
     def test_stream_info_defaults(self):
@@ -68,50 +58,54 @@ class TestStreamStatus(unittest.TestCase):
         
     def test_deserialization_migration(self):
         """Test migration from is_quarantined bool to status str"""
-        # Reset singleton just in case
+        original_config_dir = stream_session_manager.CONFIG_DIR
+        original_session_file = stream_session_manager.SESSION_DATA_FILE
         StreamSessionManager._instance = None
-        
-        # Mock load/save methods to avoid file I/O
-        StreamSessionManager._load_sessions = MagicMock()
-        StreamSessionManager._save_sessions = MagicMock()
-        
-        manager = StreamSessionManager()
-        
-        # Mock legacy data
-        legacy_data = {
-            'session_id': 'test_session',
-            'channel_id': 100,
-            'channel_name': 'Test Channel',
-            'regex_filter': '.*',
-            'created_at': 1234567890,
-            'is_active': True,
-            'streams': {
-                '1': {
-                    'stream_id': 1,
-                    'url': 'http://test1',
-                    'name': 'Stream 1',
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            stream_session_manager.CONFIG_DIR = Path(tmpdir)
+            stream_session_manager.SESSION_DATA_FILE = Path(tmpdir) / "sessions.json"
+
+            try:
+                with patch.object(StreamSessionManager, '_load_sessions', return_value=None), \
+                     patch.object(StreamSessionManager, '_save_sessions', return_value=None):
+                    manager = StreamSessionManager()
+
+                legacy_data = {
+                    'session_id': 'test_session',
                     'channel_id': 100,
-                    'is_quarantined': True # Legacy field
-                },
-                '2': {
-                    'stream_id': 2,
-                    'url': 'http://test2',
-                    'name': 'Stream 2',
-                    'channel_id': 100,
-                    # No is_quarantined field (default behavior)
+                    'channel_name': 'Test Channel',
+                    'regex_filter': '.*',
+                    'created_at': 1234567890,
+                    'is_active': True,
+                    'streams': {
+                        '1': {
+                            'stream_id': 1,
+                            'url': 'http://test1',
+                            'name': 'Stream 1',
+                            'channel_id': 100,
+                            'is_quarantined': True
+                        },
+                        '2': {
+                            'stream_id': 2,
+                            'url': 'http://test2',
+                            'name': 'Stream 2',
+                            'channel_id': 100,
+                        }
+                    }
                 }
-            }
-        }
-        
-        session = manager._deserialize_session(legacy_data)
-        
-        # Check stream 1 (quarantined)
-        s1 = session.streams[1]
-        self.assertEqual(s1.status, 'quarantined')
-        
-        # Check stream 2 (not quarantined -> default review)
-        s2 = session.streams[2]
-        self.assertEqual(s2.status, 'review')
+
+                session = manager._deserialize_session(legacy_data)
+
+                s1 = session.streams[1]
+                self.assertEqual(s1.status, 'quarantined')
+
+                s2 = session.streams[2]
+                self.assertEqual(s2.status, 'review')
+            finally:
+                stream_session_manager.CONFIG_DIR = original_config_dir
+                stream_session_manager.SESSION_DATA_FILE = original_session_file
+                StreamSessionManager._instance = None
 
 if __name__ == '__main__':
     unittest.main()

@@ -5,6 +5,7 @@ Test suite for Stream Monitoring Session functionality.
 Tests the session creation, EPG event attachment, and monitoring features.
 """
 
+import json
 import os
 import sys
 import unittest
@@ -34,6 +35,18 @@ class TestStreamMonitoring(unittest.TestCase):
         # Remove temporary directory
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
+
+    def test_legacy_singleton_initializes_runtime_refresh_state(self):
+        """Test reused manager instances recover volatile refresh state."""
+        from apps.stream.stream_session_manager import StreamSessionManager
+
+        manager = StreamSessionManager()
+        if hasattr(manager, '_last_streams_refresh'):
+            delattr(manager, '_last_streams_refresh')
+
+        manager._ensure_runtime_state()
+
+        self.assertEqual(manager._last_streams_refresh, 0)
 
     @patch('stream_session_manager.get_udi_manager')
     @patch('stream_session_manager.get_dispatcharr_config')
@@ -145,8 +158,12 @@ class TestStreamMonitoring(unittest.TestCase):
         """Test that the dictionary iteration bug is fixed."""
         # This test verifies that we don't get RuntimeError when monitors dict changes during iteration
         from apps.stream.stream_monitoring_service import StreamMonitoringService
-        
-        service = StreamMonitoringService()
+
+        with patch(
+            'apps.stream.stream_monitoring_service.get_screenshot_service',
+            return_value=Mock(),
+        ):
+            service = StreamMonitoringService()
         
         # Create a mock session with monitors
         service.monitors = {
@@ -178,6 +195,126 @@ class TestStreamMonitoring(unittest.TestCase):
                 if 'dictionary changed size during iteration' in str(e):
                     self.fail("Dictionary iteration error still occurs!")
                 raise
+
+    def test_positive_monitoring_bitrate_clears_stale_incomplete_quality_state(self):
+        from apps.stream.stream_monitoring_service import StreamMonitoringService
+
+        service = object.__new__(StreamMonitoringService)
+        stream_info = Mock(
+            is_quarantined=False,
+            width=None,
+            height=None,
+            fps=None,
+            bitrate='17870',
+        )
+        session = Mock(streams={42: stream_info})
+        udi = Mock()
+        udi.get_stream_by_id.return_value = {
+            'stream_stats': json.dumps({
+                'measurement_incomplete': True,
+                'measurement_incomplete_reason': 'missing_bitrate_after_recheck',
+                'measurement_incomplete_context': {'attempt': 1},
+                'bitrate_recheck_required': True,
+                'bitrate_recheck_attempted': True,
+                'bitrate_recheck_outcome': 'unavailable',
+                'quality_reason': 'missing_bitrate_after_recheck',
+                'quality_reason_detail': 'missing_bitrate_after_recheck',
+                'quality_reason_context': {'attempt': 1},
+            }),
+        }
+
+        with patch(
+            'apps.core.api_utils.batch_update_stream_stats',
+            return_value=(1, 0),
+        ) as update_stats:
+            service._sync_stream_stats([session])
+
+        payload = update_stats.call_args.args[0][0]
+        self.assertEqual(payload['stream_id'], 42)
+        self.assertEqual(payload['stream_stats'], {'ffmpeg_output_bitrate': 17870})
+        self.assertTrue(payload['recover_bitrate_state'])
+
+        from apps.core.api_utils import batch_update_stream_stats
+
+        response = Mock(status_code=200)
+        with (
+            patch('apps.core.api_utils._get_base_url', return_value='http://dispatcharr.test'),
+            patch('apps.core.api_utils.get_udi_manager', return_value=udi),
+            patch('apps.core.api_utils.patch_request', return_value=response) as patch_stats,
+        ):
+            self.assertEqual(batch_update_stream_stats([payload]), (1, 0))
+
+        merged = patch_stats.call_args.args[1]['stream_stats']
+        self.assertEqual(merged['ffmpeg_output_bitrate'], 17870)
+        self.assertFalse(merged['measurement_incomplete'])
+        self.assertEqual(merged['measurement_incomplete_reason'], 'none')
+        self.assertEqual(merged['measurement_incomplete_context'], {})
+        self.assertFalse(merged['bitrate_recheck_required'])
+        self.assertFalse(merged['bitrate_recheck_attempted'])
+        self.assertEqual(merged['bitrate_recheck_outcome'], 'not_needed')
+        self.assertEqual(merged['quality_reason'], 'none')
+        self.assertEqual(merged['quality_reason_detail'], 'none')
+        self.assertEqual(merged['quality_reason_context'], {})
+
+    def test_positive_monitoring_bitrate_preserves_visual_incomplete_quality_state(self):
+        from apps.stream.stream_monitoring_service import StreamMonitoringService
+
+        service = object.__new__(StreamMonitoringService)
+        stream_info = Mock(
+            is_quarantined=False,
+            width=None,
+            height=None,
+            fps=None,
+            bitrate='12000',
+        )
+        session = Mock(streams={43: stream_info})
+        udi = Mock()
+        udi.get_stream_by_id.return_value = {
+            'stream_stats': {
+                'measurement_incomplete': True,
+                'measurement_incomplete_reason': 'visual_probe_timeout',
+                'measurement_incomplete_context': {'probe': 'blank'},
+                'bitrate_recheck_required': False,
+                'quality_reason': 'blank_detected',
+                'quality_reason_detail': 'blank_detected',
+                'quality_reason_context': {'frames': 0},
+            },
+        }
+
+        with patch(
+            'apps.core.api_utils.batch_update_stream_stats',
+            return_value=(1, 0),
+        ) as update_stats:
+            service._sync_stream_stats([session])
+
+        payload = update_stats.call_args.args[0][0]
+        self.assertEqual(payload['stream_id'], 43)
+        self.assertEqual(
+            payload['stream_stats'],
+            {'ffmpeg_output_bitrate': 12000},
+        )
+        self.assertTrue(payload['recover_bitrate_state'])
+
+        # The current state changes to a visual failure before the final merge.
+        # Conditional bitrate recovery must revalidate and preserve it.
+        from apps.core.api_utils import batch_update_stream_stats
+
+        response = Mock(status_code=200)
+        with (
+            patch('apps.core.api_utils._get_base_url', return_value='http://dispatcharr.test'),
+            patch('apps.core.api_utils.get_udi_manager', return_value=udi),
+            patch('apps.core.api_utils.patch_request', return_value=response) as patch_stats,
+        ):
+            self.assertEqual(batch_update_stream_stats([payload]), (1, 0))
+
+        merged = patch_stats.call_args.args[1]['stream_stats']
+        self.assertEqual(merged['ffmpeg_output_bitrate'], 12000)
+        self.assertTrue(merged['measurement_incomplete'])
+        self.assertEqual(merged['measurement_incomplete_reason'], 'visual_probe_timeout')
+        self.assertEqual(merged['measurement_incomplete_context'], {'probe': 'blank'})
+        self.assertEqual(merged['quality_reason'], 'blank_detected')
+        self.assertEqual(merged['quality_reason_detail'], 'blank_detected')
+        self.assertEqual(merged['quality_reason_context'], {'frames': 0})
 
 
 if __name__ == '__main__':

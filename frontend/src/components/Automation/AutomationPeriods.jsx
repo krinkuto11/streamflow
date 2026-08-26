@@ -8,9 +8,10 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select.jsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs.jsx'
 import { Badge } from '@/components/ui/badge.jsx'
+import { Switch } from '@/components/ui/switch.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import { automationAPI } from '@/services/api.js'
-import { Plus, Trash2, Edit2, Clock, Calendar, Loader2 } from 'lucide-react'
+import { AlertTriangle, Plus, Trash2, Edit2, Clock, Calendar, Loader2 } from 'lucide-react'
 
 export default function AutomationPeriods() {
   const [periods, setPeriods] = useState([])
@@ -53,7 +54,9 @@ export default function AutomationPeriods() {
     setCurrentPeriod({
       name: '',
       schedule: { type: 'interval', value: 60 },
-      priority: 0
+      priority: 0,
+      catch_up_missed_runs: false,
+      missed_run_grace_minutes: 0
     })
     setEditDialogOpen(true)
   }
@@ -155,6 +158,25 @@ export default function AutomationPeriods() {
     return 'Unknown'
   }
 
+  const formatSkipTime = (value) => {
+    if (!value) return ''
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) return ''
+    return parsed.toLocaleString([], {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  }
+
+  const formatLastSkip = (skip) => {
+    if (!skip) return ''
+    const time = formatSkipTime(skip.skipped_at)
+    const reason = skip.message || 'Automatic run skipped'
+    return time ? `${reason} (${time})` : reason
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -222,7 +244,23 @@ export default function AutomationPeriods() {
                       <Badge variant="outline" className="font-normal text-xs text-muted-foreground w-fit">
                         Priority: {period.priority || 0}
                       </Badge>
+                      {period.catch_up_missed_runs && (
+                        <Badge variant="outline" className="font-normal text-xs text-muted-foreground w-fit">
+                          Startup catch-up
+                        </Badge>
+                      )}
+                      {Number(period.missed_run_grace_minutes || 0) > 0 && (
+                        <Badge variant="outline" className="font-normal text-xs text-muted-foreground w-fit">
+                          Missed-run grace: {period.missed_run_grace_minutes}m
+                        </Badge>
+                      )}
                     </div>
+                    {period.last_skip && (
+                      <div className="flex items-start gap-2 text-xs text-amber-600 dark:text-amber-400 mt-2">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+                        <span>{formatLastSkip(period.last_skip)}</span>
+                      </div>
+                    )}
                   </div>
                   <div className="flex items-center gap-2">
                     <Button
@@ -345,6 +383,45 @@ export default function AutomationPeriods() {
                     Higher values take precedence when schedules overlap exactly.
                   </span>
                 </div>
+              </div>
+
+              <div className="flex items-start justify-between gap-4 rounded-md border p-4">
+                <div className="space-y-1">
+                  <Label htmlFor="period-catch-up">Startup catch-up</Label>
+                  <p className="text-xs text-muted-foreground leading-relaxed">
+                    When no saved last-run timestamp exists for this period, include it once on the next scheduler pass instead of waiting for the next interval or cron block.
+                  </p>
+                </div>
+                <Switch
+                  id="period-catch-up"
+                  checked={Boolean(currentPeriod.catch_up_missed_runs)}
+                  onCheckedChange={(checked) => setCurrentPeriod({
+                    ...currentPeriod,
+                    catch_up_missed_runs: checked
+                  })}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="period-missed-run-grace">Missed-run grace</Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="period-missed-run-grace"
+                    type="number"
+                    min="0"
+                    max="1440"
+                    className="max-w-[120px]"
+                    value={currentPeriod.missed_run_grace_minutes || 0}
+                    onChange={(e) => setCurrentPeriod({
+                      ...currentPeriod,
+                      missed_run_grace_minutes: Math.max(0, parseInt(e.target.value) || 0)
+                    })}
+                  />
+                  <span className="text-sm text-muted-foreground">minutes</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  0 keeps the existing schedule behavior. Positive values skip automatic missed runs that are noticed after this window.
+                </p>
               </div>
             </div>
           )}

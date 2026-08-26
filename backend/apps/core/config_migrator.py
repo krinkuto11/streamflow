@@ -16,6 +16,11 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Tuple
 import uuid
 
+try:
+    from apps.core.atomic_json import atomic_write_json
+except ModuleNotFoundError:  # Direct migration script execution.
+    from atomic_json import atomic_write_json
+
 # Setup logging
 logger = logging.getLogger(__name__)
 
@@ -197,6 +202,8 @@ def convert_to_new_format(
                     "grace_period": False,
                     "check_all_streams": False,
                     "loop_check_enabled": False,
+                    "blank_check_enabled": False,
+                    "freeze_check_enabled": False,
                     "m3u_priority": m3u_priority,
                     "m3u_priority_mode": m3u_priority_mode,
                     "min_resolution": "any",
@@ -263,8 +270,7 @@ def migrate_legacy_config() -> bool:
         
         # Step 4: Write new configuration
         logger.info("Step 4/5: Writing new configuration...")
-        with open(AUTOMATION_CONFIG, 'w') as f:
-            json.dump(new_config, f, indent=2)
+        atomic_write_json(AUTOMATION_CONFIG, new_config)
         logger.info(f"Created new automation config with profile: {list(new_config['profiles'].keys())[0]}")
         
         # Step 5: Move deprecated files to legacy directory

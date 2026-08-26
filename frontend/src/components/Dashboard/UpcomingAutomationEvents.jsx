@@ -7,6 +7,9 @@ import { automationAPI } from '@/services/api.js'
 import { useToast } from '@/hooks/use-toast.js'
 import { Calendar, Clock, RefreshCw, Filter, Loader2 } from 'lucide-react'
 
+const EVENTS_AUTO_REFRESH_MS = 300000
+const NEXT_EVENT_REFRESH_DELAY_MS = 15000
+
 export default function UpcomingAutomationEvents() {
   const [events, setEvents] = useState([])
   const [allPeriods, setAllPeriods] = useState([])
@@ -16,19 +19,37 @@ export default function UpcomingAutomationEvents() {
   const [timeRangeFilter, setTimeRangeFilter] = useState('24')
   const [cachedAt, setCachedAt] = useState(null)
   const [automationEnabled, setAutomationEnabled] = useState(true)
+  const [loadError, setLoadError] = useState('')
   const { toast } = useToast()
 
   useEffect(() => {
     loadData()
     loadPeriods()
 
-    // Auto-refresh every 5 minutes
     const interval = setInterval(() => {
-      loadData(false) // Don't force refresh
-    }, 300000)
+      loadData(false)
+    }, EVENTS_AUTO_REFRESH_MS)
 
     return () => clearInterval(interval)
   }, [timeRangeFilter, periodFilter])
+
+  useEffect(() => {
+    if (events.length === 0) {
+      return undefined
+    }
+
+    const nextTimestamp = Date.parse(events[0]?.time)
+    if (!Number.isFinite(nextTimestamp)) {
+      return undefined
+    }
+
+    const delay = Math.max(1000, nextTimestamp - Date.now() + NEXT_EVENT_REFRESH_DELAY_MS)
+    const timer = setTimeout(() => {
+      loadData(true)
+    }, delay)
+
+    return () => clearTimeout(timer)
+  }, [events, timeRangeFilter, periodFilter])
 
   const loadData = async (forceRefresh = false) => {
     try {
@@ -45,13 +66,17 @@ export default function UpcomingAutomationEvents() {
       setEvents(response.data.events || [])
       setCachedAt(response.data.cached_at)
       setAutomationEnabled(response.data.automation_enabled ?? true)
+      setLoadError('')
     } catch (err) {
       console.error('Failed to load upcoming events:', err)
-      toast({
-        title: "Error",
-        description: "Failed to load upcoming automation events",
-        variant: "destructive"
-      })
+      setLoadError('Upcoming automation events are temporarily unavailable. Retrying automatically.')
+      if (forceRefresh) {
+        toast({
+          title: "Error",
+          description: "Failed to load upcoming automation events",
+          variant: "destructive"
+        })
+      }
     } finally {
       setLoading(false)
       setRefreshing(false)
@@ -60,8 +85,9 @@ export default function UpcomingAutomationEvents() {
 
   const loadPeriods = async () => {
     try {
-      const response = await automationAPI.getPeriods()
-      setAllPeriods(response.data || [])
+      const response = await automationAPI.getPeriods({ page: 1, per_page: 200 })
+      const periodItems = Array.isArray(response.data) ? response.data : response.data?.items || []
+      setAllPeriods(periodItems)
     } catch (err) {
       console.error('Failed to load periods:', err)
     }
@@ -198,6 +224,12 @@ export default function UpcomingAutomationEvents() {
       </CardHeader>
       <CardContent className="space-y-4">
         {/* Filters */}
+        {loadError && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+            {loadError}
+          </div>
+        )}
+
         <div className="flex gap-4">
           <div className="flex-1">
             <div className="flex items-center gap-2 mb-2">

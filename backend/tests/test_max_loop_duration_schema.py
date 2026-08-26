@@ -6,6 +6,11 @@ test_automation_profile_schema_* tests.
 
 # --- max_loop_duration validation ---
 
+import pytest
+
+from apps.api.schemas import AutomationProfileCreateSchema, AutomationProfileUpdateSchema
+from apps.core.exceptions import ValidationError
+
 def test_automation_profile_schema_accepts_valid_max_loop_duration():
     """max_loop_duration within range is stored as-is."""
     parsed = AutomationProfileCreateSchema.from_payload(

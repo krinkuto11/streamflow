@@ -5,6 +5,7 @@ from apps.automation.automated_stream_manager import AutomatedStreamManager
 
 def _build_manager(monkeypatch, *, m3u_enabled: bool) -> AutomatedStreamManager:
     manager = AutomatedStreamManager()
+    manager.config["m3u_refresh_wait"] = {"enabled": False}
 
     manager._save_state = Mock()
     manager.validate_and_remove_non_matching_streams = Mock(return_value={"details": []})
@@ -48,7 +49,10 @@ def _build_manager(monkeypatch, *, m3u_enabled: bool) -> AutomatedStreamManager:
     mock_udi = Mock()
     mock_udi.get_channels.return_value = [{"id": 101, "name": "Channel 101", "streams": []}]
     mock_udi.get_channel_by_id.return_value = {"id": 101, "name": "Channel 101", "streams": []}
+    mock_udi.get_cache_age_description.return_value = "fresh"
+    mock_udi.is_network_ready.return_value = False
     monkeypatch.setattr("apps.automation.automated_stream_manager.get_udi_manager", lambda: mock_udi)
+    monkeypatch.setattr("apps.automation.automated_stream_manager.get_streams", lambda *args, **kwargs: [])
 
     mock_stream_checker = Mock()
     mock_stream_checker.get_status.return_value = {"stream_checking_mode": False}
@@ -65,12 +69,12 @@ def test_run_cycle_no_default_post_refresh_delay(monkeypatch):
     manager = _build_manager(monkeypatch, m3u_enabled=True)
     manager.refresh_playlists = Mock(return_value=(True, [{"id": 1, "name": "Account 1"}]))
 
-    sleep_mock = Mock()
-    monkeypatch.setattr("apps.automation.automated_stream_manager.time.sleep", sleep_mock)
+    wait_mock = Mock(return_value=False)
+    monkeypatch.setattr(manager._manual_stop_requested, "wait", wait_mock)
 
     manager.run_automation_cycle(forced=True, forced_period_id="period-1")
 
-    sleep_mock.assert_not_called()
+    wait_mock.assert_not_called()
 
 
 def test_run_cycle_honors_configured_post_refresh_delay(monkeypatch):
@@ -78,9 +82,9 @@ def test_run_cycle_honors_configured_post_refresh_delay(monkeypatch):
     manager.config["post_refresh_delay_seconds"] = 0.25
     manager.refresh_playlists = Mock(return_value=(True, [{"id": 1, "name": "Account 1"}]))
 
-    sleep_mock = Mock()
-    monkeypatch.setattr("apps.automation.automated_stream_manager.time.sleep", sleep_mock)
+    wait_mock = Mock(return_value=False)
+    monkeypatch.setattr(manager._manual_stop_requested, "wait", wait_mock)
 
     manager.run_automation_cycle(forced=True, forced_period_id="period-1")
 
-    sleep_mock.assert_called_once_with(0.25)
+    wait_mock.assert_called_once_with(timeout=0.25)

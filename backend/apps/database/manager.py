@@ -180,6 +180,27 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def update_dead_stream_reason(self, url: str, reason: str, channel_id: Optional[int] = None) -> bool:
+        session = self._get_session()
+        try:
+            dead = session.query(DeadStream).filter(DeadStream.url == url).first()
+            if not dead:
+                return False
+
+            dead.reason = reason
+            if channel_id is not None:
+                dead.channel_id = channel_id
+            dead.marked_dead_at = datetime.utcnow()
+
+            session.commit()
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error(f"Error updating dead stream reason {url}: {e}")
+            return False
+        finally:
+            session.close()
+
     def remove_dead_stream(self, url: str) -> bool:
         session = self._get_session()
         try:
@@ -650,12 +671,14 @@ class DatabaseManager:
 
     def export_channel_regex_configs_as_json(self) -> Dict[str, Any]:
         """Export all channel regex configs in the canonical JSON format."""
+        from apps.automation.regex_settings import default_channel_regex_global_settings
+
         configs = self.get_all_channel_regex_configs()
         # Also fetch global settings from SystemSetting if present
-        global_settings = self.get_system_setting('channel_regex_global_settings', {
-            'case_sensitive': True,
-            'require_exact_match': False,
-        })
+        global_settings = self.get_system_setting(
+            'channel_regex_global_settings',
+            default_channel_regex_global_settings(),
+        )
         return {
             'patterns': configs,
             'global_settings': global_settings,

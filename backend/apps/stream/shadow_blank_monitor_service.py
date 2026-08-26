@@ -1,0 +1,7074 @@
+"""Active-viewer shadow blank monitor.
+
+This service watches only channels that already have real active clients.  It
+probes the channel proxy URL, never a provider stream URL, so an already-active
+channel should receive only one extra local downstream client during a probe.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import queue
+import re
+import subprocess
+import threading
+import time
+import uuid
+from collections import defaultdict, deque
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional
+
+from apps.config.dispatcharr_config import get_dispatcharr_config
+from apps.core.api_utils import change_channel_stream
+from apps.core.atomic_json import atomic_write_json, load_json_with_backup
+from apps.core.exceptions import ConflictError, ValidationError
+from apps.core.logging_config import setup_logging
+from apps.core.secret_sources import external_secret_source, read_external_secret
+from apps.stream.stream_check_utils import (
+    BLACK_DURATION_RE,
+    BLACK_END_RE,
+    BLACK_START_RE,
+    FREEZE_DURATION_RE,
+    FREEZE_END_RE,
+    FREEZE_START_RE,
+    _parse_blank_detection,
+    _parse_ffmpeg_progress_time,
+    _parse_freeze_detection,
+    _probe_stream_for_loops,
+)
+from apps.udi import get_udi_manager
+
+logger = setup_logging(__name__)
+
+CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", "/app/data"))
+CONFIG_FILE = CONFIG_DIR / "shadow_blank_monitor_config.json"
+SAFETY_STATE_FILE = CONFIG_DIR / "shadow_blank_monitor_safety_state.json"
+SAFETY_STATE_VERSION = 1
+MAX_EVENTS = 100
+LOOP_SWITCH_REQUIRES_PRE_PROBE = True
+LOOP_PENDING_PROBE_OK_MISS_TOLERANCE = 1
+CONTINUOUS_LOOP_PROBE_SLICE_MIN_SECONDS = 30.0
+AGGREGATE_ONLY_VIEWER_GRACE_SECONDS = 2.0
+WATCHER_API_KEY_REQUIRED_CODE = "watcher_api_key_required"
+WATCHER_API_KEY_REQUIRED_MESSAGE = "Watcher API Key is required before Shadow Monitor can start."
+SHADOW_MONITOR_LOOP_ERROR_MESSAGE = "Shadow monitor loop failed; see server logs."
+SHADOW_MONITOR_SCAN_ERROR_MESSAGE = "Shadow monitor scan failed; see server logs."
+SHADOW_MONITOR_START_ERROR_MESSAGE = "Shadow monitor worker failed to start; see server logs."
+NO_DECODABLE_FRAME_ERROR_PATTERNS = (
+    "could not find codec parameters",
+    "unspecified size",
+    "output file does not contain any stream",
+    "cannot determine format of input stream",
+    "invalid data found",
+    "no decodable frames",
+    "no frame could be decoded",
+    "no decoded video frames",
+)
+FFMPEG_FRAME_RE = re.compile(r"\bframe=\s*(?P<frames>\d+)")
+ENTROPY_FRAME_RE = re.compile(r"frame:\s*(?P<frame>\d+)")
+ENTROPY_VALUE_RE = re.compile(
+    r"lavfi\.entropy\.normalized_entropy\.normal\.(?P<plane>[YUV])=(?P<value>\d+(?:\.\d+)?)"
+)
+SOLID_COLOR_ENTROPY_THRESHOLD = 0.02
+SOLID_COLOR_MIN_SAMPLES = 3
+SOLID_COLOR_SAMPLE_RATIO_THRESHOLD = 0.80
+OFFLINE_IMAGE_PHASH_RE = re.compile(r"^[0-9a-f]{16}$")
+SILENCE_START_RE = re.compile(r"silence_start:\s*(?P<start>\d+(?:\.\d+)?)")
+SILENCE_END_RE = re.compile(r"silence_end:\s*(?P<end>\d+(?:\.\d+)?)")
+SILENCE_DURATION_RE = re.compile(r"silence_duration:\s*(?P<duration>\d+(?:\.\d+)?)")
+AUDIO_MISSING_PATTERNS = (
+    "matches no streams",
+    "stream specifier",
+    "no audio stream",
+)
+AUDIO_ERROR_PATTERNS = (
+    "error while decoding stream",
+    "audio decoding failed",
+    "audio decode error",
+    "invalid audio",
+    "corrupt audio",
+)
+AUDIO_DECODER_RE = re.compile(r"^\[(?:aac|ac3|eac3|mp2|mp3float|opus|vorbis|flac|truehd|dca)\s+@")
+AUDIO_DECODER_ERROR_PATTERNS = (
+    "channel element",
+    "audible artifact",
+    "clipped noise gain",
+    "input buffer exhausted",
+    "error decoding",
+    "decode error",
+    "invalid",
+    "not allocated",
+)
+FFMPEG_STREAM_AUDIO_RE = re.compile(r"^\s*Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]+\))?:\s*Audio:", re.IGNORECASE)
+FFMPEG_STREAM_VIDEO_RE = re.compile(r"^\s*Stream #\d+:\d+(?:\[[^\]]+\])?(?:\([^)]+\))?:\s*Video:", re.IGNORECASE)
+FFMPEG_STREAM_MAPPING_RE = re.compile(r"^\s*Stream mapping:", re.IGNORECASE)
+FFMPEG_ZERO_AUDIO_SUMMARY_RE = re.compile(r"\baudio:\s*0KiB\b", re.IGNORECASE)
+PROXY_OUTPUT_FORMAT_ALIASES = {
+    "fmp4": "fmp4",
+    "mp4": "fmp4",
+    "mpegts": "mpegts",
+    "ts": "mpegts",
+}
+SHADOW_WATCHER_USER_AGENT_MARKER = "StreamFlow-Shadow-Blank-Monitor/1.0"
+DEFAULT_WATCHER_USER_AGENT = f"TiviMate/5.1.6 {SHADOW_WATCHER_USER_AGENT_MARKER}"
+POST_SWITCH_STATUS_SETTLE_SECONDS = 15
+PROBE_CLIENT_RELEASE_POLL_SECONDS = 0.5
+PROBE_CLIENT_RELEASE_STABLE_POLLS = 2
+PROBE_CLIENT_RELEASE_TIMEOUT_SECONDS = 30.0
+CONFIG_REVISION_KEY = "config_revision"
+
+
+class ShadowConfigConflictError(ConflictError):
+    """Raised when a Shadow config compare-and-swap precondition is stale."""
+
+    def __init__(self, expected_revision: int, current_config: Dict[str, Any]) -> None:
+        super().__init__(
+            "Shadow monitor configuration changed; reload it before saving.",
+            error_code="shadow_config_revision_conflict",
+            details={
+                "expected_config_revision": expected_revision,
+                "current_config_revision": current_config.get(CONFIG_REVISION_KEY),
+                "current_config": current_config,
+            },
+        )
+
+
+class ShadowConfigValidationError(ValidationError):
+    """Raised when a Shadow config CAS precondition is malformed."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "expected_config_revision must be a non-negative integer",
+            error_code="invalid_shadow_config_revision",
+        )
+
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "enabled": False,
+    "dry_run": False,
+    "watch_mode": "continuous",
+    "poll_interval_seconds": 5,
+    "watch_gap_seconds": 1,
+    "probe_duration_seconds": 60,
+    "blank_min_duration_seconds": 2.0,
+    "blank_pixel_threshold": 0.10,
+    "blank_ratio_threshold": 0.80,
+    "freeze_detection_enabled": True,
+    "freeze_min_duration_seconds": 5.0,
+    "freeze_noise_threshold": 0.001,
+    "freeze_ratio_threshold": 0.80,
+    "no_decodable_frames_detection_enabled": True,
+    "no_decodable_frames_min_duration_seconds": 10.0,
+    "garbled_audio_detection_enabled": False,
+    "garbled_audio_error_threshold": 3,
+    "silent_audio_detection_enabled": False,
+    "silent_audio_min_duration_seconds": 10.0,
+    "silent_audio_noise_db": -50,
+    "offline_image_detection_enabled": False,
+    "offline_image_reference_hashes": [],
+    "offline_image_hash_threshold": 4,
+    "offline_image_capture_offset_seconds": 3,
+    "loop_detection_enabled": False,
+    "loop_probe_duration_seconds": 360,
+    "persistent_watcher_enabled": False,
+    "continuous_probe_interval_seconds": 120,
+    "next_stream_pre_probe_enabled": False,
+    "next_stream_pre_probe_duration_seconds": 8,
+    "confirmation_count": 2,
+    "channel_cooldown_seconds": 300,
+    "viewer_left_grace_seconds": 5,
+    "max_switches_per_hour": 3,
+    "max_concurrent_watchers": 2,
+    "skip_during_quality_check": False,
+    "watcher_user_agent": DEFAULT_WATCHER_USER_AGENT,
+    "watcher_api_key": "",
+    "included_channel_ids": [],
+    "included_channel_uuids": [],
+    "excluded_channel_ids": [],
+    "excluded_channel_uuids": [],
+}
+CONFIG_KEYS = set(DEFAULT_CONFIG)
+WATCH_MODES = {"continuous"}
+MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS = {
+    "blank",
+    "freeze",
+    "solid_color",
+    "offline_image",
+    "garbled_audio",
+    "silent_audio",
+    "loop",
+}
+DETECTION_REASONS = {
+    "blank",
+    "freeze",
+    "solid_color",
+    "no_decodable_frames",
+    "garbled_audio",
+    "silent_audio",
+    "offline_image",
+    "loop",
+}
+VIDEO_FAULT_CONFIRMATION_REASONS = {
+    "blank",
+    "freeze",
+    "solid_color",
+}
+VIDEO_FAULT_CONFIRMATION_KEY = "video_fault"
+PENDING_EVENT_REASONS = {
+    f"{reason}_pending": reason
+    for reason in DETECTION_REASONS
+}
+DETECTION_MEASUREMENT_KEYS = {
+    "blank": ("blank_ratio", "blank_duration_secs"),
+    "freeze": ("freeze_ratio", "freeze_duration_secs"),
+    "solid_color": (
+        "solid_color_duration_secs",
+        "solid_color_normalized_entropy_max",
+        "solid_color_sample_count",
+    ),
+    "no_decodable_frames": (
+        "no_decodable_frames_duration_secs",
+        "no_decodable_frames_error",
+    ),
+    "garbled_audio": ("garbled_audio_error_count", "garbled_audio_error"),
+    "silent_audio": ("silent_audio_duration_secs", "silent_audio_noise_db", "audio_stream_present"),
+    "offline_image": ("offline_image_distance", "offline_image_hash"),
+    "loop": ("loop_duration_secs", "loop_frames_processed"),
+}
+DETECTION_THRESHOLD_KEYS = {
+    "blank": (
+        "blank_min_duration_seconds",
+        "blank_ratio_threshold",
+        "blank_pixel_threshold",
+    ),
+    "freeze": (
+        "freeze_min_duration_seconds",
+        "freeze_ratio_threshold",
+        "freeze_noise_threshold",
+    ),
+    "solid_color": (
+        "freeze_min_duration_seconds",
+        "freeze_ratio_threshold",
+        "freeze_noise_threshold",
+    ),
+    "no_decodable_frames": ("no_decodable_frames_min_duration_seconds",),
+    "garbled_audio": ("garbled_audio_error_threshold",),
+    "silent_audio": (
+        "silent_audio_min_duration_seconds",
+        "silent_audio_noise_db",
+    ),
+    "offline_image": ("offline_image_hash_threshold",),
+    "loop": ("loop_probe_duration_seconds",),
+}
+SWITCH_EVENT_TYPES = {
+    "dry_run_switch",
+    "switch_api_completed",
+    "switch_success",
+    "switch_failed",
+    "external_stream_change",
+}
+PRE_PROBE_EVENT_TYPES = {"pre_probe_unavailable", "pre_probe_rejected"}
+PRE_PROBE_METRICS = {
+    "preprobe_attempted",
+    "preprobe_success",
+    "preprobe_rejected_media_fault",
+    "preprobe_skipped_provider_limit",
+    "preprobe_skipped_profile_limit",
+    "preprobe_skipped_missing_url",
+    "preprobe_timeout",
+    "switch_prevented_by_preprobe",
+}
+GUARD_EVENT_TYPES = {
+    "cooldown",
+    "loop_pre_probe_required",
+    "stale_stream_guard",
+    "switch_rate_limited",
+    "quality_check_active",
+    "watcher_recovery_guard",
+    "watcher_recovery_observed",
+}
+
+INT_BOUNDS = {
+    "poll_interval_seconds": (5, 3600),
+    "watch_gap_seconds": (1, 300),
+    "probe_duration_seconds": (3, 120),
+    "confirmation_count": (1, 5),
+    "channel_cooldown_seconds": (30, 86400),
+    "viewer_left_grace_seconds": (0, 10),
+    "max_switches_per_hour": (1, 20),
+    "max_concurrent_watchers": (1, 10),
+    "garbled_audio_error_threshold": (1, 20),
+    "silent_audio_noise_db": (-90, -20),
+    "offline_image_hash_threshold": (0, 20),
+    "offline_image_capture_offset_seconds": (0, 30),
+    "loop_probe_duration_seconds": (60, 720),
+    "continuous_probe_interval_seconds": (30, 600),
+    "next_stream_pre_probe_duration_seconds": (3, 60),
+}
+
+FLOAT_BOUNDS = {
+    "blank_min_duration_seconds": (0.5, 30.0),
+    "blank_pixel_threshold": (0.0, 1.0),
+    "blank_ratio_threshold": (0.1, 1.0),
+    "freeze_min_duration_seconds": (1.0, 120.0),
+    "freeze_noise_threshold": (0.0, 1.0),
+    "freeze_ratio_threshold": (0.1, 1.0),
+    "no_decodable_frames_min_duration_seconds": (3.0, 60.0),
+    "silent_audio_min_duration_seconds": (2.0, 60.0),
+}
+
+
+def _ref(kind: str, value: Any) -> str:
+    if value is None:
+        return f"{kind}-unknown"
+    digest = hashlib.sha256(f"{kind}:{value}".encode("utf-8")).hexdigest()[:12]
+    return f"{kind}-{digest}"
+
+
+def _coerce_int(value: Any, default: int, bounds: tuple[int, int]) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(bounds[0], min(bounds[1], parsed))
+
+
+def _coerce_float(value: Any, default: float, bounds: tuple[float, float]) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(bounds[0], min(bounds[1], parsed))
+
+
+def _coerce_list(value: Any) -> List[Any]:
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _coerce_int_set(value: Any) -> set[int]:
+    items: set[int] = set()
+    for item in _coerce_list(value):
+        try:
+            items.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return items
+
+
+def _coerce_text_set(value: Any) -> set[str]:
+    items: set[str] = set()
+    for item in _coerce_list(value):
+        text = str(item).strip()
+        if text:
+            items.add(text)
+    return items
+
+
+def _offline_image_hashes(value: Any) -> List[str]:
+    seen = set()
+    hashes: List[str] = []
+    for item in _coerce_list(value):
+        text = str(item).strip().lower()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        hashes.append(text)
+    return hashes
+
+
+def _valid_offline_image_hashes(value: Any) -> List[str]:
+    return [
+        item
+        for item in _offline_image_hashes(value)
+        if OFFLINE_IMAGE_PHASH_RE.match(item)
+    ]
+
+
+def _invalid_offline_image_hashes(value: Any) -> List[str]:
+    return [
+        item
+        for item in _offline_image_hashes(value)
+        if not OFFLINE_IMAGE_PHASH_RE.match(item)
+    ]
+
+
+def _offline_image_config_status(config: Dict[str, Any]) -> Dict[str, Any]:
+    reference_hashes = _offline_image_hashes(config.get("offline_image_reference_hashes"))
+    invalid_count = len(_invalid_offline_image_hashes(reference_hashes))
+    valid_count = len(reference_hashes) - invalid_count
+    warnings = []
+    if config.get("offline_image_detection_enabled") and not reference_hashes:
+        warnings.append("missing_reference_hash")
+    if invalid_count:
+        warnings.append("invalid_reference_hash")
+    if config.get("offline_image_detection_enabled") and reference_hashes and valid_count == 0:
+        warnings.append("no_valid_reference_hash")
+    return {
+        "enabled": bool(config.get("offline_image_detection_enabled")),
+        "reference_count": len(reference_hashes),
+        "valid_reference_count": valid_count,
+        "invalid_reference_count": invalid_count,
+        "hash_threshold": int(config.get("offline_image_hash_threshold", DEFAULT_CONFIG["offline_image_hash_threshold"])),
+        "capture_offset_seconds": int(config.get("offline_image_capture_offset_seconds", DEFAULT_CONFIG["offline_image_capture_offset_seconds"])),
+        "warnings": warnings,
+    }
+
+
+def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    config = dict(DEFAULT_CONFIG)
+    if current:
+        config.update({key: value for key, value in current.items() if key in CONFIG_KEYS})
+    if payload:
+        config.update({key: value for key, value in payload.items() if key in CONFIG_KEYS})
+
+    for key, bounds in INT_BOUNDS.items():
+        config[key] = _coerce_int(config.get(key), DEFAULT_CONFIG[key], bounds)
+    for key, bounds in FLOAT_BOUNDS.items():
+        config[key] = _coerce_float(config.get(key), DEFAULT_CONFIG[key], bounds)
+
+    config["enabled"] = bool(config.get("enabled"))
+    config["dry_run"] = bool(config.get("dry_run"))
+    config["freeze_detection_enabled"] = bool(config.get("freeze_detection_enabled"))
+    config["no_decodable_frames_detection_enabled"] = bool(config.get("no_decodable_frames_detection_enabled"))
+    config["garbled_audio_detection_enabled"] = bool(config.get("garbled_audio_detection_enabled"))
+    config["silent_audio_detection_enabled"] = bool(config.get("silent_audio_detection_enabled"))
+    config["offline_image_detection_enabled"] = bool(config.get("offline_image_detection_enabled"))
+    config["loop_detection_enabled"] = bool(config.get("loop_detection_enabled"))
+    config["persistent_watcher_enabled"] = bool(config.get("persistent_watcher_enabled"))
+    config["next_stream_pre_probe_enabled"] = bool(config.get("next_stream_pre_probe_enabled"))
+    config["watch_mode"] = DEFAULT_CONFIG["watch_mode"]
+    # The shadow monitor protects active viewers through Dispatcharr's local
+    # channel proxy. It should not pause just because quality checks are active.
+    config["skip_during_quality_check"] = False
+    config["watcher_user_agent"] = str(config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"]).strip()
+    config["watcher_api_key"] = str(config.get("watcher_api_key") or "").strip()
+    for key in ("included_channel_ids", "excluded_channel_ids"):
+        config[key] = list(dict.fromkeys(
+            int(item)
+            for item in _coerce_list(config.get(key))
+            if str(item).strip().isdigit()
+        ))
+    for key in ("included_channel_uuids", "excluded_channel_uuids"):
+        config[key] = list(dict.fromkeys(
+            str(item).strip()
+            for item in _coerce_list(config.get(key))
+            if str(item).strip()
+        ))
+    config["offline_image_reference_hashes"] = _offline_image_hashes(config.get("offline_image_reference_hashes"))
+    return config
+
+
+def public_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    visible = dict(config)
+    visible["has_watcher_api_key"] = bool(visible.get("watcher_api_key"))
+    visible["watcher_api_key"] = ""
+    return visible
+
+
+def _watcher_configuration_issue(config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    if not str(config.get("watcher_api_key") or "").strip():
+        return {
+            "code": WATCHER_API_KEY_REQUIRED_CODE,
+            "message": WATCHER_API_KEY_REQUIRED_MESSAGE,
+        }
+    return None
+
+
+class ShadowBlankMonitorService:
+    def __init__(
+        self,
+        *,
+        config_file: Path = CONFIG_FILE,
+        safety_state_file: Optional[Path] = None,
+        udi_provider: Callable[[], Any] = get_udi_manager,
+        switch_stream: Callable[..., bool] = change_channel_stream,
+        base_url_provider: Optional[Callable[[], Optional[str]]] = None,
+        blank_probe: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
+        loop_probe: Optional[Callable[[str, Dict[str, Any]], Dict[str, Any]]] = None,
+        stream_checker_provider: Optional[Callable[[], Any]] = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.config_file = config_file
+        self.safety_state_file = safety_state_file or (
+            SAFETY_STATE_FILE
+            if config_file == CONFIG_FILE
+            else config_file.with_name(f"{config_file.stem}_safety_state.json")
+        )
+        self.udi_provider = udi_provider
+        self.switch_stream = switch_stream
+        self._uses_default_switch_stream = switch_stream is change_channel_stream
+        self.base_url_provider = base_url_provider or (lambda: get_dispatcharr_config().get_base_url())
+        self.blank_probe = blank_probe or self._run_blank_probe
+        self.loop_probe = loop_probe or self._run_loop_probe
+        self._uses_default_blank_probe = blank_probe is None
+        self.stream_checker_provider = stream_checker_provider or self._default_stream_checker_provider
+        self.clock = clock
+
+        # Config mutations and the final stream-switch decision share one lock.
+        # This gives exclusion updates a linear ordering against recovery calls:
+        # once an exclusion PUT returns, no newly excluded channel can switch.
+        self._config_mutation_lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
+        self._lock = threading.RLock()
+        self._config_revision = 0
+        self._stop_event = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._external_watcher_api_key = read_external_secret(
+            "SHADOW_WATCHER_API_KEY",
+            "SHADOW_WATCHER_API_KEY_FILE",
+        )
+        self._watcher_api_key_managed_externally = bool(
+            external_secret_source(
+                "SHADOW_WATCHER_API_KEY",
+                "SHADOW_WATCHER_API_KEY_FILE",
+            )
+        )
+        self._config = self._load_config()
+        self._events: deque[Dict[str, Any]] = deque(maxlen=MAX_EVENTS)
+        self._watched: Dict[str, Dict[str, Any]] = {}
+        self._last_excluded_active_targets: List[Dict[str, Any]] = []
+        self._watcher_absences: Dict[str, Dict[str, Any]] = {}
+        self._viewer_absences: Dict[str, Dict[str, Any]] = {}
+        self._viewer_left_finalized: Dict[str, Dict[str, Any]] = {}
+        self._blank_counts: Dict[str, int] = defaultdict(int)
+        self._detection_misses: Dict[str, int] = defaultdict(int)
+        self._cooldowns: Dict[str, float] = {}
+        self._switch_attempts: Dict[str, Dict[str, Any]] = {}
+        self._switch_history: Dict[str, deque[float]] = defaultdict(deque)
+        self._known_channel_ids_by_uuid: Dict[str, int] = {}
+        self._known_channel_ids_by_stream_id: Dict[int, int] = {}
+        self._pre_probe_metrics: Dict[str, int] = defaultdict(int)
+        self._last_pre_probe: Optional[Dict[str, Any]] = None
+        self._active_probes: set[str] = set()
+        self._probe_cancel_events: Dict[str, threading.Event] = {}
+        self._service_stop_probe_events: set[threading.Event] = set()
+        self._persistent_watchers: Dict[str, Dict[str, Any]] = {}
+        self._last_loop_probe_started_at: Dict[str, float] = {}
+        self._last_scan_at: Optional[float] = None
+        self._last_error: Optional[str] = None
+        self._load_safety_state()
+
+    def _load_config(self) -> Dict[str, Any]:
+        payload = load_json_with_backup(
+            self.config_file,
+            default=None,
+            validator=lambda value: isinstance(value, dict),
+        )
+        raw_payload = payload if payload is not None else {}
+        raw_revision = raw_payload.get(CONFIG_REVISION_KEY)
+        if (
+            isinstance(raw_revision, int)
+            and not isinstance(raw_revision, bool)
+            and raw_revision >= 0
+        ):
+            self._config_revision = raw_revision
+        config = normalize_config(raw_payload)
+        if self._watcher_api_key_managed_externally:
+            config["watcher_api_key"] = self._external_watcher_api_key or ""
+        return config
+
+    def _persist_config_candidate_locked(self, candidate: Dict[str, Any]) -> None:
+        """Atomically persist and then publish a normalized config candidate."""
+        persisted = dict(candidate)
+        if self._watcher_api_key_managed_externally:
+            persisted["watcher_api_key"] = ""
+        next_revision = self._config_revision + 1
+        persisted[CONFIG_REVISION_KEY] = next_revision
+        try:
+            atomic_write_json(self.config_file, persisted, sort_keys=True)
+        except Exception:
+            # atomic_write_json can raise after os.replace (for example while
+            # fsyncing the directory or creating the first last-good copy).
+            # Resolve that ambiguous commit before deciding whether memory may
+            # advance; never leave durable revision N+1 behind memory at N.
+            try:
+                durable = json.loads(self.config_file.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                durable = None
+            if durable != persisted:
+                raise
+        self._config = candidate
+        self._config_revision = next_revision
+
+    def _save_config(self) -> None:
+        """Persist the current config for compatibility with internal callers."""
+        self._persist_config_candidate_locked(dict(self._config))
+
+    def _load_safety_state(self) -> None:
+        try:
+            payload = load_json_with_backup(
+                self.safety_state_file,
+                default=None,
+                validator=lambda value: isinstance(value, dict),
+            )
+            if payload is None:
+                return
+            if not isinstance(payload, dict):
+                raise ValueError("safety state must be an object")
+
+            now = self.clock()
+            max_cooldown = int(
+                self._config.get("channel_cooldown_seconds")
+                or DEFAULT_CONFIG["channel_cooldown_seconds"]
+            )
+            cooldowns: Dict[str, float] = {}
+            for channel_uuid, raw_until in (payload.get("cooldowns") or {}).items():
+                try:
+                    until = float(raw_until)
+                except (TypeError, ValueError):
+                    continue
+                if until > now:
+                    cooldowns[str(channel_uuid)] = min(until, now + max_cooldown)
+
+            switch_history: Dict[str, deque[float]] = defaultdict(deque)
+            for channel_uuid, raw_history in (payload.get("switch_history") or {}).items():
+                if not isinstance(raw_history, list):
+                    continue
+                restored = []
+                for raw_timestamp in raw_history:
+                    try:
+                        timestamp = min(float(raw_timestamp), now)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= now - timestamp <= 3600:
+                        restored.append(timestamp)
+                if restored:
+                    switch_history[str(channel_uuid)].extend(sorted(restored))
+
+            with self._lock:
+                self._cooldowns = cooldowns
+                self._switch_history = switch_history
+        except Exception as exc:
+            logger.warning("Failed to load Shadow Monitor safety state: %s", exc)
+
+    def _save_safety_state_locked(self) -> None:
+        now = self.clock()
+        cooldowns = {
+            channel_uuid: until
+            for channel_uuid, until in self._cooldowns.items()
+            if until > now
+        }
+        switch_history = {
+            channel_uuid: [timestamp for timestamp in history if 0 <= now - timestamp <= 3600]
+            for channel_uuid, history in self._switch_history.items()
+        }
+        switch_history = {
+            channel_uuid: history
+            for channel_uuid, history in switch_history.items()
+            if history
+        }
+        payload = {
+            "version": SAFETY_STATE_VERSION,
+            "updated_at": now,
+            "cooldowns": cooldowns,
+            "switch_history": switch_history,
+        }
+        try:
+            atomic_write_json(self.safety_state_file, payload, sort_keys=True)
+        except Exception as exc:
+            logger.warning("Failed to persist Shadow Monitor safety state: %s", exc)
+
+    def get_config(self, *, include_secret: bool = False) -> Dict[str, Any]:
+        with self._lock:
+            if include_secret:
+                visible = dict(self._config)
+                visible[CONFIG_REVISION_KEY] = self._config_revision
+                return visible
+            return self._public_config_locked()
+
+    def _public_config_locked(self) -> Dict[str, Any]:
+        visible = public_config(self._config)
+        visible[CONFIG_REVISION_KEY] = self._config_revision
+        visible["watcher_api_key_managed_externally"] = bool(
+            self._watcher_api_key_managed_externally
+        )
+        return visible
+
+    @staticmethod
+    def _expected_config_revision(payload: Dict[str, Any]) -> Optional[int]:
+        has_expected = "expected_config_revision" in payload
+        has_roundtrip_revision = CONFIG_REVISION_KEY in payload
+        expected = payload.pop("expected_config_revision", None)
+        roundtrip_revision = payload.pop(CONFIG_REVISION_KEY, None)
+        for present, value in (
+            (has_expected, expected),
+            (has_roundtrip_revision, roundtrip_revision),
+        ):
+            if present and (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                raise ShadowConfigValidationError()
+        if has_expected and has_roundtrip_revision and expected != roundtrip_revision:
+            raise ShadowConfigValidationError()
+        if not has_expected:
+            expected = roundtrip_revision if has_roundtrip_revision else None
+        if expected is None and not (has_expected or has_roundtrip_revision):
+            return None
+        return expected
+
+    def update_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(payload or {})
+        expected_revision = self._expected_config_revision(payload)
+        cancel_events: List[threading.Event] = []
+        watcher_sessions: List[Dict[str, Any]] = []
+        with self._config_mutation_lock:
+            with self._lock:
+                if (
+                    expected_revision is not None
+                    and expected_revision != self._config_revision
+                ):
+                    raise ShadowConfigConflictError(
+                        expected_revision,
+                        self._public_config_locked(),
+                    )
+
+                current = dict(self._config)
+                if self._watcher_api_key_managed_externally:
+                    payload.pop("clear_watcher_api_key", None)
+                    payload.pop("watcher_api_key", None)
+                    current["watcher_api_key"] = self._external_watcher_api_key or ""
+                elif payload.get("clear_watcher_api_key"):
+                    current["watcher_api_key"] = ""
+                    payload.pop("watcher_api_key", None)
+                elif payload.get("watcher_api_key", "") == "":
+                    payload["watcher_api_key"] = current.get("watcher_api_key", "")
+
+                candidate = normalize_config(payload, current)
+                issue = _watcher_configuration_issue(candidate)
+                next_last_error = self._last_error
+                if issue and candidate["enabled"]:
+                    candidate["enabled"] = False
+                    next_last_error = issue["message"]
+                elif not issue and next_last_error == WATCHER_API_KEY_REQUIRED_MESSAGE:
+                    next_last_error = None
+
+                # Publish no config or lifecycle side effect until persistence
+                # succeeds. This keeps a failed write fully retryable.
+                self._persist_config_candidate_locked(candidate)
+                self._last_error = next_last_error
+                cancel_events = list(self._probe_cancel_events.values())
+                disallowed_cancel_events, watcher_sessions = (
+                    self._detach_disallowed_targets_locked(candidate)
+                )
+                cancel_events = list(dict.fromkeys(
+                    cancel_events + disallowed_cancel_events
+                ))
+                # A persistent watcher embeds the full probe configuration in
+                # its ffmpeg command (including the watcher credential and
+                # user agent).  Retire every old-revision process before this
+                # PUT returns; the next scan recreates eligible watchers from
+                # the newly committed revision.
+                watcher_sessions.extend(self._persistent_watchers.values())
+                self._persistent_watchers = {}
+                watcher_sessions = list({
+                    id(session): session
+                    for session in watcher_sessions
+                }.values())
+                enabled = candidate["enabled"]
+                committed_revision = self._config_revision
+
+            for cancel_event in cancel_events:
+                cancel_event.set()
+        for session in watcher_sessions:
+            self._terminate_persistent_watcher_session(session)
+
+        # Do not hold the mutation lock while stop() joins the worker. If a
+        # newer writer won in between, that writer owns lifecycle reconciliation.
+        if enabled:
+            started = self.start(persist=False, expected_revision=committed_revision)
+            if not started:
+                # A previous worker may still be inside a blocking fetch after
+                # stop() exhausted its bounded join.  Do not publish the
+                # impossible enabled=true/running=false state as stable.
+                with self._config_mutation_lock:
+                    with self._lock:
+                        if (
+                            self._config_revision == committed_revision
+                            and self._config.get("enabled")
+                        ):
+                            disabled = dict(self._config)
+                            disabled["enabled"] = False
+                            self._persist_config_candidate_locked(disabled)
+        else:
+            self.stop(persist=False, expected_revision=committed_revision)
+        return self.get_config()
+
+    def _target_allowed_by_config_locked(
+        self,
+        channel_uuid: str,
+        target: Optional[Dict[str, Any]],
+        config: Dict[str, Any],
+    ) -> tuple[bool, Optional[str]]:
+        target = target or {}
+        channel_id = self._coerce_int(target.get("channel_id"))
+        if channel_id is None:
+            channel_id = self._known_channel_ids_by_uuid.get(channel_uuid)
+        included_ids = {int(item) for item in config.get("included_channel_ids", [])}
+        included_uuids = {str(item) for item in config.get("included_channel_uuids", [])}
+        excluded_ids = {int(item) for item in config.get("excluded_channel_ids", [])}
+        excluded_uuids = {str(item) for item in config.get("excluded_channel_uuids", [])}
+        if channel_id in excluded_ids or channel_uuid in excluded_uuids:
+            return False, "channel_excluded"
+        if (
+            (included_ids or included_uuids)
+            and channel_id not in included_ids
+            and channel_uuid not in included_uuids
+        ):
+            return False, "channel_not_included"
+        return True, None
+
+    def _config_snapshot_is_current_locked(self, config: Dict[str, Any]) -> bool:
+        snapshot_revision = config.get(CONFIG_REVISION_KEY)
+        if snapshot_revision is None:
+            return True
+        return (
+            isinstance(snapshot_revision, int)
+            and not isinstance(snapshot_revision, bool)
+            and snapshot_revision == self._config_revision
+        )
+
+    def _detach_disallowed_targets_locked(
+        self,
+        config: Dict[str, Any],
+    ) -> tuple[List[threading.Event], List[Dict[str, Any]]]:
+        channel_uuids = (
+            set(self._watched)
+            | set(self._active_probes)
+            | set(self._persistent_watchers)
+            | set(self._probe_cancel_events)
+        )
+        cancel_events: List[threading.Event] = []
+        watcher_sessions: List[Dict[str, Any]] = []
+        excluded_by_uuid: Dict[str, Dict[str, Any]] = {}
+        for target in self._last_excluded_active_targets:
+            channel_uuid = str(target.get("channel_uuid") or "")
+            if not channel_uuid:
+                continue
+            allowed, reason = self._target_allowed_by_config_locked(
+                channel_uuid,
+                target,
+                config,
+            )
+            if allowed:
+                continue
+            retained_target = dict(target)
+            retained_target["exclude_reason"] = reason
+            excluded_by_uuid[channel_uuid] = retained_target
+        for channel_uuid in channel_uuids:
+            target = self._watched.get(channel_uuid)
+            allowed, reason = self._target_allowed_by_config_locked(
+                channel_uuid,
+                target,
+                config,
+            )
+            if allowed:
+                continue
+            cancel_event = self._probe_cancel_events.get(channel_uuid)
+            if cancel_event is not None:
+                cancel_events.append(cancel_event)
+            detached_target = self._watched.pop(channel_uuid, None)
+            if detached_target and int(detached_target.get("real_client_count") or 0) > 0:
+                excluded_target = dict(detached_target)
+                excluded_target["exclude_reason"] = reason
+                excluded_by_uuid[channel_uuid] = excluded_target
+            self._watcher_absences.pop(channel_uuid, None)
+            self._viewer_absences.pop(channel_uuid, None)
+            self._viewer_left_finalized.pop(channel_uuid, None)
+            self._clear_detection_counts_locked(channel_uuid)
+            self._switch_attempts.pop(channel_uuid, None)
+            self._last_loop_probe_started_at.pop(channel_uuid, None)
+            watcher_session = self._persistent_watchers.pop(channel_uuid, None)
+            if watcher_session:
+                watcher_sessions.append(watcher_session)
+        self._last_excluded_active_targets = list(excluded_by_uuid.values())
+        return cancel_events, watcher_sessions
+
+    def learn_offline_image_from_current_frame(
+        self,
+        *,
+        channel_ref: Optional[str] = None,
+        enable_detection: bool = False,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            targets = list(self._watched.values())
+            if channel_ref:
+                targets = [
+                    target
+                    for target in targets
+                    if str(target.get("channel_ref")) == str(channel_ref)
+                ]
+            target = dict(targets[0]) if targets else {}
+            config = dict(self._config)
+
+        if not target:
+            return {
+                "success": False,
+                "learned": False,
+                "reason": "no_watched_channel",
+                "message": "No active Shadow-watched channel is available.",
+            }
+
+        channel_uuid = target.get("channel_uuid")
+        if not channel_uuid:
+            return {
+                "success": False,
+                "learned": False,
+                "reason": "missing_channel_uuid",
+                "channel_ref": target.get("channel_ref"),
+            }
+
+        capture = self._capture_offline_image_hash(
+            self._channel_proxy_url(str(channel_uuid), target.get("viewer_output_format")),
+            config,
+        )
+        if not capture.get("success"):
+            return {
+                "success": False,
+                "learned": False,
+                "reason": capture.get("reason") or "frame_capture_failed",
+                "channel_ref": target.get("channel_ref"),
+                "stream_ref": target.get("stream_ref"),
+            }
+
+        phash = str(capture.get("offline_image_hash") or "").lower()
+        if not OFFLINE_IMAGE_PHASH_RE.match(phash):
+            return {
+                "success": False,
+                "learned": False,
+                "reason": "invalid_captured_hash",
+                "channel_ref": target.get("channel_ref"),
+                "stream_ref": target.get("stream_ref"),
+            }
+
+        cancel_events: List[threading.Event] = []
+        watcher_sessions: List[Dict[str, Any]] = []
+        with self._config_mutation_lock:
+            with self._lock:
+                existing_hashes = _offline_image_hashes(
+                    self._config.get("offline_image_reference_hashes")
+                )
+                valid_existing = _valid_offline_image_hashes(existing_hashes)
+                threshold = int(self._config.get("offline_image_hash_threshold", 4))
+                distances = [
+                    distance
+                    for distance in (
+                        self._hash_distance(phash, candidate)
+                        for candidate in valid_existing
+                    )
+                    if distance is not None
+                ]
+                nearest_distance = min(distances) if distances else None
+                already_covered = nearest_distance is not None and nearest_distance <= threshold
+                candidate = dict(self._config)
+                changed = False
+                if enable_detection and not candidate.get("offline_image_detection_enabled"):
+                    candidate["offline_image_detection_enabled"] = True
+                    changed = True
+                if not already_covered:
+                    candidate["offline_image_reference_hashes"] = existing_hashes + [phash]
+                    changed = True
+                if changed:
+                    self._persist_config_candidate_locked(candidate)
+                    cancel_events = list(self._probe_cancel_events.values())
+                    watcher_sessions = list(self._persistent_watchers.values())
+                    self._persistent_watchers = {}
+                reference_count = len(
+                    self._config.get("offline_image_reference_hashes") or []
+                )
+            for cancel_event in cancel_events:
+                cancel_event.set()
+        for session in watcher_sessions:
+            self._terminate_persistent_watcher_session(session)
+
+        details = {
+            "reason": "offline_image",
+            "offline_image_hash": phash,
+            "offline_image_distance": nearest_distance,
+            "reference_count": reference_count,
+            "deduplicated": already_covered,
+        }
+        self._record_event("offline_image_learned", target, details)
+        return {
+            "success": True,
+            "learned": not already_covered,
+            "deduplicated": already_covered,
+            "channel_ref": target.get("channel_ref"),
+            "stream_ref": target.get("stream_ref"),
+            "offline_image_hash": phash,
+            "offline_image_distance": nearest_distance,
+            "reference_count": reference_count,
+            "config": self.get_config(),
+            "status": self.get_status(),
+        }
+
+    def start(
+        self,
+        *,
+        persist: bool = True,
+        expected_revision: Optional[int] = None,
+    ) -> bool:
+        with self._lifecycle_lock:
+            return self._start_with_lifecycle_lock(
+                persist=persist,
+                expected_revision=expected_revision,
+            )
+
+    def _start_with_lifecycle_lock(
+        self,
+        *,
+        persist: bool,
+        expected_revision: Optional[int],
+    ) -> bool:
+        with self._config_mutation_lock:
+            with self._lock:
+                if (
+                    expected_revision is not None
+                    and expected_revision != self._config_revision
+                ):
+                    return bool(self._thread and self._thread.is_alive())
+                issue = _watcher_configuration_issue(self._config)
+                if issue:
+                    if persist:
+                        candidate = dict(self._config)
+                        candidate["enabled"] = False
+                        self._persist_config_candidate_locked(candidate)
+                    self._last_error = issue["message"]
+                    return False
+                if (
+                    self._thread
+                    and self._thread.is_alive()
+                    and self._stop_event.is_set()
+                ):
+                    # stop() has a bounded join.  Never clear its stop signal
+                    # underneath a worker that did not exit in time: doing so
+                    # could make start() report success for a thread already
+                    # committed to exiting.  A later explicit retry can start
+                    # a fresh worker once this one is actually gone.
+                    return False
+                if (
+                    self._thread
+                    and self._thread.is_alive()
+                    and self._config.get("enabled")
+                ):
+                    # An already-running start is an idempotent lifecycle
+                    # request, not a config mutation.  Avoid advancing the
+                    # revision underneath continuous probes that are already
+                    # using the current snapshot.
+                    return True
+                if persist:
+                    candidate = dict(self._config)
+                    candidate["enabled"] = True
+                    self._persist_config_candidate_locked(candidate)
+                elif not self._config.get("enabled"):
+                    return False
+                if self._last_error == WATCHER_API_KEY_REQUIRED_MESSAGE:
+                    self._last_error = None
+                if self._thread and self._thread.is_alive():
+                    return True
+                self._stop_event.clear()
+                start_revision = self._config_revision
+                self._thread = None
+                thread: Optional[threading.Thread] = None
+                try:
+                    thread = threading.Thread(
+                        target=self._worker,
+                        name="ShadowBlankMonitor",
+                        daemon=True,
+                    )
+                    self._thread = thread
+                    thread.start()
+                except Exception:
+                    self._stop_event.set()
+                    if (
+                        thread is not None
+                        and self._thread is thread
+                        and not thread.is_alive()
+                    ):
+                        self._thread = None
+                    self._last_error = SHADOW_MONITOR_START_ERROR_MESSAGE
+                    if (
+                        self._config_revision == start_revision
+                        and self._config.get("enabled")
+                    ):
+                        disabled = dict(self._config)
+                        disabled["enabled"] = False
+                        self._persist_config_candidate_locked(disabled)
+                    logger.error(
+                        "Shadow blank monitor worker thread failed to start",
+                        exc_info=True,
+                    )
+                    raise
+                return True
+
+    def stop(
+        self,
+        *,
+        persist: bool = True,
+        expected_revision: Optional[int] = None,
+    ) -> bool:
+        with self._lifecycle_lock:
+            return self._stop_with_lifecycle_lock(
+                persist=persist,
+                expected_revision=expected_revision,
+            )
+
+    def _stop_with_lifecycle_lock(
+        self,
+        *,
+        persist: bool,
+        expected_revision: Optional[int],
+    ) -> bool:
+        with self._config_mutation_lock:
+            with self._lock:
+                if (
+                    expected_revision is not None
+                    and expected_revision != self._config_revision
+                ):
+                    return not bool(self._thread and self._thread.is_alive())
+                if persist:
+                    candidate = dict(self._config)
+                    candidate["enabled"] = False
+                    self._persist_config_candidate_locked(candidate)
+                self._stop_event.set()
+                probe_cancel_events = list(self._probe_cancel_events.values())
+                self._service_stop_probe_events.update(probe_cancel_events)
+                self._watched = {}
+                self._watcher_absences = {}
+                self._viewer_absences = {}
+                thread = self._thread
+                stop_revision = self._config_revision
+                watcher_sessions = list(self._persistent_watchers.values())
+                self._persistent_watchers = {}
+            for cancel_event in probe_cancel_events:
+                cancel_event.set()
+        if thread and thread.is_alive():
+            thread.join(timeout=5)
+        # A scan that was already inside a slow proxy-status fetch can finish
+        # after the first clear. Clear the public snapshot again after the
+        # worker had a chance to observe the stop event.
+        with self._lock:
+            if (
+                self._config_revision == stop_revision
+                and not self._config.get("enabled")
+                and self._stop_event.is_set()
+            ):
+                self._watched = {}
+                self._watcher_absences = {}
+                self._viewer_absences = {}
+        for session in watcher_sessions:
+            self._terminate_persistent_watcher_session(session)
+        return True
+
+    def get_status(self) -> Dict[str, Any]:
+        with self._lock:
+            now = self.clock()
+            issue = _watcher_configuration_issue(self._config)
+            watched_channels = [self._public_target(target) for target in self._watched.values()]
+            excluded_active_channels = [
+                self._public_excluded_target(target)
+                for target in self._last_excluded_active_targets
+            ]
+            cooldowns = []
+            for channel_uuid, until in self._cooldowns.items():
+                if until <= now:
+                    continue
+                target = self._watched.get(channel_uuid, {"channel_ref": _ref("channel", channel_uuid)})
+                cooldowns.append({
+                    "channel_ref": target.get("channel_ref"),
+                    "cooldown_seconds": max(0, int(until - now)),
+                })
+            recent_events = list(self._events)
+            loop_gate_status = self._loop_detection_gate_status(self._config)
+            return {
+                "enabled": bool(self._config.get("enabled")),
+                "running": bool(self._thread and self._thread.is_alive()),
+                "dry_run": bool(self._config.get("dry_run")),
+                "watch_mode": self._config.get("watch_mode"),
+                "freeze_detection_enabled": bool(self._config.get("freeze_detection_enabled")),
+                "garbled_audio_detection_enabled": bool(self._config.get("garbled_audio_detection_enabled")),
+                "silent_audio_detection_enabled": bool(self._config.get("silent_audio_detection_enabled")),
+                "offline_image_detection_enabled": bool(self._config.get("offline_image_detection_enabled")),
+                "next_stream_pre_probe_enabled": bool(self._config.get("next_stream_pre_probe_enabled")),
+                "loop_detection_enabled": bool(self._config.get("loop_detection_enabled")),
+                "loop_probe_duration_seconds": int(self._config.get("loop_probe_duration_seconds") or 0),
+                "loop_switch_requires_pre_probe": LOOP_SWITCH_REQUIRES_PRE_PROBE,
+                "loop_switch_gate_satisfied": bool(loop_gate_status.get("switch_gate_satisfied")),
+                "loop_detection_gates": loop_gate_status,
+                "configuration_required": bool(issue),
+                "configuration_issue": issue["code"] if issue else None,
+                "configuration_message": issue["message"] if issue else None,
+                "has_watcher_api_key": bool(str(self._config.get("watcher_api_key") or "").strip()),
+                "last_scan_at": self._last_scan_at,
+                "last_error": self._last_error,
+                "watched_count": len(watched_channels),
+                "watched_channels": watched_channels,
+                "excluded_active_count": len(excluded_active_channels),
+                "excluded_active_channels": excluded_active_channels,
+                "cooldowns": cooldowns,
+                "recent_events": recent_events,
+                "decision_history": recent_events,
+                "switch_summary": self._switch_summary(recent_events, active_cooldowns=len(cooldowns)),
+                "pre_probe": {
+                    "metrics": dict(self._pre_probe_metrics),
+                    "last": dict(self._last_pre_probe) if self._last_pre_probe else None,
+                },
+                "offline_image": _offline_image_config_status(self._config),
+            }
+
+    def _worker(self) -> None:
+        logger.info("Shadow blank monitor started")
+        while not self._stop_event.is_set():
+            try:
+                with self._lock:
+                    enabled = bool(self._config.get("enabled"))
+                    config = dict(self._config)
+                    interval = self._next_scan_delay(config)
+                if enabled:
+                    self.run_once()
+                self._stop_event.wait(interval)
+            except Exception as exc:
+                self._last_error = SHADOW_MONITOR_LOOP_ERROR_MESSAGE
+                logger.error(f"Shadow blank monitor loop failed: {exc}", exc_info=True)
+                self._stop_event.wait(30)
+        logger.info("Shadow blank monitor stopped")
+
+    @staticmethod
+    def _next_scan_delay(config: Dict[str, Any]) -> int:
+        if config.get("watch_mode") == "continuous":
+            return int(config.get("watch_gap_seconds") or DEFAULT_CONFIG["watch_gap_seconds"])
+        return int(config.get("poll_interval_seconds") or DEFAULT_CONFIG["poll_interval_seconds"])
+
+    def run_once(
+        self,
+        *,
+        force: bool = False,
+        include_channel_ids: Any = None,
+        include_channel_uuids: Any = None,
+    ) -> Dict[str, Any]:
+        with self._lock:
+            config = dict(self._config)
+            config[CONFIG_REVISION_KEY] = self._config_revision
+        issue = _watcher_configuration_issue(config)
+        if issue:
+            with self._lock:
+                self._last_error = issue["message"]
+            return self.get_status()
+        if not config.get("enabled") and not force:
+            return self.get_status()
+
+        restore_stop_event = False
+        if force and self._stop_event.is_set():
+            # Manual scans are allowed while the background monitor is disabled.
+            # The worker stop event must not abort the one-off continuous probe.
+            self._stop_event.clear()
+            restore_stop_event = True
+
+        self._last_scan_at = self.clock()
+        try:
+            udi = self.udi_provider()
+            targets = self.discover_active_targets(
+                udi,
+                config,
+                include_channel_ids=include_channel_ids,
+                include_channel_uuids=include_channel_uuids,
+            )
+            if not force and self._stop_event.is_set():
+                with self._lock:
+                    self._watched = {}
+                    self._last_excluded_active_targets = []
+                    self._watcher_absences = {}
+                    self._viewer_absences = {}
+                return self.get_status()
+            if not force:
+                self._sync_persistent_watchers(targets, config)
+            self._probe_targets(
+                udi,
+                targets[: config["max_concurrent_watchers"]],
+                config,
+                single_pass=force,
+                allow_orphaned_watcher_reprobe=force and bool(include_channel_ids or include_channel_uuids),
+            )
+            self._last_error = None
+        except Exception as exc:
+            self._last_error = SHADOW_MONITOR_SCAN_ERROR_MESSAGE
+            logger.error(f"Shadow blank monitor scan failed: {exc}", exc_info=True)
+        finally:
+            if restore_stop_event:
+                with self._lock:
+                    if not self._config.get("enabled"):
+                        self._stop_event.set()
+        return self.get_status()
+
+    def discover_active_targets(
+        self,
+        udi: Any,
+        config: Dict[str, Any],
+        *,
+        include_channel_ids: Any = None,
+        include_channel_uuids: Any = None,
+    ) -> List[Dict[str, Any]]:
+        proxy_status = udi.get_proxy_status() or {}
+        channels = udi.get_channels() if hasattr(udi, "get_channels") else []
+        by_uuid, by_id = self._index_channels(channels)
+        self._remember_channel_identities(channels)
+        excluded_ids = {int(item) for item in config.get("excluded_channel_ids", [])}
+        excluded_uuids = {str(item) for item in config.get("excluded_channel_uuids", [])}
+        included_ids = _coerce_int_set(include_channel_ids)
+        included_uuids = _coerce_text_set(include_channel_uuids)
+        if not (included_ids or included_uuids):
+            included_ids = _coerce_int_set(config.get("included_channel_ids"))
+            included_uuids = _coerce_text_set(config.get("included_channel_uuids"))
+        if len(included_ids) == 1 and len(included_uuids) == 1:
+            self._remember_channel_identity({
+                "id": next(iter(included_ids)),
+                "uuid": next(iter(included_uuids)),
+            })
+        limit_to_included = bool(included_ids or included_uuids)
+
+        targets: List[Dict[str, Any]] = []
+        watched: Dict[str, Dict[str, Any]] = {}
+        excluded_active_targets: List[Dict[str, Any]] = []
+        continuity_events: List[tuple[str, Dict[str, Any], Dict[str, Any]]] = []
+        continuous_mode = config.get("watch_mode") == "continuous"
+        persistent_watcher_expected = self._persistent_watcher_configured(config)
+        viewer_left_grace_seconds = int(config.get("viewer_left_grace_seconds") or 0)
+        now = self.clock()
+        with self._lock:
+            previous_watched = {
+                channel_uuid: dict(target)
+                for channel_uuid, target in self._watched.items()
+            }
+            previous_absences = {
+                channel_uuid: dict(absence)
+                for channel_uuid, absence in self._watcher_absences.items()
+            }
+            previous_viewer_absences = {
+                channel_uuid: dict(absence)
+                for channel_uuid, absence in self._viewer_absences.items()
+            }
+            active_probe_channels = set(self._active_probes)
+        next_absences: Dict[str, Dict[str, Any]] = {}
+        next_viewer_absences: Dict[str, Dict[str, Any]] = {}
+        seen_active_channel_uuids = set()
+
+        for key, raw_status in proxy_status.items():
+            if not self._is_status_active(raw_status):
+                continue
+
+            channel_uuid = str(raw_status.get("channel_id") or raw_status.get("channel_uuid") or key)
+            channel = by_uuid.get(channel_uuid)
+            if channel is None and str(key).isdigit():
+                channel = by_id.get(int(key))
+                channel_uuid = str(channel.get("uuid") or key) if channel else channel_uuid
+            if not channel and channel_uuid in by_uuid:
+                channel = by_uuid[channel_uuid]
+            seen_active_channel_uuids.add(channel_uuid)
+
+            watcher_details = self._watcher_client_details(raw_status, config)
+            watcher_clients = int(watcher_details.get("watcher_client_count") or 0)
+            viewer_output_format = self._real_viewer_output_format(raw_status, config)
+
+            stream_id = self._extract_stream_id(raw_status)
+            previous_target = previous_watched.get(channel_uuid) or {}
+            count_target = (
+                previous_target
+                if continuous_mode
+                and previous_target.get("probe_state") in {"probing", "settling"}
+                and previous_target.get("active_probe_started_at") is not None
+                else None
+            )
+            real_clients = self._real_client_count(raw_status, config, count_target)
+            if real_clients <= 0:
+                previous_absence = previous_viewer_absences.get(channel_uuid)
+                if previous_absence is None:
+                    previous_absence = self._stale_real_client_absence(raw_status, config, now)
+                grace_target = self._viewer_left_grace_target(
+                    raw_status,
+                    previous_target,
+                    previous_absence,
+                    watcher_details,
+                    now=now,
+                    grace_seconds=viewer_left_grace_seconds,
+                    stream_id=stream_id,
+                    watcher_clients=watcher_clients,
+                    viewer_output_format=viewer_output_format,
+                ) if continuous_mode else None
+                if grace_target:
+                    if self._is_low_impact_probe_client_settling(
+                        channel_uuid,
+                        grace_target,
+                        raw_status,
+                        config,
+                        watcher_clients,
+                    ):
+                        self._mark_shadow_probe_client_settling(grace_target, watcher_clients)
+                    absence = {
+                        "since": grace_target["viewer_absent_since"],
+                        "last_real_client_count": previous_target.get("real_client_count") if previous_target else None,
+                    }
+                    next_viewer_absences[channel_uuid] = absence
+                    targets.append(grace_target)
+                    watched[channel_uuid] = dict(grace_target)
+                elif continuous_mode and previous_target:
+                    grace_since = (
+                        float(previous_absence.get("since"))
+                        if previous_absence and previous_absence.get("since") is not None
+                        else now
+                    )
+                    event_target = dict(previous_target)
+                    if stream_id is not None:
+                        event_target["stream_id"] = stream_id
+                        event_target["stream_ref"] = _ref("stream", stream_id)
+                    event_target["real_client_count"] = 0
+                    event_target["watcher_client_count"] = watcher_clients
+                    event_target.update(watcher_details)
+                    if self._mark_viewer_left_finalized(channel_uuid, event_target):
+                        continuity_events.append((
+                            "viewer_left",
+                            event_target,
+                            {
+                                "reason": "viewer_left_grace_expired" if previous_absence else "viewer_left",
+                                "viewer_absent_seconds": max(0, int(now - grace_since)),
+                                "viewer_left_grace_seconds": viewer_left_grace_seconds,
+                            },
+                        ))
+                continue
+            self._clear_viewer_left_finalized(channel_uuid)
+            numeric_id = self._resolve_channel_id(
+                udi,
+                self._extract_channel_id(channel, raw_status),
+                channel_uuid=channel_uuid,
+                channel=channel,
+                status=raw_status,
+                current_stream_id=stream_id,
+                included_ids=included_ids,
+                included_uuids=included_uuids,
+                previous_target=previous_watched.get(channel_uuid),
+            )
+            current_program = self._current_epg_program(channel, raw_status, numeric_id)
+            not_included = (
+                limit_to_included
+                and numeric_id not in included_ids
+                and channel_uuid not in included_uuids
+            )
+            explicitly_excluded = numeric_id in excluded_ids or channel_uuid in excluded_uuids
+            if not_included or explicitly_excluded:
+                excluded_target = {
+                    "channel_uuid": channel_uuid,
+                    "channel_id": numeric_id,
+                    "channel_ref": _ref("channel", numeric_id or channel_uuid),
+                    "channel_name": self._channel_display_name(channel, raw_status),
+                    "stream_id": stream_id,
+                    "stream_ref": _ref("stream", stream_id),
+                    "real_client_count": real_clients,
+                    "watcher_client_count": watcher_clients,
+                    "state": raw_status.get("state") or "active",
+                    "exclude_reason": (
+                        "channel_excluded" if explicitly_excluded else "channel_not_included"
+                    ),
+                }
+                if viewer_output_format:
+                    excluded_target["viewer_output_format"] = viewer_output_format
+                if current_program:
+                    excluded_target["current_program"] = current_program
+                excluded_active_targets.append(excluded_target)
+                continue
+            target = {
+                "channel_uuid": channel_uuid,
+                "channel_id": numeric_id,
+                "channel_ref": _ref("channel", numeric_id or channel_uuid),
+                "channel_name": self._channel_display_name(channel, raw_status),
+                "stream_id": stream_id,
+                "stream_ref": _ref("stream", stream_id),
+                "real_client_count": real_clients,
+                "watcher_client_count": watcher_clients,
+                "state": raw_status.get("state") or "active",
+                "cooldown_seconds": self._cooldown_remaining(channel_uuid),
+            }
+            if viewer_output_format:
+                target["viewer_output_format"] = viewer_output_format
+            if current_program:
+                target["current_program"] = current_program
+            target.update(watcher_details)
+            if continuous_mode:
+                probe_running = channel_uuid in active_probe_channels
+                for probe_status_key in (
+                    "probe_state",
+                    "probe_active",
+                    "active_probe_started_at",
+                    "next_probe_at",
+                    "last_probe",
+                    "last_event",
+                ):
+                    if probe_status_key in previous_target:
+                        target[probe_status_key] = previous_target[probe_status_key]
+                previous_probe_started = previous_target.get("active_probe_started_at")
+                if previous_probe_started is not None and previous_target.get("real_client_refs"):
+                    target["real_client_refs"] = list(previous_target.get("real_client_refs") or [])
+                else:
+                    target["real_client_refs"] = self._real_client_refs(raw_status, config)
+                if previous_probe_started is not None:
+                    probe_target = dict(target)
+                    probe_target["active_probe_started_at"] = previous_probe_started
+                    target["active_probe_started_at"] = previous_probe_started
+                    if self._is_low_impact_probe_client_settling(
+                        channel_uuid,
+                        probe_target,
+                        raw_status,
+                        config,
+                        watcher_clients,
+                    ):
+                        self._mark_shadow_probe_client_settling(target, watcher_clients)
+                        watcher_clients = 0
+                previous_absence = previous_absences.get(channel_uuid)
+                previous_watcher_count = int(previous_target.get("watcher_client_count") or 0)
+                previous_watcher_ref = previous_target.get("watcher_client_ref")
+                watcher_ref = target.get("watcher_client_ref")
+                previous_stream_id = previous_target.get("stream_id")
+                if (
+                    previous_stream_id is not None
+                    and stream_id is not None
+                    and str(previous_stream_id) != str(stream_id)
+                ):
+                    expected_shadow_switch = self._switch_attempt_matches(
+                        channel_uuid,
+                        previous_stream_id,
+                        stream_id,
+                    )
+                    expected_shadow_switch = (
+                        expected_shadow_switch
+                        or self._recent_switch_attempt_transition(
+                            channel_uuid,
+                            previous_stream_id,
+                            stream_id,
+                        )
+                    )
+                    if expected_shadow_switch:
+                        self._reset_blank_count(channel_uuid)
+                    else:
+                        self._reset_detection_state(channel_uuid)
+                        self._clear_cooldown(channel_uuid)
+                        continuity_events.append((
+                            "external_stream_change",
+                            {
+                                **dict(target),
+                                "stream_id": previous_stream_id,
+                                "stream_ref": _ref("stream", previous_stream_id),
+                            },
+                            {
+                                "target_stream_ref": _ref("stream", stream_id),
+                                "observed_stream_ref": _ref("stream", stream_id),
+                                "switch_source": "external",
+                                "switch_actor": "unknown",
+                                "switch_actor_note": (
+                                    "Dispatcharr proxy status does not expose who changed "
+                                    "the active stream."
+                                ),
+                                "stream_change_source": "dispatcharr_proxy_status",
+                                "operator_note": (
+                                    "Active stream changed outside the Shadow Monitor switch path. "
+                                    "Dispatcharr did not provide actor details."
+                                ),
+                            },
+                        ))
+                if watcher_clients > 0:
+                    target["watcher_state"] = "watching"
+                    if probe_running:
+                        next_absences.pop(channel_uuid, None)
+                    elif persistent_watcher_expected and previous_absence:
+                        since = float(previous_absence.get("since") or now)
+                        recovered_after = max(0, int(now - since))
+                        target["watcher_recovered_after_seconds"] = recovered_after
+                        continuity_events.append((
+                            "watcher_recovered",
+                            dict(target),
+                            {
+                                "downtime_seconds": recovered_after,
+                                "last_watcher_client_ref": previous_absence.get("last_watcher_client_ref"),
+                                "watcher_client_ref": target.get("watcher_client_ref"),
+                            },
+                        ))
+                    elif (
+                        persistent_watcher_expected
+                        and
+                        previous_watcher_count > 0
+                        and previous_watcher_ref
+                        and watcher_ref
+                        and watcher_ref != previous_watcher_ref
+                    ):
+                        target["watcher_recovered_after_seconds"] = 0
+                        continuity_events.append((
+                            "watcher_recovered",
+                            dict(target),
+                            {
+                                "downtime_seconds": 0,
+                                "last_watcher_client_ref": previous_watcher_ref,
+                                "watcher_client_ref": watcher_ref,
+                            },
+                        ))
+                elif persistent_watcher_expected and (previous_watcher_count > 0 or previous_absence):
+                    absence = previous_absence or {
+                        "since": now,
+                        "last_watcher_client_ref": previous_target.get("watcher_client_ref"),
+                    }
+                    since = float(absence.get("since") or now)
+                    target["watcher_state"] = "reconnecting"
+                    target["watcher_absent_since"] = since
+                    target["watcher_absent_seconds"] = max(0, int(now - since))
+                    if absence.get("last_watcher_client_ref"):
+                        target["last_watcher_client_ref"] = absence.get("last_watcher_client_ref")
+                    next_absences[channel_uuid] = dict(absence)
+                    if not previous_absence:
+                        continuity_events.append((
+                            "watcher_reconnecting",
+                            dict(target),
+                            {
+                                "last_watcher_client_ref": absence.get("last_watcher_client_ref"),
+                                "watcher_absent_seconds": target["watcher_absent_seconds"],
+                            },
+                        ))
+                else:
+                    target["watcher_state"] = "waiting"
+            targets.append(target)
+            watched[channel_uuid] = dict(target)
+
+        if continuous_mode:
+            for channel_uuid, previous_target in previous_watched.items():
+                if channel_uuid in watched or channel_uuid in seen_active_channel_uuids:
+                    continue
+                if limit_to_included:
+                    previous_id = previous_target.get("channel_id")
+                    if previous_id not in included_ids and channel_uuid not in included_uuids:
+                        continue
+                previous_absence = previous_viewer_absences.get(channel_uuid)
+                grace_target = self._viewer_left_grace_target(
+                    {},
+                    previous_target,
+                    previous_absence,
+                    {},
+                    now=now,
+                    grace_seconds=viewer_left_grace_seconds,
+                    stream_id=previous_target.get("stream_id"),
+                    watcher_clients=0,
+                    viewer_output_format=previous_target.get("viewer_output_format"),
+                )
+                if grace_target:
+                    absence = {
+                        "since": grace_target["viewer_absent_since"],
+                        "last_real_client_count": previous_target.get("real_client_count"),
+                    }
+                    grace_target["proxy_status_gap"] = True
+                    grace_target["watcher_state"] = (
+                        "reconnecting" if persistent_watcher_expected else "waiting"
+                    )
+                    grace_target["last_watcher_client_count"] = previous_target.get("watcher_client_count")
+                    next_viewer_absences[channel_uuid] = absence
+                    targets.append(grace_target)
+                    watched[channel_uuid] = dict(grace_target)
+                elif previous_target:
+                    grace_since = (
+                        float(previous_absence.get("since"))
+                        if previous_absence and previous_absence.get("since") is not None
+                        else now
+                    )
+                    event_target = dict(previous_target)
+                    event_target["real_client_count"] = 0
+                    event_target["watcher_client_count"] = 0
+                    event_target["proxy_status_gap"] = True
+                    if self._mark_viewer_left_finalized(channel_uuid, event_target):
+                        continuity_events.append((
+                            "viewer_left",
+                            event_target,
+                            {
+                                "reason": (
+                                    "proxy_status_gap_grace_expired"
+                                    if previous_absence else "proxy_status_gap"
+                                ),
+                                "viewer_absent_seconds": max(0, int(now - grace_since)),
+                                "viewer_left_grace_seconds": viewer_left_grace_seconds,
+                            },
+                        ))
+
+        scope_status_candidates: Dict[str, Dict[str, Any]] = {}
+        for candidate in [*targets, *excluded_active_targets]:
+            channel_uuid = str(candidate.get("channel_uuid") or "")
+            if channel_uuid and int(candidate.get("real_client_count") or 0) > 0:
+                scope_status_candidates[channel_uuid] = dict(candidate)
+
+        with self._lock:
+            # Internal run snapshots carry a revision and must be revalidated
+            # against the latest persisted scope before publishing discovery
+            # state.  Revisionless direct callers intentionally supply their
+            # own authoritative normalized config (used by integrations and
+            # focused discovery tests), so preserve that compatibility.
+            scope_config = self._config if CONFIG_REVISION_KEY in config else config
+            current_excluded_active_targets: List[Dict[str, Any]] = []
+            for channel_uuid, candidate in scope_status_candidates.items():
+                allowed, reason = self._target_allowed_by_config_locked(
+                    channel_uuid,
+                    candidate,
+                    scope_config,
+                )
+                if not allowed:
+                    excluded_candidate = dict(candidate)
+                    excluded_candidate["exclude_reason"] = reason
+                    current_excluded_active_targets.append(excluded_candidate)
+            targets = [
+                target
+                for target in targets
+                if self._target_allowed_by_config_locked(
+                    str(target.get("channel_uuid") or ""),
+                    target,
+                    scope_config,
+                )[0]
+            ]
+            watched = {
+                channel_uuid: target
+                for channel_uuid, target in watched.items()
+                if self._target_allowed_by_config_locked(
+                    channel_uuid,
+                    target,
+                    scope_config,
+                )[0]
+            }
+            next_absences = {
+                channel_uuid: absence
+                for channel_uuid, absence in next_absences.items()
+                if channel_uuid in watched
+            }
+            next_viewer_absences = {
+                channel_uuid: absence
+                for channel_uuid, absence in next_viewer_absences.items()
+                if channel_uuid in watched
+            }
+            self._watched = watched
+            self._last_excluded_active_targets = current_excluded_active_targets
+            self._watcher_absences = next_absences if continuous_mode else {}
+            self._viewer_absences = next_viewer_absences if continuous_mode else {}
+        for event_type, event_target, details in continuity_events:
+            self._record_event(event_type, event_target, details)
+        return targets
+
+    def _viewer_left_grace_target(
+        self,
+        raw_status: Dict[str, Any],
+        previous_target: Optional[Dict[str, Any]],
+        previous_absence: Optional[Dict[str, Any]],
+        watcher_details: Dict[str, Any],
+        *,
+        now: float,
+        grace_seconds: int,
+        stream_id: Optional[int],
+        watcher_clients: int,
+        viewer_output_format: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        if grace_seconds <= 0 or not previous_target:
+            return None
+        if previous_absence:
+            since = float(previous_absence.get("since") or now)
+        elif int(previous_target.get("real_client_count") or 0) > 0:
+            since = now
+        else:
+            return None
+        elapsed = max(0, int(now - since))
+        if elapsed > grace_seconds:
+            return None
+
+        target = dict(previous_target)
+        if stream_id is not None:
+            target["stream_id"] = stream_id
+            target["stream_ref"] = _ref("stream", stream_id)
+        target["real_client_count"] = 0
+        target["watcher_client_count"] = watcher_clients
+        target["state"] = raw_status.get("state") or target.get("state") or "active"
+        target["viewer_state"] = "left_grace"
+        target["viewer_left_grace_active"] = True
+        target["viewer_absent_since"] = since
+        target["viewer_absent_seconds"] = elapsed
+        target["viewer_left_grace_seconds"] = grace_seconds
+        target["viewer_left_grace_remaining_seconds"] = max(0, grace_seconds - elapsed)
+        target["skip_probe_reason"] = "viewer_left_grace"
+        if viewer_output_format:
+            target["viewer_output_format"] = viewer_output_format
+        target.update(watcher_details)
+        return target
+
+    def _mark_viewer_left_grace(
+        self,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        fresh_status: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if self._probe_cancelled(config):
+            return None
+        if not config.get("_shadow_allow_viewer_left_grace"):
+            return None
+        grace_seconds = int(config.get("viewer_left_grace_seconds") or 0)
+        if grace_seconds <= 0 or not target.get("channel_uuid"):
+            return None
+
+        channel_uuid = str(target.get("channel_uuid"))
+        now = self.clock()
+        with self._lock:
+            previous_absence = dict(self._viewer_absences.get(channel_uuid) or {})
+        if previous_absence:
+            since = float(previous_absence.get("since") or now)
+        else:
+            since = now
+        elapsed = max(0, int(now - since))
+        if elapsed > grace_seconds:
+            return None
+
+        fresh_status = fresh_status or {}
+        watcher_details = self._watcher_client_details(fresh_status, config) if fresh_status else {}
+        watcher_clients = int(
+            watcher_details.get("watcher_client_count")
+            or target.get("watcher_client_count")
+            or 0
+        )
+        stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
+        grace_target = dict(target)
+        if stream_id is not None:
+            grace_target["stream_id"] = stream_id
+            grace_target["stream_ref"] = _ref("stream", stream_id)
+        grace_target["real_client_count"] = 0
+        grace_target["watcher_client_count"] = watcher_clients
+        grace_target["viewer_state"] = "left_grace"
+        grace_target["viewer_left_grace_active"] = True
+        grace_target["viewer_absent_since"] = since
+        grace_target["viewer_absent_seconds"] = elapsed
+        grace_target["viewer_left_grace_seconds"] = grace_seconds
+        grace_target["viewer_left_grace_remaining_seconds"] = max(0, grace_seconds - elapsed)
+        grace_target["skip_probe_reason"] = "viewer_left_grace"
+        if watcher_details:
+            grace_target.update(watcher_details)
+        if self._is_low_impact_probe_client_settling(
+            channel_uuid,
+            grace_target,
+            fresh_status,
+            config,
+            watcher_clients,
+        ):
+            self._mark_shadow_probe_client_settling(grace_target, watcher_clients)
+
+        with self._lock:
+            allowed, _reason = self._target_allowed_by_config_locked(
+                channel_uuid,
+                grace_target,
+                self._config,
+            )
+            if not allowed or self._probe_cancelled(config):
+                return None
+            self._viewer_absences[channel_uuid] = {
+                "since": since,
+                "last_real_client_count": target.get("real_client_count"),
+            }
+            self._watched[channel_uuid] = dict(grace_target)
+        return grace_target
+
+    def _handle_viewer_left_or_grace(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        fresh_status: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if self._probe_cancelled(config):
+            return False
+        if self._mark_viewer_left_grace(target, config, fresh_status):
+            return True
+
+        self._reset_blank_count(channel_uuid)
+        self._clear_switch_attempts(channel_uuid)
+        target.pop("media_recovery_guard_observed", None)
+        event_target = dict(target)
+        event_target["real_client_count"] = 0
+        with self._lock:
+            allowed, _reason = self._target_allowed_by_config_locked(
+                channel_uuid,
+                target,
+                self._config,
+            )
+            if not allowed or self._probe_cancelled(config):
+                return False
+            should_record = self._mark_viewer_left_finalized(channel_uuid, event_target)
+            if should_record:
+                self._record_event("viewer_left", event_target, {})
+            self._watched.pop(channel_uuid, None)
+            self._viewer_absences.pop(channel_uuid, None)
+            self._watcher_absences.pop(channel_uuid, None)
+        return False
+
+    def _viewer_left_finalized_key(self, target: Dict[str, Any]) -> str:
+        stream_ref = target.get("stream_ref")
+        if stream_ref:
+            return str(stream_ref)
+        stream_id = target.get("stream_id")
+        if stream_id is not None:
+            return _ref("stream", stream_id)
+        return ""
+
+    def _mark_viewer_left_finalized(self, channel_uuid: str, target: Dict[str, Any]) -> bool:
+        key = self._viewer_left_finalized_key(target)
+        with self._lock:
+            previous = self._viewer_left_finalized.get(channel_uuid)
+            if previous and previous.get("key") == key:
+                return False
+            self._viewer_left_finalized[channel_uuid] = {
+                "key": key,
+                "timestamp": self.clock(),
+            }
+            self._viewer_absences.pop(channel_uuid, None)
+            self._watcher_absences.pop(channel_uuid, None)
+        return True
+
+    def _clear_viewer_left_finalized(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._viewer_left_finalized.pop(channel_uuid, None)
+
+    def _probe_targets(
+        self,
+        udi: Any,
+        targets: Iterable[Dict[str, Any]],
+        config: Dict[str, Any],
+        *,
+        single_pass: bool = False,
+        allow_orphaned_watcher_reprobe: bool = False,
+    ) -> None:
+        targets = list(targets)
+        threads: List[threading.Thread] = []
+        wait_for_probes = single_pass or not (
+            config.get("watch_mode") == "continuous" and self._uses_default_blank_probe
+        )
+        for target in targets:
+            channel_uuid = target["channel_uuid"]
+            if target.get("viewer_left_grace_active") or int(target.get("real_client_count") or 0) <= 0:
+                continue
+            watcher_count = int(target.get("watcher_client_count") or 0)
+            blocking_watcher_count = self._blocking_watcher_count(target, watcher_count)
+            if blocking_watcher_count > 0:
+                with self._lock:
+                    probe_is_running = channel_uuid in self._active_probes
+                if probe_is_running or not allow_orphaned_watcher_reprobe:
+                    continue
+                target["watcher_state"] = "orphaned"
+                self._record_event(
+                    "watcher_orphaned",
+                    target,
+                    {
+                        "reason": "watcher_without_active_probe",
+                        "watcher_client_count": watcher_count,
+                        "blocking_watcher_count": blocking_watcher_count,
+                        "action": "starting_recovery_probe",
+                    },
+                )
+            if self._quality_checker_conflicts(target, config):
+                self._record_event("quality_check_active", target, {})
+                continue
+
+            with self._lock:
+                if not self._config_snapshot_is_current_locked(config):
+                    continue
+                allowed, _reason = self._target_allowed_by_config_locked(
+                    channel_uuid,
+                    target,
+                    self._config,
+                )
+                if not allowed:
+                    continue
+                if channel_uuid in self._active_probes:
+                    continue
+                cancel_event = threading.Event()
+                self._active_probes.add(channel_uuid)
+                self._probe_cancel_events[channel_uuid] = cancel_event
+
+            try:
+                thread = threading.Thread(
+                    target=self._probe_target,
+                    args=(udi, target, dict(config), single_pass, cancel_event),
+                    name=f"ShadowBlankProbe-{channel_uuid[:8]}",
+                    daemon=True,
+                )
+                thread.start()
+            except Exception:
+                with self._lock:
+                    if self._probe_cancel_events.get(channel_uuid) is cancel_event:
+                        self._probe_cancel_events.pop(channel_uuid, None)
+                        self._active_probes.discard(channel_uuid)
+                raise
+            threads.append(thread)
+
+        if wait_for_probes:
+            for thread in threads:
+                thread.join()
+
+    def _probe_target(
+        self,
+        udi: Any,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        single_pass: bool = False,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
+        channel_uuid = target["channel_uuid"]
+        config = dict(config)
+        probe_stop_event = cancel_event or self._stop_event
+        config["_shadow_probe_cancel_event"] = probe_stop_event
+        if (
+            not single_pass
+            and config.get("watch_mode") == "continuous"
+            and self._uses_default_blank_probe
+            and bool(str(config.get("watcher_api_key") or "").strip())
+        ):
+            config["_shadow_allow_viewer_left_grace"] = True
+        try:
+            while not (self._stop_event.is_set() or probe_stop_event.is_set()):
+                should_continue = self._probe_target_once(udi, target, config)
+                self._set_probe_state(channel_uuid, target, "settling")
+                if single_pass:
+                    break
+                if not (
+                    should_continue
+                    and config.get("watch_mode") == "continuous"
+                    and self._uses_default_blank_probe
+                ):
+                    break
+                if self._stop_event.is_set() or probe_stop_event.is_set():
+                    break
+
+                fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                if self._real_client_count(fresh_status, config, target) <= 0:
+                    self._handle_viewer_left_or_grace(channel_uuid, target, config, fresh_status)
+                    break
+
+                target = dict(target)
+                target["real_client_count"] = self._real_client_count(fresh_status, config, target)
+                viewer_output_format = self._real_viewer_output_format(fresh_status, config)
+                if viewer_output_format:
+                    target["viewer_output_format"] = viewer_output_format
+                watcher_details = self._watcher_client_details(fresh_status, config)
+                target.update(watcher_details)
+                watcher_count = int(target.get("watcher_client_count") or 0)
+                if self._is_low_impact_probe_client_settling(
+                    channel_uuid,
+                    target,
+                    fresh_status,
+                    config,
+                    watcher_count,
+                ):
+                    self._mark_shadow_probe_client_settling(target, watcher_count)
+                    watcher_count = 0
+                else:
+                    target["watcher_state"] = (
+                        "watching"
+                        if watcher_count > 0
+                        else ("reconnecting" if self._persistent_watcher_configured(config) else "waiting")
+                    )
+                stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
+                target["stream_id"] = stream_id
+                target["stream_ref"] = _ref("stream", stream_id)
+                with self._lock:
+                    snapshot_is_current = self._config_snapshot_is_current_locked(config)
+                    allowed, _reason = self._target_allowed_by_config_locked(
+                        channel_uuid,
+                        target,
+                        self._config,
+                    )
+                    if (
+                        not snapshot_is_current
+                        or not allowed
+                        or self._probe_cancelled(config)
+                    ):
+                        break
+                    if watcher_count > 0:
+                        self._watcher_absences.pop(channel_uuid, None)
+                    self._watched[channel_uuid] = dict(target)
+                blocking_watcher_count = self._blocking_watcher_count(target, watcher_count)
+                if self._has_pending_detection(channel_uuid) and blocking_watcher_count <= 0:
+                    release = self._wait_for_channel_probe_client_release(
+                        udi,
+                        target,
+                        config,
+                        initial_status=fresh_status,
+                        stop_event=probe_stop_event,
+                    )
+                    if release["released"]:
+                        watcher_count = 0
+                        blocking_watcher_count = 0
+                    elif release["reason"] == "viewer_left":
+                        self._handle_viewer_left_or_grace(
+                            channel_uuid,
+                            target,
+                            config,
+                            release.get("status") or fresh_status,
+                        )
+                        break
+                    elif release["reason"] == "timeout":
+                        self._record_event(
+                            "watcher_release_timeout",
+                            target,
+                            {
+                                "reason": "pending_confirmation",
+                                "waited_seconds": release["waited_seconds"],
+                                "watcher_client_count": release["watcher_client_count"],
+                            },
+                        )
+                        break
+                    else:
+                        break
+                if blocking_watcher_count > 0:
+                    if self._watcher_status_has_current_probe_client(target, fresh_status, config):
+                        release = self._wait_for_channel_probe_client_release(
+                            udi,
+                            target,
+                            config,
+                            initial_status=fresh_status,
+                            stop_event=probe_stop_event,
+                        )
+                        if release["released"]:
+                            if probe_stop_event.wait(float(config.get("watch_gap_seconds", 1))):
+                                break
+                            continue
+                        if release["reason"] == "viewer_left":
+                            self._handle_viewer_left_or_grace(
+                                channel_uuid,
+                                target,
+                                config,
+                                release.get("status") or fresh_status,
+                            )
+                        elif release["reason"] == "timeout":
+                            self._record_event(
+                                "watcher_release_timeout",
+                                target,
+                                {
+                                    "reason": "probe_rollover",
+                                    "waited_seconds": release["waited_seconds"],
+                                    "watcher_client_count": release["watcher_client_count"],
+                                },
+                            )
+                        if probe_stop_event.is_set() or self._stop_event.is_set():
+                            break
+                        break
+                    bypass_details = self._pending_media_recovery_guard_bypass_details(
+                        channel_uuid,
+                        target,
+                        fresh_status,
+                        config,
+                    )
+                    if bypass_details is not None:
+                        release = self._wait_for_channel_probe_client_release(
+                            udi,
+                            target,
+                            config,
+                            initial_status=fresh_status,
+                            stop_event=probe_stop_event,
+                        )
+                        if not release["released"]:
+                            if release["reason"] == "viewer_left":
+                                self._handle_viewer_left_or_grace(
+                                    channel_uuid,
+                                    target,
+                                    config,
+                                    release.get("status") or fresh_status,
+                                )
+                            elif release["reason"] == "timeout":
+                                self._record_event(
+                                    "watcher_release_timeout",
+                                    target,
+                                    {
+                                        "reason": "media_recovery_confirmation",
+                                        "waited_seconds": release["waited_seconds"],
+                                        "watcher_client_count": release["watcher_client_count"],
+                                    },
+                                )
+                            break
+                        target["media_recovery_guard_bypass"] = bypass_details
+                        target["media_recovery_guard_observed"] = bypass_details
+                        self._record_event("watcher_recovery_observed", target, bypass_details)
+                        if probe_stop_event.wait(float(config.get("watch_gap_seconds", 1))):
+                            break
+                        continue
+                    guard_details = {
+                        "reason": "active_watcher_between_confirmations",
+                        "watcher_client_count": watcher_count,
+                        "blocking_watcher_count": blocking_watcher_count,
+                    }
+                    if target.get("watcher_client_ref"):
+                        guard_details["watcher_client_ref"] = target.get("watcher_client_ref")
+                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
+                    break
+
+                delay = self._continuous_probe_delay_seconds(channel_uuid, config)
+                self._set_probe_state(
+                    channel_uuid,
+                    target,
+                    "waiting",
+                    next_probe_at=self.clock() + max(0.0, delay),
+                )
+                if delay > 0:
+                    if probe_stop_event.wait(delay):
+                        break
+        finally:
+            with self._lock:
+                registered_event = self._probe_cancel_events.get(channel_uuid)
+                service_stopped_probe = (
+                    cancel_event is not None
+                    and cancel_event in self._service_stop_probe_events
+                )
+                if cancel_event is not None:
+                    self._service_stop_probe_events.discard(cancel_event)
+                if cancel_event is None or registered_event is cancel_event:
+                    self._probe_cancel_events.pop(channel_uuid, None)
+                    self._active_probes.discard(channel_uuid)
+                    if service_stopped_probe:
+                        self._watched.pop(channel_uuid, None)
+                        self._watcher_absences.pop(channel_uuid, None)
+                        self._viewer_absences.pop(channel_uuid, None)
+                    else:
+                        watched = self._watched.get(channel_uuid)
+                        if watched is not None:
+                            watched["probe_state"] = "idle"
+                            watched["probe_active"] = False
+                            watched.pop("active_probe_started_at", None)
+                            watched.pop("next_probe_at", None)
+
+    def _cancel_active_probe(self, channel_uuid: str) -> bool:
+        with self._lock:
+            cancel_event = self._probe_cancel_events.get(str(channel_uuid))
+        if cancel_event is None:
+            return False
+        cancel_event.set()
+        return True
+
+    def _probe_cancelled(self, config: Dict[str, Any]) -> bool:
+        cancel_event = config.get("_shadow_probe_cancel_event")
+        if cancel_event is not None and (
+            self._stop_event.is_set()
+            or bool(hasattr(cancel_event, "is_set") and cancel_event.is_set())
+        ):
+            return True
+        return self._provider_preemption_requested(config)
+
+    @staticmethod
+    def _provider_viewer_preempted(config: Dict[str, Any]) -> bool:
+        state = config.get("_shadow_provider_preemption_state")
+        return bool(isinstance(state, dict) and state.get("viewer_preempted"))
+
+    def _provider_preemption_requested(self, config: Dict[str, Any]) -> bool:
+        if self._provider_viewer_preempted(config):
+            return True
+        preempt_check = config.get("_shadow_provider_preempt_check")
+        if not callable(preempt_check):
+            return False
+        try:
+            should_preempt = bool(preempt_check())
+        except Exception as exc:
+            logger.warning(
+                "Shadow provider viewer-preemption check failed (%s)",
+                type(exc).__name__,
+            )
+            return False
+        if should_preempt:
+            state = config.get("_shadow_provider_preemption_state")
+            if isinstance(state, dict):
+                state["viewer_preempted"] = True
+        return should_preempt
+
+    def _set_probe_state(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        state: str,
+        *,
+        next_probe_at: Optional[float] = None,
+    ) -> None:
+        target["probe_state"] = state
+        target["probe_active"] = state in {"probing", "settling"}
+        if next_probe_at is None:
+            target.pop("next_probe_at", None)
+        else:
+            target["next_probe_at"] = next_probe_at
+        with self._lock:
+            watched = self._watched.get(channel_uuid)
+            if watched is None:
+                return
+            watched["probe_state"] = target["probe_state"]
+            watched["probe_active"] = target["probe_active"]
+            if (
+                target.get("active_probe_started_at") is not None
+                and watched.get("watcher_recovered_after_seconds") is None
+            ):
+                watched["active_probe_started_at"] = target["active_probe_started_at"]
+            if next_probe_at is None:
+                watched.pop("next_probe_at", None)
+            else:
+                watched["next_probe_at"] = next_probe_at
+
+    def _continuous_probe_delay_seconds(self, channel_uuid: str, config: Dict[str, Any]) -> float:
+        """Space out clean continuous probes so Shadow does not become load-bearing.
+
+        Once a media fault is pending, use the normal watch gap so confirmations
+        still happen quickly. Healthy channels use a longer cadence to avoid
+        acting like a permanent second viewer/provider session.
+        """
+        if self._has_pending_detection(channel_uuid):
+            return float(config.get("watch_gap_seconds") or DEFAULT_CONFIG["watch_gap_seconds"])
+        return float(
+            config.get("continuous_probe_interval_seconds")
+            or DEFAULT_CONFIG["continuous_probe_interval_seconds"]
+        )
+
+    def _has_pending_detection(self, channel_uuid: str) -> bool:
+        prefixes = (
+            f"{channel_uuid}:",
+            self._detection_count_key(channel_uuid, VIDEO_FAULT_CONFIRMATION_KEY),
+        )
+        with self._lock:
+            if int(self._blank_counts.get(channel_uuid) or 0) > 0:
+                return True
+            for key, count in self._blank_counts.items():
+                key_text = str(key)
+                if key_text in prefixes or key_text.startswith(prefixes[0]):
+                    if int(count or 0) > 0:
+                        return True
+        return False
+
+    def _probe_target_once(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any]) -> bool:
+        channel_uuid = target["channel_uuid"]
+        try:
+            if self._probe_cancelled(config):
+                return False
+            target.pop("media_recovery_guard_reason", None)
+            target.pop("media_recovery_guard_bypass", None)
+            target["active_probe_started_at"] = self.clock()
+            self._set_probe_state(channel_uuid, target, "probing")
+            proxy_url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
+            media_probe_url, media_probe_source = self._media_probe_url(udi, target, proxy_url)
+            media_probe_config = dict(config)
+            if media_probe_source == "stream_url":
+                media_probe_config["watcher_api_key"] = ""
+            target["media_probe_source"] = media_probe_source
+            use_continuous_blank_probe = (
+                config.get("watch_mode") == "continuous"
+                and self._uses_default_blank_probe
+            )
+            if use_continuous_blank_probe:
+                result = self._run_blank_probe_until_viewer_left(
+                    media_probe_url,
+                    media_probe_config,
+                    udi,
+                    target,
+                    continuous=not bool(media_probe_config.get("loop_detection_enabled")),
+                )
+            else:
+                result = self.blank_probe(media_probe_url, media_probe_config)
+            if self._probe_cancelled(config):
+                return False
+            blank = bool(result.get("blank_detected"))
+            freeze = bool(result.get("freeze_detected"))
+            solid_color = bool(result.get("solid_color_detected"))
+            no_decodable_frames = bool(result.get("no_decodable_frames_detected"))
+            garbled_audio = bool(
+                config.get("garbled_audio_detection_enabled")
+                and result.get("garbled_audio_detected")
+            )
+            silent_audio = bool(
+                config.get("silent_audio_detection_enabled")
+                and result.get("silent_audio_detected")
+            )
+            offline_image = bool(
+                config.get("offline_image_detection_enabled")
+                and result.get("offline_image_detected")
+            )
+            freeze_audio_present = bool(
+                config.get("watch_mode") == "continuous"
+                and freeze
+                and result.get("audio_stream_present") is True
+            )
+            loop = False
+            detection_reason = next(
+                (
+                    reason
+                    for reason, detected in (
+                        ("blank", blank),
+                        ("offline_image", offline_image),
+                        ("solid_color", solid_color),
+                        ("freeze", freeze),
+                        ("no_decodable_frames", no_decodable_frames),
+                        ("garbled_audio", garbled_audio),
+                        ("silent_audio", silent_audio),
+                    )
+                    if detected
+                ),
+                "",
+            )
+            target["last_probe"] = {
+                "started_at": target.get("active_probe_started_at"),
+                "completed_at": self.clock(),
+                "blank_detected": blank,
+                "blank_ratio": result.get("blank_ratio"),
+                "blank_duration_secs": result.get("blank_duration_secs"),
+                "freeze_detected": freeze,
+                "freeze_ratio": result.get("freeze_ratio"),
+                "freeze_duration_secs": result.get("freeze_duration_secs"),
+                "solid_color_detected": solid_color,
+                "solid_color_duration_secs": result.get("solid_color_duration_secs"),
+                "solid_color_normalized_entropy_max": result.get("solid_color_normalized_entropy_max"),
+                "solid_color_sample_count": result.get("solid_color_sample_count"),
+                "no_decodable_frames_detected": no_decodable_frames,
+                "no_decodable_frames_duration_secs": result.get("no_decodable_frames_duration_secs"),
+                "no_decodable_frames_error": result.get("no_decodable_frames_error"),
+                "garbled_audio_detected": garbled_audio,
+                "garbled_audio_error_count": result.get("garbled_audio_error_count"),
+                "garbled_audio_error": result.get("garbled_audio_error"),
+                "silent_audio_detected": silent_audio,
+                "silent_audio_duration_secs": result.get("silent_audio_duration_secs"),
+                "silent_audio_noise_db": result.get("silent_audio_noise_db"),
+                "audio_stream_present": result.get("audio_stream_present"),
+                "offline_image_detected": offline_image,
+                "offline_image_hash": result.get("offline_image_hash"),
+                "offline_image_distance": result.get("offline_image_distance"),
+                "media_probe_source": media_probe_source,
+                "loop_probe_ran": bool(result.get("loop_probe_ran")),
+                "loop_detected": loop,
+                "loop_duration_secs": result.get("loop_duration_secs"),
+                "loop_frames_processed": result.get("loop_frames_processed"),
+                "loop_probe_error": result.get("loop_probe_error"),
+                "loop_probe_sliced": bool(result.get("loop_probe_sliced")),
+                "freeze_audio_present": freeze_audio_present,
+                "freeze_suppressed_audio_present": False,
+            }
+            target["last_probe_thresholds"] = self._detection_thresholds(config)
+
+            if result.get("viewer_left"):
+                fresh_status = {}
+            else:
+                fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+            if self._probe_cancelled(config):
+                return False
+
+            if result.get("viewer_left") or self._real_client_count(fresh_status, config, target) <= 0:
+                self._handle_viewer_left_or_grace(channel_uuid, target, config, fresh_status)
+                return False
+
+            if self._discard_probe_after_stream_change(target, fresh_status, config=config):
+                return True
+
+            if not detection_reason:
+                loop_result = self._run_loop_probe_if_enabled(media_probe_url, target, media_probe_config, udi=udi)
+                if self._probe_cancelled(config):
+                    return False
+                if loop_result:
+                    result.update(loop_result)
+                    loop = bool(loop_result.get("loop_detected"))
+                    target["last_probe"].update({
+                        "loop_probe_ran": bool(loop_result.get("loop_probe_ran")),
+                        "loop_detected": loop,
+                        "loop_duration_secs": loop_result.get("loop_duration_secs"),
+                        "loop_frames_processed": loop_result.get("loop_frames_processed"),
+                        "loop_probe_error": loop_result.get("loop_probe_error"),
+                        "loop_probe_sliced": bool(loop_result.get("loop_probe_sliced")),
+                    })
+                    if loop_result.get("viewer_left"):
+                        self._handle_viewer_left_or_grace(channel_uuid, target, config)
+                        return False
+                    if loop:
+                        detection_reason = "loop"
+                    fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                    if self._real_client_count(fresh_status, config, target) <= 0:
+                        self._handle_viewer_left_or_grace(channel_uuid, target, config, fresh_status)
+                        return False
+                    if self._discard_probe_after_stream_change(target, fresh_status, config=config):
+                        return True
+
+            if not detection_reason:
+                if self._probe_cancelled(config):
+                    return False
+                preserved_pending = self._reset_blank_count_after_probe_ok(channel_uuid, config)
+                self._clear_switch_attempts(channel_uuid)
+                target.pop("media_recovery_guard_observed", None)
+                probe_details = dict(target["last_probe"])
+                if preserved_pending:
+                    probe_details["preserved_pending_detection"] = preserved_pending
+                self._record_event("probe_ok", target, probe_details)
+                return True
+
+            cooldown_remaining = self._cooldown_remaining(channel_uuid)
+            if cooldown_remaining > 0:
+                self._reset_blank_count(channel_uuid)
+                self._record_event(
+                    "cooldown",
+                    target,
+                    {
+                        "cooldown_seconds": cooldown_remaining,
+                        "reason": detection_reason,
+                    },
+                )
+                return True
+
+            guard_details = self._watcher_recovery_guard_details(
+                channel_uuid,
+                target,
+                fresh_status,
+                config,
+                reason=detection_reason,
+            )
+            confirmations = self._required_confirmations(
+                config,
+                detection_reason,
+                guard_details,
+                target=target,
+            )
+            if self._probe_cancelled(config):
+                return False
+            recovery_guard_bypass: Optional[Dict[str, Any]] = None
+            if guard_details is not None:
+                next_count = self._current_detection_count(channel_uuid, detection_reason) + 1
+                recovery_guard_bypass = self._media_recovery_guard_bypass_details(
+                    target,
+                    fresh_status,
+                    config,
+                    reason=detection_reason,
+                    guard_details=guard_details,
+                    confirmed_count=next_count,
+                    required_confirmations=confirmations,
+                    require_confirmed=False,
+                )
+                if recovery_guard_bypass is None:
+                    self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
+                    return False
+                target["media_recovery_guard_reason"] = detection_reason
+                target["media_recovery_guard_bypass"] = recovery_guard_bypass
+
+            blank_count = self._increment_blank_count(channel_uuid, detection_reason)
+            if blank_count < confirmations:
+                pending_details = {
+                    "confirmations": blank_count,
+                    "required": confirmations,
+                    "reason": detection_reason,
+                }
+                if recovery_guard_bypass:
+                    pending_details["recovery_guard"] = recovery_guard_bypass
+                self._record_event(
+                    f"{detection_reason}_pending",
+                    target,
+                    pending_details,
+                )
+                return True
+
+            if self._probe_cancelled(config):
+                return False
+            self._handle_confirmed_blank(udi, target, config, reason=detection_reason)
+            return False
+        except Exception:
+            logger.error(
+                f"Shadow blank monitor probe failed for {_ref('channel', channel_uuid)}",
+                exc_info=True,
+            )
+            return False
+
+    def _handle_confirmed_blank(self, udi: Any, target: Dict[str, Any], config: Dict[str, Any], *, reason: str = "blank") -> None:
+        channel_uuid = target["channel_uuid"]
+        if self._probe_cancelled(config):
+            return
+        fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+        if self._probe_cancelled(config):
+            return
+        if self._real_client_count(fresh_status, config, target) <= 0:
+            self._handle_viewer_left_or_grace(channel_uuid, target, config, fresh_status)
+            return
+
+        fresh_stream_id = self._extract_stream_id(fresh_status) or target.get("stream_id")
+        guard_details = self._watcher_recovery_guard_details(
+            channel_uuid,
+            target,
+            fresh_status,
+            config,
+            reason=reason,
+        )
+        recovery_guard_bypass: Optional[Dict[str, Any]] = None
+        if guard_details is not None:
+            current_count = self._current_detection_count(channel_uuid, reason)
+            required_confirmations = self._required_confirmations(
+                config,
+                reason,
+                guard_details,
+                target=target,
+            )
+            recovery_guard_bypass = self._media_recovery_guard_bypass_details(
+                target,
+                fresh_status,
+                config,
+                reason=reason,
+                guard_details=guard_details,
+                confirmed_count=current_count,
+                required_confirmations=required_confirmations,
+                require_confirmed=True,
+            )
+            if recovery_guard_bypass is None:
+                self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
+                return
+        else:
+            observed_guard = target.get("media_recovery_guard_observed")
+            if isinstance(observed_guard, dict) and observed_guard.get("reason") == reason:
+                current_count = self._current_detection_count(channel_uuid, reason)
+                required_confirmations = self._required_confirmations(
+                    config,
+                    reason,
+                    observed_guard,
+                    target=target,
+                )
+                recovery_guard_bypass = self._media_recovery_guard_bypass_details(
+                    target,
+                    fresh_status,
+                    config,
+                    reason=reason,
+                    guard_details=observed_guard,
+                    confirmed_count=current_count,
+                    required_confirmations=required_confirmations,
+                    require_confirmed=True,
+                )
+                if recovery_guard_bypass is not None:
+                    recovery_guard_bypass["observed_between_confirmations"] = True
+
+        if target.get("stream_id") and fresh_stream_id != target.get("stream_id"):
+            self._reset_blank_count(channel_uuid)
+            self._clear_switch_attempts(channel_uuid)
+            self._record_event(
+                "stale_stream_guard",
+                target,
+                {
+                    "reason": reason,
+                    "current_stream_ref": _ref("stream", fresh_stream_id),
+                },
+            )
+            return
+
+        if self._loop_switch_pre_probe_required(config, reason):
+            self._set_cooldown(channel_uuid, config)
+            self._reset_blank_count(channel_uuid)
+            self._record_event(
+                "loop_pre_probe_required",
+                target,
+                {
+                    "reason": reason,
+                    "next_stream_pre_probe_enabled": False,
+                    "operator_action": "enable_next_stream_pre_probe",
+                },
+            )
+            return
+
+        if not self._switch_allowed(channel_uuid, config):
+            self._record_event("switch_rate_limited", target, {"reason": reason})
+            return
+
+        attempted_targets = self._attempted_switch_targets(channel_uuid, fresh_stream_id)
+        if config.get("next_stream_pre_probe_enabled"):
+            alternative, pre_probe_details = self._choose_preprobed_alternative_stream(
+                udi,
+                target,
+                config,
+                fresh_stream_id,
+                excluded_stream_ids=attempted_targets,
+                reason=reason,
+            )
+        else:
+            resolved_channel_id = self._resolve_channel_id(
+                udi,
+                target.get("channel_id"),
+                channel_uuid=target.get("channel_uuid"),
+                current_stream_id=fresh_stream_id,
+                previous_target=target,
+            )
+            if resolved_channel_id is not None and target.get("channel_id") != resolved_channel_id:
+                target["channel_id"] = resolved_channel_id
+                target["channel_ref"] = _ref("channel", resolved_channel_id)
+            alternative = self._choose_alternative_stream(
+                udi,
+                resolved_channel_id,
+                fresh_stream_id,
+                excluded_stream_ids=attempted_targets,
+            )
+            pre_probe_details = None
+        if self._probe_cancelled(config):
+            return
+        if not alternative:
+            self._set_cooldown(channel_uuid, config)
+            self._reset_blank_count(channel_uuid)
+            details = {"reason": reason}
+            if pre_probe_details:
+                details["pre_probe"] = pre_probe_details
+                self._record_pre_probe_metric(
+                    "switch_prevented_by_preprobe",
+                    target,
+                    pre_probe_details,
+                )
+            self._record_event("no_alternative", target, details)
+            return
+
+        event_origin_stream_id = fresh_stream_id
+        origin_stream_source = "dispatcharr_proxy_status"
+        if pre_probe_details:
+            inferred_origin_stream_id = pre_probe_details.pop(
+                "_inferred_origin_stream_id",
+                None,
+            )
+            if inferred_origin_stream_id is not None:
+                event_origin_stream_id = int(inferred_origin_stream_id)
+                origin_stream_source = "content_matching_preprobe"
+            elif pre_probe_details.get("reported_current_reprobe"):
+                origin_stream_source = "dispatcharr_proxy_status_stale_unresolved"
+
+        switch_details = {
+            "target_stream_ref": _ref("stream", alternative),
+            "reason": reason,
+            "origin_stream_source": origin_stream_source,
+        }
+        if pre_probe_details:
+            switch_details["pre_probe"] = pre_probe_details
+        if recovery_guard_bypass:
+            switch_details["recovery_guard"] = recovery_guard_bypass
+
+        if config.get("dry_run"):
+            with self._config_mutation_lock:
+                with self._lock:
+                    snapshot_is_current = self._config_snapshot_is_current_locked(config)
+                    allowed, _reason = self._target_allowed_by_config_locked(
+                        channel_uuid,
+                        target,
+                        self._config,
+                    )
+                    cancelled = self._probe_cancelled(config)
+                if not snapshot_is_current or not allowed or cancelled:
+                    return
+                self._set_cooldown(channel_uuid, config)
+                self._record_event(
+                    "dry_run_switch",
+                    target,
+                    switch_details,
+                )
+            return
+
+        # Proxy status can update the shared watched target to the selected
+        # stream while post-switch verification is still running. Preserve the
+        # faulting stream for an accurate switch audit trail.
+        switch_event_target = dict(target)
+        switch_event_target["stream_id"] = event_origin_stream_id
+        switch_event_target["stream_ref"] = _ref("stream", event_origin_stream_id)
+        switch_details["origin_stream_ref"] = switch_event_target["stream_ref"]
+
+        switch_details["switch_channel_ref"] = _ref("channel", channel_uuid)
+        # Dispatcharr's change_stream route is UUID-based even though proxy
+        # status also carries StreamFlow's numeric channel id.
+        switch_channel_id = channel_uuid or target.get("channel_id")
+        api_success = self._switch_stream_with_config_fence(
+            switch_channel_id,
+            alternative,
+            channel_uuid=channel_uuid,
+            target=target,
+            config=config,
+            origin_stream_id=fresh_stream_id,
+            event_target=switch_event_target,
+            event_details=switch_details,
+        )
+        if api_success is None:
+            return
+        if self._probe_cancelled(config):
+            return
+        observed_stream_id: Optional[int] = None
+        verification_details: Dict[str, Any] = {}
+        success = api_success
+        if api_success and self._uses_default_switch_stream:
+            success, observed_stream_id, verification_details = self._verify_active_stream_after_switch(
+                udi,
+                target,
+                alternative,
+                config,
+                require_proxy_probe=bool(
+                    pre_probe_details and pre_probe_details.get("reported_current_reprobe")
+                ),
+            )
+        if self._probe_cancelled(config):
+            return
+        self._reset_blank_count(channel_uuid)
+        if api_success and not success:
+            self._set_cooldown(channel_uuid, config)
+        switch_details["switch_api_success"] = api_success
+        if observed_stream_id is not None:
+            switch_details["observed_stream_ref"] = _ref("stream", observed_stream_id)
+        if verification_details:
+            verification_details = dict(verification_details)
+            verification_details.pop("accepted", None)
+            switch_details.update(verification_details)
+        self._record_event(
+            "switch_success" if success else "switch_failed",
+            switch_event_target,
+            {
+                **switch_details,
+                "post_switch_verification": bool(success),
+            },
+        )
+
+    def _switch_stream_with_config_fence(
+        self,
+        switch_channel_id: Any,
+        stream_id: int,
+        *,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        origin_stream_id: Optional[int],
+        event_target: Optional[Dict[str, Any]] = None,
+        event_details: Optional[Dict[str, Any]] = None,
+    ) -> Optional[bool]:
+        """Linearize a recovery switch against config scope/exclusion writes."""
+        with self._config_mutation_lock:
+            with self._lock:
+                snapshot_is_current = self._config_snapshot_is_current_locked(config)
+                allowed, _reason = self._target_allowed_by_config_locked(
+                    channel_uuid,
+                    target,
+                    self._config,
+                )
+                cancelled = self._probe_cancelled(config)
+            if not snapshot_is_current or not allowed or cancelled:
+                return None
+            self._record_switch_attempt(channel_uuid, origin_stream_id, stream_id)
+            api_success = bool(self.switch_stream(switch_channel_id, stream_id=stream_id))
+            if api_success:
+                self._record_successful_switch(channel_uuid, config)
+            else:
+                self._set_cooldown(channel_uuid, config)
+            switch_attempt_ref = f"switch-{uuid.uuid4().hex}"
+            if event_details is not None:
+                # The caller records the final verification event from this
+                # same dictionary.  A shared opaque reference lets status
+                # distinguish an unresolved API completion from the normal
+                # API-completed + verified audit pair.
+                event_details["switch_attempt_ref"] = switch_attempt_ref
+            completed_details = dict(event_details or {})
+            completed_details.update({
+                "switch_attempt_ref": switch_attempt_ref,
+                "switch_api_success": api_success,
+                "post_switch_verification": False,
+                "post_switch_verification_pending": bool(
+                    api_success and self._uses_default_switch_stream
+                ),
+            })
+            self._record_event(
+                "switch_api_completed",
+                event_target or target,
+                completed_details,
+            )
+            return api_success
+
+    def _verify_active_stream_after_switch(
+        self,
+        udi: Any,
+        target: Dict[str, Any],
+        expected_stream_id: int,
+        config: Dict[str, Any],
+        *,
+        require_proxy_probe: bool = False,
+    ) -> tuple[bool, Optional[int], Dict[str, Any]]:
+        verification_window_seconds = (
+            45.0
+            if self._normalize_proxy_output_format(target.get("viewer_output_format")) == "fmp4"
+            else 35.0
+        )
+        verification_started = time.monotonic()
+        deadline = verification_started + verification_window_seconds
+        observed_stream_id: Optional[int] = None
+        last_probe_details: Optional[Dict[str, Any]] = None
+        proxy_probe_attempts = 0
+        while time.monotonic() < deadline and not self._probe_cancelled(config):
+            try:
+                status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+            except Exception as exc:
+                logger.warning(f"Shadow blank monitor switch verification status fetch failed: {exc}")
+                status = {}
+            stream_id = self._extract_stream_id(status)
+            if stream_id is not None:
+                observed_stream_id = stream_id
+            status_matches = False
+            try:
+                status_matches = stream_id is not None and int(stream_id) == int(expected_stream_id)
+            except (TypeError, ValueError):
+                status_matches = False
+            if status_matches and not require_proxy_probe:
+                return True, observed_stream_id, {
+                    "post_switch_verification_mode": "status_stream_id",
+                }
+
+            # Dispatcharr can switch the owner worker before its shared proxy
+            # status exposes the new stream ID. Give that cheap status path a
+            # short settle period, then verify the actual viewer output while
+            # there is still enough time for a reconnect retry.
+            settle_elapsed = time.monotonic() - verification_started
+            should_probe_proxy = require_proxy_probe or settle_elapsed >= 3.0
+            if should_probe_proxy:
+                remaining_seconds = max(0.0, deadline - time.monotonic())
+                probe_duration = self._post_switch_probe_duration_seconds(config)
+                if remaining_seconds < probe_duration + 1.0:
+                    break
+                release = self._wait_for_channel_probe_client_release(
+                    udi,
+                    target,
+                    config,
+                    initial_status=status,
+                    stop_event=config.get("_shadow_probe_cancel_event"),
+                    max_wait_seconds=max(0.0, remaining_seconds - probe_duration - 1.0),
+                )
+                if not release["released"]:
+                    if last_probe_details is None:
+                        last_probe_details = {
+                            "post_switch_verification_mode": "proxy_probe",
+                            "post_switch_proxy_probe_accepted": False,
+                            "post_switch_proxy_probe_attempts": proxy_probe_attempts,
+                            "post_switch_proxy_release": {
+                                "reason": release["reason"],
+                                "waited_seconds": release["waited_seconds"],
+                                "watcher_client_count": release["watcher_client_count"],
+                            },
+                        }
+                    break
+                proxy_probe_attempts += 1
+                probe_details = self._verify_proxy_output_after_switch(
+                    target,
+                    config,
+                    max_runtime_seconds=remaining_seconds,
+                )
+                last_probe_details = self._post_switch_verification_details(
+                    observed_stream_id,
+                    expected_stream_id,
+                    verification_window_seconds,
+                    probe_details,
+                    require_proxy_probe=require_proxy_probe,
+                )
+                last_probe_details["post_switch_proxy_probe_attempts"] = proxy_probe_attempts
+                if probe_details.get("accepted"):
+                    return True, observed_stream_id, last_probe_details
+            time.sleep(0.5)
+
+        if self._probe_cancelled(config):
+            return False, observed_stream_id, {
+                "post_switch_verification_mode": "cancelled",
+            }
+
+        if last_probe_details is not None:
+            return False, observed_stream_id, last_probe_details
+
+        release = self._wait_for_channel_probe_client_release(
+            udi,
+            target,
+            config,
+            stop_event=config.get("_shadow_probe_cancel_event"),
+            max_wait_seconds=PROBE_CLIENT_RELEASE_TIMEOUT_SECONDS,
+        )
+        if not release["released"]:
+            return False, observed_stream_id, {
+                "post_switch_verification_mode": "proxy_probe",
+                "post_switch_proxy_probe_accepted": False,
+                "post_switch_proxy_probe_attempts": proxy_probe_attempts,
+                "post_switch_proxy_release": {
+                    "reason": release["reason"],
+                    "waited_seconds": release["waited_seconds"],
+                    "watcher_client_count": release["watcher_client_count"],
+                },
+            }
+        probe_details = self._verify_proxy_output_after_switch(target, config)
+        details = self._post_switch_verification_details(
+            observed_stream_id,
+            expected_stream_id,
+            verification_window_seconds,
+            probe_details,
+            require_proxy_probe=False,
+        )
+        return bool(probe_details.get("accepted")), observed_stream_id, details
+
+    def _wait_for_channel_probe_client_release(
+        self,
+        udi: Any,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        initial_status: Optional[Dict[str, Any]] = None,
+        stop_event: Optional[threading.Event] = None,
+        max_wait_seconds: float = PROBE_CLIENT_RELEASE_TIMEOUT_SECONDS,
+    ) -> Dict[str, Any]:
+        """Wait until a closed Shadow proxy probe is absent for consecutive polls."""
+        started = time.monotonic()
+        deadline = started + max(0.0, float(max_wait_seconds))
+        status = initial_status if isinstance(initial_status, dict) else None
+        stable_absent_polls = 0
+        watcher_count = 0
+        blocker = stop_event or self._stop_event
+
+        while True:
+            if status is None:
+                try:
+                    status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                except Exception:
+                    status = {}
+
+            watcher_count = self._blocking_watcher_count(
+                target,
+                self._watcher_client_count(status, config),
+            )
+            if watcher_count <= 0:
+                stable_absent_polls += 1
+                if stable_absent_polls >= PROBE_CLIENT_RELEASE_STABLE_POLLS:
+                    return {
+                        "released": True,
+                        "reason": "released",
+                        "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                        "watcher_client_count": 0,
+                        "status": status,
+                    }
+            else:
+                stable_absent_polls = 0
+
+            if self._real_client_count(status, config, target) <= 0:
+                return {
+                    "released": False,
+                    "reason": "viewer_left",
+                    "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                    "watcher_client_count": watcher_count,
+                    "status": status,
+                }
+
+            now = time.monotonic()
+            if now >= deadline:
+                return {
+                    "released": False,
+                    "reason": "timeout",
+                    "waited_seconds": round(max(0.0, now - started), 3),
+                    "watcher_client_count": watcher_count,
+                    "status": status,
+                }
+
+            wait_seconds = min(PROBE_CLIENT_RELEASE_POLL_SECONDS, max(0.0, deadline - now))
+            if blocker.is_set():
+                return {
+                    "released": False,
+                    "reason": "stopped",
+                    "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                    "watcher_client_count": watcher_count,
+                    "status": status,
+                }
+            time.sleep(wait_seconds)
+            if blocker.is_set():
+                return {
+                    "released": False,
+                    "reason": "stopped",
+                    "waited_seconds": round(max(0.0, time.monotonic() - started), 3),
+                    "watcher_client_count": watcher_count,
+                    "status": status,
+                }
+            status = None
+
+    @staticmethod
+    def _post_switch_verification_details(
+        observed_stream_id: Optional[int],
+        expected_stream_id: int,
+        verification_window_seconds: float,
+        probe_details: Dict[str, Any],
+        *,
+        require_proxy_probe: bool,
+    ) -> Dict[str, Any]:
+        if observed_stream_id is None:
+            return dict(probe_details)
+
+        details: Dict[str, Any] = {
+            "post_switch_verification_mode": "status_stream_id",
+            "expected_stream_ref": _ref("stream", expected_stream_id),
+            "post_switch_verification_window_seconds": int(verification_window_seconds),
+        }
+        try:
+            status_matches = int(observed_stream_id) == int(expected_stream_id)
+        except (TypeError, ValueError):
+            status_matches = False
+        if not status_matches:
+            details["post_switch_status_mismatch"] = True
+        if require_proxy_probe:
+            details["post_switch_proxy_probe_required"] = True
+        details.update(probe_details)
+        if probe_details.get("accepted"):
+            details["post_switch_verification_mode"] = "status_stream_id+proxy_probe"
+        return details
+
+    def _verify_proxy_output_after_switch(
+        self,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        max_runtime_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        channel_uuid = target.get("channel_uuid")
+        if not channel_uuid:
+            return {
+                "post_switch_verification_mode": "proxy_probe",
+                "post_switch_proxy_probe": {"error": "missing_channel_uuid"},
+            }
+        try:
+            url = self._channel_proxy_url(str(channel_uuid), target.get("viewer_output_format"))
+        except Exception as exc:
+            return {
+                "post_switch_verification_mode": "proxy_probe",
+                "post_switch_proxy_probe": {"error": str(exc)},
+            }
+
+        verify_config = dict(config)
+        verify_config["probe_duration_seconds"] = self._post_switch_probe_duration_seconds(config)
+        verify_config["loop_detection_enabled"] = False
+        if max_runtime_seconds is not None:
+            verify_config["_shadow_probe_subprocess_timeout_seconds"] = max(
+                1.0,
+                min(
+                    float(max_runtime_seconds),
+                    float(verify_config["probe_duration_seconds"]) + 3.0,
+                ),
+            )
+            # The selected target was already checked directly by the enabled
+            # next-stream pre-probe. Avoid spending another 15 seconds on an
+            # offline-frame capture when this reconnect probe received no media.
+            if config.get("next_stream_pre_probe_enabled"):
+                verify_config["offline_image_detection_enabled"] = False
+        try:
+            result = self.blank_probe(url, verify_config)
+        except Exception as exc:
+            return {
+                "post_switch_verification_mode": "proxy_probe",
+                "post_switch_proxy_probe": {"error": str(exc)},
+            }
+
+        rejection_reason = self._pre_probe_rejection_reason(result)
+        summary = {
+            key: result.get(key)
+            for key in (
+                "blank_detected",
+                "freeze_detected",
+                "no_decodable_frames_detected",
+                "garbled_audio_detected",
+                "silent_audio_detected",
+                "offline_image_detected",
+                "probe_incomplete",
+                "probe_elapsed_seconds",
+                "probe_expected_duration_seconds",
+                "probe_media_window_complete",
+                "probe_media_duration_seconds",
+                "decoded_video_frames",
+                "probe_teardown_timeout",
+                "timeout",
+            )
+            if key in result
+        }
+        if rejection_reason:
+            summary["rejection_reason"] = rejection_reason
+        return {
+            "post_switch_verification_mode": "proxy_probe",
+            "post_switch_proxy_probe": summary,
+            "post_switch_proxy_probe_accepted": rejection_reason is None,
+            "accepted": rejection_reason is None,
+        }
+
+    @staticmethod
+    def _post_switch_probe_duration_seconds(config: Dict[str, Any]) -> int:
+        return max(
+            3,
+            min(12, ShadowBlankMonitorService._effective_pre_probe_duration_seconds(config)),
+        )
+
+    def _ordered_alternative_streams(
+        self,
+        udi: Any,
+        channel_id: Optional[int],
+        current_stream_id: Optional[int],
+        *,
+        excluded_stream_ids: Optional[Iterable[int]] = None,
+    ) -> List[int]:
+        if channel_id is None:
+            return []
+        channel = udi.get_channel_by_id(channel_id) if hasattr(udi, "get_channel_by_id") else None
+        stream_ids = list((channel or {}).get("streams") or [])
+        if not stream_ids and hasattr(udi, "get_channel_streams"):
+            stream_ids = [
+                stream.get("id")
+                for stream in (udi.get_channel_streams(channel_id) or [])
+                if isinstance(stream, dict) and stream.get("id") is not None
+            ]
+        stream_ids = [int(item) for item in stream_ids if str(item).isdigit()]
+        if len(stream_ids) <= 1:
+            return []
+        excluded = {
+            int(item)
+            for item in (excluded_stream_ids or [])
+            if item is not None and str(item).isdigit()
+        }
+        if current_stream_id in stream_ids:
+            index = stream_ids.index(current_stream_id)
+            ordered = stream_ids[index + 1 :] + stream_ids[:index]
+        else:
+            ordered = stream_ids
+        return [
+            sid
+            for sid in ordered
+            if sid != current_stream_id and sid not in excluded
+        ]
+
+    def _choose_alternative_stream(
+        self,
+        udi: Any,
+        channel_id: Optional[int],
+        current_stream_id: Optional[int],
+        *,
+        excluded_stream_ids: Optional[Iterable[int]] = None,
+    ) -> Optional[int]:
+        return next(
+            iter(
+                self._ordered_alternative_streams(
+                    udi,
+                    channel_id,
+                    current_stream_id,
+                    excluded_stream_ids=excluded_stream_ids,
+                )
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _loop_switch_pre_probe_required(config: Dict[str, Any], reason: str) -> bool:
+        return (
+            str(reason or "") == "loop"
+            and LOOP_SWITCH_REQUIRES_PRE_PROBE
+            and not bool(config.get("next_stream_pre_probe_enabled"))
+        )
+
+    @staticmethod
+    def _loop_detection_gate_status(config: Dict[str, Any]) -> Dict[str, Any]:
+        loop_enabled = bool(config.get("loop_detection_enabled"))
+        pre_probe_enabled = bool(config.get("next_stream_pre_probe_enabled"))
+        return {
+            "enabled": loop_enabled,
+            "active_real_viewer_required": True,
+            "confirmation_required": True,
+            "cooldown_required": True,
+            "switch_rate_limit_required": True,
+            "stale_stream_guard_required": True,
+            "watcher_recovery_guard_required": True,
+            "next_stream_pre_probe_required": LOOP_SWITCH_REQUIRES_PRE_PROBE,
+            "next_stream_pre_probe_enabled": pre_probe_enabled,
+            "switch_gate_satisfied": not (
+                loop_enabled
+                and LOOP_SWITCH_REQUIRES_PRE_PROBE
+                and not pre_probe_enabled
+            ),
+        }
+
+    def _choose_preprobed_alternative_stream(
+        self,
+        udi: Any,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        current_stream_id: Optional[int],
+        *,
+        excluded_stream_ids: Optional[Iterable[int]] = None,
+        reason: str,
+    ) -> tuple[Optional[int], Optional[Dict[str, Any]]]:
+        if self._probe_cancelled(config):
+            return None, None
+        last_details: Optional[Dict[str, Any]] = None
+        matching_fault_candidate_ids: List[int] = []
+        channel_id = self._resolve_channel_id(
+            udi,
+            target.get("channel_id"),
+            channel_uuid=target.get("channel_uuid"),
+            current_stream_id=current_stream_id,
+            previous_target=target,
+        )
+        if channel_id is not None and target.get("channel_id") != channel_id:
+            target["channel_id"] = channel_id
+            target["channel_ref"] = _ref("channel", channel_id)
+        excluded = {
+            int(item)
+            for item in (excluded_stream_ids or [])
+            if item is not None and str(item).isdigit()
+        }
+        candidate_ids = self._ordered_alternative_streams(
+            udi,
+            channel_id,
+            current_stream_id,
+            excluded_stream_ids=excluded_stream_ids,
+        )
+        # Dispatcharr can change the live fMP4 input on its owner worker while
+        # proxy status still reports the previous stream ID. After every true
+        # alternative has failed its pre-probe, retry the reported current
+        # stream as a final recovery candidate. Its own pre-probe still has to
+        # pass, and the resulting switch requires content verification.
+        if (
+            candidate_ids
+            and current_stream_id is not None
+            and int(current_stream_id) not in excluded
+            and self._stream_for_id(udi, channel_id, int(current_stream_id)) is not None
+        ):
+            candidate_ids.append(int(current_stream_id))
+
+        for candidate_id in candidate_ids:
+            if self._probe_cancelled(config):
+                return None, last_details
+            candidate_ref = _ref("stream", candidate_id)
+            candidate_stream = self._stream_for_id(udi, channel_id, candidate_id)
+            candidate_url = self._stream_url(candidate_stream)
+            configured_duration = int(config.get("next_stream_pre_probe_duration_seconds", 8))
+            effective_duration = self._effective_pre_probe_duration_seconds(config)
+            details: Dict[str, Any] = {
+                "enabled": True,
+                "target_stream_ref": candidate_ref,
+                "duration_seconds": effective_duration,
+            }
+            if effective_duration != configured_duration:
+                details["configured_duration_seconds"] = configured_duration
+            if current_stream_id is not None and int(candidate_id) == int(current_stream_id):
+                details["reported_current_reprobe"] = True
+            if not candidate_url:
+                if self._probe_cancelled(config):
+                    return None, last_details
+                details["result"] = "missing_url"
+                self._record_pre_probe_metric("preprobe_skipped_missing_url", target, details)
+                last_details = details
+                self._record_event("pre_probe_unavailable", target, {**details, "reason": reason})
+                continue
+
+            provider_slot = self._acquire_pre_probe_provider_slot(udi, candidate_stream)
+            if self._probe_cancelled(config):
+                if provider_slot.get("acquired"):
+                    self._release_pre_probe_provider_slot(provider_slot)
+                return None, last_details
+            details.update(provider_slot.get("details") or {})
+            if not provider_slot.get("acquired"):
+                details["result"] = "rejected"
+                details["rejection_reason"] = provider_slot.get("reason") or "provider_capacity"
+                details["slot_scope"] = self._pre_probe_slot_scope(details["rejection_reason"])
+                self._record_pre_probe_metric(
+                    self._pre_probe_slot_metric(details["rejection_reason"]),
+                    target,
+                    details,
+                )
+                last_details = details
+                self._record_event("pre_probe_rejected", target, {**details, "reason": reason})
+                continue
+
+            self._record_pre_probe_metric("preprobe_attempted", target, details)
+            probe_started = time.monotonic()
+            probe_config = dict(config)
+            provider_preempt_check = provider_slot.get("provider_preempt_check")
+            if callable(provider_preempt_check):
+                probe_config["_shadow_provider_preempt_check"] = provider_preempt_check
+            provider_preemption_state = provider_slot.get("preemption_state")
+            if isinstance(provider_preemption_state, dict):
+                probe_config["_shadow_provider_preemption_state"] = provider_preemption_state
+            try:
+                probe_result = self._run_next_stream_pre_probe(
+                    str(provider_slot.get("url") or candidate_url),
+                    probe_config,
+                    reason=reason,
+                )
+            finally:
+                self._release_pre_probe_provider_slot(provider_slot)
+            if self._probe_cancelled(config):
+                return None, last_details
+            rejection_reason = self._pre_probe_rejection_reason(probe_result)
+            details["elapsed_ms"] = max(0, int((time.monotonic() - probe_started) * 1000))
+            details.update({
+                "result": "rejected" if rejection_reason else "ok",
+                "rejection_reason": rejection_reason,
+                "probe_incomplete": bool(probe_result.get("probe_incomplete")),
+                "probe_elapsed_seconds": probe_result.get("probe_elapsed_seconds"),
+                "probe_expected_duration_seconds": probe_result.get("probe_expected_duration_seconds"),
+                "blank_detected": bool(probe_result.get("blank_detected")),
+                "freeze_detected": bool(probe_result.get("freeze_detected")),
+                "no_decodable_frames_detected": bool(probe_result.get("no_decodable_frames_detected")),
+                "garbled_audio_detected": bool(probe_result.get("garbled_audio_detected")),
+                "silent_audio_detected": bool(probe_result.get("silent_audio_detected")),
+                "audio_stream_present": probe_result.get("audio_stream_present"),
+                "offline_image_detected": bool(probe_result.get("offline_image_detected")),
+                "loop_probe_ran": bool(probe_result.get("loop_probe_ran")),
+                "loop_detected": bool(probe_result.get("loop_detected")),
+                "loop_duration_secs": probe_result.get("loop_duration_secs"),
+                "viewer_preempted": bool(probe_result.get("viewer_preempted")),
+            })
+            last_details = details
+            if rejection_reason:
+                if self._probe_cancelled(config):
+                    return None, last_details
+                if rejection_reason == "viewer_preempted":
+                    details["slot_scope"] = self._pre_probe_slot_scope(rejection_reason)
+                    self._record_pre_probe_metric(
+                        self._pre_probe_slot_metric(rejection_reason),
+                        target,
+                        details,
+                    )
+                    self._record_event(
+                        "pre_probe_rejected",
+                        target,
+                        {**details, "reason": reason},
+                    )
+                    continue
+                if (
+                    self._pre_probe_fault_matches_active_fault(
+                        rejection_reason,
+                        reason,
+                    )
+                    and current_stream_id is not None
+                    and int(candidate_id) != int(current_stream_id)
+                ):
+                    matching_fault_candidate_ids.append(int(candidate_id))
+                metric = "preprobe_timeout" if rejection_reason == "timeout" else "preprobe_rejected_media_fault"
+                self._record_pre_probe_metric(metric, target, details)
+                self._record_event("pre_probe_rejected", target, {**details, "reason": reason})
+                continue
+            if details.get("reported_current_reprobe"):
+                details["reported_current_stream_ref"] = _ref("stream", current_stream_id)
+                unique_fault_candidates = list(dict.fromkeys(matching_fault_candidate_ids))
+                if len(unique_fault_candidates) == 1:
+                    inferred_origin_stream_id = unique_fault_candidates[0]
+                    details["_inferred_origin_stream_id"] = inferred_origin_stream_id
+                    details["inferred_origin_stream_ref"] = _ref(
+                        "stream",
+                        inferred_origin_stream_id,
+                    )
+                    details["origin_inference"] = (
+                        "single_preprobe_candidate_reproduced_active_fault"
+                    )
+                elif unique_fault_candidates:
+                    details["origin_inference"] = "ambiguous_preprobe_fault_candidates"
+                    details["matching_fault_candidate_count"] = len(unique_fault_candidates)
+            if self._probe_cancelled(config):
+                return None, last_details
+            self._record_pre_probe_metric("preprobe_success", target, details)
+            return candidate_id, details
+        return None, last_details
+
+    def _stream_for_id(self, udi: Any, channel_id: Optional[int], stream_id: int) -> Optional[Dict[str, Any]]:
+        stream: Optional[Dict[str, Any]] = None
+        if hasattr(udi, "get_stream_by_id"):
+            stream = udi.get_stream_by_id(stream_id)
+        if not stream and channel_id is not None and hasattr(udi, "get_channel_streams"):
+            stream_ref = str(stream_id)
+            stream = next(
+                (
+                    candidate
+                    for candidate in (udi.get_channel_streams(channel_id) or [])
+                    if isinstance(candidate, dict) and str(candidate.get("id") or "") == stream_ref
+                ),
+                None,
+            )
+        return stream if isinstance(stream, dict) else None
+
+    @staticmethod
+    def _stream_url(stream: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(stream, dict):
+            return None
+        url = str(stream.get("url") or "").strip()
+        return url or None
+
+    @staticmethod
+    def _stream_m3u_account_id(stream: Optional[Dict[str, Any]]) -> Optional[int]:
+        if not isinstance(stream, dict):
+            return None
+        account_id = stream.get("m3u_account_id")
+        if account_id in (None, ""):
+            account_id = stream.get("m3u_account")
+        try:
+            return int(account_id) if account_id not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    def _acquire_pre_probe_provider_slot(
+        self,
+        udi: Any,
+        stream: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        account_id = self._stream_m3u_account_id(stream)
+        details: Dict[str, Any] = {"provider_limited": account_id is not None}
+        if account_id is not None:
+            details["m3u_account_ref"] = _ref("m3u_account", account_id)
+
+        if account_id is None:
+            return {
+                "acquired": True,
+                "reason": "custom_stream",
+                "url": self._stream_url(stream),
+                "details": details,
+            }
+
+        try:
+            from apps.stream.concurrent_stream_limiter import (
+                get_account_limiter,
+                initialize_account_limits,
+            )
+
+            limiter = get_account_limiter()
+            limiter.udi_manager = udi
+            if hasattr(udi, "get_m3u_accounts"):
+                accounts = udi.get_m3u_accounts() or []
+                if accounts:
+                    initialize_account_limits(accounts)
+
+            acquired, limit_reason = limiter.acquire(account_id, timeout=0)
+            if not acquired:
+                details["provider_limit_reason"] = limit_reason
+                return {
+                    "acquired": False,
+                    "reason": limit_reason or "provider_capacity",
+                    "details": details,
+                }
+
+            profile_acquired = False
+            profile = None
+            try:
+                profile_acquired, profile_reason, profile, url = (
+                    limiter.reserve_profile_for_stream_with_url(stream or {})
+                )
+                if not profile_acquired:
+                    details["provider_limit_reason"] = profile_reason
+                    limiter.release(account_id)
+                    return {
+                        "acquired": False,
+                        "reason": profile_reason or "provider_capacity",
+                        "details": details,
+                    }
+
+                if not isinstance(url, str) or not url:
+                    limiter.release_profile(profile)
+                    limiter.release(account_id)
+                    return {
+                        "acquired": False,
+                        "reason": "profile_url_incompatible",
+                        "details": details,
+                    }
+                if profile:
+                    details["profile_url_transformed"] = (
+                        url != self._stream_url(stream)
+                    )
+                if profile:
+                    details["m3u_profile_ref"] = _ref("m3u_profile", profile.get("id"))
+                details["provider_slot_acquired"] = True
+                preemption_token = object()
+                preemption_state = {"viewer_preempted": False}
+
+                def provider_preempt_check() -> bool:
+                    if preemption_state["viewer_preempted"]:
+                        return True
+                    should_preempt_profile = getattr(
+                        limiter,
+                        "should_preempt_profile_for_viewer",
+                        None,
+                    )
+                    if not callable(should_preempt_profile):
+                        return False
+                    try:
+                        should_preempt = bool(should_preempt_profile(
+                            profile,
+                            account_id=account_id,
+                            reservation_token=preemption_token,
+                        ))
+                    except Exception as exc:
+                        logger.warning(
+                            "Shadow provider viewer-preemption poll failed (%s)",
+                            type(exc).__name__,
+                        )
+                        return False
+                    if should_preempt:
+                        preemption_state["viewer_preempted"] = True
+                    return should_preempt
+
+                return {
+                    "acquired": True,
+                    "reason": "acquired",
+                    "limiter": limiter,
+                    "account_id": account_id,
+                    "profile": profile,
+                    "url": url,
+                    "preemption_token": preemption_token,
+                    "preemption_state": preemption_state,
+                    "provider_preempt_check": provider_preempt_check,
+                    "details": details,
+                }
+            except Exception:
+                if profile_acquired and profile is not None:
+                    limiter.release_profile(profile)
+                limiter.release(account_id)
+                raise
+        except Exception as exc:
+            logger.warning(
+                "Shadow next-stream pre-probe provider limit check failed (%s)",
+                type(exc).__name__,
+            )
+            details["provider_limit_reason"] = type(exc).__name__
+            return {
+                "acquired": False,
+                "reason": "provider_limit_unavailable",
+                "details": details,
+            }
+
+    @staticmethod
+    def _release_pre_probe_provider_slot(slot: Dict[str, Any]) -> None:
+        limiter = slot.get("limiter")
+        if limiter is None:
+            return
+        try:
+            try:
+                limiter.release_profile(slot.get("profile"))
+            finally:
+                limiter.release(slot.get("account_id"))
+        finally:
+            release_claim = getattr(limiter, "release_viewer_preemption_claim", None)
+            if callable(release_claim):
+                release_claim(slot.get("preemption_token"))
+
+    @staticmethod
+    def _pre_probe_slot_scope(reason: Any) -> str:
+        reason_text = str(reason or "")
+        if reason_text in {"checking_capacity"}:
+            return "profile"
+        return "provider"
+
+    @classmethod
+    def _pre_probe_slot_metric(cls, reason: Any) -> str:
+        if cls._pre_probe_slot_scope(reason) == "profile":
+            return "preprobe_skipped_profile_limit"
+        return "preprobe_skipped_provider_limit"
+
+    def _record_pre_probe_metric(
+        self,
+        metric: str,
+        target: Dict[str, Any],
+        details: Optional[Dict[str, Any]],
+    ) -> None:
+        if metric not in PRE_PROBE_METRICS:
+            return
+        if isinstance(details, dict):
+            details["pre_probe_metric"] = metric
+        payload = dict(details or {})
+        payload["metric"] = metric
+        summary = {
+            "timestamp": self.clock(),
+            "metric": metric,
+            "channel_ref": target.get("channel_ref"),
+            "origin_stream_ref": target.get("stream_ref"),
+            "target_stream_ref": payload.get("target_stream_ref"),
+            "result": payload.get("result"),
+            "rejection_reason": payload.get("rejection_reason"),
+            "slot_scope": payload.get("slot_scope"),
+            "elapsed_ms": payload.get("elapsed_ms"),
+            "provider_limited": payload.get("provider_limited"),
+            "provider_slot_acquired": payload.get("provider_slot_acquired"),
+            "trigger_reason": payload.get("trigger_reason") or payload.get("reason"),
+        }
+        summary = {key: value for key, value in summary.items() if value is not None}
+        with self._lock:
+            channel_uuid = str(target.get("channel_uuid") or "")
+            if channel_uuid:
+                allowed, _reason = self._target_allowed_by_config_locked(
+                    channel_uuid,
+                    target,
+                    self._config,
+                )
+                if not allowed:
+                    return
+            self._pre_probe_metrics[metric] += 1
+            self._last_pre_probe = summary
+
+    def _run_next_stream_pre_probe(
+        self,
+        url: str,
+        config: Dict[str, Any],
+        *,
+        reason: str = "",
+    ) -> Dict[str, Any]:
+        pre_probe_config = dict(config)
+        pre_probe_config["probe_duration_seconds"] = self._effective_pre_probe_duration_seconds(config)
+        pre_probe_config["watcher_api_key"] = ""
+        if str(reason or "") != "loop":
+            pre_probe_config["loop_detection_enabled"] = False
+        result = self._run_blank_probe(url, pre_probe_config)
+        if self._probe_cancelled(pre_probe_config):
+            if self._provider_viewer_preempted(pre_probe_config):
+                return {"stopped": True, "viewer_preempted": True}
+            return {"stopped": True}
+        if self._pre_probe_rejection_reason(result):
+            return result
+        result.update(self._run_loop_probe_if_enabled(url, {"channel_ref": "pre_probe"}, pre_probe_config))
+        if self._provider_viewer_preempted(pre_probe_config):
+            return {"stopped": True, "viewer_preempted": True}
+        return result
+
+    @staticmethod
+    def _effective_pre_probe_duration_seconds(config: Dict[str, Any]) -> int:
+        configured = int(config.get("next_stream_pre_probe_duration_seconds", 8))
+        minimums = [int(float(config.get("blank_min_duration_seconds", 2.0))) + 2]
+        if config.get("freeze_detection_enabled"):
+            minimums.append(int(float(config.get("freeze_min_duration_seconds", 5.0))) + 2)
+        if config.get("no_decodable_frames_detection_enabled"):
+            minimums.append(int(float(config.get("no_decodable_frames_min_duration_seconds", 10.0))) + 2)
+        if config.get("silent_audio_detection_enabled"):
+            minimums.append(int(float(config.get("silent_audio_min_duration_seconds", 10.0))) + 2)
+        if config.get("offline_image_detection_enabled"):
+            minimums.append(int(config.get("offline_image_capture_offset_seconds", 3)) + 2)
+        return min(120, max(configured, *minimums))
+
+    @staticmethod
+    def _pre_probe_rejection_reason(result: Dict[str, Any]) -> Optional[str]:
+        if result.get("viewer_preempted"):
+            return "viewer_preempted"
+        if result.get("stopped"):
+            return "cancelled"
+        if result.get("timeout"):
+            return "timeout"
+        for reason in (
+            "blank",
+            "offline_image",
+            "solid_color",
+            "freeze",
+            "no_decodable_frames",
+            "garbled_audio",
+            "silent_audio",
+            "loop",
+        ):
+            if result.get(f"{reason}_detected"):
+                return reason
+        if result.get("probe_incomplete"):
+            return "incomplete_probe"
+        return None
+
+    @staticmethod
+    def _pre_probe_fault_matches_active_fault(
+        candidate_reason: Optional[str],
+        active_reason: Optional[str],
+    ) -> bool:
+        candidate = str(candidate_reason or "")
+        active = str(active_reason or "")
+        if not candidate or not active:
+            return False
+        if candidate == active:
+            return True
+        return {candidate, active} == {"blank", "solid_color"}
+
+    @staticmethod
+    def _detection_count_key(channel_uuid: str, reason: str) -> str:
+        return f"{channel_uuid}:{reason or 'blank'}"
+
+    @staticmethod
+    def _confirmation_count_reason(reason: str) -> str:
+        if reason in VIDEO_FAULT_CONFIRMATION_REASONS:
+            return VIDEO_FAULT_CONFIRMATION_KEY
+        return reason or "blank"
+
+    def _clear_detection_counts_locked(self, channel_uuid: str) -> None:
+        self._blank_counts.pop(channel_uuid, None)
+        self._blank_counts.pop(
+            self._detection_count_key(channel_uuid, VIDEO_FAULT_CONFIRMATION_KEY),
+            None,
+        )
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "blank"), None)
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "freeze"), None)
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "solid_color"), None)
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "garbled_audio"), None)
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "silent_audio"), None)
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "offline_image"), None)
+        self._blank_counts.pop(self._detection_count_key(channel_uuid, "loop"), None)
+        self._detection_misses.pop(channel_uuid, None)
+        self._detection_misses.pop(
+            self._detection_count_key(channel_uuid, VIDEO_FAULT_CONFIRMATION_KEY),
+            None,
+        )
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "blank"), None)
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "freeze"), None)
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "solid_color"), None)
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "no_decodable_frames"), None)
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "garbled_audio"), None)
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "silent_audio"), None)
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "offline_image"), None)
+        self._detection_misses.pop(self._detection_count_key(channel_uuid, "loop"), None)
+
+    def _reset_blank_count(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._clear_detection_counts_locked(channel_uuid)
+
+    def _reset_blank_count_after_probe_ok(
+        self,
+        channel_uuid: str,
+        config: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        loop_key = self._detection_count_key(channel_uuid, "loop")
+        with self._lock:
+            loop_count = int(self._blank_counts.get(loop_key) or 0)
+            loop_misses = int(self._detection_misses.get(loop_key) or 0)
+            preserve_loop = (
+                bool(config.get("loop_detection_enabled"))
+                and loop_count > 0
+                and loop_misses < LOOP_PENDING_PROBE_OK_MISS_TOLERANCE
+            )
+            self._clear_detection_counts_locked(channel_uuid)
+            if not preserve_loop:
+                return None
+            self._blank_counts[loop_key] = loop_count
+            self._detection_misses[loop_key] = loop_misses + 1
+            return {
+                "reason": "loop",
+                "confirmations": loop_count,
+                "misses": loop_misses + 1,
+                "miss_tolerance": LOOP_PENDING_PROBE_OK_MISS_TOLERANCE,
+            }
+
+    def _reset_detection_state(self, channel_uuid: str) -> None:
+        self._reset_blank_count(channel_uuid)
+        self._clear_switch_attempts(channel_uuid)
+
+    def _increment_blank_count(self, channel_uuid: str, reason: str = "blank") -> int:
+        count_reason = self._confirmation_count_reason(reason)
+        key = self._detection_count_key(channel_uuid, count_reason)
+        with self._lock:
+            if count_reason == VIDEO_FAULT_CONFIRMATION_KEY and not self._blank_counts.get(key):
+                self._blank_counts[key] = max(
+                    int(
+                        self._blank_counts.get(self._detection_count_key(channel_uuid, "blank"))
+                        or 0
+                    ),
+                    int(
+                        self._blank_counts.get(self._detection_count_key(channel_uuid, "freeze"))
+                        or 0
+                    ),
+                )
+            self._blank_counts[key] += 1
+            self._detection_misses[key] = 0
+            return self._blank_counts[key]
+
+    def _current_detection_count(self, channel_uuid: str, reason: str = "blank") -> int:
+        count_reason = self._confirmation_count_reason(reason)
+        key = self._detection_count_key(channel_uuid, count_reason)
+        with self._lock:
+            current_count = int(self._blank_counts.get(key) or 0)
+            if current_count or count_reason != VIDEO_FAULT_CONFIRMATION_KEY:
+                return current_count
+            return max(
+                int(
+                    self._blank_counts.get(self._detection_count_key(channel_uuid, "blank"))
+                    or 0
+                ),
+                int(
+                    self._blank_counts.get(self._detection_count_key(channel_uuid, "freeze"))
+                    or 0
+                ),
+            )
+
+    @staticmethod
+    def _required_confirmations(
+        config: Dict[str, Any],
+        reason: str,
+        guard_details: Optional[Dict[str, Any]] = None,
+        *,
+        target: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        confirmations = int(config.get("confirmation_count", 2))
+        if (
+            reason == "freeze"
+            and isinstance(target, dict)
+            and (target.get("last_probe") or {}).get("audio_stream_present") is True
+        ):
+            confirmations = max(confirmations, 2)
+        if guard_details is not None and reason in MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS:
+            return max(confirmations, 2)
+        return confirmations
+
+    def _watcher_recovery_guard_details(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        reason: str,
+    ) -> Optional[Dict[str, Any]]:
+        if config.get("watch_mode") != "continuous":
+            return None
+
+        with self._lock:
+            watched = dict(self._watched.get(channel_uuid) or {})
+        recovery_age = watched.get("watcher_recovered_after_seconds")
+        guard_details: Optional[Dict[str, Any]] = None
+        if recovery_age is not None:
+            if self._watcher_recovery_matches_current_probe_window(
+                target,
+                watched,
+                config,
+                reason=reason,
+                recovery_age=recovery_age,
+            ):
+                return None
+            guard_details = {
+                "reason": reason,
+                "watcher_recovered_after_seconds": recovery_age,
+            }
+        else:
+            fresh_details = self._watcher_client_details(fresh_status, config)
+            if (
+                self._watcher_client_started_with_current_probe(target, fresh_details)
+                or self._watcher_status_has_current_probe_client(target, fresh_status, config)
+            ):
+                return None
+            target_watcher_ref = target.get("watcher_client_ref")
+            fresh_watcher_ref = fresh_details.get("watcher_client_ref")
+            if target_watcher_ref and fresh_watcher_ref and fresh_watcher_ref != target_watcher_ref:
+                guard_details = {
+                    "reason": reason,
+                    "last_watcher_client_ref": target_watcher_ref,
+                    "watcher_client_ref": fresh_watcher_ref,
+                }
+            elif not target_watcher_ref and fresh_watcher_ref:
+                guard_details = {
+                    "reason": reason,
+                    "watcher_client_ref": fresh_watcher_ref,
+                    "watcher_client_count": fresh_details.get("watcher_client_count"),
+                }
+
+        return guard_details
+
+    @staticmethod
+    def _watcher_client_started_with_current_probe(
+        target: Dict[str, Any],
+        watcher_details: Dict[str, Any],
+    ) -> bool:
+        try:
+            probe_started = float(target.get("active_probe_started_at"))
+            watcher_connected = float(watcher_details.get("watcher_connected_at"))
+        except (TypeError, ValueError):
+            return False
+        return watcher_connected >= probe_started - 0.5
+
+    def _watcher_status_has_current_probe_client(
+        self,
+        target: Dict[str, Any],
+        status: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> bool:
+        try:
+            probe_started = float(target.get("active_probe_started_at"))
+        except (TypeError, ValueError):
+            return False
+
+        marker = self._watcher_client_marker(config)
+        if not marker:
+            return False
+        clients = status.get("clients")
+        if isinstance(clients, dict):
+            clients = list(clients.values())
+        if not isinstance(clients, list):
+            return False
+
+        for client in clients:
+            if marker not in self._client_text(client).lower():
+                continue
+            connected_at = None
+            if isinstance(client, dict):
+                connected_at = client.get("connected_at") or client.get("started_at")
+            try:
+                watcher_connected = float(connected_at)
+            except (TypeError, ValueError):
+                continue
+            if watcher_connected >= probe_started - 0.5:
+                return True
+        return False
+
+    def _is_low_impact_probe_client_settling(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        status: Dict[str, Any],
+        config: Dict[str, Any],
+        watcher_count: Any = None,
+    ) -> bool:
+        if config.get("watch_mode") != "continuous":
+            return False
+        if not self._uses_default_blank_probe:
+            return False
+        if self._persistent_watcher_configured(config):
+            return False
+        if self._has_pending_detection(channel_uuid):
+            return False
+        try:
+            count_source = watcher_count if watcher_count is not None else target.get("watcher_client_count")
+            count = int(count_source or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0:
+            return False
+        return self._watcher_status_has_current_probe_client(target, status, config)
+
+    @staticmethod
+    def _mark_shadow_probe_client_settling(target: Dict[str, Any], watcher_count: Any = None) -> None:
+        try:
+            raw_count = int(watcher_count or 0)
+        except (TypeError, ValueError):
+            raw_count = 0
+        for key in (
+            "watcher_client_ref",
+            "watcher_connected_at",
+            "watcher_uptime_seconds",
+            "last_watcher_client_ref",
+            "watcher_absent_since",
+            "watcher_absent_seconds",
+            "watcher_recovered_after_seconds",
+        ):
+            target.pop(key, None)
+        target["watcher_client_count"] = 0
+        target["watcher_state"] = "waiting"
+        target["shadow_probe_settling"] = True
+        if raw_count > 0:
+            target["shadow_probe_settling_client_count"] = raw_count
+
+    def _watcher_recovery_matches_current_probe_window(
+        self,
+        target: Dict[str, Any],
+        watched: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        reason: str,
+        recovery_age: Any,
+    ) -> bool:
+        if reason != "blank" and reason not in MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS:
+            return False
+        try:
+            probe_started = float(target.get("active_probe_started_at"))
+            watched_probe_started = float(watched.get("active_probe_started_at"))
+            age = float(recovery_age)
+        except (TypeError, ValueError):
+            return False
+        if abs(watched_probe_started - probe_started) > 1.0:
+            return False
+        # Bounded Shadow probes intentionally close and reopen the watcher
+        # connection so ffmpeg can flush media-fault lines. Dispatcharr does
+        # not always expose watcher connected_at. Only recoveries attached to
+        # the same active probe window are treated as our own probe rollover;
+        # stale or external watcher recoveries still guard the switch.
+        window = self._probe_analysis_window_seconds(config) + float(config.get("watch_gap_seconds", 1)) + 1.0
+        return 0.0 <= age <= window
+
+    def _media_recovery_guard_bypass_details(
+        self,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        reason: str,
+        guard_details: Dict[str, Any],
+        confirmed_count: int,
+        required_confirmations: int,
+        require_confirmed: bool,
+    ) -> Optional[Dict[str, Any]]:
+        if reason not in MEDIA_FAULT_RECOVERY_GUARD_BYPASS_REASONS:
+            return None
+        if config.get("watch_mode") != "continuous":
+            return None
+        if not config.get("next_stream_pre_probe_enabled"):
+            return None
+        if require_confirmed and confirmed_count < required_confirmations:
+            return None
+        if self._real_client_count(fresh_status, config, target) <= 0:
+            return None
+
+        target_stream_id = target.get("stream_id")
+        fresh_stream_id = self._extract_stream_id(fresh_status) or target_stream_id
+        if target_stream_id and fresh_stream_id != target_stream_id:
+            return None
+
+        details = dict(guard_details)
+        guard_reason = guard_details.get("reason")
+        details.update({
+            "bypassed": True,
+            "bypass_scope": "confirmed_media_fault",
+            "guard_reason": guard_reason,
+            "reason": reason,
+            "pre_probe_required": True,
+            "confirmations": confirmed_count,
+            "required": required_confirmations,
+            "current_stream_ref": _ref("stream", fresh_stream_id),
+        })
+        return details
+
+    def _pending_media_recovery_guard_bypass_details(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+        config: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        reason = (
+            target.get("media_recovery_guard_reason")
+            or (target.get("media_recovery_guard_bypass") or {}).get("reason")
+        )
+        if not reason:
+            return None
+
+        current_count = self._current_detection_count(channel_uuid, str(reason))
+        guard_details = {
+            "reason": "active_watcher_between_confirmations",
+            "watcher_client_count": self._watcher_client_count(fresh_status, config),
+        }
+        fresh_details = self._watcher_client_details(fresh_status, config)
+        if fresh_details.get("watcher_client_ref"):
+            guard_details["watcher_client_ref"] = fresh_details.get("watcher_client_ref")
+        required_confirmations = self._required_confirmations(
+            config,
+            str(reason),
+            guard_details,
+            target=target,
+        )
+        if current_count <= 0 or current_count >= required_confirmations:
+            return None
+
+        return self._media_recovery_guard_bypass_details(
+            target,
+            fresh_status,
+            config,
+            reason=str(reason),
+            guard_details=guard_details,
+            confirmed_count=current_count,
+            required_confirmations=required_confirmations,
+            require_confirmed=False,
+        )
+
+    def _guard_recent_watcher_recovery(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        reason: str,
+    ) -> bool:
+        guard_details = self._watcher_recovery_guard_details(
+            channel_uuid,
+            target,
+            fresh_status,
+            config,
+            reason=reason,
+        )
+        if guard_details is None:
+            return False
+
+        self._record_watcher_recovery_guard(channel_uuid, target, guard_details, config)
+        return True
+
+    def _record_watcher_recovery_guard(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        guard_details: Dict[str, Any],
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self._reset_detection_state(channel_uuid)
+        self._record_event("watcher_recovery_guard", target, guard_details)
+
+    @staticmethod
+    def _persistent_watcher_command(url: str, config: Dict[str, Any]) -> List[str]:
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-user_agent",
+            config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"],
+        ]
+        headers = ShadowBlankMonitorService._watcher_probe_headers(config)
+        if headers:
+            command.extend(["-headers", headers])
+        command.extend([
+            "-i",
+            url,
+            "-map",
+            "0:v:0?",
+            "-map",
+            "0:a:0?",
+            "-c",
+            "copy",
+            "-f",
+            "null",
+            "-",
+        ])
+        return command
+
+    def _persistent_watcher_snapshot(self, channel_uuid: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            session = self._persistent_watchers.get(channel_uuid)
+            if not session:
+                return None
+            process = session.get("process")
+            if process is not None and process.poll() is not None:
+                return None
+            started_at = float(session.get("started_at") or self.clock())
+            return {
+                "persistent_watcher_state": "running",
+                "persistent_watcher_started_at": started_at,
+                "persistent_watcher_uptime_seconds": max(0, int(self.clock() - started_at)),
+                "persistent_watcher_pid": getattr(process, "pid", None),
+            }
+
+    def _apply_persistent_watcher_snapshot(self, channel_uuid: str, target: Dict[str, Any]) -> None:
+        snapshot = self._persistent_watcher_snapshot(channel_uuid)
+        if not snapshot:
+            return
+        target.update(snapshot)
+        with self._lock:
+            watched = self._watched.get(channel_uuid)
+            if watched is not None:
+                watched.update(snapshot)
+
+    @staticmethod
+    def _blocking_watcher_count(target: Dict[str, Any], watcher_count: int) -> int:
+        """Return watcher clients that should block starting another probe.
+
+        A persistent watcher is intentionally kept open to stabilize Dispatcharr
+        playback visibility. It is not an analysis probe and must not suppress
+        future media checks. Any additional watcher client still blocks broad
+        probing to avoid duplicate proxy probes.
+        """
+        count = max(0, int(watcher_count or 0))
+        if target.get("persistent_watcher_state") == "running" and count > 0:
+            return count - 1
+        return count
+
+    def _start_persistent_watcher(
+        self,
+        channel_uuid: str,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        url: str,
+    ) -> None:
+        command = self._persistent_watcher_command(url, config)
+        with self._config_mutation_lock:
+            with self._lock:
+                snapshot_revision = config.get(CONFIG_REVISION_KEY)
+                snapshot_is_current = (
+                    snapshot_revision is None
+                    or (
+                        isinstance(snapshot_revision, int)
+                        and not isinstance(snapshot_revision, bool)
+                        and snapshot_revision == self._config_revision
+                    )
+                )
+                allowed, _reason = self._target_allowed_by_config_locked(
+                    channel_uuid,
+                    target,
+                    self._config,
+                )
+                eligible = (
+                    snapshot_is_current
+                    and allowed
+                    and self._persistent_watcher_expected(config)
+                    and not self._stop_event.is_set()
+                )
+            if not eligible:
+                return
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    stdin=subprocess.DEVNULL,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Shadow persistent watcher failed to start for %s: %s",
+                    target.get("channel_ref") or _ref("channel", channel_uuid),
+                    exc,
+                )
+                return
+
+            session = {
+                "process": process,
+                "url": url,
+                "stream_id": target.get("stream_id"),
+                "output_format": target.get("viewer_output_format"),
+                CONFIG_REVISION_KEY: config.get(CONFIG_REVISION_KEY),
+                "started_at": self.clock(),
+            }
+            with self._lock:
+                snapshot_is_current = self._config_snapshot_is_current_locked(config)
+                allowed, _reason = self._target_allowed_by_config_locked(
+                    channel_uuid,
+                    target,
+                    self._config,
+                )
+                if not snapshot_is_current or not allowed or self._stop_event.is_set():
+                    registered = False
+                else:
+                    self._persistent_watchers[channel_uuid] = session
+                    registered = True
+            if not registered:
+                self._terminate_persistent_watcher_session(session)
+                return
+        self._apply_persistent_watcher_snapshot(channel_uuid, target)
+
+    def _stop_persistent_watcher(self, channel_uuid: str) -> None:
+        with self._lock:
+            session = self._persistent_watchers.pop(channel_uuid, None)
+        if not session:
+            return
+
+        self._terminate_persistent_watcher_session(session)
+
+    @staticmethod
+    def _terminate_persistent_watcher_session(session: Dict[str, Any]) -> None:
+        process = session.get("process")
+        if process is None or process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=3)
+        except Exception:
+            try:
+                process.kill()
+                process.wait(timeout=3)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _persistent_watcher_configured(config: Dict[str, Any]) -> bool:
+        return (
+            config.get("watch_mode") == "continuous"
+            and bool(config.get("persistent_watcher_enabled"))
+            and bool(str(config.get("watcher_api_key") or "").strip())
+        )
+
+    def _persistent_watcher_expected(self, config: Dict[str, Any]) -> bool:
+        return self._persistent_watcher_configured(config) and self._uses_default_blank_probe
+
+    def _sync_persistent_watchers(self, targets: Iterable[Dict[str, Any]], config: Dict[str, Any]) -> None:
+        targets_by_uuid = {
+            str(target.get("channel_uuid")): target
+            for target in targets
+            if target.get("channel_uuid")
+            and (
+                int(target.get("real_client_count") or 0) > 0
+                or bool(target.get("viewer_left_grace_active"))
+            )
+        }
+        should_keep_watchers = self._persistent_watcher_expected(config)
+        if not should_keep_watchers:
+            targets_by_uuid = {}
+
+        with self._lock:
+            existing_uuids = list(self._persistent_watchers)
+
+        for channel_uuid in existing_uuids:
+            target = targets_by_uuid.get(channel_uuid)
+            if not target:
+                self._stop_persistent_watcher(channel_uuid)
+                continue
+            try:
+                url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
+            except Exception:
+                self._stop_persistent_watcher(channel_uuid)
+                continue
+            with self._lock:
+                session = self._persistent_watchers.get(channel_uuid)
+            process = session.get("process") if session else None
+            stale = (
+                not session
+                or process is None
+                or process.poll() is not None
+                or session.get("url") != url
+                or str(session.get("stream_id")) != str(target.get("stream_id"))
+                or session.get(CONFIG_REVISION_KEY) != config.get(CONFIG_REVISION_KEY)
+            )
+            if stale:
+                self._stop_persistent_watcher(channel_uuid)
+                self._start_persistent_watcher(channel_uuid, target, config, url)
+            else:
+                self._apply_persistent_watcher_snapshot(channel_uuid, target)
+
+        for channel_uuid, target in targets_by_uuid.items():
+            with self._lock:
+                exists = channel_uuid in self._persistent_watchers
+            if exists:
+                continue
+            try:
+                url = self._channel_proxy_url(channel_uuid, target.get("viewer_output_format"))
+            except Exception as exc:
+                logger.warning(
+                    "Shadow persistent watcher could not build proxy URL for %s: %s",
+                    target.get("channel_ref") or _ref("channel", channel_uuid),
+                    exc,
+                )
+                continue
+            self._start_persistent_watcher(channel_uuid, target, config, url)
+
+    def _channel_proxy_url(self, channel_uuid: str, output_format: Optional[str] = None) -> str:
+        base_url = (self.base_url_provider() or "").rstrip("/")
+        if not base_url:
+            raise RuntimeError("Dispatcharr base URL is not configured")
+        url = f"{base_url}/proxy/ts/stream/{channel_uuid}"
+        canonical_format = self._normalize_proxy_output_format(output_format)
+        if canonical_format:
+            return f"{url}?output_format={canonical_format}"
+        return url
+
+    def _media_probe_url(self, _udi: Any, _target: Dict[str, Any], fallback_url: str) -> tuple[str, str]:
+        """Probe the same Dispatcharr proxy path as the active viewer.
+
+        Direct provider/source probes can look quieter in Dispatcharr because
+        they do not appear as watcher clients, but they can still consume a
+        second provider slot and trigger provider-side stream recovery. Shadow's
+        low-impact mode should be visible and bounded, not hidden from the
+        proxy path it is protecting.
+        """
+        return fallback_url, "channel_proxy"
+
+    @staticmethod
+    def _blank_probe_command(url: str, config: Dict[str, Any], *, continuous: bool = False) -> tuple[List[str], int]:
+        duration = int(config["probe_duration_seconds"])
+        headers = ""
+        api_key = config.get("watcher_api_key")
+        if api_key:
+            headers = f"X-API-Key: {api_key}\r\nAuthorization: ApiKey {api_key}\r\n"
+
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "info",
+            "-user_agent",
+            config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"],
+        ]
+        if headers:
+            command.extend(["-headers", headers])
+        video_filters = [
+            (
+                f"blackdetect=d={float(config['blank_min_duration_seconds'])}:"
+                f"pix_th={float(config['blank_pixel_threshold'])}"
+            )
+        ]
+        if config.get("freeze_detection_enabled"):
+            video_filters.append(
+                f"freezedetect=n={float(config['freeze_noise_threshold'])}:"
+                f"d={float(config['freeze_min_duration_seconds'])}"
+            )
+            video_filters.extend([
+                "fps=1",
+                "entropy",
+                "metadata=mode=print",
+            ])
+        command.extend(["-i", url, "-vf", ",".join(video_filters)])
+        if config.get("garbled_audio_detection_enabled") or config.get("silent_audio_detection_enabled"):
+            audio_filters: List[str] = []
+            if config.get("silent_audio_detection_enabled"):
+                audio_filters.append(
+                    "silencedetect="
+                    f"n={int(config['silent_audio_noise_db'])}dB:"
+                    f"d={float(config['silent_audio_min_duration_seconds'])}"
+                )
+            audio_filters.append("astats=metadata=1:reset=1")
+            command.extend(["-af", ",".join(audio_filters)])
+        else:
+            command.append("-an")
+        command.extend(["-f", "null", "-"])
+        if not continuous:
+            input_index = command.index("-vf")
+            command[input_index:input_index] = ["-t", str(duration)]
+        return command, duration
+
+    @staticmethod
+    def _probe_analysis_window_seconds(config: Dict[str, Any]) -> float:
+        """Bound one shadow media analysis window to the enabled fault timers.
+
+        Some Dispatcharr proxy formats only flush blackdetect/freezedetect
+        segment summaries when ffmpeg exits. Keeping the downstream probe open
+        forever makes a real black channel look healthy until the viewer leaves.
+        This cap lets one confirmation window close quickly while preserving the
+        configured per-fault minimum durations.
+        """
+        duration = float(config.get("probe_duration_seconds") or DEFAULT_CONFIG["probe_duration_seconds"])
+        required_windows = [
+            float(config.get("blank_min_duration_seconds", DEFAULT_CONFIG["blank_min_duration_seconds"])),
+        ]
+        if config.get("freeze_detection_enabled"):
+            required_windows.append(float(
+                config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
+            ))
+        if config.get("no_decodable_frames_detection_enabled", True):
+            required_windows.append(float(
+                config.get(
+                    "no_decodable_frames_min_duration_seconds",
+                    DEFAULT_CONFIG["no_decodable_frames_min_duration_seconds"],
+                )
+            ))
+        if config.get("silent_audio_detection_enabled"):
+            required_windows.append(float(
+                config.get(
+                    "silent_audio_min_duration_seconds",
+                    DEFAULT_CONFIG["silent_audio_min_duration_seconds"],
+                )
+            ))
+        # Add a small settle window so ffmpeg can flush final filter lines.
+        analysis_window = max(required_windows or [duration]) + 2.0
+        return max(1.0, min(duration, analysis_window))
+
+    @staticmethod
+    def _line_is_missing_audio(line: str) -> bool:
+        lowered = (line or "").lower()
+        return any(pattern in lowered for pattern in AUDIO_MISSING_PATTERNS) and (
+            "audio" in lowered or ":a" in lowered
+        )
+
+    @staticmethod
+    def _line_has_audio_stream(line: str) -> bool:
+        return FFMPEG_STREAM_AUDIO_RE.search(line or "") is not None
+
+    @staticmethod
+    def _line_has_video_stream(line: str) -> bool:
+        return FFMPEG_STREAM_VIDEO_RE.search(line or "") is not None
+
+    @staticmethod
+    def _line_marks_stream_mapping(line: str) -> bool:
+        return FFMPEG_STREAM_MAPPING_RE.search(line or "") is not None
+
+    @staticmethod
+    def _output_has_video_without_audio(output: str) -> bool:
+        saw_video_stream = False
+        saw_audio_stream = False
+        saw_stream_mapping = False
+        saw_frame_progress = False
+        saw_zero_audio_summary = False
+        for line in (output or "").splitlines():
+            if ShadowBlankMonitorService._line_has_audio_stream(line):
+                saw_audio_stream = True
+            if ShadowBlankMonitorService._line_has_video_stream(line):
+                saw_video_stream = True
+            if ShadowBlankMonitorService._line_marks_stream_mapping(line):
+                saw_stream_mapping = True
+            if FFMPEG_FRAME_RE.search(line):
+                saw_frame_progress = True
+            if FFMPEG_ZERO_AUDIO_SUMMARY_RE.search(line):
+                saw_zero_audio_summary = True
+        return saw_video_stream and not saw_audio_stream and (
+            saw_stream_mapping or saw_frame_progress or saw_zero_audio_summary
+        )
+
+    @staticmethod
+    def _line_is_garbled_audio(line: str) -> bool:
+        lowered = (line or "").lower()
+        if not lowered or ShadowBlankMonitorService._line_is_missing_audio(lowered):
+            return False
+        if any(pattern in lowered for pattern in AUDIO_ERROR_PATTERNS):
+            return "audio" in lowered or ":a" in lowered or AUDIO_DECODER_RE.search(lowered) is not None
+        if AUDIO_DECODER_RE.search(lowered) is None:
+            return False
+        return any(pattern in lowered for pattern in AUDIO_DECODER_ERROR_PATTERNS)
+
+    @staticmethod
+    def _parse_audio_detection(
+        output: str,
+        config: Dict[str, Any],
+        *,
+        observed_duration: float,
+    ) -> Dict[str, Any]:
+        result = {
+            "garbled_audio_detected": False,
+            "garbled_audio_error_count": 0,
+            "garbled_audio_error": None,
+            "silent_audio_detected": False,
+            "silent_audio_duration_secs": None,
+            "silent_audio_noise_db": None,
+            "audio_stream_present": None,
+        }
+        if not (
+            config.get("garbled_audio_detection_enabled")
+            or config.get("silent_audio_detection_enabled")
+        ):
+            return result
+
+        output = output or ""
+        audio_missing = False
+        garbled_count = 0
+        first_garbled_line: Optional[str] = None
+        active_silence_start: Optional[float] = None
+        longest_silence = 0.0
+
+        for line in output.splitlines():
+            if ShadowBlankMonitorService._line_is_missing_audio(line):
+                audio_missing = True
+                continue
+            if ShadowBlankMonitorService._line_is_garbled_audio(line):
+                garbled_count += 1
+                first_garbled_line = first_garbled_line or line.strip()[:160]
+
+            silence_start = SILENCE_START_RE.search(line)
+            if silence_start:
+                try:
+                    active_silence_start = max(0.0, float(silence_start.group("start")))
+                except (TypeError, ValueError):
+                    active_silence_start = None
+
+            silence_duration = SILENCE_DURATION_RE.search(line)
+            if silence_duration:
+                try:
+                    longest_silence = max(longest_silence, float(silence_duration.group("duration")))
+                except (TypeError, ValueError):
+                    pass
+                active_silence_start = None
+                continue
+
+            silence_end = SILENCE_END_RE.search(line)
+            if silence_end and active_silence_start is not None:
+                try:
+                    longest_silence = max(
+                        longest_silence,
+                        max(0.0, float(silence_end.group("end")) - active_silence_start),
+                    )
+                except (TypeError, ValueError):
+                    pass
+                active_silence_start = None
+
+        if not audio_missing and ShadowBlankMonitorService._output_has_video_without_audio(output):
+            audio_missing = True
+
+        if active_silence_start is not None:
+            longest_silence = max(longest_silence, max(0.0, float(observed_duration or 0.0) - active_silence_start))
+
+        result["audio_stream_present"] = not audio_missing if (audio_missing or garbled_count or longest_silence) else None
+        if audio_missing:
+            if config.get("silent_audio_detection_enabled"):
+                result["silent_audio_detected"] = True
+                result["silent_audio_duration_secs"] = round(max(0.0, float(observed_duration or 0.0)), 3)
+                result["silent_audio_noise_db"] = int(config.get("silent_audio_noise_db", DEFAULT_CONFIG["silent_audio_noise_db"]))
+            return result
+
+        if config.get("garbled_audio_detection_enabled"):
+            threshold = int(config.get("garbled_audio_error_threshold", DEFAULT_CONFIG["garbled_audio_error_threshold"]))
+            result["garbled_audio_error_count"] = garbled_count
+            if garbled_count >= threshold:
+                result["garbled_audio_detected"] = True
+                result["garbled_audio_error"] = first_garbled_line or "audio_decode_errors"
+
+        if config.get("silent_audio_detection_enabled"):
+            min_duration = float(
+                config.get(
+                    "silent_audio_min_duration_seconds",
+                    DEFAULT_CONFIG["silent_audio_min_duration_seconds"],
+                )
+            )
+            result["silent_audio_duration_secs"] = round(longest_silence, 3) if longest_silence else None
+            result["silent_audio_noise_db"] = int(config.get("silent_audio_noise_db", DEFAULT_CONFIG["silent_audio_noise_db"]))
+            if longest_silence >= min_duration:
+                result["silent_audio_detected"] = True
+
+        return result
+
+    @staticmethod
+    def _parse_solid_color_detection(
+        output: str,
+        config: Dict[str, Any],
+        *,
+        observed_duration: float,
+    ) -> Dict[str, Any]:
+        result = {
+            "solid_color_detected": False,
+            "solid_color_duration_secs": None,
+            "solid_color_normalized_entropy_max": None,
+            "solid_color_sample_count": 0,
+        }
+        if not config.get("freeze_detection_enabled"):
+            return result
+
+        frame_values: Dict[int, Dict[str, float]] = {}
+        current_frame: Optional[int] = None
+        for line in (output or "").splitlines():
+            frame_match = ENTROPY_FRAME_RE.search(line)
+            if frame_match:
+                try:
+                    current_frame = int(frame_match.group("frame"))
+                    frame_values.setdefault(current_frame, {})
+                except (TypeError, ValueError):
+                    current_frame = None
+                continue
+
+            value_match = ENTROPY_VALUE_RE.search(line)
+            if not value_match or current_frame is None:
+                continue
+            try:
+                value = float(value_match.group("value"))
+            except (TypeError, ValueError):
+                continue
+            frame_values.setdefault(current_frame, {})[value_match.group("plane")] = value
+
+        complete_frames = [
+            values
+            for values in frame_values.values()
+            if all(plane in values for plane in ("Y", "U", "V"))
+        ]
+        if not complete_frames:
+            return result
+
+        frame_maxima = [max(values.values()) for values in complete_frames]
+        low_entropy_samples = [
+            value for value in frame_maxima if value <= SOLID_COLOR_ENTROPY_THRESHOLD
+        ]
+        result["solid_color_sample_count"] = len(low_entropy_samples)
+        result["solid_color_normalized_entropy_max"] = round(max(frame_maxima), 4)
+
+        min_duration = float(
+            config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
+        )
+        low_entropy_ratio = len(low_entropy_samples) / max(1, len(complete_frames))
+        if (
+            len(low_entropy_samples) >= SOLID_COLOR_MIN_SAMPLES
+            and low_entropy_ratio >= SOLID_COLOR_SAMPLE_RATIO_THRESHOLD
+            and float(observed_duration or 0.0) >= min_duration
+        ):
+            result["solid_color_detected"] = True
+            result["solid_color_duration_secs"] = round(float(observed_duration or 0.0), 3)
+        return result
+
+    @staticmethod
+    def _offline_image_probe_command(url: str, config: Dict[str, Any]) -> List[str]:
+        headers = ""
+        api_key = config.get("watcher_api_key")
+        if api_key:
+            headers = f"X-API-Key: {api_key}\r\nAuthorization: ApiKey {api_key}\r\n"
+        command = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-user_agent",
+            config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"],
+        ]
+        if headers:
+            command.extend(["-headers", headers])
+        offset = int(config.get("offline_image_capture_offset_seconds", 3))
+        if offset > 0:
+            command.extend(["-ss", str(offset)])
+        command.extend(["-i", url, "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"])
+        return command
+
+    @staticmethod
+    def _hash_distance(left: str, right: str) -> Optional[int]:
+        try:
+            return bin(int(left, 16) ^ int(right, 16)).count("1")
+        except (TypeError, ValueError):
+            return None
+
+    def _run_cancelable_command(
+        self,
+        command: List[str],
+        config: Dict[str, Any],
+        *,
+        timeout: float,
+        text: bool = False,
+    ) -> subprocess.CompletedProcess:
+        """Run a probe command with prompt per-channel cancellation when active."""
+        cancel_event = config.get("_shadow_probe_cancel_event")
+        provider_preempt_check = config.get("_shadow_provider_preempt_check")
+        if cancel_event is None and not callable(provider_preempt_check):
+            return subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                text=text,
+            )
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=text,
+        )
+        deadline = time.monotonic() + max(0.1, float(timeout))
+        stdout: Any = "" if text else b""
+        stderr: Any = "" if text else b""
+        try:
+            while True:
+                if self._probe_cancelled(config):
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        stdout, stderr = process.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        stdout, stderr = process.communicate(timeout=5)
+                    return subprocess.CompletedProcess(
+                        command,
+                        process.returncode,
+                        stdout,
+                        stderr,
+                    )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    process.kill()
+                    stdout, stderr = process.communicate(timeout=5)
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        timeout,
+                        output=stdout,
+                        stderr=stderr,
+                    )
+                try:
+                    stdout, stderr = process.communicate(timeout=min(0.2, remaining))
+                    return subprocess.CompletedProcess(
+                        command,
+                        process.returncode,
+                        stdout,
+                        stderr,
+                    )
+                except subprocess.TimeoutExpired:
+                    continue
+        finally:
+            if process.poll() is None:
+                process.kill()
+
+    def _capture_offline_image_hash(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from PIL import Image
+            import imagehash
+        except Exception as exc:
+            return {
+                "success": False,
+                "reason": f"image_hash_unavailable:{type(exc).__name__}",
+            }
+
+        try:
+            completed = self._run_cancelable_command(
+                self._offline_image_probe_command(url, config),
+                config,
+                timeout=15,
+            )
+            if self._probe_cancelled(config):
+                reason = (
+                    "viewer_preempted"
+                    if self._provider_viewer_preempted(config)
+                    else "probe_cancelled"
+                )
+                return {"success": False, "reason": reason}
+            if completed.returncode != 0 or not completed.stdout:
+                return {
+                    "success": False,
+                    "reason": "frame_capture_failed",
+                }
+
+            image = Image.open(io.BytesIO(completed.stdout))
+            return {
+                "success": True,
+                "offline_image_hash": str(imagehash.phash(image)).lower(),
+            }
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "reason": "frame_capture_timeout",
+            }
+        except Exception as exc:
+            logger.debug("Shadow offline image hash capture failed: %s", exc)
+            return {
+                "success": False,
+                "reason": type(exc).__name__,
+            }
+
+    def _run_offline_image_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        result = {
+            "offline_image_detected": False,
+            "offline_image_hash": None,
+            "offline_image_distance": None,
+            "offline_image_reference_count": len(config.get("offline_image_reference_hashes") or []),
+        }
+        if not config.get("offline_image_detection_enabled"):
+            return result
+        invalid_hashes = _invalid_offline_image_hashes(config.get("offline_image_reference_hashes"))
+        reference_hashes = _valid_offline_image_hashes(config.get("offline_image_reference_hashes"))
+        result["offline_image_invalid_reference_count"] = len(invalid_hashes)
+        if not reference_hashes:
+            if invalid_hashes:
+                result["offline_image_error"] = "no_valid_reference_hashes"
+            return result
+
+        capture = self._capture_offline_image_hash(url, config)
+        if not capture.get("success"):
+            result["offline_image_error"] = capture.get("reason")
+            if capture.get("reason") == "viewer_preempted":
+                result["stopped"] = True
+                result["viewer_preempted"] = True
+            return result
+
+        phash = str(capture.get("offline_image_hash") or "").lower()
+        result["offline_image_hash"] = phash
+        distances = [
+            distance
+            for distance in (self._hash_distance(phash, candidate) for candidate in reference_hashes)
+            if distance is not None
+        ]
+        if not distances:
+            return result
+        best_distance = min(distances)
+        result["offline_image_distance"] = best_distance
+        if best_distance <= int(config.get("offline_image_hash_threshold", 4)):
+            result["offline_image_detected"] = True
+        return result
+
+    @staticmethod
+    def _watcher_probe_headers(config: Dict[str, Any]) -> str:
+        api_key = config.get("watcher_api_key")
+        if not api_key:
+            return ""
+        return f"X-API-Key: {api_key}\r\nAuthorization: ApiKey {api_key}\r\n"
+
+    def _run_loop_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        stream_tag = _ref("shadow-loop-url", url)
+        loop_detected, loop_duration, frames = _probe_stream_for_loops(
+            url=url,
+            stream_tag=stream_tag,
+            probe_duration=int(config.get("loop_probe_duration_seconds", 120)),
+            user_agent=config.get("watcher_user_agent") or DEFAULT_CONFIG["watcher_user_agent"],
+            headers=self._watcher_probe_headers(config) or None,
+            should_abort=config.get("_shadow_loop_abort_check"),
+        )
+        return {
+            "loop_probe_ran": True,
+            "loop_detected": bool(loop_detected),
+            "loop_duration_secs": loop_duration,
+            "loop_frames_processed": frames,
+        }
+
+    @staticmethod
+    def _continuous_loop_probe_slice_seconds(config: Dict[str, Any]) -> float:
+        """Keep continuous Shadow loop probes from blocking media-fault checks.
+
+        Loop detection still gets enough wall time to satisfy the 10s sidecar
+        loop threshold, but it must yield back to the watcher so black, freeze,
+        silent-audio, and decode-fault checks can run again while a viewer is
+        still active.
+        """
+        configured = float(
+            config.get("loop_probe_duration_seconds")
+            or DEFAULT_CONFIG["loop_probe_duration_seconds"]
+        )
+        analysis_window = ShadowBlankMonitorService._probe_analysis_window_seconds(config)
+        return max(
+            1.0,
+            min(
+                configured,
+                max(CONTINUOUS_LOOP_PROBE_SLICE_MIN_SECONDS, analysis_window + 3.0),
+            ),
+        )
+
+    def _run_loop_probe_if_enabled(
+        self,
+        url: str,
+        target: Dict[str, Any],
+        config: Dict[str, Any],
+        *,
+        udi: Any = None,
+    ) -> Dict[str, Any]:
+        if not config.get("loop_detection_enabled"):
+            return {}
+        loop_config = dict(config)
+        channel_uuid = str(target.get("channel_uuid") or "")
+        abort_state = {"viewer_left": False}
+        loop_slice_seconds: Optional[float] = None
+        loop_slice_deadline: Optional[float] = None
+        if udi is not None and config.get("watch_mode") == "continuous":
+            pending_loop_confirmation = (
+                bool(channel_uuid)
+                and self._current_detection_count(channel_uuid, "loop") > 0
+            )
+            interval_seconds = float(
+                max(
+                    self._continuous_loop_probe_slice_seconds(config),
+                    float(config.get("loop_probe_duration_seconds") or DEFAULT_CONFIG["loop_probe_duration_seconds"]),
+                )
+            )
+            now = self.clock()
+            last_started = None
+            if not pending_loop_confirmation:
+                with self._lock:
+                    last_started = self._last_loop_probe_started_at.get(channel_uuid)
+            if last_started is not None:
+                elapsed = now - float(last_started)
+                if elapsed < interval_seconds:
+                    return {
+                        "loop_probe_ran": False,
+                        "loop_detected": False,
+                        "loop_probe_skipped": True,
+                        "loop_probe_skip_reason": "loop_probe_interval",
+                        "loop_probe_next_due_seconds": max(0, int(interval_seconds - elapsed)),
+                    }
+            if channel_uuid:
+                with self._lock:
+                    self._last_loop_probe_started_at[channel_uuid] = now
+            loop_slice_seconds = self._continuous_loop_probe_slice_seconds(config)
+            loop_slice_deadline = time.monotonic() + loop_slice_seconds
+
+            def _abort_when_viewer_left() -> bool:
+                try:
+                    fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                    viewer_left = self._real_client_count(fresh_status, config, target) <= 0
+                except Exception as exc:
+                    logger.warning(f"Shadow loop probe viewer poll failed: {exc}")
+                    viewer_left = False
+                if viewer_left:
+                    abort_state["viewer_left"] = True
+                    return True
+                if loop_slice_deadline is not None and time.monotonic() >= loop_slice_deadline:
+                    abort_state["time_sliced"] = True
+                    return True
+                return False
+
+            loop_config["_shadow_loop_abort_check"] = _abort_when_viewer_left
+        prior_abort = loop_config.get("_shadow_loop_abort_check")
+
+        def _abort_loop_probe() -> bool:
+            return self._probe_cancelled(config) or bool(
+                callable(prior_abort) and prior_abort()
+            )
+
+        loop_config["_shadow_loop_abort_check"] = _abort_loop_probe
+        try:
+            result = dict(self.loop_probe(url, loop_config) or {})
+            result.setdefault("loop_probe_ran", True)
+            result["loop_detected"] = bool(result.get("loop_detected"))
+            if self._provider_viewer_preempted(config):
+                result["loop_detected"] = False
+                result["stopped"] = True
+                result["viewer_preempted"] = True
+            if abort_state.get("viewer_left"):
+                result["viewer_left"] = True
+            if abort_state.get("time_sliced") and not result.get("loop_detected"):
+                result["loop_probe_sliced"] = True
+                if loop_slice_seconds is not None:
+                    result["loop_probe_slice_seconds"] = round(loop_slice_seconds, 3)
+            return result
+        except Exception as exc:
+            logger.warning(
+                "Shadow loop probe failed for %s: %s",
+                target.get("channel_ref") or _ref("channel", target.get("channel_uuid")),
+                exc,
+            )
+            return {
+                "loop_probe_ran": False,
+                "loop_detected": False,
+                "loop_probe_error": type(exc).__name__,
+            }
+
+    @staticmethod
+    def _parse_no_decodable_frames_detection(
+        output: str,
+        config: Dict[str, Any],
+        *,
+        observed_duration: float,
+        returncode: Optional[int],
+    ) -> Dict[str, Any]:
+        result = {
+            "no_decodable_frames_detected": False,
+            "no_decodable_frames_duration_secs": None,
+            "no_decodable_frames_error": None,
+        }
+        if not config.get("no_decodable_frames_detection_enabled", True):
+            return result
+
+        output = output or ""
+        lowered = output.lower()
+        decoded_frames = 0
+        saw_media_stream = False
+        saw_video_stream = False
+        for line in output.splitlines():
+            if ShadowBlankMonitorService._line_has_video_stream(line):
+                saw_video_stream = True
+                saw_media_stream = True
+            if ShadowBlankMonitorService._line_has_audio_stream(line):
+                saw_media_stream = True
+            if ShadowBlankMonitorService._line_marks_stream_mapping(line):
+                saw_media_stream = True
+            match = FFMPEG_FRAME_RE.search(line)
+            if match:
+                try:
+                    decoded_frames = max(decoded_frames, int(match.group("frames")))
+                except (TypeError, ValueError):
+                    continue
+
+        matched_pattern = next(
+            (pattern for pattern in NO_DECODABLE_FRAME_ERROR_PATTERNS if pattern in lowered),
+            None,
+        )
+        if (
+            not matched_pattern
+            and saw_media_stream
+            and not (decoded_frames > 0 and saw_video_stream)
+        ):
+            matched_pattern = "no decoded video frames"
+        if not matched_pattern:
+            return result
+        if decoded_frames > 0:
+            return result
+
+        min_duration = float(
+            config.get(
+                "no_decodable_frames_min_duration_seconds",
+                DEFAULT_CONFIG["no_decodable_frames_min_duration_seconds"],
+            )
+        )
+        strong_terminal_error = (
+            returncode not in (None, 0)
+            and (
+                "output file does not contain any stream" in lowered
+                or "invalid data found" in lowered
+                or (
+                    "could not find codec parameters" in lowered
+                    and "unspecified size" in lowered
+                )
+            )
+        )
+        if float(observed_duration or 0.0) < min_duration and not strong_terminal_error:
+            return result
+
+        result["no_decodable_frames_detected"] = True
+        result["no_decodable_frames_duration_secs"] = round(
+            max(float(observed_duration or 0.0), min_duration if strong_terminal_error else 0.0),
+            3,
+        )
+        result["no_decodable_frames_error"] = matched_pattern
+        return result
+
+    def _run_blank_probe(self, url: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        command, duration = self._blank_probe_command(url, config)
+        process_timeout = float(
+            config.get("_shadow_probe_subprocess_timeout_seconds") or (duration + 15)
+        )
+        try:
+            start = time.time()
+            completed = self._run_cancelable_command(
+                command,
+                config,
+                timeout=process_timeout,
+                text=True,
+            )
+            if self._probe_cancelled(config):
+                result = {"blank_detected": False, "stopped": True}
+                if self._provider_viewer_preempted(config):
+                    result["viewer_preempted"] = True
+                return result
+            elapsed = time.time() - start
+            output = completed.stderr or ""
+            parsed = _parse_blank_detection(
+                output,
+                duration,
+                blank_ratio_threshold=float(config["blank_ratio_threshold"]),
+            )
+            if config.get("freeze_detection_enabled"):
+                parsed.update(_parse_freeze_detection(
+                    output,
+                    duration,
+                    freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
+                ))
+                parsed.update(self._parse_solid_color_detection(
+                    output,
+                    config,
+                    observed_duration=duration,
+                ))
+            parsed.update(self._parse_audio_detection(
+                output,
+                config,
+                observed_duration=elapsed,
+            ))
+            parsed.update(self._parse_no_decodable_frames_detection(
+                output,
+                config,
+                observed_duration=elapsed,
+                returncode=completed.returncode,
+            ))
+            offline_result = self._run_offline_image_probe(url, config)
+            if offline_result.get("viewer_preempted"):
+                return {
+                    "blank_detected": False,
+                    "stopped": True,
+                    "viewer_preempted": True,
+                }
+            parsed.update(offline_result)
+            decoded_frames, media_duration = self._probe_media_progress(output)
+            media_window_complete = (
+                decoded_frames > 0
+                and media_duration + 1.0 >= float(duration)
+            )
+            parsed["returncode"] = completed.returncode
+            parsed["probe_elapsed_seconds"] = round(max(0.0, elapsed), 3)
+            parsed["probe_expected_duration_seconds"] = duration
+            parsed["decoded_video_frames"] = decoded_frames
+            parsed["probe_media_duration_seconds"] = round(media_duration, 3)
+            parsed["probe_media_window_complete"] = media_window_complete
+            parsed["probe_incomplete"] = not media_window_complete and elapsed + 1.0 < float(duration)
+            return parsed
+        except subprocess.TimeoutExpired as exc:
+            if self._probe_cancelled(config):
+                result = {"blank_detected": False, "stopped": True}
+                if self._provider_viewer_preempted(config):
+                    result["viewer_preempted"] = True
+                return result
+            raw_output = exc.stderr or ""
+            if isinstance(raw_output, bytes):
+                output = raw_output.decode("utf-8", errors="replace")
+            else:
+                output = str(raw_output)
+            parsed = _parse_blank_detection(
+                output,
+                duration,
+                blank_ratio_threshold=float(config["blank_ratio_threshold"]),
+            )
+            if config.get("freeze_detection_enabled"):
+                parsed.update(_parse_freeze_detection(
+                    output,
+                    duration,
+                    freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
+                ))
+                parsed.update(self._parse_solid_color_detection(
+                    output,
+                    config,
+                    observed_duration=duration,
+                ))
+            parsed.update(self._parse_audio_detection(
+                output,
+                config,
+                observed_duration=duration,
+            ))
+            parsed.update(self._parse_no_decodable_frames_detection(
+                output,
+                config,
+                observed_duration=duration,
+                returncode=None,
+            ))
+            offline_result = self._run_offline_image_probe(url, config)
+            if offline_result.get("viewer_preempted"):
+                return {
+                    "blank_detected": False,
+                    "stopped": True,
+                    "viewer_preempted": True,
+                }
+            parsed.update(offline_result)
+            decoded_frames, media_duration = self._probe_media_progress(output)
+            media_window_complete = (
+                decoded_frames > 0
+                and media_duration + 1.0 >= float(duration)
+            )
+            parsed["decoded_video_frames"] = decoded_frames
+            parsed["probe_media_duration_seconds"] = round(media_duration, 3)
+            parsed["probe_media_window_complete"] = media_window_complete
+            parsed["probe_teardown_timeout"] = True
+            if not media_window_complete:
+                parsed["timeout"] = True
+            parsed["probe_elapsed_seconds"] = duration
+            parsed["probe_expected_duration_seconds"] = duration
+            parsed["probe_incomplete"] = False
+            return parsed
+
+    @staticmethod
+    def _probe_media_progress(output: str) -> tuple[int, float]:
+        decoded_frames = 0
+        media_duration = 0.0
+        for line in (output or "").splitlines():
+            progress_time = _parse_ffmpeg_progress_time(line)
+            if progress_time is not None:
+                media_duration = max(media_duration, progress_time)
+        for match in FFMPEG_FRAME_RE.finditer(output or ""):
+            try:
+                decoded_frames = max(decoded_frames, int(match.group("frames")))
+            except (TypeError, ValueError):
+                continue
+        return decoded_frames, media_duration
+
+    def _run_blank_probe_until_viewer_left(
+        self,
+        url: str,
+        config: Dict[str, Any],
+        udi: Any,
+        target: Dict[str, Any],
+        *,
+        continuous: bool = True,
+    ) -> Dict[str, Any]:
+        if self._probe_cancelled(config):
+            return {"blank_detected": False, "stopped": True}
+        command, duration = self._blank_probe_command(url, config, continuous=continuous)
+        offline_image_probe = self._run_offline_image_probe(url, config)
+        if self._probe_cancelled(config):
+            return {"blank_detected": False, "stopped": True}
+        if offline_image_probe.get("offline_image_detected"):
+            return {
+                "blank_detected": False,
+                "freeze_detected": False,
+                "no_decodable_frames_detected": False,
+                "garbled_audio_detected": False,
+                "silent_audio_detected": False,
+                **offline_image_probe,
+            }
+        viewer_left = False
+        stopped = False
+        detected_reason = ""
+        detected_duration = 0.0
+        no_decodable_error: Optional[str] = None
+        no_decodable_first_seen_wall: Optional[float] = None
+        garbled_audio_errors = 0
+        first_garbled_audio_error: Optional[str] = None
+        active_silence_start: Optional[float] = None
+        active_silence_wall: Optional[float] = None
+        decoded_frames = 0
+        lines: List[str] = []
+        line_queue: queue.Queue[str] = queue.Queue()
+        probe_started_wall = time.monotonic()
+        analysis_window_seconds = self._probe_analysis_window_seconds(config)
+        analysis_window_elapsed = False
+        analysis_window_duration: Optional[float] = None
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+
+        def read_stderr() -> None:
+            if process.stderr is None:
+                return
+            try:
+                for line in iter(process.stderr.readline, ""):
+                    line_queue.put(line)
+            except Exception as exc:
+                logger.debug(f"Shadow blank monitor stderr reader stopped: {exc}")
+
+        reader = threading.Thread(
+            target=read_stderr,
+            name=f"ShadowBlankProbeReader-{str(target.get('channel_uuid') or '')[:8]}",
+            daemon=True,
+        )
+        reader.start()
+
+        try:
+            # Continuous probes are protecting a real viewer that is already on
+            # the channel. Brief broadcast fades and low-motion content are
+            # normal, so blank and freeze both have to occupy their configured
+            # share of the bounded analysis window. The absolute minimum still
+            # applies when it is stricter than the ratio gate.
+            blank_minimum = float(
+                config.get("blank_min_duration_seconds", DEFAULT_CONFIG["blank_min_duration_seconds"])
+            )
+            blank_required = max(
+                blank_minimum,
+                float(analysis_window_seconds or duration or 1)
+                * float(config.get("blank_ratio_threshold", DEFAULT_CONFIG["blank_ratio_threshold"])),
+            )
+            freeze_required = float(
+                config.get("freeze_min_duration_seconds", DEFAULT_CONFIG["freeze_min_duration_seconds"])
+            )
+            freeze_ratio_required = max(
+                freeze_required,
+                float(analysis_window_seconds or duration or 1)
+                * float(config.get("freeze_ratio_threshold", DEFAULT_CONFIG["freeze_ratio_threshold"])),
+            )
+            no_decodable_required = float(
+                config.get(
+                    "no_decodable_frames_min_duration_seconds",
+                    DEFAULT_CONFIG["no_decodable_frames_min_duration_seconds"],
+                )
+            )
+            silent_audio_required = float(
+                config.get(
+                    "silent_audio_min_duration_seconds",
+                    DEFAULT_CONFIG["silent_audio_min_duration_seconds"],
+                )
+            )
+            garbled_audio_threshold = int(
+                config.get(
+                    "garbled_audio_error_threshold",
+                    DEFAULT_CONFIG["garbled_audio_error_threshold"],
+                )
+            )
+            last_media_time = 0.0
+            active_blank_start: Optional[float] = None
+            active_blank_wall: Optional[float] = None
+            active_freeze_start: Optional[float] = None
+            active_freeze_wall: Optional[float] = None
+            last_viewer_poll = 0.0
+            saw_audio_stream = False
+            saw_video_stream = False
+            saw_stream_mapping = False
+
+            def observed_duration(media_start: Optional[float], wall_start: Optional[float]) -> float:
+                media_duration = 0.0
+                if media_start is not None:
+                    media_duration = max(0.0, last_media_time - media_start)
+                wall_duration = 0.0
+                if wall_start is not None:
+                    wall_duration = max(0.0, time.monotonic() - wall_start)
+                return max(media_duration, wall_duration)
+
+            def no_decodable_observed_duration() -> float:
+                start = no_decodable_first_seen_wall if no_decodable_first_seen_wall is not None else probe_started_wall
+                return max(0.0, time.monotonic() - start)
+
+            def mark_detection(reason: str, event_duration: float) -> bool:
+                nonlocal detected_reason, detected_duration
+                detected_reason = reason
+                detected_duration = max(0.0, event_duration)
+                if process.poll() is None:
+                    process.terminate()
+                return True
+
+            while process.poll() is None and not self._probe_cancelled(config):
+                now = time.monotonic()
+                while True:
+                    try:
+                        line = line_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    lines.append(line)
+
+                    if self._line_has_audio_stream(line):
+                        saw_audio_stream = True
+                    if self._line_has_video_stream(line):
+                        saw_video_stream = True
+                    if self._line_marks_stream_mapping(line):
+                        saw_stream_mapping = True
+
+                    progress_time = _parse_ffmpeg_progress_time(line)
+                    if progress_time is not None:
+                        last_media_time = max(last_media_time, progress_time)
+
+                    for frame_match in FFMPEG_FRAME_RE.finditer(line):
+                        try:
+                            decoded_frames = max(decoded_frames, int(frame_match.group("frames")))
+                        except (TypeError, ValueError):
+                            continue
+
+                    if config.get("garbled_audio_detection_enabled") and self._line_is_garbled_audio(line):
+                        garbled_audio_errors += 1
+                        first_garbled_audio_error = first_garbled_audio_error or line.strip()[:160]
+                        if garbled_audio_errors >= garbled_audio_threshold:
+                            if mark_detection("garbled_audio", 0.0):
+                                break
+
+                    if config.get("silent_audio_detection_enabled"):
+                        if saw_video_stream and not saw_audio_stream and (
+                            saw_stream_mapping or FFMPEG_FRAME_RE.search(line)
+                        ):
+                            if mark_detection("silent_audio", max(0.0, now - probe_started_wall)):
+                                break
+
+                        silence_start = SILENCE_START_RE.search(line)
+                        if silence_start:
+                            try:
+                                active_silence_start = max(0.0, float(silence_start.group("start")))
+                                active_silence_wall = now
+                            except (TypeError, ValueError):
+                                active_silence_start = None
+                                active_silence_wall = None
+
+                        silence_duration = SILENCE_DURATION_RE.search(line)
+                        if silence_duration:
+                            try:
+                                silence_secs = max(0.0, float(silence_duration.group("duration")))
+                            except (TypeError, ValueError):
+                                silence_secs = 0.0
+                            active_silence_start = None
+                            active_silence_wall = None
+                            if silence_secs >= silent_audio_required:
+                                if mark_detection("silent_audio", silence_secs):
+                                    break
+
+                        silence_end = SILENCE_END_RE.search(line)
+                        if silence_end and active_silence_start is not None:
+                            try:
+                                silence_secs = max(0.0, float(silence_end.group("end")) - active_silence_start)
+                            except (TypeError, ValueError):
+                                silence_secs = 0.0
+                            active_silence_start = None
+                            active_silence_wall = None
+                            if silence_secs >= silent_audio_required:
+                                if mark_detection("silent_audio", silence_secs):
+                                    break
+
+                    if (
+                        config.get("no_decodable_frames_detection_enabled", True)
+                        and not (decoded_frames > 0 and saw_video_stream)
+                    ):
+                        lowered_line = line.lower()
+                        matched_no_decodable = next(
+                            (
+                                pattern
+                                for pattern in NO_DECODABLE_FRAME_ERROR_PATTERNS
+                                if pattern in lowered_line
+                            ),
+                            None,
+                        )
+                        if matched_no_decodable and no_decodable_error is None:
+                            no_decodable_error = matched_no_decodable
+                            no_decodable_first_seen_wall = now
+
+                    blank_start_match = BLACK_START_RE.search(line)
+                    if blank_start_match:
+                        try:
+                            active_blank_start = max(0.0, float(blank_start_match.group("start")))
+                            active_blank_wall = now
+                        except (TypeError, ValueError):
+                            active_blank_start = None
+                            active_blank_wall = None
+
+                    blank_end_match = BLACK_END_RE.search(line)
+                    if blank_end_match:
+                        segment_duration = None
+                        duration_match = BLACK_DURATION_RE.search(line)
+                        if duration_match:
+                            try:
+                                segment_duration = max(0.0, float(duration_match.group("duration")))
+                            except (TypeError, ValueError):
+                                segment_duration = None
+                        if segment_duration is None and active_blank_start is not None:
+                            try:
+                                segment_duration = max(0.0, float(blank_end_match.group("end")) - active_blank_start)
+                            except (TypeError, ValueError):
+                                segment_duration = 0.0
+                        active_blank_start = None
+                        active_blank_wall = None
+                        if segment_duration is not None and segment_duration >= blank_required:
+                            if mark_detection("blank", segment_duration):
+                                break
+
+                    freeze_start_match = FREEZE_START_RE.search(line)
+                    if freeze_start_match:
+                        try:
+                            active_freeze_start = max(0.0, float(freeze_start_match.group("start")))
+                            active_freeze_wall = now
+                        except (TypeError, ValueError):
+                            active_freeze_start = None
+                            active_freeze_wall = None
+
+                    freeze_end_match = FREEZE_END_RE.search(line)
+                    if freeze_end_match:
+                        segment_duration = None
+                        duration_match = FREEZE_DURATION_RE.search(line)
+                        if duration_match:
+                            try:
+                                segment_duration = max(0.0, float(duration_match.group("duration")))
+                            except (TypeError, ValueError):
+                                segment_duration = None
+                        if segment_duration is None and active_freeze_start is not None:
+                            try:
+                                segment_duration = max(0.0, float(freeze_end_match.group("end")) - active_freeze_start)
+                            except (TypeError, ValueError):
+                                segment_duration = 0.0
+                        active_freeze_start = None
+                        active_freeze_wall = None
+                        if segment_duration is not None and segment_duration >= freeze_ratio_required:
+                            if mark_detection("freeze", segment_duration):
+                                break
+
+                if detected_reason:
+                    break
+
+                if (
+                    config.get("silent_audio_detection_enabled")
+                    and active_silence_start is not None
+                    and observed_duration(active_silence_start, active_silence_wall) >= silent_audio_required
+                ):
+                    mark_detection("silent_audio", observed_duration(active_silence_start, active_silence_wall))
+                    break
+
+                if (
+                    no_decodable_error
+                    and not (decoded_frames > 0 and saw_video_stream)
+                    and no_decodable_observed_duration() >= no_decodable_required
+                ):
+                    mark_detection("no_decodable_frames", no_decodable_observed_duration())
+                    break
+
+                if (
+                    config.get("no_decodable_frames_detection_enabled", True)
+                    and not no_decodable_error
+                    and not (decoded_frames > 0 and saw_video_stream)
+                    and (saw_audio_stream or saw_video_stream or saw_stream_mapping)
+                    and no_decodable_observed_duration() >= no_decodable_required
+                ):
+                    no_decodable_error = "no decoded video frames"
+                    no_decodable_first_seen_wall = probe_started_wall
+                    mark_detection("no_decodable_frames", no_decodable_observed_duration())
+                    break
+
+                if (
+                    active_blank_start is not None
+                    and observed_duration(active_blank_start, active_blank_wall) >= blank_required
+                ):
+                    mark_detection("blank", observed_duration(active_blank_start, active_blank_wall))
+                    break
+
+                if (
+                    active_freeze_start is not None
+                    and observed_duration(active_freeze_start, active_freeze_wall) >= freeze_ratio_required
+                ):
+                    mark_detection("freeze", observed_duration(active_freeze_start, active_freeze_wall))
+                    break
+
+                try:
+                    if now - last_viewer_poll >= 1.0:
+                        last_viewer_poll = now
+                        fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                        if self._real_client_count(fresh_status, config, target) <= 0:
+                            viewer_left = True
+                            process.terminate()
+                            break
+                except Exception as exc:
+                    logger.warning(f"Shadow blank monitor viewer poll failed: {exc}")
+
+                if now - probe_started_wall >= analysis_window_seconds:
+                    analysis_window_elapsed = True
+                    analysis_window_duration = max(0.0, now - probe_started_wall)
+                    if process.poll() is None:
+                        process.terminate()
+                    break
+
+                time.sleep(0.2)
+
+            if self._probe_cancelled(config):
+                stopped = True
+                if process.poll() is None:
+                    process.terminate()
+
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+                stopped = True
+
+            reader.join(timeout=1.0)
+            while True:
+                try:
+                    lines.append(line_queue.get_nowait())
+                except queue.Empty:
+                    break
+
+            output = "".join(lines)
+            no_decodable_probe_duration = no_decodable_observed_duration()
+            no_decodable_parsed = self._parse_no_decodable_frames_detection(
+                output,
+                config,
+                observed_duration=no_decodable_probe_duration,
+                # Continuous mode intentionally does not treat a fast terminal
+                # ffmpeg error as enough by itself. It waits for the configured
+                # stall duration so confirmation_count still controls switch speed.
+                returncode=0,
+            )
+            if (
+                not detected_reason
+                and no_decodable_parsed.get("no_decodable_frames_detected")
+                and not viewer_left
+                and not stopped
+            ):
+                detected_reason = "no_decodable_frames"
+                detected_duration = float(no_decodable_parsed.get("no_decodable_frames_duration_secs") or 0.0)
+            elif (
+                not detected_reason
+                and no_decodable_error
+                and not (decoded_frames > 0 and saw_video_stream)
+                and not viewer_left
+                and not stopped
+            ):
+                while (
+                    no_decodable_probe_duration < no_decodable_required
+                    and not self._probe_cancelled(config)
+                ):
+                    try:
+                        fresh_status = self._find_status_for_target(udi.get_proxy_status() or {}, target)
+                        if self._real_client_count(fresh_status, config, target) <= 0:
+                            viewer_left = True
+                            break
+                    except Exception as exc:
+                        logger.warning(f"Shadow blank monitor viewer poll failed: {exc}")
+                    time.sleep(0.2)
+                    no_decodable_probe_duration = no_decodable_observed_duration()
+
+                no_decodable_parsed = self._parse_no_decodable_frames_detection(
+                    output,
+                    config,
+                    observed_duration=no_decodable_probe_duration,
+                    returncode=0,
+                )
+                if no_decodable_parsed.get("no_decodable_frames_detected") and not viewer_left:
+                    detected_reason = "no_decodable_frames"
+                    detected_duration = float(no_decodable_parsed.get("no_decodable_frames_duration_secs") or 0.0)
+
+            probe_elapsed_duration = max(0.0, time.monotonic() - probe_started_wall)
+            base_probe_duration = (
+                float(analysis_window_seconds)
+                if detected_reason == "blank"
+                else (
+                    analysis_window_duration
+                    if analysis_window_elapsed and analysis_window_duration is not None
+                    else min(
+                        float(duration),
+                        max(probe_elapsed_duration, last_media_time, detected_duration, 0.001),
+                    )
+                )
+            )
+            observed_probe_duration = max(
+                base_probe_duration,
+                int(last_media_time) if last_media_time else 0,
+                int(detected_duration) if detected_duration else 0,
+            )
+            parsed = _parse_blank_detection(
+                output,
+                observed_probe_duration,
+                blank_ratio_threshold=float(config["blank_ratio_threshold"]),
+            )
+            if config.get("freeze_detection_enabled"):
+                parsed.update(_parse_freeze_detection(
+                    output,
+                    observed_probe_duration,
+                    freeze_ratio_threshold=float(config["freeze_ratio_threshold"]),
+                ))
+                parsed.update(self._parse_solid_color_detection(
+                    output,
+                    config,
+                    observed_duration=observed_probe_duration,
+                ))
+            if not detected_reason and not viewer_left and not stopped:
+                flushed_blank_duration = max(
+                    (
+                        float(segment.get("duration") or 0.0)
+                        for segment in parsed.get("blank_segments") or []
+                        if isinstance(segment, dict)
+                    ),
+                    default=0.0,
+                )
+                if flushed_blank_duration >= blank_required:
+                    detected_reason = "blank"
+                    detected_duration = flushed_blank_duration
+                elif config.get("freeze_detection_enabled"):
+                    flushed_freeze_duration = max(
+                        (
+                            float(segment.get("duration") or 0.0)
+                            for segment in parsed.get("freeze_segments") or []
+                            if isinstance(segment, dict)
+                        ),
+                        default=0.0,
+                    )
+                    if flushed_freeze_duration >= freeze_ratio_required:
+                        detected_reason = "freeze"
+                        detected_duration = flushed_freeze_duration
+            if (
+                parsed.get("solid_color_detected")
+                and not parsed.get("blank_detected")
+                and parsed.get("freeze_detected")
+                and detected_reason in {"", "freeze"}
+                and not viewer_left
+                and not stopped
+            ):
+                detected_reason = "solid_color"
+                detected_duration = max(
+                    detected_duration,
+                    float(parsed.get("solid_color_duration_secs") or 0.0),
+                    float(parsed.get("freeze_duration_secs") or 0.0),
+                )
+            parsed.update(self._parse_audio_detection(
+                output,
+                config,
+                observed_duration=max(detected_duration, time.monotonic() - probe_started_wall),
+            ))
+            if saw_audio_stream and parsed.get("audio_stream_present") is None:
+                parsed["audio_stream_present"] = True
+            parsed.update(no_decodable_parsed)
+            parsed.update(offline_image_probe)
+            parsed["returncode"] = process.returncode
+            if detected_reason == "blank":
+                parsed["blank_detected"] = True
+                parsed["blank_duration_secs"] = round(detected_duration, 3)
+                parsed["blank_ratio"] = round(
+                    min(1.0, detected_duration / float(observed_probe_duration or 1)),
+                    4,
+                )
+            elif detected_reason == "freeze":
+                parsed.setdefault("blank_detected", False)
+                parsed["freeze_detected"] = True
+                parsed["freeze_duration_secs"] = round(detected_duration, 3)
+                freeze_ratio_duration = (
+                    analysis_window_duration
+                    if analysis_window_duration is not None
+                    else analysis_window_seconds
+                )
+                parsed["freeze_ratio"] = round(
+                    min(1.0, detected_duration / float(freeze_ratio_duration or duration or 1)),
+                    4,
+                )
+            elif detected_reason == "solid_color":
+                parsed.setdefault("blank_detected", False)
+                parsed.setdefault("freeze_detected", True)
+                parsed["solid_color_detected"] = True
+                parsed["solid_color_duration_secs"] = round(detected_duration, 3)
+            elif detected_reason == "no_decodable_frames":
+                parsed.setdefault("blank_detected", False)
+                parsed.setdefault("freeze_detected", False)
+                parsed["no_decodable_frames_detected"] = True
+                parsed["no_decodable_frames_duration_secs"] = round(detected_duration, 3)
+                parsed["no_decodable_frames_error"] = (
+                    no_decodable_parsed.get("no_decodable_frames_error")
+                    or no_decodable_error
+                )
+            elif detected_reason == "garbled_audio":
+                parsed.setdefault("blank_detected", False)
+                parsed.setdefault("freeze_detected", False)
+                parsed["garbled_audio_detected"] = True
+                parsed["garbled_audio_error_count"] = garbled_audio_errors
+                parsed["garbled_audio_error"] = first_garbled_audio_error or "audio_decode_errors"
+            elif detected_reason == "silent_audio":
+                parsed.setdefault("blank_detected", False)
+                parsed.setdefault("freeze_detected", False)
+                parsed["silent_audio_detected"] = True
+                parsed["silent_audio_duration_secs"] = round(detected_duration, 3)
+                parsed["silent_audio_noise_db"] = int(config.get("silent_audio_noise_db", DEFAULT_CONFIG["silent_audio_noise_db"]))
+            if viewer_left:
+                parsed["viewer_left"] = True
+            if stopped:
+                parsed["stopped"] = True
+            return parsed
+        finally:
+            if process.poll() is None:
+                process.kill()
+
+    def _remember_channel_identities(self, channels: Iterable[Dict[str, Any]]) -> None:
+        for channel in channels or []:
+            self._remember_channel_identity(channel)
+
+    def _remember_channel_identity(self, channel: Optional[Dict[str, Any]]) -> Optional[int]:
+        if not isinstance(channel, dict):
+            return None
+        channel_id = self._coerce_int((channel or {}).get("id"))
+        if channel_id is None:
+            return None
+        channel_uuid = str(channel.get("uuid") or channel.get("channel_uuid") or "").strip()
+        stream_ids = [
+            stream_id
+            for stream_id in (
+                self._coerce_int(item.get("id") if isinstance(item, dict) else item)
+                for item in (channel.get("streams") or [])
+            )
+            if stream_id is not None
+        ]
+        with self._lock:
+            if channel_uuid:
+                self._known_channel_ids_by_uuid[channel_uuid] = channel_id
+            for stream_id in stream_ids:
+                self._known_channel_ids_by_stream_id[stream_id] = channel_id
+        return channel_id
+
+    def _resolve_channel_id(
+        self,
+        udi: Any,
+        candidate_id: Any,
+        *,
+        channel_uuid: Any = None,
+        channel: Optional[Dict[str, Any]] = None,
+        status: Optional[Dict[str, Any]] = None,
+        current_stream_id: Any = None,
+        included_ids: Optional[Iterable[int]] = None,
+        included_uuids: Optional[Iterable[str]] = None,
+        previous_target: Optional[Dict[str, Any]] = None,
+    ) -> Optional[int]:
+        channel_uuid_text = str(channel_uuid or "").strip()
+        current_stream_id_int = self._coerce_int(current_stream_id)
+
+        if isinstance(channel, dict):
+            if not channel_uuid_text:
+                channel_uuid_text = str(channel.get("uuid") or channel.get("channel_uuid") or "").strip()
+            resolved = self._remember_channel_identity(channel)
+            if resolved is not None:
+                return resolved
+
+        for value in (
+            candidate_id,
+            (status or {}).get("numeric_channel_id") if isinstance(status, dict) else None,
+            (status or {}).get("id") if isinstance(status, dict) else None,
+            (previous_target or {}).get("channel_id") if isinstance(previous_target, dict) else None,
+        ):
+            resolved = self._coerce_int(value)
+            if resolved is not None:
+                self._remember_channel_identity({
+                    "id": resolved,
+                    "uuid": channel_uuid_text,
+                    "streams": [current_stream_id_int] if current_stream_id_int is not None else [],
+                })
+                return resolved
+
+        if channel_uuid_text:
+            with self._lock:
+                resolved = self._known_channel_ids_by_uuid.get(channel_uuid_text)
+            if resolved is not None:
+                return resolved
+
+        if current_stream_id_int is not None:
+            with self._lock:
+                resolved = self._known_channel_ids_by_stream_id.get(current_stream_id_int)
+            if resolved is not None:
+                return resolved
+
+        resolved_channel = self._find_channel_for_identity(
+            udi,
+            channel_uuid=channel_uuid_text,
+            stream_id=current_stream_id_int,
+        )
+        resolved = self._remember_channel_identity(resolved_channel)
+        if resolved is not None:
+            return resolved
+
+        included_id_set = set(included_ids or [])
+        included_uuid_set = {str(item) for item in (included_uuids or [])}
+        if len(included_id_set) == 1 and channel_uuid_text and channel_uuid_text in included_uuid_set:
+            resolved = next(iter(included_id_set))
+            self._remember_channel_identity({
+                "id": resolved,
+                "uuid": channel_uuid_text,
+                "streams": [current_stream_id_int] if current_stream_id_int is not None else [],
+            })
+            return resolved
+
+        return None
+
+    def _find_channel_for_identity(
+        self,
+        udi: Any,
+        *,
+        channel_uuid: str = "",
+        stream_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        if not hasattr(udi, "get_channels"):
+            return None
+        try:
+            channels = udi.get_channels() or []
+        except Exception:
+            return None
+        for channel in channels:
+            if not isinstance(channel, dict):
+                continue
+            if channel_uuid and str(channel.get("uuid") or channel.get("channel_uuid") or "") == channel_uuid:
+                return channel
+            if stream_id is not None and self._channel_has_stream(channel, stream_id):
+                return channel
+        return None
+
+    @staticmethod
+    def _channel_has_stream(channel: Dict[str, Any], stream_id: int) -> bool:
+        stream_id_text = str(stream_id)
+        for item in (channel or {}).get("streams") or []:
+            value = item.get("id") if isinstance(item, dict) else item
+            if str(value) == stream_id_text:
+                return True
+        return False
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        try:
+            return int(value) if value is not None and str(value) != "" else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _index_channels(channels: Iterable[Dict[str, Any]]) -> tuple[Dict[str, Dict[str, Any]], Dict[int, Dict[str, Any]]]:
+        by_uuid: Dict[str, Dict[str, Any]] = {}
+        by_id: Dict[int, Dict[str, Any]] = {}
+        for channel in channels or []:
+            if not isinstance(channel, dict):
+                continue
+            if channel.get("uuid"):
+                by_uuid[str(channel["uuid"])] = channel
+            if channel.get("id") is not None:
+                try:
+                    by_id[int(channel["id"])] = channel
+                except (TypeError, ValueError):
+                    pass
+        return by_uuid, by_id
+
+    @staticmethod
+    def _is_status_active(status: Dict[str, Any]) -> bool:
+        if not isinstance(status, dict):
+            return False
+        return bool(
+            status.get("state") == "active"
+            or status.get("active")
+            or status.get("current_stream")
+            or status.get("stream_id")
+            or status.get("clients")
+        )
+
+    @staticmethod
+    def _extract_stream_id(status: Dict[str, Any]) -> Optional[int]:
+        value = status.get("stream_id") or status.get("current_stream_id")
+        current = status.get("current_stream")
+        if value is None and isinstance(current, dict):
+            value = current.get("id") or current.get("stream_id")
+        elif value is None:
+            value = current
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _extract_channel_id(channel: Optional[Dict[str, Any]], status: Dict[str, Any]) -> Optional[int]:
+        value = (channel or {}).get("id") or status.get("numeric_channel_id") or status.get("id")
+        try:
+            return int(value) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _channel_display_name(channel: Optional[Dict[str, Any]], status: Dict[str, Any]) -> Optional[str]:
+        for value in (
+            (channel or {}).get("name"),
+            (channel or {}).get("channel_name"),
+            status.get("channel_name"),
+            status.get("name"),
+        ):
+            text = str(value or "").strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _client_text(client: Any) -> str:
+        if isinstance(client, dict):
+            values = [
+                client.get("user_agent"),
+                client.get("client_id"),
+                client.get("username"),
+                client.get("user"),
+                client.get("ip"),
+            ]
+            return " ".join(str(value) for value in values if value is not None)
+        return str(client)
+
+    @staticmethod
+    def _watcher_client_marker(config: Dict[str, Any]) -> str:
+        user_agent = str(config.get("watcher_user_agent") or DEFAULT_WATCHER_USER_AGENT).lower()
+        marker = SHADOW_WATCHER_USER_AGENT_MARKER.lower()
+        if marker in user_agent:
+            return marker
+        return user_agent
+
+    @staticmethod
+    def _status_clients(status: Dict[str, Any]) -> Optional[List[Any]]:
+        clients = status.get("clients")
+        if isinstance(clients, dict):
+            return list(clients.values())
+        if isinstance(clients, list):
+            return clients
+        return None
+
+    @classmethod
+    def _client_ref(cls, client: Any, index: int) -> str:
+        if isinstance(client, dict):
+            for key in ("client_id", "id", "session_id"):
+                value = client.get(key)
+                if value is not None and str(value).strip():
+                    return f"{key}:{str(value).strip()}"
+            parts = [
+                str(client.get(key) or "").strip()
+                for key in ("ip", "user", "username", "connected_at", "started_at", "user_agent")
+                if str(client.get(key) or "").strip()
+            ]
+            if parts:
+                return "|".join(parts)
+        return f"{index}:{cls._client_text(client)}"
+
+    def _real_client_refs(self, status: Dict[str, Any], config: Dict[str, Any]) -> List[str]:
+        marker = self._watcher_client_marker(config)
+        clients = self._status_clients(status)
+        if not clients:
+            return []
+        refs: List[str] = []
+        for index, client in enumerate(clients):
+            text = self._client_text(client).lower()
+            if marker and marker in text:
+                continue
+            if self._is_stale_real_client(client, config):
+                continue
+            refs.append(self._client_ref(client, index))
+        return refs
+
+    def _client_last_active_age_seconds(self, client: Any) -> Optional[float]:
+        if not isinstance(client, dict):
+            return None
+        for key in ("last_active_ago", "last_activity_ago", "idle_seconds"):
+            try:
+                age = float(client.get(key))
+            except (TypeError, ValueError):
+                continue
+            if age >= 0:
+                return age
+        for key in ("last_active", "last_activity_at"):
+            try:
+                timestamp = float(client.get(key))
+            except (TypeError, ValueError):
+                continue
+            if timestamp > 0:
+                return max(0.0, float(self.clock()) - timestamp)
+        return None
+
+    @staticmethod
+    def _stale_real_client_threshold_seconds(config: Dict[str, Any]) -> float:
+        try:
+            grace = float(config.get("viewer_left_grace_seconds"))
+        except (TypeError, ValueError):
+            grace = float(DEFAULT_CONFIG["viewer_left_grace_seconds"])
+        return max(1.0, grace)
+
+    def _is_stale_real_client(self, client: Any, config: Dict[str, Any]) -> bool:
+        age = self._client_last_active_age_seconds(client)
+        if age is None:
+            return False
+        return age > self._stale_real_client_threshold_seconds(config)
+
+    def _stale_real_client_absence(
+        self,
+        status: Dict[str, Any],
+        config: Dict[str, Any],
+        now: float,
+    ) -> Optional[Dict[str, Any]]:
+        marker = self._watcher_client_marker(config)
+        clients = self._status_clients(status)
+        if not clients:
+            return None
+
+        stale_ages: List[float] = []
+        for client in clients:
+            text = self._client_text(client).lower()
+            if marker and marker in text:
+                continue
+            age = self._client_last_active_age_seconds(client)
+            if age is None:
+                return None
+            if age <= self._stale_real_client_threshold_seconds(config):
+                return None
+            stale_ages.append(age)
+
+        if not stale_ages:
+            return None
+        return {
+            "since": max(0.0, float(now) - max(stale_ages)),
+            "last_real_client_count": len(stale_ages),
+            "reason": "stale_dispatcharr_client",
+        }
+
+    @staticmethod
+    def _normalize_proxy_output_format(value: Any) -> Optional[str]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return None
+        # Dispatcharr can expose resolved format keys such as fmp4:p21.
+        text = text.split(":", 1)[0].strip()
+        return PROXY_OUTPUT_FORMAT_ALIASES.get(text)
+
+    def _real_viewer_output_format(self, status: Dict[str, Any], config: Dict[str, Any]) -> Optional[str]:
+        marker = self._watcher_client_marker(config)
+        clients = status.get("clients")
+        if isinstance(clients, dict):
+            clients = list(clients.values())
+        if isinstance(clients, list):
+            for client in clients:
+                if marker and marker in self._client_text(client).lower():
+                    continue
+                if not isinstance(client, dict):
+                    continue
+                if self._is_stale_real_client(client, config):
+                    continue
+                for key in ("output_format", "resolved_output_format", "container", "format"):
+                    normalized = self._normalize_proxy_output_format(client.get(key))
+                    if normalized:
+                        return normalized
+
+        for key in ("output_format", "resolved_output_format", "container", "format"):
+            normalized = self._normalize_proxy_output_format(status.get(key))
+            if normalized:
+                return normalized
+        return None
+
+    def _real_client_count(
+        self,
+        status: Dict[str, Any],
+        config: Dict[str, Any],
+        target: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        marker = self._watcher_client_marker(config)
+        clients = self._status_clients(status)
+        if isinstance(clients, list):
+            non_watcher_refs: List[str] = []
+            visible_watcher_count = 0
+            for index, client in enumerate(clients):
+                text = self._client_text(client).lower()
+                if marker and marker in text:
+                    visible_watcher_count += 1
+                    continue
+                if self._is_stale_real_client(client, config):
+                    continue
+                non_watcher_refs.append(self._client_ref(client, index))
+
+            if target is not None and visible_watcher_count <= 0:
+                probe_started = target.get("active_probe_started_at")
+                try:
+                    probe_age = self.clock() - float(probe_started)
+                except (TypeError, ValueError):
+                    probe_age = 0.0
+                probe_is_established = (
+                    probe_started is not None
+                    and probe_age >= AGGREGATE_ONLY_VIEWER_GRACE_SECONDS
+                )
+                baseline_refs = {
+                    str(ref)
+                    for ref in (target.get("real_client_refs") or [])
+                    if str(ref).strip()
+                }
+                if probe_is_established and baseline_refs and non_watcher_refs:
+                    still_real = [ref for ref in non_watcher_refs if ref in baseline_refs]
+                    unseen = [ref for ref in non_watcher_refs if ref not in baseline_refs]
+                    inferred_shadow_clients = 1 if unseen else 0
+                    return len(still_real) + max(0, len(unseen) - inferred_shadow_clients)
+
+            return len(non_watcher_refs)
+
+        aggregate_count: Optional[int] = None
+        for key in ("real_client_count", "client_count", "current_viewers", "viewer_count"):
+            try:
+                count = int(status.get(key))
+            except (TypeError, ValueError):
+                continue
+            if count >= 0:
+                aggregate_count = count
+                break
+
+        if target is None:
+            if aggregate_count is not None:
+                return aggregate_count
+            return 1 if self._is_status_active(status) else 0
+
+        probe_started = target.get("active_probe_started_at")
+        try:
+            probe_age = self.clock() - float(probe_started)
+        except (TypeError, ValueError):
+            probe_age = 0.0
+        probe_is_established = probe_started is not None and probe_age >= AGGREGATE_ONLY_VIEWER_GRACE_SECONDS
+
+        if aggregate_count is not None:
+            if not probe_is_established:
+                return aggregate_count
+            # When Dispatcharr does not expose per-client details, a continuous
+            # Shadow probe can be the only remaining downstream client. In that
+            # ambiguous state we fail closed: one aggregate client means watcher
+            # only, two or more means at least one real viewer remains.
+            return max(0, aggregate_count - 1)
+
+        if probe_is_established and self._is_status_active(status):
+            return 0
+        return 1 if self._is_status_active(status) else 0
+
+    def _watcher_client_count(self, status: Dict[str, Any], config: Dict[str, Any]) -> int:
+        return int(self._watcher_client_details(status, config).get("watcher_client_count") or 0)
+
+    def _watcher_client_details(self, status: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+        marker = self._watcher_client_marker(config)
+        if not marker:
+            return {"watcher_client_count": 0}
+        clients = self._status_clients(status)
+        if not isinstance(clients, list):
+            return {"watcher_client_count": 0}
+
+        watcher_clients = [
+            (index, client)
+            for index, client in enumerate(clients)
+            if marker in self._client_text(client).lower()
+        ]
+        details: Dict[str, Any] = {"watcher_client_count": len(watcher_clients)}
+        if not watcher_clients:
+            return details
+
+        def _watcher_sort_key(item: tuple[int, Any]) -> tuple[int, float, int]:
+            index, client = item
+            connected_at: Any = None
+            if isinstance(client, dict):
+                connected_at = client.get("connected_at") or client.get("started_at")
+            try:
+                parsed = float(connected_at)
+            except (TypeError, ValueError):
+                return (1, float(index), index)
+            return (0, parsed, index)
+
+        index, client = sorted(watcher_clients, key=_watcher_sort_key)[0]
+        raw_client_id: Any = None
+        connected_at: Any = None
+        if isinstance(client, dict):
+            raw_client_id = client.get("client_id") or client.get("id") or client.get("session_id")
+            connected_at = client.get("connected_at") or client.get("started_at")
+        if raw_client_id is None:
+            raw_client_id = f"{index}:{self._client_text(client)}"
+
+        details["watcher_client_ref"] = _ref("client", raw_client_id)
+        try:
+            connected_at_float = float(connected_at)
+        except (TypeError, ValueError):
+            connected_at_float = None
+        if connected_at_float is not None:
+            details["watcher_connected_at"] = connected_at_float
+            details["watcher_uptime_seconds"] = max(0, int(self.clock() - connected_at_float))
+        return details
+
+    def _cooldown_remaining(self, channel_uuid: str) -> int:
+        with self._lock:
+            now = self.clock()
+            until = self._cooldowns.get(channel_uuid, 0)
+            if until <= now and channel_uuid in self._cooldowns:
+                self._cooldowns.pop(channel_uuid, None)
+                self._save_safety_state_locked()
+                return 0
+            return max(0, int(until - now))
+
+    def _set_cooldown(self, channel_uuid: str, config: Dict[str, Any]) -> None:
+        with self._lock:
+            self._cooldowns[channel_uuid] = self.clock() + int(config["channel_cooldown_seconds"])
+            self._save_safety_state_locked()
+
+    def _clear_cooldown(self, channel_uuid: str) -> None:
+        with self._lock:
+            if self._cooldowns.pop(channel_uuid, None) is not None:
+                self._save_safety_state_locked()
+
+    def _record_successful_switch(
+        self,
+        channel_uuid: str,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self._lock:
+            self._switch_history[channel_uuid].append(self.clock())
+            if config is not None:
+                self._cooldowns[channel_uuid] = (
+                    self.clock() + int(config["channel_cooldown_seconds"])
+                )
+            self._save_safety_state_locked()
+
+    def _attempted_switch_targets(
+        self,
+        channel_uuid: str,
+        origin_stream_id: Optional[int],
+    ) -> set[int]:
+        if origin_stream_id is None:
+            return set()
+        try:
+            origin = int(origin_stream_id)
+        except (TypeError, ValueError):
+            return set()
+        with self._lock:
+            entry = self._switch_attempts.get(channel_uuid) or {}
+            if entry.get("origin_stream_id") != origin:
+                return set()
+            return {
+                int(item)
+                for item in entry.get("target_stream_ids", [])
+                if item is not None and str(item).isdigit()
+            }
+
+    def _record_switch_attempt(
+        self,
+        channel_uuid: str,
+        origin_stream_id: Optional[int],
+        target_stream_id: Optional[int],
+    ) -> None:
+        if origin_stream_id is None or target_stream_id is None:
+            return
+        try:
+            origin = int(origin_stream_id)
+            target = int(target_stream_id)
+        except (TypeError, ValueError):
+            return
+        with self._lock:
+            entry = self._switch_attempts.get(channel_uuid)
+            if not entry or entry.get("origin_stream_id") != origin:
+                entry = {
+                    "origin_stream_id": origin,
+                    "target_stream_ids": [],
+                    "recorded_at": self.clock(),
+                }
+                self._switch_attempts[channel_uuid] = entry
+            else:
+                entry["recorded_at"] = self.clock()
+            targets = entry.setdefault("target_stream_ids", [])
+            if target not in targets:
+                targets.append(target)
+
+    def _switch_attempt_matches(
+        self,
+        channel_uuid: str,
+        origin_stream_id: Optional[int],
+        target_stream_id: Optional[int],
+    ) -> bool:
+        try:
+            target = int(target_stream_id) if target_stream_id is not None else None
+        except (TypeError, ValueError):
+            return False
+        return target in self._attempted_switch_targets(channel_uuid, origin_stream_id)
+
+    def _recent_switch_attempt_transition(
+        self,
+        channel_uuid: str,
+        previous_stream_id: Optional[int],
+        current_stream_id: Optional[int],
+    ) -> bool:
+        try:
+            previous = int(previous_stream_id) if previous_stream_id is not None else None
+            current = int(current_stream_id) if current_stream_id is not None else None
+        except (TypeError, ValueError):
+            return False
+        if previous is None or current is None:
+            return False
+        with self._lock:
+            entry = self._switch_attempts.get(channel_uuid) or {}
+            try:
+                recorded_at = float(entry.get("recorded_at"))
+                origin = int(entry.get("origin_stream_id"))
+            except (TypeError, ValueError):
+                return False
+            if self.clock() - recorded_at > POST_SWITCH_STATUS_SETTLE_SECONDS:
+                return False
+            targets = {
+                int(item)
+                for item in entry.get("target_stream_ids", [])
+                if item is not None and str(item).isdigit()
+            }
+            return (
+                (previous == origin and current in targets)
+                or (current == origin and previous in targets)
+            )
+
+    def _clear_switch_attempts(self, channel_uuid: str) -> None:
+        with self._lock:
+            self._switch_attempts.pop(channel_uuid, None)
+
+    def _switch_allowed(self, channel_uuid: str, config: Dict[str, Any]) -> bool:
+        now = self.clock()
+        with self._lock:
+            history = self._switch_history[channel_uuid]
+            pruned = False
+            while history and now - history[0] > 3600:
+                history.popleft()
+                pruned = True
+            if pruned:
+                self._save_safety_state_locked()
+            return len(history) < int(config["max_switches_per_hour"])
+
+    @staticmethod
+    def _detection_thresholds(config: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            key: config.get(key)
+            for keys in DETECTION_THRESHOLD_KEYS.values()
+            for key in keys
+            if key in config
+        }
+
+    @staticmethod
+    def _event_trigger_reason(event_type: str, details: Dict[str, Any]) -> Optional[str]:
+        explicit = (
+            details.get("trigger_reason")
+            or details.get("reason")
+            or PENDING_EVENT_REASONS.get(event_type)
+        )
+        if explicit:
+            return str(explicit)
+        if event_type == "probe_ok":
+            return "probe_ok"
+        if event_type in PRE_PROBE_EVENT_TYPES:
+            return "pre_probe"
+        if event_type in GUARD_EVENT_TYPES:
+            return event_type
+        return None
+
+    @staticmethod
+    def _event_decision_group(event_type: str) -> str:
+        if event_type in SWITCH_EVENT_TYPES:
+            return "switch"
+        if event_type in PRE_PROBE_EVENT_TYPES:
+            return "pre_probe"
+        if event_type in GUARD_EVENT_TYPES:
+            return "guard"
+        if event_type.endswith("_pending") or event_type == "probe_ok":
+            return "probe"
+        if event_type == "offline_image_learned":
+            return "learn"
+        if event_type in {"viewer_left", "watcher_reconnecting", "watcher_recovered", "watcher_orphaned"}:
+            return "watcher"
+        if event_type == "no_alternative":
+            return "skip"
+        return "other"
+
+    @staticmethod
+    def _switch_summary(events: Iterable[Dict[str, Any]], *, active_cooldowns: int = 0) -> Dict[str, Any]:
+        summary: Dict[str, Any] = {
+            "window_events": 0,
+            "successful_switches": 0,
+            "failed_switches": 0,
+            "dry_run_switches": 0,
+            "api_completed_switches": 0,
+            "api_successful_switch_calls": 0,
+            "pending_post_switch_verifications": 0,
+            "external_stream_changes": 0,
+            "skipped_switches": 0,
+            "pre_probe_prevented_switches": 0,
+            "loop_pre_probe_required_skips": 0,
+            "recovery_guard_prevented_switches": 0,
+            "stale_stream_guard_skips": 0,
+            "cooldown_skips": 0,
+            "rate_limited_skips": 0,
+            "quality_guard_skips": 0,
+            "active_cooldowns": int(active_cooldowns),
+            "prevented_false_switches": 0,
+            "last_switch_reason": None,
+            "last_switch_at": None,
+            "last_switch_result": None,
+        }
+        event_list = list(events or [])
+        finalized_switch_attempts = {
+            str(details.get("switch_attempt_ref"))
+            for event in event_list
+            if isinstance(event, dict)
+            and event.get("type") in {"switch_success", "switch_failed"}
+            and isinstance((details := event.get("details")), dict)
+            and details.get("switch_attempt_ref")
+        }
+        for event in event_list:
+            if not isinstance(event, dict):
+                continue
+            summary["window_events"] += 1
+            event_type = event.get("type")
+            details = event.get("details") if isinstance(event.get("details"), dict) else {}
+            reason = (
+                details.get("trigger_reason")
+                or event.get("trigger_reason")
+                or details.get("reason")
+            )
+
+            if event_type == "switch_success":
+                summary["successful_switches"] += 1
+            elif event_type == "switch_failed":
+                summary["failed_switches"] += 1
+            elif event_type == "dry_run_switch":
+                summary["dry_run_switches"] += 1
+            elif event_type == "switch_api_completed":
+                summary["api_completed_switches"] += 1
+                if details.get("switch_api_success"):
+                    summary["api_successful_switch_calls"] += 1
+                switch_attempt_ref = details.get("switch_attempt_ref")
+                if (
+                    details.get("post_switch_verification_pending")
+                    and (
+                        not switch_attempt_ref
+                        or str(switch_attempt_ref) not in finalized_switch_attempts
+                    )
+                ):
+                    summary["pending_post_switch_verifications"] += 1
+            elif event_type == "external_stream_change":
+                summary["external_stream_changes"] = int(summary.get("external_stream_changes", 0)) + 1
+            elif event_type == "no_alternative":
+                summary["skipped_switches"] += 1
+                if isinstance(details.get("pre_probe"), dict):
+                    summary["pre_probe_prevented_switches"] += 1
+            elif event_type == "watcher_recovery_guard":
+                summary["skipped_switches"] += 1
+                summary["recovery_guard_prevented_switches"] += 1
+            elif event_type == "loop_pre_probe_required":
+                summary["skipped_switches"] += 1
+                summary["loop_pre_probe_required_skips"] += 1
+            elif event_type == "stale_stream_guard":
+                summary["skipped_switches"] += 1
+                summary["stale_stream_guard_skips"] += 1
+            elif event_type == "cooldown":
+                summary["cooldown_skips"] += 1
+            elif event_type == "switch_rate_limited":
+                summary["skipped_switches"] += 1
+                summary["rate_limited_skips"] += 1
+            elif event_type == "quality_check_active":
+                summary["quality_guard_skips"] += 1
+
+            if event_type in SWITCH_EVENT_TYPES and summary["last_switch_result"] is None:
+                summary["last_switch_result"] = event_type
+                summary["last_switch_reason"] = reason
+                summary["last_switch_at"] = event.get("timestamp")
+
+        summary["prevented_false_switches"] = (
+            summary["pre_probe_prevented_switches"]
+            + summary["loop_pre_probe_required_skips"]
+            + summary["recovery_guard_prevented_switches"]
+            + summary["stale_stream_guard_skips"]
+            + summary["rate_limited_skips"]
+        )
+        return summary
+
+    @staticmethod
+    def _compact_probe_context(
+        reason: Optional[str],
+        probe: Optional[Dict[str, Any]],
+        thresholds: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        if not reason or reason not in DETECTION_REASONS or not isinstance(probe, dict):
+            return None
+
+        measurements = {
+            key: probe.get(key)
+            for key in DETECTION_MEASUREMENT_KEYS.get(reason, ())
+            if probe.get(key) is not None
+        }
+        threshold_values = {
+            key: (thresholds or {}).get(key)
+            for key in DETECTION_THRESHOLD_KEYS.get(reason, ())
+            if (thresholds or {}).get(key) is not None
+        }
+        if not measurements and not threshold_values:
+            return {"reason": reason}
+        context: Dict[str, Any] = {"reason": reason}
+        if measurements:
+            context["measurements"] = measurements
+        if threshold_values:
+            context["thresholds"] = threshold_values
+        return context
+
+    @staticmethod
+    def _viewer_context(target: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = (
+            "real_client_count",
+            "watcher_client_count",
+            "watcher_state",
+            "watcher_client_ref",
+            "watcher_uptime_seconds",
+            "watcher_absent_seconds",
+            "watcher_recovered_after_seconds",
+            "persistent_watcher_state",
+            "persistent_watcher_uptime_seconds",
+        )
+        return {
+            key: target.get(key)
+            for key in allowed
+            if target.get(key) is not None
+        }
+
+    def _event_details_with_context(
+        self,
+        event_type: str,
+        target: Dict[str, Any],
+        details: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        enriched = dict(details or {})
+        reason = self._event_trigger_reason(event_type, enriched)
+        if reason:
+            enriched.setdefault("trigger_reason", reason)
+        if target.get("stream_ref"):
+            enriched.setdefault("origin_stream_ref", target.get("stream_ref"))
+
+        viewer_context = self._viewer_context(target)
+        if viewer_context:
+            enriched.setdefault("viewer_context", viewer_context)
+
+        detection_context = self._compact_probe_context(
+            reason,
+            target.get("last_probe"),
+            target.get("last_probe_thresholds"),
+        )
+        if detection_context:
+            if "confirmations" in enriched:
+                detection_context["confirmations"] = enriched.get("confirmations")
+            if "required" in enriched:
+                detection_context["required"] = enriched.get("required")
+            enriched.setdefault("detection", detection_context)
+
+        if event_type in SWITCH_EVENT_TYPES:
+            enriched.setdefault("switch_result", event_type)
+        return enriched
+
+    def _record_event(self, event_type: str, target: Dict[str, Any], details: Dict[str, Any]) -> None:
+        details = self._event_details_with_context(event_type, target, details)
+        event = {
+            "timestamp": self.clock(),
+            "type": event_type,
+            "decision_group": self._event_decision_group(event_type),
+            "trigger_reason": details.get("trigger_reason"),
+            "channel_ref": target.get("channel_ref"),
+            "stream_ref": target.get("stream_ref"),
+            "real_client_count": target.get("real_client_count"),
+            "details": details,
+        }
+        with self._lock:
+            channel_uuid = str(target.get("channel_uuid") or "")
+            if channel_uuid:
+                allowed, _reason = self._target_allowed_by_config_locked(
+                    channel_uuid,
+                    target,
+                    self._config,
+                )
+                if not allowed:
+                    return
+            if event_type in {"switch_success", "switch_failed"}:
+                switch_attempt_ref = details.get("switch_attempt_ref")
+                if switch_attempt_ref:
+                    # The API-completed event is deliberately provisional so
+                    # cancellation after the external side effect remains
+                    # visible.  Once verification reaches a final result,
+                    # replace that provisional row instead of showing one
+                    # logical switch twice in Decision History.
+                    self._events = deque(
+                        (
+                            existing
+                            for existing in self._events
+                            if not (
+                                existing.get("type") == "switch_api_completed"
+                                and isinstance(existing.get("details"), dict)
+                                and existing["details"].get("switch_attempt_ref")
+                                == switch_attempt_ref
+                            )
+                        ),
+                        maxlen=MAX_EVENTS,
+                    )
+            self._events.appendleft(event)
+            watched = self._watched.get(target.get("channel_uuid"))
+            if watched is not None:
+                watched["last_event"] = event
+                if target.get("last_probe"):
+                    watched["last_probe"] = target["last_probe"]
+        logger.info(
+            f"Shadow blank monitor event={event_type} "
+            f"channel_ref={event['channel_ref']} stream_ref={event['stream_ref']}"
+        )
+        if event_type == "viewer_left" and target.get("channel_uuid"):
+            channel_uuid = str(target.get("channel_uuid"))
+            self._cancel_active_probe(channel_uuid)
+            self._stop_persistent_watcher(channel_uuid)
+            with self._lock:
+                self._last_loop_probe_started_at.pop(channel_uuid, None)
+                self._viewer_absences.pop(channel_uuid, None)
+
+    @staticmethod
+    def _default_stream_checker_provider() -> Any:
+        from apps.stream.stream_checker_service import get_stream_checker_service
+
+        return get_stream_checker_service()
+
+    def _quality_checker_conflicts(self, target: Dict[str, Any], config: Dict[str, Any]) -> bool:
+        if not config.get("skip_during_quality_check", False):
+            return False
+
+        channel_id = target.get("channel_id")
+        if channel_id is None:
+            return False
+
+        try:
+            checker = self.stream_checker_provider()
+            status = checker.get_status() if checker else {}
+        except Exception as exc:
+            logger.warning(f"Shadow blank monitor could not read quality checker status: {exc}")
+            return True
+
+        queue_status = status.get("queue") or {}
+        progress = status.get("progress") or {}
+        current_channel = queue_status.get("current_channel") or progress.get("channel_id")
+
+        try:
+            if current_channel is not None and int(current_channel) == int(channel_id):
+                return True
+        except (TypeError, ValueError):
+            pass
+
+        if status.get("stream_checking_mode") and queue_status.get("in_progress", 0) and current_channel is None:
+            return True
+
+        return False
+
+    @staticmethod
+    def _parse_program_time(value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @classmethod
+    def _normalize_program_payload(cls, program: Dict[str, Any], *, state: str) -> Optional[Dict[str, Any]]:
+        title = (
+            program.get("title")
+            or program.get("program_title")
+            or program.get("name")
+        )
+        if not title:
+            return None
+        start = program.get("start_time") or program.get("start") or program.get("starts_at")
+        end = program.get("end_time") or program.get("end") or program.get("ends_at")
+        payload = {
+            "title": str(title),
+            "state": state,
+        }
+        if start:
+            payload["start_time"] = str(start)
+        if end:
+            payload["end_time"] = str(end)
+        return payload
+
+    def _current_epg_program(
+        self,
+        channel: Optional[Dict[str, Any]],
+        raw_status: Dict[str, Any],
+        numeric_channel_id: Optional[int],
+    ) -> Optional[Dict[str, Any]]:
+        for key in ("current_program", "epg_program", "program"):
+            program = raw_status.get(key)
+            if isinstance(program, dict):
+                normalized = self._normalize_program_payload(program, state="current")
+                if normalized:
+                    return normalized
+
+        status_title = (
+            raw_status.get("program_title")
+            or raw_status.get("epg_title")
+            or raw_status.get("current_program_title")
+        )
+        if status_title:
+            return {"title": str(status_title), "state": "current"}
+
+        tvg_id = (channel or {}).get("tvg_id") or raw_status.get("tvg_id")
+        if numeric_channel_id is None and not tvg_id:
+            return None
+
+        try:
+            from apps.automation.scheduling_service import get_scheduling_service
+
+            service = get_scheduling_service()
+            programs = service.get_programs_by_channel(numeric_channel_id, tvg_id=tvg_id)
+        except Exception as exc:
+            logger.debug("Shadow monitor could not read EPG program: %s", exc)
+            return None
+
+        if not isinstance(programs, list) or not programs:
+            return None
+
+        now = datetime.now(timezone.utc)
+        upcoming: List[tuple[datetime, Dict[str, Any]]] = []
+        for program in programs:
+            if not isinstance(program, dict):
+                continue
+            start = self._parse_program_time(program.get("start_time") or program.get("start"))
+            end = self._parse_program_time(program.get("end_time") or program.get("end"))
+            if start and end and start <= now <= end:
+                return self._normalize_program_payload(program, state="current")
+            if start and start > now:
+                upcoming.append((start, program))
+
+        if upcoming:
+            upcoming.sort(key=lambda item: item[0])
+            return self._normalize_program_payload(upcoming[0][1], state="upcoming")
+        return None
+
+    @staticmethod
+    def _public_target(target: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = {
+            "channel_ref",
+            "channel_id",
+            "stream_ref",
+            "real_client_count",
+            "watcher_client_count",
+            "watcher_client_ref",
+            "watcher_connected_at",
+            "watcher_uptime_seconds",
+            "watcher_state",
+            "watcher_absent_since",
+            "watcher_absent_seconds",
+            "watcher_recovered_after_seconds",
+            "last_watcher_client_ref",
+            "viewer_state",
+            "viewer_left_grace_active",
+            "viewer_absent_since",
+            "viewer_absent_seconds",
+            "viewer_left_grace_seconds",
+            "viewer_left_grace_remaining_seconds",
+            "skip_probe_reason",
+            "persistent_watcher_state",
+            "persistent_watcher_started_at",
+            "persistent_watcher_uptime_seconds",
+            "persistent_watcher_pid",
+            "state",
+            "current_program",
+            "channel_name",
+            "cooldown_seconds",
+            "viewer_output_format",
+            "probe_state",
+            "probe_active",
+            "active_probe_started_at",
+            "next_probe_at",
+            "last_probe",
+            "last_event",
+        }
+        return {key: value for key, value in target.items() if key in allowed}
+
+    @staticmethod
+    def _public_excluded_target(target: Dict[str, Any]) -> Dict[str, Any]:
+        allowed = {
+            "channel_ref",
+            "channel_id",
+            "channel_name",
+            "stream_ref",
+            "real_client_count",
+            "watcher_client_count",
+            "state",
+            "current_program",
+            "viewer_output_format",
+            "exclude_reason",
+        }
+        return {key: value for key, value in target.items() if key in allowed}
+
+    @staticmethod
+    def _find_status_for_target(proxy_status: Dict[str, Any], target: Dict[str, Any]) -> Dict[str, Any]:
+        channel_uuid = str(target.get("channel_uuid") or "")
+        if channel_uuid and channel_uuid in proxy_status:
+            return proxy_status[channel_uuid] or {}
+
+        channel_id = target.get("channel_id")
+        channel_id_key = str(channel_id) if channel_id is not None else ""
+        if channel_id_key and channel_id_key in proxy_status:
+            return proxy_status[channel_id_key] or {}
+
+        for status in proxy_status.values():
+            if not isinstance(status, dict):
+                continue
+            status_uuid = str(status.get("channel_id") or status.get("channel_uuid") or "")
+            if channel_uuid and status_uuid == channel_uuid:
+                return status
+            try:
+                status_id = int(status.get("numeric_channel_id") or status.get("id"))
+            except (TypeError, ValueError):
+                continue
+            if channel_id is not None and status_id == int(channel_id):
+                return status
+
+        return {}
+
+    def _discard_probe_after_stream_change(
+        self,
+        target: Dict[str, Any],
+        fresh_status: Dict[str, Any],
+        *,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        if config is not None and self._probe_cancelled(config):
+            return True
+        previous_stream_id = target.get("stream_id")
+        observed_stream_id = self._extract_stream_id(fresh_status)
+        if (
+            previous_stream_id is None
+            or observed_stream_id is None
+            or str(previous_stream_id) == str(observed_stream_id)
+        ):
+            return False
+
+        channel_uuid = str(target.get("channel_uuid") or "")
+        previous_stream_ref = target.get("stream_ref") or _ref("stream", previous_stream_id)
+        observed_stream_ref = _ref("stream", observed_stream_id)
+        event_target = dict(target)
+        event_target["stream_id"] = previous_stream_id
+        event_target["stream_ref"] = previous_stream_ref
+
+        last_probe = dict(target.get("last_probe") or {})
+        last_probe.update({
+            "discarded": True,
+            "discarded_reason": "stream_changed_during_probe",
+            "observed_stream_ref": observed_stream_ref,
+        })
+        target["last_probe"] = last_probe
+        target["stream_id"] = observed_stream_id
+        target["stream_ref"] = observed_stream_ref
+
+        self._reset_detection_state(channel_uuid)
+        self._clear_cooldown(channel_uuid)
+
+        with self._lock:
+            watched = self._watched.get(channel_uuid) or {}
+            already_observed = (
+                watched.get("stream_id") is not None
+                and str(watched.get("stream_id")) == str(observed_stream_id)
+            )
+
+        if config is not None and self._probe_cancelled(config):
+            return True
+        if not already_observed:
+            self._record_event(
+                "external_stream_change",
+                event_target,
+                {
+                    "target_stream_ref": observed_stream_ref,
+                    "observed_stream_ref": observed_stream_ref,
+                    "switch_source": "external",
+                    "switch_actor": "unknown",
+                    "switch_actor_note": (
+                        "Dispatcharr proxy status does not expose who changed "
+                        "the active stream."
+                    ),
+                    "stream_change_source": "dispatcharr_proxy_status",
+                    "probe_result_discarded": True,
+                    "probe_discard_reason": "stream_changed_during_probe",
+                    "operator_note": (
+                        "Active stream changed while Shadow was probing. The mixed probe "
+                        "result was discarded and the new stream will be probed cleanly."
+                    ),
+                },
+            )
+
+        with self._lock:
+            allowed, _reason = self._target_allowed_by_config_locked(
+                channel_uuid,
+                target,
+                self._config,
+            )
+            if not allowed or (config is not None and self._probe_cancelled(config)):
+                return True
+            current = dict(self._watched.get(channel_uuid) or {})
+            current.update(target)
+            if self._events and self._events[0].get("channel_ref") == target.get("channel_ref"):
+                current["last_event"] = self._events[0]
+            self._watched[channel_uuid] = current
+        return True
+
+
+_shadow_monitor_instance: Optional[ShadowBlankMonitorService] = None
+_shadow_monitor_lock = threading.Lock()
+
+
+def get_shadow_blank_monitor_service() -> ShadowBlankMonitorService:
+    global _shadow_monitor_instance
+    with _shadow_monitor_lock:
+        if _shadow_monitor_instance is None:
+            _shadow_monitor_instance = ShadowBlankMonitorService()
+        return _shadow_monitor_instance

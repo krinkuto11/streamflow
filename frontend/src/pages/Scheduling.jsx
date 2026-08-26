@@ -15,6 +15,10 @@ import { useToast } from '@/hooks/use-toast.js'
 import { schedulingAPI, channelsAPI, automationAPI } from '@/services/api.js'
 import { Plus, Trash2, Clock, Calendar, RefreshCw, Loader2, Settings, ChevronsUpDown, Check, Edit, Download, Upload, FileJson } from 'lucide-react'
 import { cn } from '@/lib/utils.js'
+import {
+  getAutoCreateRuleTestDiagnostics,
+  getAutoCreateRuleTestToast,
+} from '@/lib/scheduling-auto-create-display.js'
 
 // Schedule type descriptions
 const SCHEDULE_TYPE_INFO = {
@@ -30,6 +34,7 @@ const SCHEDULE_TYPE_INFO = {
     detailsPlural: 'Creates monitoring sessions for continuous quality tracking'
   }
 }
+const DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN = 10
 
 export default function Scheduling() {
   const [events, setEvents] = useState([])
@@ -62,28 +67,14 @@ export default function Scheduling() {
   const [ruleName, setRuleName] = useState('')
   const [ruleRegexPattern, setRuleRegexPattern] = useState('')
   const [ruleMinutesBefore, setRuleMinutesBefore] = useState(5)
+  const [ruleMaxEventsPerRun, setRuleMaxEventsPerRun] = useState(DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN)
   const [ruleScheduleType, setRuleScheduleType] = useState('check')  // 'check' or 'monitoring'
-  const [ruleEnableLoopDetection, setRuleEnableLoopDetection] = useState(false)
   const [ruleEnableLoopingDetection, setRuleEnableLoopingDetection] = useState(true)
   const [ruleEnableLogoDetection, setRuleEnableLogoDetection] = useState(true)
-  
-  // Single Event AceStream Config
-  const [enableLoopDetection, setEnableLoopDetection] = useState(false)
-  const [sessionType, setSessionType] = useState('standard')
-  const [intervalS, setIntervalS] = useState(1.0)
-  const [runSeconds, setRunSeconds] = useState(0)
-  const [perSampleTimeoutS, setPerSampleTimeoutS] = useState(1.0)
-  const [engineContainerId, setEngineContainerId] = useState('')
-
-  // Rule AceStream Config
-  const [ruleSessionType, setRuleSessionType] = useState('standard')
-  const [ruleIntervalS, setRuleIntervalS] = useState(1.0)
-  const [ruleRunSeconds, setRuleRunSeconds] = useState(0)
-  const [rulePerSampleTimeoutS, setRulePerSampleTimeoutS] = useState(1.0)
-  const [ruleEngineContainerId, setRuleEngineContainerId] = useState('')
 
   const [testingRegex, setTestingRegex] = useState(false)
   const [regexMatches, setRegexMatches] = useState([])
+  const [regexTestResult, setRegexTestResult] = useState(null)
   const [deleteRuleDialogOpen, setDeleteRuleDialogOpen] = useState(false)
   const [ruleToDelete, setRuleToDelete] = useState(null)
   const [editingRuleId, setEditingRuleId] = useState(null)
@@ -95,6 +86,32 @@ export default function Scheduling() {
   const { toast } = useToast()
 
   // Calculate paginated events with useMemo for performance
+  const regexTestDiagnostics = useMemo(
+    () => getAutoCreateRuleTestDiagnostics(regexTestResult),
+    [regexTestResult],
+  )
+
+  const clearRegexTestState = () => {
+    setRegexMatches([])
+    setRegexTestResult(null)
+  }
+
+  const resetRuleForm = () => {
+    setEditingRuleId(null)
+    setRuleName('')
+    setRuleSelectedChannels([])
+    setRuleSelectedChannelGroups([])
+    setRuleRegexPattern('')
+    setRuleMinutesBefore(5)
+    setRuleMaxEventsPerRun(DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN)
+    setRuleScheduleType('check')
+    setRuleEnableLoopingDetection(true)
+    setRuleEnableLogoDetection(true)
+    setRuleChannelComboboxOpen(false)
+    setRuleChannelGroupComboboxOpen(false)
+    clearRegexTestState()
+  }
+
   const paginationData = useMemo(() => {
     // Apply channel filter first
     const filteredEvents = channelFilter === 'all'
@@ -206,12 +223,6 @@ export default function Scheduling() {
         program_title: selectedProgram.title,
         minutes_before: minutesBeforeValue,
         schedule_type: scheduleType,
-        session_type: sessionType,
-        interval_s: intervalS,
-        run_seconds: runSeconds,
-        per_sample_timeout_s: perSampleTimeoutS,
-        engine_container_id: engineContainerId,
-        enable_loop_detection: enableLoopDetection,
       }
 
       await schedulingAPI.createEvent(eventData)
@@ -228,12 +239,6 @@ export default function Scheduling() {
       setChannelComboboxOpen(false)
       setMinutesBefore(5)
       setScheduleType('check')
-      setSessionType('standard')
-      setIntervalS(1.0)
-      setRunSeconds(0)
-      setPerSampleTimeoutS(1.0)
-      setEngineContainerId('')
-      setEnableLoopDetection(false)
       await loadData()
     } catch (err) {
       console.error('Failed to create event:', err)
@@ -253,6 +258,11 @@ export default function Scheduling() {
     return !isNaN(minutesValue) && minutesValue >= 0
   }
 
+  const validateMaxEventsPerRun = (value) => {
+    const maxValue = parseInt(value)
+    return !isNaN(maxValue) && maxValue >= 1
+  }
+
   const handleRuleChannelSelect = (channelId) => {
     const channel = channels.find(c => c.id === parseInt(channelId))
     if (!channel) return
@@ -265,8 +275,8 @@ export default function Scheduling() {
       setRuleSelectedChannels([...ruleSelectedChannels, channel])
     }
 
-    // Clear regex matches when channels change
-    setRegexMatches([])
+    // Clear regex results when channels change
+    clearRegexTestState()
   }
 
   const handleRuleChannelGroupSelect = (groupId) => {
@@ -281,8 +291,8 @@ export default function Scheduling() {
       setRuleSelectedChannelGroups([...ruleSelectedChannelGroups, group])
     }
 
-    // Clear regex matches when groups change
-    setRegexMatches([])
+    // Clear regex results when groups change
+    clearRegexTestState()
   }
 
   const handleTestRegex = async () => {
@@ -297,48 +307,34 @@ export default function Scheduling() {
 
     try {
       setTestingRegex(true)
-      // Test regex against first selected channel or first channel from first selected group
-      let testChannelId = null
-      if (ruleSelectedChannels.length > 0) {
-        testChannelId = ruleSelectedChannels[0].id
-      } else if (ruleSelectedChannelGroups.length > 0) {
-        // Find first channel in the first selected group
-        const firstGroup = ruleSelectedChannelGroups[0]
-        const groupChannels = channels.filter(c => c.channel_group_id === firstGroup.id)
-        if (groupChannels.length > 0) {
-          testChannelId = groupChannels[0].id
-        }
-      }
+      const selectedChannelIds = ruleSelectedChannels.map(c => c.id)
+      const selectedGroupIds = ruleSelectedChannelGroups.map(g => g.id)
 
-      if (!testChannelId) {
+      if (selectedChannelIds.length === 0 && selectedGroupIds.length === 0) {
         toast({
           title: "No Channels",
-          description: "No channels found in selected groups",
+          description: "Select at least one channel or channel group",
           variant: "destructive"
         })
         return
       }
 
       const response = await schedulingAPI.testAutoCreateRule({
-        channel_id: testChannelId,
-        regex_pattern: ruleRegexPattern
+        channel_ids: selectedChannelIds,
+        channel_group_ids: selectedGroupIds,
+        regex_pattern: ruleRegexPattern,
+        minutes_before: parseInt(ruleMinutesBefore) || 0,
+        max_events_per_run: parseInt(ruleMaxEventsPerRun) || DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN,
       })
 
       setRegexMatches(response.data.programs || [])
-
-      // SCH-002: backend signals the channel has no TVG-ID configured
-      if (response.data.no_tvg_id) {
-        toast({
-          title: "No TVG-ID Configured",
-          description: "This channel has no TVG-ID set. EPG matching requires a TVG-ID — open the channel in Dispatcharr and click \"Use EPG TVG-ID\" to populate it.",
-          variant: "destructive"
-        })
-      } else if (response.data.matches === 0) {
-        toast({
-          title: "No Matches",
-          description: "The regex pattern didn't match any programs in the EPG (tested on first available channel)",
-          variant: "default"
-        })
+      setRegexTestResult(response.data || null)
+      const testToast = getAutoCreateRuleTestToast({
+        responseData: response.data,
+        selectedChannelCount: selectedChannelIds.length,
+      })
+      if (testToast) {
+        toast(testToast)
       }
     } catch (err) {
       console.error('Failed to test regex:', err)
@@ -347,9 +343,26 @@ export default function Scheduling() {
         description: err.response?.data?.error || "Failed to test regex pattern",
         variant: "destructive"
       })
-      setRegexMatches([])
+      clearRegexTestState()
     } finally {
       setTestingRegex(false)
+    }
+  }
+
+  const handleRefresh = async () => {
+    try {
+      setLoading(true)
+      await schedulingAPI.getEPGGrid(true)
+      await loadData()
+    } catch (err) {
+      console.error('Failed to refresh scheduling data:', err)
+      toast({
+        title: "Error",
+        description: "Failed to refresh EPG matches",
+        variant: "destructive"
+      })
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -373,6 +386,14 @@ export default function Scheduling() {
       })
       return
     }
+    if (!validateMaxEventsPerRun(ruleMaxEventsPerRun)) {
+      toast({
+        title: "Validation Error",
+        description: "Please enter a valid max checks value (1 or greater)",
+        variant: "destructive"
+      })
+      return
+    }
 
     try {
       const ruleData = {
@@ -381,13 +402,8 @@ export default function Scheduling() {
         channel_group_ids: ruleSelectedChannelGroups.map(g => g.id),
         regex_pattern: ruleRegexPattern,
         minutes_before: minutesBeforeValue,
+        max_events_per_run: parseInt(ruleMaxEventsPerRun),
         schedule_type: ruleScheduleType,
-        session_type: ruleSessionType,
-        interval_s: ruleIntervalS,
-        run_seconds: ruleRunSeconds,
-        per_sample_timeout_s: rulePerSampleTimeoutS,
-        engine_container_id: ruleEngineContainerId,
-        enable_loop_detection: ruleEnableLoopDetection,
         enable_looping_detection: ruleEnableLoopingDetection,
         enable_logo_detection: ruleEnableLogoDetection
       }
@@ -409,24 +425,7 @@ export default function Scheduling() {
       }
 
       setRuleDialogOpen(false)
-      setEditingRuleId(null)
-      setRuleName('')
-      setRuleSelectedChannels([])
-      setRuleSelectedChannelGroups([])
-      setRuleRegexPattern('')
-      setRuleMinutesBefore(5)
-      setRuleScheduleType('check')
-      setRuleSessionType('standard')
-      setRuleIntervalS(1.0)
-      setRuleRunSeconds(0)
-      setRulePerSampleTimeoutS(1.0)
-      setRuleEngineContainerId('')
-      setRuleEnableLoopDetection(false)
-      setRuleEnableLoopingDetection(true)
-      setRuleEnableLogoDetection(true)
-      setRegexMatches([])
-      setRuleChannelComboboxOpen(false)
-      setRuleChannelGroupComboboxOpen(false)
+      resetRuleForm()
       await loadData()
     } catch (err) {
       console.error('Failed to save rule:', err)
@@ -464,13 +463,8 @@ export default function Scheduling() {
     setRuleName(rule.name)
     setRuleRegexPattern(rule.regex_pattern)
     setRuleMinutesBefore(rule.minutes_before)
+    setRuleMaxEventsPerRun(rule.max_events_per_run || DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN)
     setRuleScheduleType(rule.schedule_type || 'check')  // Default to 'check' for backward compatibility
-    setRuleSessionType(rule.session_type || 'standard')
-    setRuleIntervalS(rule.interval_s || 1.0)
-    setRuleRunSeconds(rule.run_seconds || 0)
-    setRulePerSampleTimeoutS(rule.per_sample_timeout_s || 1.0)
-    setRuleEngineContainerId(rule.engine_container_id || '')
-    setRuleEnableLoopDetection(rule.enable_loop_detection || false)
     setRuleEnableLoopingDetection(rule.enable_looping_detection !== false)
     setRuleEnableLogoDetection(rule.enable_logo_detection !== false)
 
@@ -509,7 +503,7 @@ export default function Scheduling() {
     setRuleSelectedChannelGroups(selectedGroups)
 
     // Clear previous test results
-    setRegexMatches([])
+    clearRegexTestState()
 
     // Open dialog
     setRuleDialogOpen(true)
@@ -640,6 +634,7 @@ export default function Scheduling() {
       setRuleName(rule.name || '')
       setRuleRegexPattern(rule.regex_pattern || '')
       setRuleMinutesBefore(rule.minutes_before || 5)
+      setRuleMaxEventsPerRun(rule.max_events_per_run || DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN)
 
       // Handle channel selection
       const channelIds = rule.channel_ids || (rule.channel_id ? [rule.channel_id] : [])
@@ -705,21 +700,21 @@ export default function Scheduling() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h1 className="text-3xl font-bold">Scheduling</h1>
           <p className="text-muted-foreground mt-1">
             Schedule channel checks before EPG events
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => loadData()}>
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-end">
+          <Button variant="outline" size="sm" onClick={handleRefresh} className="w-full sm:w-auto">
             <RefreshCw className={cn("h-4 w-4 mr-2", loading && "animate-spin")} />
             Refresh
           </Button>
           <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
             <DialogTrigger asChild>
-              <Button>
+              <Button className="w-full sm:w-auto">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Event Check
               </Button>
@@ -876,91 +871,12 @@ export default function Scheduling() {
                   </div>
                 )}
 
-                {/* Session Type (Monitoring only) */}
                 {selectedProgram && scheduleType === 'monitoring' && (
-                  <div className="space-y-4 border rounded-lg p-4">
+                  <div className="space-y-2 border rounded-lg p-4">
                     <h4 className="text-sm font-medium">Monitoring Settings</h4>
-                    <div className="space-y-2">
-                      <Label htmlFor="session-type">Session Type</Label>
-                      <Select
-                        value={sessionType}
-                        onValueChange={(value) => setSessionType(value)}
-                      >
-                        <SelectTrigger id="session-type">
-                          <SelectValue placeholder="Select session type" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="standard">Standard (FFmpeg)</SelectItem>
-                          <SelectItem value="acestream">AceStream</SelectItem>
-                        </SelectContent>
-                      </Select>
-                      <p className="text-sm text-muted-foreground">
-                        {sessionType === 'standard'
-                          ? 'Creates a standard monitoring session using ffmpeg'
-                          : 'Creates an AceStream quality monitoring session'}
-                      </p>
-                    </div>
-
-                    {sessionType === 'acestream' && (
-                      <div className="grid grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                          <Label htmlFor="interval-s">Interval (s)</Label>
-                          <Input
-                            id="interval-s"
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            value={intervalS}
-                            onChange={(e) => setIntervalS(parseFloat(e.target.value) || 1.0)}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="run-seconds">Run Seconds</Label>
-                          <Input
-                            id="run-seconds"
-                            type="number"
-                            min="0"
-                            value={runSeconds}
-                            onChange={(e) => setRunSeconds(parseInt(e.target.value) || 0)}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="per-sample-timeout">Sample Timeout (s)</Label>
-                          <Input
-                            id="per-sample-timeout"
-                            type="number"
-                            step="0.1"
-                            min="0.1"
-                            value={perSampleTimeoutS}
-                            onChange={(e) => setPerSampleTimeoutS(parseFloat(e.target.value) || 1.0)}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="engine-container">Engine Container ID</Label>
-                          <Input
-                            id="engine-container"
-                            placeholder="Optional"
-                            value={engineContainerId}
-                            onChange={(e) => setEngineContainerId(e.target.value)}
-                          />
-                        </div>
-                        <div className="flex items-center justify-between col-span-2 border-t pt-2">
-                          <div className="space-y-0.5">
-                            <Label htmlFor="ace-loop-detection" className="text-sm">
-                              Enable Zero-Decode Loop Detection
-                            </Label>
-                            <p className="text-[11px] text-muted-foreground mr-4">
-                              Monitors packet metadata to detect if the stream is a looping VOD file. (Negligible CPU impact)
-                            </p>
-                          </div>
-                          <Switch
-                            id="ace-loop-detection"
-                            checked={enableLoopDetection}
-                            onCheckedChange={setEnableLoopDetection}
-                          />
-                        </div>
-                      </div>
-                    )}
+                    <p className="text-sm text-muted-foreground">
+                      Creates a standard FFmpeg monitoring session for the selected program.
+                    </p>
                   </div>
                 )}
               </div>
@@ -1288,20 +1204,21 @@ export default function Scheduling() {
       {/* Auto-Create Rules Card */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
               <CardTitle>Auto-Create Rules</CardTitle>
               <CardDescription>
                 Automatically create scheduled events based on regex patterns matching EPG program names
               </CardDescription>
             </div>
-            <div className="flex gap-2">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:justify-end">
               {/* Export Button */}
               <Button
                 variant="outline"
                 size="sm"
                 onClick={handleExportRules}
                 disabled={autoCreateRules.length === 0}
+                className="w-full sm:w-auto"
               >
                 <Download className="h-4 w-4 mr-2" />
                 Export
@@ -1312,6 +1229,7 @@ export default function Scheduling() {
                 variant="outline"
                 size="sm"
                 onClick={() => fileInputRef.current?.click()}
+                className="w-full sm:w-auto"
               >
                 <Upload className="h-4 w-4 mr-2" />
                 Import
@@ -1328,37 +1246,13 @@ export default function Scheduling() {
               <Dialog open={ruleDialogOpen} onOpenChange={(open) => {
                 setRuleDialogOpen(open)
                 if (!open) {
-                  // Clear form when dialog closes
-                  setEditingRuleId(null)
-                  setRuleName('')
-                  setRuleSelectedChannels([])
-                  setRuleRegexPattern('')
-                  setRuleMinutesBefore(5)
-                  setRuleEnableLoopDetection(false)
-                  setRuleEnableLoopingDetection(true)
-                  setRuleEnableLogoDetection(true)
-                  setRegexMatches([])
+                  resetRuleForm()
                 }
               }}>
                 <DialogTrigger asChild>
                   <Button size="sm" onClick={() => {
-                    // Clear editing state when opening to create new rule
-                    setEditingRuleId(null)
-                    setRuleName('')
-                    setRuleSelectedChannels([])
-                    setRuleRegexPattern('')
-                    setRuleMinutesBefore(5)
-                    setRuleScheduleType('check')
-                    setRuleSessionType('standard')
-                    setRuleIntervalS(1.0)
-                    setRuleRunSeconds(0)
-                    setRulePerSampleTimeoutS(1.0)
-                    setRuleEngineContainerId('')
-                    setRuleEnableLoopDetection(false)
-                    setRuleEnableLoopingDetection(true)
-                    setRuleEnableLogoDetection(true)
-                    setRegexMatches([])
-                  }}>
+                    resetRuleForm()
+                  }} className="w-full sm:w-auto">
                     <Plus className="h-4 w-4 mr-2" />
                     Add Rule
                   </Button>
@@ -1366,13 +1260,14 @@ export default function Scheduling() {
                 <DialogContent className="max-w-4xl max-h-[90vh] flex flex-col">
                   <DialogHeader>
                     <DialogTitle>
-                      <div className="flex items-center justify-between">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <span>{editingRuleId ? 'Edit Auto-Create Rule' : 'Create Auto-Create Rule'}</span>
                         {!editingRuleId && (
                           <Button
                             variant="outline"
                             size="sm"
                             onClick={() => wizardFileInputRef.current?.click()}
+                            className="w-full sm:w-auto"
                           >
                             <FileJson className="h-4 w-4 mr-2" />
                             Import JSON
@@ -1575,18 +1470,18 @@ export default function Scheduling() {
                             value={ruleRegexPattern}
                             onChange={(e) => {
                               setRuleRegexPattern(e.target.value)
-                              setRegexMatches([])  // Clear matches when pattern changes
+                              clearRegexTestState()
                             }}
                           />
                           <p className="text-sm text-muted-foreground">
-                            Use regex syntax to match program titles. Click "Test Pattern" to see live results{ruleSelectedChannels.length > 1 ? ' (tested on first selected channel)' : ''}.
+                            Use regex syntax to match program titles. Click "Test Pattern" to see live results across selected channels and groups.
                           </p>
                         </div>
 
                         {/* Live Regex Results */}
                         {regexMatches.length > 0 && (
                           <div className="space-y-2">
-                            <Label>Matching Programs ({regexMatches.length}){ruleSelectedChannels.length > 1 && ` on ${ruleSelectedChannels[0].name}`}</Label>
+                            <Label>Matching Programs ({regexMatches.length})</Label>
                             <div className="border rounded-lg max-h-48 overflow-y-auto">
                               {regexMatches.map((program, idx) => (
                                 <div
@@ -1594,12 +1489,80 @@ export default function Scheduling() {
                                   className="p-2 border-b last:border-b-0 text-sm"
                                 >
                                   <div className="font-medium">{program.title}</div>
+                                  {program.channel_name && (
+                                    <div className="text-muted-foreground text-xs mt-1">
+                                      {program.channel_name}
+                                    </div>
+                                  )}
                                   <div className="text-muted-foreground text-xs mt-1">
                                     {formatTime(program.start_time)} - {formatTime(program.end_time)}
                                   </div>
+                                  {program.schedule_state && (
+                                    <div className="mt-1">
+                                      <Badge variant="outline" className="text-[10px]">
+                                        {program.schedule_state === 'due_now' ? 'Due now' : 'Future event'}
+                                      </Badge>
+                                    </div>
+                                  )}
                                 </div>
                               ))}
                             </div>
+                          </div>
+                        )}
+
+                        {regexTestResult && (
+                          <div className="rounded-lg border bg-muted/20 p-3 space-y-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-sm font-medium">Pattern test diagnostics</span>
+                              <Badge variant="secondary">
+                                {regexTestResult.channels_with_matches || 0}/{regexTestResult.channels_tested || 0} channels matched
+                              </Badge>
+                              <Badge variant="secondary">
+                                {regexTestResult.matches || 0} program{(regexTestResult.matches || 0) === 1 ? '' : 's'}
+                              </Badge>
+                            </div>
+
+                            {regexTestDiagnostics.length === 0 ? (
+                              <p className="text-xs text-muted-foreground">
+                                Every tested channel has at least one matching EPG program.
+                              </p>
+                            ) : (
+                              <div className="space-y-2">
+                                {regexTestDiagnostics.map((item) => (
+                                  <div key={item.key} className="rounded-md border bg-background/60 p-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className="text-sm font-medium">{item.label}</span>
+                                      <Badge variant="outline">{item.count}</Badge>
+                                    </div>
+                                    <p className="mt-1 text-xs text-muted-foreground">{item.detail}</p>
+                                    {item.sampleTitles?.length > 0 && (
+                                      <div className="mt-2 space-y-1">
+                                        <div className="text-xs font-medium">Example EPG titles</div>
+                                        {item.sampleTitles.map((title, idx) => (
+                                          <div key={idx} className="truncate text-xs text-muted-foreground">
+                                            {title}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                    {item.channels?.length > 0 && (
+                                      <div className="mt-2 flex flex-wrap gap-1">
+                                        {item.channels.slice(0, 5).map((channel) => (
+                                          <Badge key={channel.id} variant="secondary" className="max-w-[12rem] truncate text-xs">
+                                            {channel.name || `Channel ${channel.id}`}
+                                          </Badge>
+                                        ))}
+                                        {item.channels.length > 5 && (
+                                          <Badge variant="secondary" className="text-xs">
+                                            +{item.channels.length - 5} more
+                                          </Badge>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                           </div>
                         )}
 
@@ -1616,6 +1579,21 @@ export default function Scheduling() {
                           />
                           <p className="text-sm text-muted-foreground">
                             Channel checks will run {ruleMinutesBefore || 0} minutes before matching programs start
+                          </p>
+                        </div>
+
+                        <div className="space-y-2">
+                          <Label htmlFor="rule-max-events">Max Checks per Rule Run</Label>
+                          <Input
+                            id="rule-max-events"
+                            type="number"
+                            min="1"
+                            max="250"
+                            value={ruleMaxEventsPerRun}
+                            onChange={(e) => setRuleMaxEventsPerRun(e.target.value)}
+                          />
+                          <p className="text-sm text-muted-foreground">
+                            If this rule would create more checks, StreamFlow blocks the rule instead of creating a mass queue.
                           </p>
                         </div>
 
@@ -1652,7 +1630,7 @@ export default function Scheduling() {
                         </div>
 
                         {/* Monitoring Toggles */}
-                        {ruleScheduleType === 'monitoring' && ruleSessionType !== 'acestream' && (
+                        {ruleScheduleType === 'monitoring' && (
                           <div className="border rounded-lg p-3 space-y-3">
                             <h4 className="text-sm font-medium">Monitoring Features</h4>
 
@@ -1689,86 +1667,6 @@ export default function Scheduling() {
                             </div>
                           </div>
                         )}
-                        
-                        {/* Session Type Settings Group */}
-                        {ruleScheduleType === 'monitoring' && (
-                          <div className="border rounded-lg p-3 space-y-3">
-                            <h4 className="text-sm font-medium">Session Type</h4>
-                            <Select
-                              value={ruleSessionType}
-                              onValueChange={(value) => setRuleSessionType(value)}
-                            >
-                              <SelectTrigger id="rule-session-type">
-                                <SelectValue placeholder="Select session type" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="standard">Standard (FFmpeg)</SelectItem>
-                                <SelectItem value="acestream">AceStream</SelectItem>
-                              </SelectContent>
-                            </Select>
-
-                            {ruleSessionType === 'acestream' && (
-                              <div className="grid grid-cols-2 gap-4 pt-2">
-                                <div className="space-y-2">
-                                  <Label htmlFor="rule-interval-s">Interval (s)</Label>
-                                  <Input
-                                    id="rule-interval-s"
-                                    type="number"
-                                    step="0.1"
-                                    min="0.1"
-                                    value={ruleIntervalS}
-                                    onChange={(e) => setRuleIntervalS(parseFloat(e.target.value) || 1.0)}
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <Label htmlFor="rule-run-seconds">Run Seconds</Label>
-                                  <Input
-                                    id="rule-run-seconds"
-                                    type="number"
-                                    min="0"
-                                    value={ruleRunSeconds}
-                                    onChange={(e) => setRuleRunSeconds(parseInt(e.target.value) || 0)}
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <Label htmlFor="rule-per-sample-timeout">Sample Timeout (s)</Label>
-                                  <Input
-                                    id="rule-per-sample-timeout"
-                                    type="number"
-                                    step="0.1"
-                                    min="0.1"
-                                    value={rulePerSampleTimeoutS}
-                                    onChange={(e) => setRulePerSampleTimeoutS(parseFloat(e.target.value) || 1.0)}
-                                  />
-                                </div>
-                                <div className="space-y-2">
-                                  <Label htmlFor="rule-engine-container">Engine Container ID</Label>
-                                  <Input
-                                    id="rule-engine-container"
-                                    placeholder="Optional"
-                                    value={ruleEngineContainerId}
-                                    onChange={(e) => setRuleEngineContainerId(e.target.value)}
-                                  />
-                                </div>
-                                <div className="flex items-center justify-between col-span-2 border-t pt-2">
-                                  <div className="space-y-0.5">
-                                    <Label htmlFor="rule-ace-loop" className="text-sm">
-                                      Enable Zero-Decode Loop Detection
-                                    </Label>
-                                    <p className="text-[11px] text-muted-foreground mr-4">
-                                      Monitors packet metadata to detect if the stream is a looping VOD file. (Negligible CPU impact)
-                                    </p>
-                                  </div>
-                                  <Switch
-                                    id="rule-ace-loop"
-                                    checked={ruleEnableLoopDetection}
-                                    onCheckedChange={setRuleEnableLoopDetection}
-                                  />
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        )}
                       </>
                     )}
                   </div></div>
@@ -1776,24 +1674,7 @@ export default function Scheduling() {
                   <DialogFooter>
                     <Button variant="outline" onClick={() => {
                       setRuleDialogOpen(false)
-                      setEditingRuleId(null)
-                      setRuleName('')
-                      setRuleSelectedChannels([])
-                      setRuleSelectedChannelGroups([])
-                      setRuleRegexPattern('')
-                      setRuleMinutesBefore(5)
-                      setRuleScheduleType('check')
-                      setRuleSessionType('standard')
-                      setRuleIntervalS(1.0)
-                      setRuleRunSeconds(0)
-                      setRulePerSampleTimeoutS(1.0)
-                      setRuleEngineContainerId('')
-                      setRuleEnableLoopDetection(false)
-                      setRuleEnableLoopingDetection(true)
-                      setRuleEnableLogoDetection(true)
-                      setRegexMatches([])
-                      setRuleChannelComboboxOpen(false)
-                      setRuleChannelGroupComboboxOpen(false)
+                      resetRuleForm()
                     }}>
                       Cancel
                     </Button>
@@ -1825,6 +1706,7 @@ export default function Scheduling() {
                     <TableHead>Channels</TableHead>
                     <TableHead>Regex Pattern</TableHead>
                     <TableHead>Minutes Before</TableHead>
+                    <TableHead>Max Checks</TableHead>
                     <TableHead className="text-right">Actions</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -1841,6 +1723,10 @@ export default function Scheduling() {
                     const channelGroupsInfo = rule.channel_groups_info || [];
                     const hasIndividualChannels = (rule.channel_ids && rule.channel_ids.length > 0);
                     const hasGroups = (channelGroupsInfo.length > 0);
+                    const explicitChannelIds = new Set(rule.channel_ids || []);
+                    const explicitChannelsInfo = hasIndividualChannels
+                      ? channelsInfo.filter((channel) => explicitChannelIds.has(channel.id))
+                      : [];
 
                     return (
                       <TableRow key={rule.id}>
@@ -1852,28 +1738,28 @@ export default function Scheduling() {
                               <div>
                                 {rule.channel_ids.length === 1 ? (
                                   <div className="flex items-center gap-2">
-                                    {channelsInfo[0]?.logo_url && (
+                                    {explicitChannelsInfo[0]?.logo_url && (
                                       <img
-                                        src={channelsInfo[0].logo_url}
-                                        alt={channelsInfo[0].name}
+                                        src={explicitChannelsInfo[0].logo_url}
+                                        alt={explicitChannelsInfo[0].name}
                                         className="h-6 w-6 object-contain rounded"
                                         onError={(e) => { e.target.style.display = 'none' }}
                                       />
                                     )}
-                                    <span>{channelsInfo[0]?.name}</span>
+                                    <span>{explicitChannelsInfo[0]?.name}</span>
                                   </div>
                                 ) : (
                                   <div className="flex flex-col gap-1">
                                     <span className="text-sm font-medium">{rule.channel_ids.length} individual channels</span>
                                     <div className="flex flex-wrap gap-1">
-                                      {channelsInfo.slice(0, 3).map((ch, idx) => (
+                                      {explicitChannelsInfo.slice(0, 3).map((ch, idx) => (
                                         <Badge key={idx} variant="secondary" className="text-xs">
                                           {ch.name}
                                         </Badge>
                                       ))}
-                                      {channelsInfo.length > 3 && (
+                                      {explicitChannelsInfo.length > 3 && (
                                         <Badge variant="secondary" className="text-xs">
-                                          +{channelsInfo.length - 3} more
+                                          +{explicitChannelsInfo.length - 3} more
                                         </Badge>
                                       )}
                                     </div>
@@ -1908,6 +1794,7 @@ export default function Scheduling() {
                           <code className="text-xs bg-muted px-2 py-1 rounded">{rule.regex_pattern}</code>
                         </TableCell>
                         <TableCell>{rule.minutes_before} min</TableCell>
+                        <TableCell>{rule.max_events_per_run || DEFAULT_AUTO_CREATE_MAX_EVENTS_PER_RUN}</TableCell>
                         <TableCell className="text-right">
                           <div className="flex items-center justify-end gap-1">
                             <Button

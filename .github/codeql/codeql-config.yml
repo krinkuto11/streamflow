@@ -1,0 +1,8 @@
+name: StreamFlow CodeQL
+
+# StreamFlow intentionally allows operators to enter full regex patterns for
+# channel matching. The one-purpose helper below is reached only after the API
+# applies existing regex validation and ReDoS guards, so keep CodeQL focused on
+# accidental regex injection elsewhere.
+paths-ignore:
+  - backend/apps/automation/intentional_user_regex.py

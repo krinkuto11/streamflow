@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge.jsx'
 import { Separator } from '@/components/ui/separator.jsx'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Loader2, Plus, Pencil, Trash2, AlertCircle, Check, X, ArrowUp, ArrowDown } from 'lucide-react'
-import { automationAPI, m3uAPI } from '@/services/api.js'
+import { automationAPI, m3uAPI, regexAPI } from '@/services/api.js'
 import { Checkbox } from '@/components/ui/checkbox.jsx'
 import { useToast } from '@/hooks/use-toast.js'
 import {
@@ -29,6 +29,11 @@ export default function AutomationProfileStudio() {
         regular_automation_enabled: false,
         playlist_update_interval_minutes: { type: 'interval', value: 5 }
     })
+    const [regexGlobalSettings, setRegexGlobalSettings] = useState({
+        case_sensitive: true,
+        require_exact_match: false
+    })
+    const [savingRegexGlobalSettings, setSavingRegexGlobalSettings] = useState(false)
 
     const { toast } = useToast()
     const navigate = useNavigate()
@@ -40,15 +45,21 @@ export default function AutomationProfileStudio() {
     const loadData = async () => {
         try {
             setLoading(true)
-            const [profilesResponse, m3uResponse, globalSettingsResponse] = await Promise.all([
+            const [profilesResponse, m3uResponse, globalSettingsResponse, regexSettingsResponse] = await Promise.all([
                 automationAPI.getProfiles(),
                 m3uAPI.getAccounts(),
-                automationAPI.getGlobalSettings()
+                automationAPI.getGlobalSettings(),
+                regexAPI.getGlobalSettings()
             ])
             setProfiles(Object.values(profilesResponse.data))
             setGlobalSettings(globalSettingsResponse.data || {
                 regular_automation_enabled: false,
                 playlist_update_interval_minutes: { type: 'interval', value: 5 }
+            })
+            setRegexGlobalSettings({
+                case_sensitive: true,
+                require_exact_match: false,
+                ...(regexSettingsResponse.data || {})
             })
         } catch (err) {
             console.error('Failed to load profiles:', err)
@@ -76,6 +87,29 @@ export default function AutomationProfileStudio() {
             console.error('Error updating global settings:', error)
             loadData()
             toast({ variant: "destructive", title: "Error", description: "Failed to update settings" })
+        }
+    }
+
+    const updateRegexGlobalSetting = async (key, value) => {
+        const nextSettings = { ...regexGlobalSettings, [key]: value }
+        const previousSettings = regexGlobalSettings
+
+        try {
+            setRegexGlobalSettings(nextSettings)
+            setSavingRegexGlobalSettings(true)
+            const response = await regexAPI.updateGlobalSettings({ [key]: value })
+            setRegexGlobalSettings({
+                case_sensitive: true,
+                require_exact_match: false,
+                ...(response.data?.settings || nextSettings)
+            })
+            toast({ title: "Settings Updated", description: "Global regex matching settings saved." })
+        } catch (error) {
+            console.error('Error updating regex global settings:', error)
+            setRegexGlobalSettings(previousSettings)
+            toast({ variant: "destructive", title: "Error", description: "Failed to update regex matching settings" })
+        } finally {
+            setSavingRegexGlobalSettings(false)
         }
     }
 
@@ -178,6 +212,20 @@ export default function AutomationProfileStudio() {
                         <Switch
                             checked={globalSettings.regular_automation_enabled}
                             onCheckedChange={(checked) => updateGlobalSetting('regular_automation_enabled', checked)}
+                        />
+                    </div>
+                    <Separator />
+                    <div className="flex items-center justify-between">
+                        <div className="space-y-0.5">
+                            <Label className="text-base">Case Sensitive Regex Matching</Label>
+                            <p className="text-sm text-muted-foreground">
+                                Match channel regex patterns using exact uppercase and lowercase letters.
+                            </p>
+                        </div>
+                        <Switch
+                            checked={Boolean(regexGlobalSettings.case_sensitive)}
+                            disabled={savingRegexGlobalSettings}
+                            onCheckedChange={(checked) => updateRegexGlobalSetting('case_sensitive', Boolean(checked))}
                         />
                     </div>
                 </CardContent>

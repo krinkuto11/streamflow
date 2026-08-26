@@ -3,16 +3,31 @@ from sqlalchemy import func, case
 from datetime import datetime, timedelta
 import logging
 
-from apps.telemetry.telemetry_db import get_session, Run, ChannelHealth, StreamTelemetry
+from apps.telemetry.telemetry_db import (
+    CHANGELOG_RETENTION_DAYS,
+    ChannelHealth,
+    Run,
+    StreamTelemetry,
+    get_session,
+)
 
 logger = logging.getLogger(__name__)
 
 telemetry_bp = Blueprint('telemetry', __name__)
 
+
+def _requested_days() -> int:
+    """Keep API query windows aligned with the retained telemetry history."""
+    try:
+        requested = int(request.args.get('days', 7))
+    except (TypeError, ValueError):
+        requested = 7
+    return min(CHANGELOG_RETENTION_DAYS, max(1, requested))
+
 @telemetry_bp.route('/global', methods=['GET'])
 def get_global_telemetry():
     """Get global telemetry statistics (runs over time)."""
-    days = int(request.args.get('days', 7))
+    days = _requested_days()
     cutoff = datetime.utcnow() - timedelta(days=days)
     
     session = get_session()
@@ -42,7 +57,7 @@ def get_global_telemetry():
 @telemetry_bp.route('/providers', methods=['GET'])
 def get_provider_telemetry():
     """Get stream resilience and stats by provider."""
-    days = int(request.args.get('days', 7))
+    days = _requested_days()
     cutoff = datetime.utcnow() - timedelta(days=days)
     
     session = get_session()
@@ -89,12 +104,16 @@ def get_provider_telemetry():
             provider_id = s.provider_id
             res_breakdown = provider_res_map.get(provider_id, {"res_2160p": 0, "res_1080p": 0, "res_720p": 0, "res_576p": 0, "res_SD": 0})
             
+            dead_streams = int(s.dead_streams) if s.dead_streams else 0
+            availability_percentage = 100 - (dead_streams / s.total_streams * 100) if s.total_streams else 100
             item = {
                 "provider_id": provider_id,
                 "provider_name": accounts.get(provider_id, f"Provider {provider_id}" if provider_id else "Unknown Account"),
                 "total_streams": s.total_streams,
-                "dead_streams": int(s.dead_streams) if s.dead_streams else 0,
-                "availability_pecentage": 100 - (int(s.dead_streams) / s.total_streams * 100) if s.total_streams else 100,
+                "dead_streams": dead_streams,
+                "availability_percentage": availability_percentage,
+                # Preserve the misspelled V7 field for existing API consumers.
+                "availability_pecentage": availability_percentage,
                 "avg_bitrate_kbps": round(s.avg_bitrate_kbps or 0, 2),
                 "avg_fps": round(s.avg_fps or 0, 2),
                 "avg_quality_score": round(s.avg_quality_score or 0, 2),
@@ -127,7 +146,7 @@ def list_channels_for_telemetry():
 @telemetry_bp.route('/channels/<int:channel_id>', methods=['GET'])
 def get_channel_telemetry(channel_id):
     """Get history for a specific channel."""
-    days = int(request.args.get('days', 7))
+    days = _requested_days()
     cutoff = datetime.utcnow() - timedelta(days=days)
     
     session = get_session()

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card.jsx'
 import { Button } from '@/components/ui/button.jsx'
 import { Input } from '@/components/ui/input.jsx'
@@ -14,10 +14,11 @@ import {
   CheckCircle2,
   AlertCircle,
   Loader2,
+  KeyRound,
+  UserRound,
   Zap
 } from 'lucide-react'
 
-// Step definitions
 const STEPS = [
   { id: 0, label: 'Connection', description: 'Connect to Dispatcharr' },
   { id: 1, label: 'Syncing', description: 'Fetching data from Dispatcharr' },
@@ -31,20 +32,19 @@ export default function SetupWizard({ onComplete }) {
   const [syncProgress, setSyncProgress] = useState({ percentage: 0, message: '', status: 'idle' })
   const { toast } = useToast()
 
-  // Step 0: Dispatcharr
   const [dispatcharrConfig, setDispatcharrConfig] = useState({
     base_url: '',
+    auth_mode: 'credentials',
     username: '',
-    password: ''
+    password: '',
+    api_key: ''
   })
-  const [connectionStatus, setConnectionStatus] = useState(null) // null, 'success', 'error'
-  const [udiInitialized, setUdiInitialized] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState(null)
 
   useEffect(() => {
     checkInitialStatus()
   }, [])
 
-  // Synchronization polling
   useEffect(() => {
     let pollInterval
     if (activeStep === 1) {
@@ -71,17 +71,16 @@ export default function SetupWizard({ onComplete }) {
   const checkInitialStatus = async () => {
     try {
       setLoading(true)
-      const healthReq = await setupAPI.getStatus()
-      if (healthReq.data.setup_completed) {
-        // Already completed
-      }
+      await setupAPI.getStatus()
 
       const daConfigReq = await dispatcharrAPI.getConfig()
       if (daConfigReq.data) {
         setDispatcharrConfig({
           base_url: daConfigReq.data.base_url || '',
+          auth_mode: daConfigReq.data.auth_mode || 'credentials',
           username: daConfigReq.data.username || '',
-          password: ''
+          password: '',
+          api_key: ''
         })
       }
     } catch (err) {
@@ -91,29 +90,33 @@ export default function SetupWizard({ onComplete }) {
     }
   }
 
+  const canConnect = () => {
+    if (!dispatcharrConfig.base_url) return false
+    if (dispatcharrConfig.auth_mode === 'api_key') {
+      return Boolean(dispatcharrConfig.api_key)
+    }
+    return Boolean(dispatcharrConfig.username && dispatcharrConfig.password)
+  }
+
   const handleStartSync = async () => {
     try {
       setLoading(true)
       setError(null)
 
-      // 1. Update config
       await dispatcharrAPI.updateConfig(dispatcharrConfig)
-
-      // 2. Test connection
       await dispatcharrAPI.testConnection(dispatcharrConfig)
-
-      // 3. Trigger UDI initialization
       await dispatcharrAPI.initializeUDI()
 
       setConnectionStatus('success')
       setActiveStep(1)
     } catch (err) {
       setConnectionStatus('error')
-      setError(err.response?.data?.error || err.message || 'Failed to connect to Dispatcharr')
+      const message = err.response?.data?.error || err.message || 'Failed to connect to Dispatcharr'
+      setError(message)
       toast({
-        title: "Connection Failed",
-        description: err.response?.data?.error || err.message || "Check your URL and Credentials",
-        variant: "destructive"
+        title: 'Connection Failed',
+        description: message || 'Check your URL and credentials',
+        variant: 'destructive'
       })
     } finally {
       setLoading(false)
@@ -123,7 +126,7 @@ export default function SetupWizard({ onComplete }) {
   const handleComplete = async () => {
     try {
       setLoading(true)
-      await setupAPI.ensureConfig() // Complete setup flag
+      await setupAPI.ensureConfig()
 
       if (onComplete) {
         onComplete()
@@ -135,6 +138,47 @@ export default function SetupWizard({ onComplete }) {
     } finally {
       setLoading(false)
     }
+  }
+
+  const renderCredentialsFields = () => {
+    if (dispatcharrConfig.auth_mode === 'api_key') {
+      return (
+        <div className="grid gap-2">
+          <Label htmlFor="api_key">API Key</Label>
+          <Input
+            id="api_key"
+            type="password"
+            placeholder="Enter API key"
+            value={dispatcharrConfig.api_key}
+            onChange={(e) => setDispatcharrConfig({ ...dispatcharrConfig, api_key: e.target.value })}
+          />
+        </div>
+      )
+    }
+
+    return (
+      <>
+        <div className="grid gap-2">
+          <Label htmlFor="username">Username</Label>
+          <Input
+            id="username"
+            placeholder="admin"
+            value={dispatcharrConfig.username}
+            onChange={(e) => setDispatcharrConfig({ ...dispatcharrConfig, username: e.target.value })}
+          />
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="password">Password</Label>
+          <Input
+            id="password"
+            type="password"
+            placeholder="Enter password"
+            value={dispatcharrConfig.password}
+            onChange={(e) => setDispatcharrConfig({ ...dispatcharrConfig, password: e.target.value })}
+          />
+        </div>
+      </>
+    )
   }
 
   const renderStepContent = () => {
@@ -151,25 +195,32 @@ export default function SetupWizard({ onComplete }) {
                 onChange={(e) => setDispatcharrConfig({ ...dispatcharrConfig, base_url: e.target.value })}
               />
             </div>
+
             <div className="grid gap-2">
-              <Label htmlFor="username">Username</Label>
-              <Input
-                id="username"
-                placeholder="admin"
-                value={dispatcharrConfig.username}
-                onChange={(e) => setDispatcharrConfig({ ...dispatcharrConfig, username: e.target.value })}
-              />
+              <Label>Authentication</Label>
+              <div className="grid grid-cols-2 rounded-md border bg-muted/30 p-1">
+                <Button
+                  type="button"
+                  variant={dispatcharrConfig.auth_mode === 'credentials' ? 'default' : 'ghost'}
+                  className="h-9"
+                  onClick={() => setDispatcharrConfig({ ...dispatcharrConfig, auth_mode: 'credentials' })}
+                >
+                  <UserRound className="mr-2 h-4 w-4" />
+                  User / Pass
+                </Button>
+                <Button
+                  type="button"
+                  variant={dispatcharrConfig.auth_mode === 'api_key' ? 'default' : 'ghost'}
+                  className="h-9"
+                  onClick={() => setDispatcharrConfig({ ...dispatcharrConfig, auth_mode: 'api_key' })}
+                >
+                  <KeyRound className="mr-2 h-4 w-4" />
+                  API Key
+                </Button>
+              </div>
             </div>
-            <div className="grid gap-2">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                placeholder="••••••••"
-                value={dispatcharrConfig.password}
-                onChange={(e) => setDispatcharrConfig({ ...dispatcharrConfig, password: e.target.value })}
-              />
-            </div>
+
+            {renderCredentialsFields()}
           </div>
         )
 
@@ -247,7 +298,7 @@ export default function SetupWizard({ onComplete }) {
             {activeStep === 0 && (
               <Button
                 onClick={handleStartSync}
-                disabled={loading || !dispatcharrConfig.base_url || !dispatcharrConfig.username || !dispatcharrConfig.password}
+                disabled={loading || !canConnect()}
                 className="w-full sm:w-auto font-bold px-8"
                 size="lg"
               >

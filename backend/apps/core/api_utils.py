@@ -11,6 +11,7 @@ Write operations (PATCH, POST, DELETE) still use direct API calls.
 
 import os
 import json
+import threading
 import time
 from typing import Dict, List, Optional, Any, Tuple
 import requests
@@ -42,6 +43,12 @@ from apps.core.auth import (
 )
 
 logger = setup_logging(__name__)
+
+_stream_stats_update_lock = threading.RLock()
+_BITRATE_INCOMPLETE_REASONS = {
+    'missing_bitrate',
+    'missing_bitrate_after_recheck',
+}
 
 if env_path.exists():
     load_dotenv(dotenv_path=env_path)
@@ -253,9 +260,22 @@ def fetch_channel_streams(channel_id: int) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def _dedupe_stream_ids(stream_ids: List[int]) -> List[int]:
+    """Return stream IDs once, preserving their first-seen order."""
+    deduped: List[int] = []
+    seen = set()
+    for stream_id in stream_ids:
+        if stream_id in seen:
+            continue
+        seen.add(stream_id)
+        deduped.append(stream_id)
+    return deduped
+
+
 def update_channel_streams(
     channel_id: int, stream_ids: List[int], valid_stream_ids: Optional[set] = None,
-    allow_dead_streams: bool = False
+    allow_dead_streams: bool = False,
+    protected_stream_ids: Optional[set] = None,
 ) -> bool:
     """
     Update the streams for a given channel ID.
@@ -271,6 +291,8 @@ def update_channel_streams(
             updating multiple channels.
         allow_dead_streams (bool): If True, allows dead streams (used during
             global checks to give dead streams a second chance). Default False.
+        protected_stream_ids (Optional[set]): Stream IDs that must survive the
+            dead-stream filter because an active viewer is currently using them.
         
     Returns:
         bool: True if update successful, False otherwise.
@@ -283,17 +305,35 @@ def update_channel_streams(
         valid_stream_ids = get_valid_stream_ids()
     
     original_count = len(stream_ids)
-    filtered_stream_ids = [sid for sid in stream_ids if sid in valid_stream_ids]
+    valid_filtered_stream_ids = [sid for sid in stream_ids if sid in valid_stream_ids]
+    filtered_stream_ids = _dedupe_stream_ids(valid_filtered_stream_ids)
     
-    non_existent_count = original_count - len(filtered_stream_ids)
+    non_existent_count = original_count - len(valid_filtered_stream_ids)
     if non_existent_count > 0:
         logger.warning(
             f"Filtered out {non_existent_count} non-existent stream(s) for channel {channel_id}"
         )
+    duplicate_count = len(valid_filtered_stream_ids) - len(filtered_stream_ids)
+    if duplicate_count > 0:
+        logger.warning(
+            f"Filtered out {duplicate_count} duplicate stream assignment(s) for channel {channel_id}"
+        )
     
+    protected_stream_ids = set(protected_stream_ids or set())
+
     # Filter out dead streams unless allow_dead_streams is True (e.g., during global checks)
     if not allow_dead_streams:
-        filtered_stream_ids, dead_count = filter_dead_streams(filtered_stream_ids)
+        if protected_stream_ids:
+            filter_candidates = [sid for sid in filtered_stream_ids if sid not in protected_stream_ids]
+            filtered_candidates, dead_count = filter_dead_streams(filter_candidates)
+            filtered_candidate_set = set(filtered_candidates)
+            filtered_stream_ids = [
+                sid
+                for sid in filtered_stream_ids
+                if sid in protected_stream_ids or sid in filtered_candidate_set
+            ]
+        else:
+            filtered_stream_ids, dead_count = filter_dead_streams(filtered_stream_ids)
         if dead_count > 0:
             logger.warning(
                 f"Filtered out {dead_count} dead stream(s) for channel {channel_id}"
@@ -344,7 +384,9 @@ def update_channel_streams(
                 
                 # Re-validate stream IDs with fresh data
                 current_valid_ids = udi.get_valid_stream_ids()
-                revalidated_stream_ids = [sid for sid in filtered_stream_ids if sid in current_valid_ids]
+                revalidated_stream_ids = _dedupe_stream_ids(
+                    [sid for sid in filtered_stream_ids if sid in current_valid_ids]
+                )
                 
                 invalid_count = len(filtered_stream_ids) - len(revalidated_stream_ids)
                 if invalid_count > 0:
@@ -392,12 +434,12 @@ def update_channel_streams(
         )
         raise
 
-def change_channel_stream(channel_id: int, stream_id: Optional[int] = None, url: Optional[str] = None) -> bool:
+def change_channel_stream(channel_id: Any, stream_id: Optional[int] = None, url: Optional[str] = None) -> bool:
     """
     Force change the currently playing stream for a channel in Dispatcharr.
     
     Parameters:
-        channel_id (int): The ID of the channel.
+        channel_id: The numeric ID or UUID of the channel.
         stream_id (Optional[int]): The ID of the stream to change to.
         url (Optional[str]): The URL of the stream to change to.
         
@@ -408,7 +450,7 @@ def change_channel_stream(channel_id: int, stream_id: Optional[int] = None, url:
         logger.error(f"Cannot change stream for channel {channel_id}: neither stream_id nor url provided")
         return False
         
-    endpoint = f"{_get_base_url()}/api/proxy/ts/change_stream/{channel_id}"
+    endpoint = f"{_get_base_url()}/proxy/ts/change_stream/{channel_id}"
     payload = {}
     if stream_id:
         payload["stream_id"] = stream_id
@@ -455,7 +497,7 @@ def refresh_m3u_playlists(
     
     try:
         resp = post_request(url, {})
-        logger.info("M3U refresh initiated successfully")
+        logger.info("M3U refresh request accepted by Dispatcharr")
         return resp
     except Exception as e:
         logger.error(f"Failed to refresh M3U playlists: {e}")
@@ -658,7 +700,7 @@ def add_streams_to_channel(
             f"{channel_id}"
         )
     
-    current_stream_ids = [s['id'] for s in current_streams]
+    current_stream_ids = _dedupe_stream_ids([s['id'] for s in current_streams])
 
     # Preserve any stream IDs that are assigned to the channel in Dispatcharr but were
     # not returned by fetch_channel_streams() due to a stale UDI stream cache.
@@ -675,16 +717,17 @@ def add_streams_to_channel(
                 f"stream ID(s) not in UDI stream cache — preserving to avoid accidental "
                 f"removal: {_uncached[:5]}{'...' if len(_uncached) > 5 else ''}"
             )
-            current_stream_ids.extend(_uncached)
+            current_stream_ids = _dedupe_stream_ids(current_stream_ids + _uncached)
     
     # Filter out stream IDs that no longer exist in Dispatcharr
     if valid_stream_ids is None:
         valid_stream_ids = get_valid_stream_ids()
     
-    valid_new_stream_ids = [
+    current_stream_id_set = set(current_stream_ids)
+    valid_new_stream_ids = _dedupe_stream_ids([
         sid for sid in stream_ids
-        if sid in valid_stream_ids and sid not in current_stream_ids
-    ]
+        if sid in valid_stream_ids and sid not in current_stream_id_set
+    ])
     
     # Log if any stream IDs were filtered out as non-existent
     non_existent_count = len([sid for sid in stream_ids if sid not in valid_stream_ids])
@@ -704,7 +747,7 @@ def add_streams_to_channel(
             )
     
     if valid_new_stream_ids:
-        updated_streams = current_stream_ids + valid_new_stream_ids
+        updated_streams = _dedupe_stream_ids(current_stream_ids + valid_new_stream_ids)
         update_channel_streams(channel_id, updated_streams, valid_stream_ids, allow_dead_streams)
         logger.info(
             f"Added {len(valid_new_stream_ids)} new streams to channel "
@@ -716,6 +759,51 @@ def add_streams_to_channel(
             f"No new streams to add to channel {channel_id}"
         )
         return 0
+
+def _merge_stream_stats_update(
+    existing_stats: Dict[str, Any],
+    stream_stats: Dict[str, Any],
+    *,
+    recover_bitrate_state: bool = False,
+) -> Dict[str, Any]:
+    """Merge stats while conditionally clearing only current bitrate failures."""
+    incoming = dict(stream_stats)
+    if recover_bitrate_state:
+        incomplete_reason = str(
+            existing_stats.get('measurement_incomplete_reason') or ''
+        ).strip().lower()
+        quality_reason = str(
+            existing_stats.get('quality_reason_detail')
+            or existing_stats.get('quality_reason')
+            or ''
+        ).strip().lower()
+        bitrate_recheck_required = bool(
+            existing_stats.get('bitrate_recheck_required')
+        )
+        bitrate_incomplete = bool(
+            incomplete_reason in _BITRATE_INCOMPLETE_REASONS
+            or (
+                bitrate_recheck_required
+                and incomplete_reason in {'', 'none'}
+            )
+        )
+        if bitrate_incomplete:
+            incoming.update({
+                'measurement_incomplete': False,
+                'measurement_incomplete_reason': 'none',
+                'measurement_incomplete_context': {},
+                'bitrate_recheck_required': False,
+                'bitrate_recheck_attempted': False,
+                'bitrate_recheck_outcome': 'not_needed',
+            })
+        if quality_reason in _BITRATE_INCOMPLETE_REASONS:
+            incoming.update({
+                'quality_reason': 'none',
+                'quality_reason_detail': 'none',
+                'quality_reason_context': {},
+            })
+    return {**existing_stats, **incoming}
+
 
 def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_size: int = 10) -> Tuple[int, int]:
     """
@@ -770,6 +858,7 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
         for item in batch:
             stream_id = item.get('stream_id')
             stream_stats = item.get('stream_stats', {})
+            recover_bitrate_state = bool(item.get('recover_bitrate_state'))
             
             if not stream_id or not stream_stats:
                 logger.warning(f"Invalid stream stats item: {item}")
@@ -779,7 +868,10 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
             # Construct URL for this stream
             stream_url = f"{base_url}/api/channels/streams/{int(stream_id)}/"
             
+            lock_acquired = False
             try:
+                _stream_stats_update_lock.acquire()
+                lock_acquired = True
                 # Fetch existing stream data from UDI cache
                 existing_stream_data = udi.get_stream_by_id(int(stream_id))
                 if not existing_stream_data:
@@ -795,8 +887,15 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
                     except json.JSONDecodeError:
                         existing_stats = {}
                 
-                # Merge existing stats with new stats
-                updated_stats = {**existing_stats, **stream_stats}
+                # Re-evaluate conditional bitrate recovery against the final
+                # cache snapshot inside the same local write transaction. This
+                # prevents an earlier monitoring snapshot from erasing newer
+                # visual-probe evidence written by Stream Checker.
+                updated_stats = _merge_stream_stats_update(
+                    existing_stats,
+                    stream_stats,
+                    recover_bitrate_state=recover_bitrate_state,
+                )
                 
                 # Send PATCH request
                 patch_payload = {"stream_stats": updated_stats}
@@ -817,6 +916,9 @@ def batch_update_stream_stats(stream_stats_list: List[Dict[str, Any]], batch_siz
             except Exception as e:
                 logger.error(f"Error updating stream {stream_id} stats: {e}")
                 failed += 1
+            finally:
+                if lock_acquired:
+                    _stream_stats_update_lock.release()
     
     logger.debug(f"Batch stats update complete: {successful} successful, {failed} failed out of {total} total")
     return successful, failed
