@@ -2,6 +2,11 @@ name: Build and Push Docker Image to GHCR
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to use (e.g. 2.5.6). Leave empty for branch-based versioning.'
+        required: false
+        default: ''
   release:
     types: [published]
   pull_request:
@@ -11,6 +16,8 @@ on:
   push:
     branches:
       - dev
+    tags:
+      - '*'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -58,6 +65,8 @@ jobs:
           # For releases, use the tag name (strip leading "v" if present)
           raw_tag="${GITHUB_REF##*/}"
           VERSION="${raw_tag#v}"
+        elif [ -n "${{ github.event.inputs.version }}" ]; then
+          VERSION="${{ github.event.inputs.version }}"
         else
           # For non-release builds, use branch name and build date
           BRANCH_NAME="${GITHUB_REF##*/}"
@@ -110,6 +119,8 @@ jobs:
           # strip leading v if present, e.g. v2.0 -> 2.0
           raw_tag="${raw_tag#v}"
           image_tag="${raw_tag}"
+        elif [ -n "${{ github.event.inputs.version }}" ]; then
+          image_tag="${{ github.event.inputs.version }}"
         elif [ "${GITHUB_REF##*/}" = "main" ]; then
           image_tag="latest"
         elif [ "${GITHUB_REF##*/}" = "dev" ]; then
@@ -191,6 +202,8 @@ jobs:
             raw_tag="${GITHUB_REF##*/}"
             raw_tag="${raw_tag#v}"
             image_tag="${raw_tag}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            image_tag="${{ github.event.inputs.version }}"
           elif [ "${GITHUB_REF##*/}" = "main" ]; then
             image_tag="latest"
           elif [ "${GITHUB_REF##*/}" = "dev" ]; then
@@ -225,8 +238,9 @@ jobs:
         run: |
           # Start with the primary tag (preserves the sanitized or semver tag chosen above)
           tags="-t ghcr.io/${{ github.repository_owner }}/streamflow:${{ steps.set_tag.outputs.tag }}"
-          # For releases, also add the semver tags from metadata and a :latest tag
-          if [ "${{ github.event_name }}" = "release" ]; then
+          # For published releases, or manual dispatches with an explicit version,
+          # also add semver-style tags from metadata and :latest.
+          if [ "${{ github.event_name }}" = "release" ] || { [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; }; then
             tags="$tags -t ghcr.io/${{ github.repository_owner }}/streamflow:latest $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< '${{ steps.meta.outputs.json }}')"
           fi
 
