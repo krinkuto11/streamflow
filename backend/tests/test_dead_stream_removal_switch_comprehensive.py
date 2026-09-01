@@ -61,8 +61,7 @@ class TestDeadStreamRemovalSwitchComprehensive(unittest.TestCase):
                 'auto_m3u_updates': True,
                 'auto_stream_matching': True,
                 'auto_quality_checking': True,
-                'scheduled_global_action': False,
-                'remove_non_matching_streams': False
+                'scheduled_global_action': False
             },
             'dead_stream_handling': {
                 'enabled': removal_enabled,
