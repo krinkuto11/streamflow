@@ -69,12 +69,10 @@ class TestValidateNonMatchingStreamsFix(unittest.TestCase):
         self.mock_stream_checker_patcher = patch('automated_stream_manager.get_stream_checker_service')
         self.mock_stream_checker = self.mock_stream_checker_patcher.start()
         
-        # Configure stream checker config to enable removal
+        # Stream checker config no longer gates removal; removal is per-profile.
         mock_stream_checker_instance = MagicMock()
         mock_stream_checker_instance.config = {
-            'automation_controls': {
-                'remove_non_matching_streams': True
-            }
+            'automation_controls': {}
         }
         self.mock_stream_checker.return_value = mock_stream_checker_instance
         

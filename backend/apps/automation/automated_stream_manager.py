@@ -4907,18 +4907,18 @@ class AutomatedStreamManager:
         Validate existing streams in channels against regex patterns.
         Remove streams that no longer match their channel's patterns.
         
-        This function respects the automation_controls.remove_non_matching_streams setting
-        unless force=True is passed. This ensures consistent behavior across:
-        - Automation cycles (step 1.5 in the pipeline)
+        Removal is driven solely by the per-profile stream_matching.validate_existing_streams
+        toggle, so behavior is identical across:
+        - Automation cycles (step 1.5 in the pipeline), scheduled or manual
         - Single channel checks
         - Global actions
-        
+
         Args:
-            force: If True, bypass the automation_controls config check.
-                   Reserved for future use or special cases where removal must happen
-                   regardless of user settings. Default is False to respect user config.
+            force: If True, bypass the per-profile validate_existing_streams check for
+                   profiles marked global_action.affected. It does NOT enable removal for
+                   profiles that have the toggle off.
             forced_period_id: Optional period ID to filter channels.
-        
+
         Returns:
             Dict containing validation statistics:
             - channels_checked: Number of channels checked
@@ -4927,31 +4927,7 @@ class AutomatedStreamManager:
             - details: List of channel details with removed streams
         """
         log_function_call(logger, "validate_and_remove_non_matching_streams")
-        
-        # Check if removal is enabled in stream checker config (unless forced)
-        if not force:
-            try:
-                from apps.stream.stream_checker_service import get_stream_checker_service
-                stream_checker = get_stream_checker_service()
-                removal_enabled = stream_checker.config.get('automation_controls', {}).get('remove_non_matching_streams', False)
-                
-                if not removal_enabled:
-                    logger.debug("Stream removal is disabled in automation_controls")
-                    return {
-                        "channels_checked": 0,
-                        "streams_removed": 0,
-                        "channels_modified": 0,
-                        "details": []
-                    }
-            except Exception as e:
-                logger.warning(f"Could not check stream checker config: {e}, skipping validation")
-                return {
-                    "channels_checked": 0,
-                    "streams_removed": 0,
-                    "channels_modified": 0,
-                    "details": []
-                }
-        
+
         # Lock to prevent concurrent execution
         if not self._lock.acquire(blocking=False):
             logger.warning("Stream validation already active - skipping concurrent request")
@@ -5144,12 +5120,14 @@ class AutomatedStreamManager:
                             kept_ids = detail["kept_ids"]
                             removed_streams = detail["removed_streams"]
                             
-                            # Only apply updates if this channel's profile has validate_existing_streams
-                            # enabled, OR if this is a forced run (e.g. global action).
-                            # Bug 3 fix: previously gated on dead_stream_removal_enabled which ignored
-                            # the per-profile validate_enabled setting entirely.
+                            # Only apply updates if this channel's profile has
+                            # validate_existing_streams enabled. This gate is purely
+                            # per-profile: a manual (forced) run removes exactly the same
+                            # streams a scheduled run would. The global_action override is
+                            # already folded into validate_enabled when the profile is
+                            # affected and force is set.
                             channel_validate_enabled = detail.get("validate_enabled", False)
-                            if channel_validate_enabled or force:
+                            if channel_validate_enabled:
                                 try:
                                     # Update channel with kept streams
                                     success = update_channel_streams(channel_id, kept_ids, allow_dead_streams=(not dead_stream_removal_enabled))

@@ -32,7 +32,8 @@ class StreamCheckConfig:
             'auto_m3u_updates': True,  # Automatically refresh M3U playlists
             'auto_stream_matching': True,  # Automatically match streams to channels via regex
             'auto_quality_checking': True,  # Automatically check stream quality
-            'remove_non_matching_streams': False  # Remove streams from channels if they no longer match regex
+            # Removal of streams that no longer match regex is controlled per automation
+            # profile via stream_matching.validate_existing_streams — no global switch.
         },
         'global_check_schedule': {
             'enabled': True,
