@@ -108,6 +108,10 @@ class StreamCheckConfig:
             'batch_size': 10,  # Number of streams to update per batch
             'verify_updates': False  # Verify channel updates by refreshing UDI (adds API overhead)
         },
+        'stream_cache': {
+            'enabled': False,  # Reuse recently-measured stream stats instead of re-probing with ffmpeg
+            'ttl_hours': 48,  # Max age (hours) of a cached measurement before it is re-probed
+        },
         'connectivity_guard': {
             'enabled': True,
             'require_internet': True,

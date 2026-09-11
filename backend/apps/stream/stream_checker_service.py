@@ -48,6 +48,7 @@ from apps.udi import get_udi_manager
 
 # Import dead streams tracker
 from apps.stream.dead_streams_tracker import DeadStreamsTracker
+from apps.telemetry.last_quality_stats import get_last_quality_stats
 from apps.stream.stream_check_utils import analyze_stream, _stream_analysis_timeout
 from apps.stream.queue_start import order_channels_for_queue_start
 from apps.stream.connectivity_guard import ConnectivityCheckResult, StreamConnectivityGuard
@@ -3616,6 +3617,31 @@ class StreamCheckerService:
                 continue
         return coerced.intersection(assigned_ids)
 
+    def _stream_cache_reusable(self, stream: Dict[str, Any]) -> bool:
+        """Return True when a stream's last quality measurement is fresh enough
+        to reuse (skip the ffmpeg probe) under the configured cache TTL."""
+        try:
+            stream_id = int(stream.get("id"))
+        except (TypeError, ValueError):
+            return False
+        try:
+            stats = get_last_quality_stats(
+                stream_id=stream_id,
+                stale_after_hours=self.config.get("stream_cache.ttl_hours", 48),
+            )
+        except Exception as exc:
+            logger.debug(
+                "Could not read cached quality stats for stream %s: %s",
+                stream_id,
+                exc,
+            )
+            return False
+        if not stats.get("measured") or stats.get("recheck_required"):
+            return False
+        if stats.get("stale"):
+            return False
+        return True
+
     @staticmethod
     def _merge_protected_stream_order(
         original_stream_ids: List[int],
@@ -4176,7 +4202,36 @@ class StreamCheckerService:
                         }
                     else:
                         logger.info(f"Channel composition changed (prev: {previous_stream_count}, curr: {current_stream_count}) - will reorder")
-            
+
+            # ── stream_cache partition ──────────────────────────────────────
+            # When caching is enabled, pull any stream whose last measurement is
+            # still within the TTL out of `streams_to_check` and into
+            # `streams_already_checked`, so the existing re-integration path
+            # re-sorts it by score WITHOUT running a fresh ffmpeg probe. This is
+            # the "re-sort, skip re-probe" behavior for Teamarr reassignments.
+            if self.config.get("stream_cache.enabled", False):
+                reusable_ids = {
+                    s['id'] for s in streams_to_check
+                    if self._stream_cache_reusable(s)
+                }
+                if reusable_ids:
+                    streams_already_checked = [
+                        s for s in streams
+                        if s.get('id') in reusable_ids
+                        and s.get('id') not in protected_active_stream_ids
+                    ] + streams_already_checked
+                    streams_to_check = [
+                        s for s in streams_to_check
+                        if s.get('id') not in reusable_ids
+                    ]
+                    logger.info(
+                        "Stream cache: reusing %s fresh stream(s) for channel %s "
+                        "(skipping ffmpeg re-probe); probing %s",
+                        len(reusable_ids),
+                        channel_name,
+                        len(streams_to_check),
+                    )
+
             # Streams that are actively analyzed in this pass. Used to gate
             # dead_stream_ids mutations — only streams checked in THIS pass may
             # be added to dead_stream_ids. Unchecked streams retain their tracker
@@ -6130,7 +6185,7 @@ class StreamCheckerService:
                         }
                     else:
                         logger.info(f"Channel composition changed (prev: {previous_stream_count}, curr: {current_stream_count}) - will reorder")
-            
+
             # Streams that are actively analyzed in this pass. Used to gate
             # dead_stream_ids mutations — only streams checked in THIS pass may
             # be added to dead_stream_ids. Unchecked streams retain their tracker
