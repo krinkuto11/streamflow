@@ -44,6 +44,38 @@ Quality Check (expand) -> Analyzed Streams -> Reason`.
 
 ---
 
+## Stream cache
+
+Stream checking always persists each stream's measured stats (resolution,
+bitrate, codec, FPS, quality score) back to Dispatcharr after analysis. The
+**stream cache** reuses those recently-persisted stats instead of re-probing a
+stream with ffmpeg when the same stream is picked up again — for example, after
+an external reassignment (Teamarr or a manual Dispatcharr edit) reorders a
+channel.
+
+Enable it at `Stream Checker -> Stream Checker Configuration -> Edit -> Stream
+Analysis -> Reuse Cached Stream Stats`; the corresponding config block is:
+
+```json
+{
+  "stream_cache": {
+    "enabled": false,
+    "ttl_hours": 48
+  }
+}
+```
+
+A stream's cached measurement is reused only when it is recent (within
+`ttl_hours`), was measured successfully, and is not marked for recheck or dead.
+Fresh streams are re-sorted by cached score but not re-probed; new or stale
+streams are still fully analyzed. Force checks and the normal re-sort always run
+— the cache only skips the ffmpeg probe step.
+
+Default is **off** (opt-in). Cache hits are visible in the backend log as
+`Stream cache: reusing N fresh stream(s) … (skipping ffmpeg re-probe); probing M`.
+
+---
+
 ## Scoring
 
 Streams are scored 0–100 using weighted dimensions. Configure the weights at
