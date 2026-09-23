@@ -1393,6 +1393,40 @@ export default function StreamChecker() {
                         </AlertDescription>
                       </Alert>
                     </div>
+
+                    {/* Stream Cache */}
+                    <div className="space-y-4 rounded-md border border-border p-4 md:col-span-2">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="space-y-0.5">
+                          <Label htmlFor="stream_cache_enabled">Reuse Cached Stream Stats</Label>
+                          <p className="text-xs text-muted-foreground">
+                            Skip re-probing streams that were already analyzed recently (e.g. after Teamarr reassignment), reusing their last resolution / bitrate / codec to re-sort instead.
+                          </p>
+                        </div>
+                        <Switch
+                          id="stream_cache_enabled"
+                          checked={editedConfig?.stream_cache?.enabled === true}
+                          onCheckedChange={(checked) => updateConfigValue('stream_cache.enabled', checked)}
+                          disabled={!configEditing}
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <Label htmlFor="stream_cache_ttl">Cache TTL (hours)</Label>
+                        <Input
+                          id="stream_cache_ttl"
+                          type="number"
+                          value={editedConfig?.stream_cache?.ttl_hours ?? 48}
+                          onChange={(e) => updateConfigValue('stream_cache.ttl_hours', parseInt(e.target.value))}
+                          disabled={!configEditing || editedConfig?.stream_cache?.enabled !== true}
+                          min={1}
+                          max={720}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          How long a cached measurement stays valid before the stream is re-probed (1-720 hours)
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 </TabsContent>
 
