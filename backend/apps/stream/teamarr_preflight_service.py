@@ -34,6 +34,7 @@ CONFIG_FILE = CONFIG_DIR / "teamarr_preflight_config.json"
 MAX_EVENTS = 120
 MAX_UPCOMING_EVENTS = 1000
 TEAMARR_PREFLIGHT_QUEUE_PRIORITY = 100
+DRIFT_RESYNC_QUEUE_PRIORITY = 60
 ATTEMPT_STATE_KEY = "teamarr_preflight_attempt_state"
 ATTEMPT_STATE_VERSION = 1
 MAX_PERSISTED_ATTEMPTS = 5000
@@ -143,6 +144,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": False,
     "managed_event_preflight_enabled": True,
     "static_team_preflight_enabled": False,
+    "drift_enabled": False,
+    "drift_poll_interval_seconds": 300,
     "teamarr_base_url": "",
     "api_key": "",
     "api_key_header": "X-API-Key",
@@ -165,6 +168,7 @@ CONFIG_KEYS = set(DEFAULT_CONFIG)
 
 INT_BOUNDS = {
     "poll_interval_seconds": (15, 3600),
+    "drift_poll_interval_seconds": (60, 3600),
     "preflight_offset_minutes": (1, 360),
     "post_start_grace_minutes": (0, 120),
     "max_concurrent_checks": (1, 10),
@@ -240,6 +244,7 @@ def normalize_config(payload: Optional[Dict[str, Any]], current: Optional[Dict[s
     config["enabled"] = bool(config.get("enabled"))
     config["managed_event_preflight_enabled"] = bool(config.get("managed_event_preflight_enabled", True))
     config["static_team_preflight_enabled"] = bool(config.get("static_team_preflight_enabled"))
+    config["drift_enabled"] = bool(config.get("drift_enabled"))
     config["queue_during_active_checks"] = bool(config.get("queue_during_active_checks"))
     config["teamarr_base_url"] = str(config.get("teamarr_base_url") or "").strip().rstrip("/")
     config["api_key"] = str(config.get("api_key") or "").strip()
@@ -412,6 +417,15 @@ class TeamarrPreflightService:
             "last_error": None,
         }
         self._upcoming_truncated = False
+        self._drift_status: Dict[str, Any] = {
+            "enabled": False,
+            "last_scan_at": None,
+            "last_error": None,
+            "channels_checked": 0,
+            "drifted": 0,
+            "queued": 0,
+            "channels": {},
+        }
 
     def _load_config(self) -> Dict[str, Any]:
         raw_config = load_json_with_backup(
@@ -547,10 +561,13 @@ class TeamarrPreflightService:
             self._config = normalize_config(payload, current)
             self._save_config()
             enabled = self._config["enabled"]
+            drift_enabled = self._config["drift_enabled"]
 
         self._ensure_default_profile()
 
-        if enabled:
+        # Start the worker when event preflight OR drift monitoring is on so
+        # drift detection runs even when managed-event preflight is disabled.
+        if enabled or drift_enabled:
             self.start(persist=False)
         else:
             self.stop(persist=False)
@@ -643,6 +660,7 @@ class TeamarrPreflightService:
                 "preflight_candidates": len(preflight_items),
                 "managed_events_truncated": self._upcoming_truncated,
                 "managed_events_limit": MAX_UPCOMING_EVENTS,
+                "drift_status": dict(self._drift_status),
                 "recent_events": recent_events,
                 "filter_options": dict(self._filter_options),
                 "teamarr_connector": self._teamarr_connector_status(),
@@ -1080,17 +1098,221 @@ class TeamarrPreflightService:
         finally:
             self._finish_scan(scan_cancel_event)
 
+    # ── Drift detection ──────────────────────────────────────────────────
+    def _managed_channel_ids(self, config: Dict[str, Any]) -> List[int]:
+        """Return the Dispatcharr channel IDs for Teamarr-managed channels."""
+        channel_ids: List[int] = []
+        seen: set = set()
+        for item in self._fetch_managed_events(config):
+            cid = _event_dispatcharr_channel_id(item)
+            if cid in (None, ""):
+                continue
+            try:
+                cid_int = int(cid)
+            except (TypeError, ValueError):
+                continue
+            if cid_int not in seen:
+                seen.add(cid_int)
+                channel_ids.append(cid_int)
+        return channel_ids
+
+    def _drift_baselines(self) -> Dict[int, List[int]]:
+        """Map Dispatcharr channel_id -> StreamFlow's last-written ordered stream ids.
+
+        Uses the Stream Checker's update tracker baseline (checked_stream_ids),
+        which is the order StreamFlow most recently re-sorted and wrote back.
+        Channels with no baseline are ignored (nothing known to compare yet).
+        """
+        baselines: Dict[int, List[int]] = {}
+        try:
+            checker = self.stream_checker_provider()
+        except Exception as exc:
+            logger.debug("Unable to read Stream Checker for drift baselines: %s", exc)
+            return baselines
+        tracker = getattr(checker, "update_tracker", None)
+        if tracker is None:
+            return baselines
+        updates = getattr(tracker, "updates", None)
+        if not updates:
+            return baselines
+        for channel_key, info in (updates.get("channels") or {}).items():
+            ids = info.get("checked_stream_ids") or []
+            try:
+                channel_id = int(channel_key)
+            except (TypeError, ValueError):
+                continue
+            if ids and channel_id not in baselines:
+                # Preserve order; dedupe defensively.
+                seen = set()
+                ordered: List[int] = []
+                for sid in ids:
+                    try:
+                        sid_int = int(sid)
+                    except (TypeError, ValueError):
+                        continue
+                    if sid_int not in seen:
+                        seen.add(sid_int)
+                        ordered.append(sid_int)
+                if ordered:
+                    baselines[channel_id] = ordered
+        return baselines
+
+    def _channel_live_stream_ids(self, channel_id: int) -> Optional[List[int]]:
+        """Return the ordered stream IDs currently assigned to a channel in
+        Dispatcharr (via UDI cache). None if the channel is unknown."""
+        try:
+            udi = self.udi_provider()
+            streams = udi.get_channel_streams(channel_id)
+        except Exception as exc:
+            logger.debug(
+                "Could not read live stream order for channel %s: %s",
+                channel_id,
+                exc,
+            )
+            return None
+        if streams is None:
+            return None
+        ordered: List[int] = []
+        seen: set = set()
+        for stream in streams:
+            sid = self._stream_dict_id(stream)
+            if sid is None:
+                continue
+            if sid not in seen:
+                seen.add(sid)
+                ordered.append(sid)
+        return ordered
+
+    @staticmethod
+    def _stream_dict_id(stream: Any) -> Optional[int]:
+        if isinstance(stream, dict):
+            raw = stream.get("id")
+        else:
+            raw = getattr(stream, "id", None)
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _order_drift_kind(baseline: List[int], actual: List[int]) -> Optional[str]:
+        """Return the drift kind, or None if there is no drift.
+
+        - 'membership' when the set of streams changed (added/removed)
+        - 'reordered' when membership is identical but order differs
+        """
+        if list(baseline) == list(actual):
+            return None
+        if set(baseline) != set(actual):
+            return "membership"
+        return "reordered"
+
+    def _check_drift(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare each Teamarr-managed channel's live stream order to its
+        StreamFlow baseline and queue a re-sync check for any that drifted."""
+        result: Dict[str, Any] = {
+            "enabled": bool(config.get("drift_enabled")),
+            "last_scan_at": None,
+            "last_error": None,
+            "channels_checked": 0,
+            "drifted": 0,
+            "queued": 0,
+            "channels": {},
+        }
+        now = self.clock()
+        if not config.get("drift_enabled"):
+            result["last_scan_at"] = now
+            self._drift_status.update(result)
+            return result
+        try:
+            baselines = self._drift_baselines()
+            managed_ids = self._managed_channel_ids(config)
+            # Only watch managed channels that have a baseline.
+            watch_ids = [cid for cid in managed_ids if cid in baselines]
+            result["channels_checked"] = len(watch_ids)
+            for channel_id in watch_ids:
+                actual = self._channel_live_stream_ids(channel_id)
+                if actual is None:
+                    continue
+                kind = self._order_drift_kind(baselines[channel_id], actual)
+                if kind is None:
+                    continue
+                result["drifted"] += 1
+                result["channels"][str(channel_id)] = {
+                    "kind": kind,
+                    "baseline_count": len(baselines[channel_id]),
+                    "actual_count": len(actual),
+                }
+                if self._queue_drift_resync(config, channel_id):
+                    result["queued"] += 1
+            result["last_scan_at"] = now
+            self._drift_status.update(result)
+            if result["drifted"]:
+                logger.info(
+                    "Teamarr drift: %s channel(s) drifted (%s queued re-sync) across %s checked",
+                    result["drifted"],
+                    result["queued"],
+                    result["channels_checked"],
+                )
+            return result
+        except Exception as exc:
+            logger.error(f"Teamarr drift detection failed: {exc}", exc_info=True)
+            result["last_error"] = str(exc)
+            self._drift_status.update(result)
+            return result
+
+    def _queue_drift_resync(self, config: Dict[str, Any], channel_id: int) -> bool:
+        """Queue a re-sync check for a drifted channel via the Stream Checker."""
+        try:
+            checker = self.stream_checker_provider()
+            forced_profile_id = self._resolve_profile_id(config.get("forced_profile_id"))
+            metadata = {
+                "source": "stream_drift",
+                "is_epg_scheduled": False,
+                "forced_profile_id": forced_profile_id,
+            }
+            queued = bool(checker.queue_channel(
+                int(channel_id),
+                priority=DRIFT_RESYNC_QUEUE_PRIORITY,
+                force_check=False,
+                metadata=metadata,
+            ))
+            if queued:
+                logger.info(
+                    "Teamarr drift re-sync queued for channel %s (kind changes re-sort via cache)",
+                    channel_id,
+                )
+            return queued
+        except Exception as exc:
+            logger.error(
+                f"Could not queue drift re-sync for channel {channel_id}: {exc}"
+            )
+            return False
+
     def _worker(self) -> None:
         while not self._stop_event.is_set():
             with self._lock:
                 config = dict(self._config)
                 enabled = bool(config.get("enabled"))
                 interval = int(config.get("poll_interval_seconds", 60))
+                drift_enabled = bool(config.get("drift_enabled"))
 
             if enabled:
                 self.run_once(force=False)
 
-            self._stop_event.wait(interval)
+            if drift_enabled:
+                try:
+                    self._check_drift(config)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.error(f"Teamarr drift check failed in worker: {exc}", exc_info=True)
+
+            # Poll cadence honors the larger of the two intervals so drift never
+            # churns faster than the preflight cadence.
+            drift_interval = int(config.get("drift_poll_interval_seconds", 300))
+            sleep_seconds = max(interval, drift_interval) if drift_enabled else interval
+            self._stop_event.wait(sleep_seconds)
 
     def _fetch_managed_events(self, config: Dict[str, Any]) -> List[Dict[str, Any]]:
         payload = self._fetch_teamarr_json(config, "/api/v1/channels/managed")

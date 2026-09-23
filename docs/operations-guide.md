@@ -256,6 +256,36 @@ enough for the poll interval. If the Stream Checker is already busy, the event
 check is queued ahead of lower-priority
 waiting work and runs after the active channel finishes.
 
+## Teamarr Stream Drift Monitor
+
+The stream-drift monitor is an opt-in addition to Teamarr preflight (disabled by
+default). It watches Teamarr-managed channels and detects when a channel's
+stream order changes **externally** — a Teamarr reassignment, or a manual
+Dispatcharr edit — rather than by StreamFlow's own automation.
+
+When drift is detected, StreamFlow queues a re-sync check for that channel.
+Because that re-sync flows through the normal check path, the [stream
+cache](stream-checking.md#stream-cache) (when enabled) re-sorts the channel from
+recently-measured stats instead of re-probing every stream.
+
+Configuration lives on the Teamarr Preflight page:
+
+- `Detect & Fix Stream Drift` — enables the monitor. Default off.
+- `Drift Poll Interval` — seconds between drift checks. Default 300 (5 min),
+  range 60-3600.
+
+The monitor compares each Teamarr-managed channel's live Dispatcharr stream
+order (`udi.get_channel_streams`) to the ordered baseline StreamFlow last wrote
+(`checked_stream_ids`). Drift is classified as `reordered` (same streams,
+different order) or `membership` (streams added/removed); either queues a
+re-sync at a priority below event preflight, so event checks still win.
+
+Scope is limited to Teamarr-managed channels that StreamFlow has already
+checked once. The monitor only **queues** a check — it never removes
+assignments on its own; the normal checker decides dead/order. Drift activity
+is visible on the Teamarr Preflight page's `Drift Monitor` stat card and in the
+backend log as `Teamarr drift: N channel(s) drifted (M queued re-sync)`.
+
 ## Hardware Acceleration
 
 Hardware acceleration is optional and disabled by default. CPU probing remains

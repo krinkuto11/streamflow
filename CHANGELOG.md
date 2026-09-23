@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Teamarr stream-drift monitor** - Adds an opt-in "Detect &amp; Fix Stream Drift" setting for Teamarr preflight. When a Teamarr-managed channel's stream order changes externally, StreamFlow queues a re-sync check that re-sorts from cached scores instead of re-probing. Watch scope is Teamarr-managed channels; poll interval is configurable (default 5 minutes).
 - **StreamFlow V3 reliability stack** - Draft-gated work for provider/profile-aware Stream Checker capacity, Teamarr managed-event preflight, Shadow Monitor continuity, startup progress, hardware diagnostics, and in-app operator Help.
 - **Detailed V3 changelog** - Added `docs/pr432-v3-changelog.md` so PR #432 has a readable branch-level changelog and validation record instead of relying on an oversized PR body.
 - **Detailed V4 changelog** - Added `docs/pr434-v4-changelog.md` so PR #434 tracks the release-hardening scope, image digest, live gates, screenshots, and remaining draft blockers outside the PR body.

@@ -456,6 +456,7 @@ export default function TeamarrPreflight() {
   const pastEventsCount = preflightItems.filter(item => String(item?.state || '') === 'past').length
   const teamStatus = status?.team_status || {}
   const scanStatus = status?.scan_status || {}
+  const driftStatus = status?.drift_status || {}
   const managedCandidates = Number(status?.managed_candidates ?? upcomingEvents.length)
   const managedEventsSeen = Number(status?.managed_events_seen ?? managedCandidates)
   const managedEventsReturned = Number(status?.managed_events_returned ?? upcomingEvents.length)
@@ -957,6 +958,26 @@ export default function TeamarrPreflight() {
             <p className="mt-2 text-xs text-muted-foreground">{status?.last_error || 'No errors'}</p>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-sm font-medium">Drift Monitor</CardTitle>
+            <RefreshCw className="h-4 w-4 text-muted-foreground" />
+          </CardHeader>
+          <CardContent>
+            <div className="text-2xl font-bold">
+              {Number(driftStatus.drifted || 0)}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              {driftStatus.enabled
+                ? `${Number(driftStatus.queued || 0)} re-synced / ${Number(driftStatus.channels_checked || 0)} checked`
+                : 'Off'}
+            </p>
+            {driftStatus.last_error && (
+              <p className="mt-1 text-xs text-destructive">{driftStatus.last_error}</p>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.05fr)_minmax(0,0.95fr)]">
@@ -1056,6 +1077,36 @@ export default function TeamarrPreflight() {
                   className="mt-1 shrink-0"
                   checked={Boolean(editedConfig.queue_during_active_checks ?? !(editedConfig.defer_during_active_checks ?? editedConfig.skip_during_quality_check))}
                   onCheckedChange={(value) => updateConfigValue('queue_during_active_checks', value)}
+                />
+              </div>
+              <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
+                <div className="min-w-0 space-y-1">
+                  <Label className="text-base">Detect &amp; Fix Stream Drift</Label>
+                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">
+                    Watches Teamarr-managed channels, and when their stream order changes externally (e.g. Teamarr reassignment), queues a re-sync check that re-sorts from cached scores.
+                  </p>
+                </div>
+                <Switch
+                  className="mt-1 shrink-0"
+                  checked={Boolean(editedConfig.drift_enabled)}
+                  onCheckedChange={(value) => updateConfigValue('drift_enabled', value)}
+                />
+              </div>
+              <div className="flex min-h-[116px] items-start justify-between gap-5 rounded-md border border-border p-4">
+                <div className="min-w-0 space-y-1">
+                  <Label className="text-base">Drift Poll Interval</Label>
+                  <p className="max-w-[28rem] text-sm leading-snug text-muted-foreground">
+                    How often to check Teamarr-managed channels for external stream-order drift (seconds). Default 300.
+                  </p>
+                </div>
+                <Input
+                  type="number"
+                  className="w-28 shrink-0"
+                  value={editedConfig.drift_poll_interval_seconds ?? 300}
+                  onChange={(event) => updateConfigValue('drift_poll_interval_seconds', Number(event.target.value))}
+                  disabled={!Boolean(editedConfig.drift_enabled)}
+                  min={60}
+                  max={3600}
                 />
               </div>
             </div>
